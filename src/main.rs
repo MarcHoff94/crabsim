@@ -9,19 +9,17 @@ use std::{
 };
 
 fn main() {
-    println!("Hello, world!");
     let mut simulator = Simulator::new();
-    let x = Rc::new(RefCell::new(SingleStation::new(60.into(), None, Vec::new(), Vec::new())));
-    let y = Rc::new(RefCell::new(SingleStation::new(75.into(), None, Vec::new(), vec![x.clone()])));
-    let source = Rc::new(RefCell::new(Source::new(30.into(), vec![x.clone()])));
+    let x = Rc::new(RefCell::new(SingleStation::new(1,60.into(), None, Vec::new(), Vec::new())));
+    let y = Rc::new(RefCell::new(SingleStation::new(2,75.into(), None, Vec::new(), vec![x.clone()])));
+    let source = Rc::new(RefCell::new(Source::new(0,30.into(), vec![x.clone()])));
     x.borrow_mut().succ = vec![y.clone()];
     simulator.add_obj(source);
     simulator.add_obj(x);
     simulator.add_obj(y);
     let mut eventcontroller = EventController::new();
     eventcontroller.init(&mut simulator);
-    let i: u32 = 1;
-    // println!("{:#?}", eventcontroller.events);
+    println!("{:#?}", eventcontroller.events);
     simulator = eventcontroller.run(simulator).unwrap();
 
 }
@@ -42,6 +40,9 @@ impl Simulator {
         
         for (id, object) in &self.objects {
             let event_templates = object.borrow_mut().init().unwrap();
+            event_templates.iter().for_each(|event_template| {
+                eventcontroller.add_event(eventcontroller.time + event_template.exec_time, Event {eventtype: event_template.eventtype.clone(), object: Rc::clone(object)});
+            });
         }
     }
     fn add_obj(&mut self, obj: Rc<RefCell<dyn EventInterface>>) {
@@ -93,16 +94,26 @@ impl EventController {
         for object in simulator.objects.values() {
             let event_templates = object.borrow_mut().init().unwrap();
             for event_template in event_templates {
-                self.add_event(event_template.exec_time, Event {eventtype: event_template.eventtype, object: Rc::clone(object)});
+                self.add_event(self.time + event_template.exec_time, Event {eventtype: event_template.eventtype, object: Rc::clone(object)});
             }
         }
     }
     fn run(&mut self, mut simulator: Simulator) -> Result<Simulator, RunTimeError> {
         while let Some((event_time, mut event_group)) = self.events.take_smallest() {
             self.time = event_time;
-            println!("At {}:", event_time.0);
             while let Some((event_id, event)) = event_group.events.take_smallest() {
-                event.object.borrow_mut().execute_event(&mut simulator, event.eventtype)?;
+                println!("At {}: {:#?}", event_time.0, event.eventtype);
+                match event.object.borrow_mut().execute_event(&mut simulator, event.eventtype) {
+                    Ok(new_events) => {
+                        if let Some(events) = new_events {
+                            for new_event in events {
+                                self.add_event(self.time + new_event.exec_time, Event {eventtype: new_event.eventtype, object: Rc::clone(simulator.objects.get(&new_event.object_id).unwrap())});
+                            }
+                        }
+                    }
+                    Err(e) => return Err(e),
+                };
+
             }
         }
         Ok(simulator)
@@ -153,10 +164,21 @@ impl fmt::Debug for Event {
     }
 }
 
-#[derive(Debug)]
+
 struct EventTemplate {
     eventtype: EventType,
     exec_time: EcTime,
+    object_id: u32,  
+}
+
+impl EventTemplate {
+    fn new(eventtype: EventType, exec_time: EcTime, object_id: u32) -> EventTemplate {
+        EventTemplate {
+            eventtype,
+            exec_time,
+            object_id,
+        }
+    }    
 }
 
 trait EventInterface {
@@ -171,13 +193,14 @@ trait MaterialFlow: EventInterface{
 }
 
 struct SingleStation {
+    object_id: u32,
     proc_time: EcTime,
     remain_proc_time: EcTime,
     content: Option<MoveableUnit>,
-    succ: Vec<Rc<RefCell<dyn MaterialFlow>>>, //id for object in simulator
+    succ: Vec<Rc<RefCell<dyn MaterialFlow>>>,
     succ_pointer: usize, //index of object in self.succ that MU will be moved to
-    pred: Vec<Rc<RefCell<dyn MaterialFlow>>>, //id for object in simulator
-    blockedlist: Vec<Rc<RefCell<dyn MaterialFlow>>>, //index of object in self.pred that tried to move MU in station unsuccessfully
+    pred: Vec<Rc<RefCell<dyn MaterialFlow>>>,
+    blockedlist: Vec<Rc<RefCell<dyn MaterialFlow>>>,
     entrancelocked: bool,
     exitlocked: bool,
     state: ProcessState,
@@ -185,11 +208,13 @@ struct SingleStation {
 }
 
 impl SingleStation {
-    fn new(proc_time: EcTime, 
+    fn new(object_id: u32,
+        proc_time: EcTime, 
         content: Option<MoveableUnit>,
         succ: Vec<Rc<RefCell<dyn MaterialFlow>>>,
         pred: Vec<Rc<RefCell<dyn MaterialFlow>>>) -> SingleStation {
             SingleStation {
+                object_id,
                 proc_time,
                 remain_proc_time: 0.into(),
                 content,
@@ -231,7 +256,7 @@ impl MaterialFlow for SingleStation {
         self.remain_proc_time = self.proc_time;
         self.entrancelocked = true;
         self.state = ProcessState::Processing;
-        return Ok(EventTemplate {eventtype: EventType::MUExit, exec_time: self.proc_time})   
+        return Ok(EventTemplate {eventtype: EventType::MUExit, exec_time: self.proc_time.clone(), object_id: self.object_id.clone()});   
     }
     fn process_mu_exit(&mut self) -> Result<Option<EventTemplate>, MaterialflowError> {
         match self.interruption {
@@ -242,11 +267,11 @@ impl MaterialFlow for SingleStation {
                 }
                 let mut i: usize = 0;
                 let mut curr_succ_pointer = self.succ_pointer.clone();
-                while i < self.succ.len() -1 {
+                while i <= self.succ.len() -1 {
                     let succ_obj = self.succ.get(curr_succ_pointer).unwrap();
                     if succ_obj.borrow().is_entrance_allowed() {
                         match succ_obj.borrow_mut().process_mu_entrance(self.content.take().unwrap()) {
-                            Ok(next_event_template) => {
+                            Ok(mut next_event_template) => {
                                 self.succ_pointer += 1;
                                 if self.succ_pointer == self.succ.len() - 1 {
                                     self.succ_pointer = 0;
@@ -280,7 +305,24 @@ impl EventInterface for SingleStation {
         Ok(Vec::new())
     }
     fn execute_event(&mut self, simulator: &mut Simulator, eventtype: EventType) -> Result<Option<Vec<EventTemplate>>, RunTimeError> {
-        Err(RunTimeError{})
+        match eventtype {
+            EventType::MUExit => {
+                match self.process_mu_exit() {
+                    Ok(Some(event_template)) => {
+                        return Ok(Some(vec![event_template]))
+                    },
+                    Ok(None) => {
+                        return Ok(None)
+                    },
+                    Err(e) => {
+                        return Err(RunTimeError{})
+                    }
+                }
+            }
+            _ => {
+                return Err(RunTimeError{})
+            }
+        }
     }
 }
 // struct ParallelStation {
@@ -301,6 +343,7 @@ impl EventInterface for SingleStation {
 //     }
 // }
 struct Source {
+    object_id: u32,
     content: Option<MoveableUnit>,
     proc_time: EcTime,
     remain_proc_time: EcTime,
@@ -311,8 +354,9 @@ struct Source {
     mu_id: u32,//ongoing number used for new MUs
 }
 impl Source {
-    fn new(proc_time: EcTime, succ: Vec<Rc<RefCell<dyn MaterialFlow>>>) -> Source {
+    fn new(object_id: u32, proc_time: EcTime, succ: Vec<Rc<RefCell<dyn MaterialFlow>>>) -> Source {
         Source {
+            object_id,
             content: None,
             proc_time,
             remain_proc_time: 0.into(),
@@ -338,7 +382,7 @@ impl EventInterface for Source {
     fn init(&mut self) -> Result<Vec<EventTemplate>, InitError> {
         match self.create_mu() {
             Ok(_) => {
-                return Ok(vec![EventTemplate {eventtype: EventType::MUExit, exec_time: self.proc_time}])
+                return Ok(vec![EventTemplate {eventtype: EventType::MUExit, exec_time: self.proc_time, object_id: self.object_id}])
                 },
             Err(e) => {
                 return Err(InitError{})
@@ -349,7 +393,17 @@ impl EventInterface for Source {
     fn execute_event(&mut self, simulator: &mut Simulator, eventtype: EventType) -> Result<Option<Vec<EventTemplate>>, RunTimeError> {
         match eventtype {
             EventType::MUExit => {
-                return Ok(Some(vec![self.process_mu_exit().unwrap().unwrap()]))
+                match self.process_mu_exit() {
+                    Ok(Some(event_template)) => {
+                        return Ok(Some(vec![event_template]))
+                    },
+                    Ok(None) => {
+                        return Ok(None)
+                    },
+                    Err(e) => {
+                        return Err(RunTimeError{})
+                    }
+                }
             }
             _ => {
                 return Err(RunTimeError{})
@@ -373,13 +427,13 @@ impl MaterialFlow for Source {
                 }
                 let mut i: usize = 0;
                 let mut curr_succ_pointer = self.succ_pointer.clone();
-                while i < self.succ.len() -1 {
+                while i <= self.succ.len() -1 {
                     let succ_obj = self.succ.get(curr_succ_pointer).unwrap();
                     if succ_obj.borrow().is_entrance_allowed() {
                         match succ_obj.borrow_mut().process_mu_entrance(self.content.take().unwrap()) {
                             Ok(next_event_template) => {
                                 self.succ_pointer += 1;
-                                if self.succ_pointer == self.succ.len() - 1 {
+                                if self.succ_pointer > self.succ.len() - 1 {
                                     self.succ_pointer = 0;
                                 }                                
                                 return Ok(Some(next_event_template))
@@ -406,7 +460,7 @@ impl MaterialFlow for Source {
         }
     }
 }
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum EventType {
     MUEntrance,
     MUExit,

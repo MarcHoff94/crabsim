@@ -1,11 +1,6 @@
 use splay_tree::SplayMap;
 use std::{
-    cell::RefCell,
-    collections::HashMap,
-    rc::Rc,
-    ops::Add,
-    cmp::Ordering,
-    fmt
+    cell::RefCell, cmp::Ordering, collections::HashMap, fmt, ops::Add, rc::Rc
 };
 
 fn main() {
@@ -325,23 +320,7 @@ impl EventInterface for SingleStation {
         }
     }
 }
-// struct ParallelStation {
 
-// }
-// impl MaterialFlow for ParallelStation {
-    
-// }
-// impl EventInterface for ParallelStation {
-//     fn init(&mut self, event_controller: &mut EventController) -> Result<(), InitError> {
-//         Ok(())
-//     }
-//     fn schedule_next_events(&mut self) -> Option<Vec<(u32, Event)>> {
-//         None
-//     }
-//     fn execute_event(&mut self, simulator: &mut Simulator, eventtype: EventType) -> Result<Option<Rc<RefCell<dyn EventInterface>>>, RunTimeError> {
-//         Err(RunTimeError{})
-//     }
-// }
 struct Source {
     object_id: u32,
     content: Option<MoveableUnit>,
@@ -367,22 +346,23 @@ impl Source {
             mu_id: 0,
         }
     }
-    fn create_mu(&mut self) -> Result<(), MaterialflowError> {
+    fn create_mu(&mut self) -> Result<EventTemplate, MaterialflowError> {
         self.mu_id = 1;
         if self.content.is_none() {
             self.content = Some(MoveableUnit {id: self.mu_id, location_id: 0});
+            self.state = ProcessState::Processing;
+            return Ok(EventTemplate {eventtype: EventType::MUExit, exec_time: self.proc_time, object_id: self.object_id});
         } else {
             return Err(MaterialflowError::NoMU);
         }
-        self.state = ProcessState::Processing;
-        return Ok(())
+        
     }
 }
 impl EventInterface for Source {
     fn init(&mut self) -> Result<Vec<EventTemplate>, InitError> {
         match self.create_mu() {
-            Ok(_) => {
-                return Ok(vec![EventTemplate {eventtype: EventType::MUExit, exec_time: self.proc_time, object_id: self.object_id}])
+            Ok(next_event) => {
+                return Ok(vec![next_event])
                 },
             Err(e) => {
                 return Err(InitError{})
@@ -395,7 +375,11 @@ impl EventInterface for Source {
             EventType::MUExit => {
                 match self.process_mu_exit() {
                     Ok(Some(event_template)) => {
-                        return Ok(Some(vec![event_template]))
+                        let next_mu_event = match self.create_mu() {
+                            Ok(val) => val,
+                            Err(e) => return Err(RunTimeError{}),
+                        };
+                        return Ok(Some(vec![next_mu_event,event_template]))
                     },
                     Ok(None) => {
                         return Ok(None)
@@ -458,6 +442,55 @@ impl MaterialFlow for Source {
                 return Ok(None);
             }
         }
+    }
+}
+
+struct Drain {
+    object_id: u32,
+    content: Option<MoveableUnit>,
+    pred: Vec<Rc<RefCell<dyn MaterialFlow>>>,
+    num_exits: u128,
+    last_exit: EcTime,
+    exit_interval: EcTime,
+    state: ProcessState,
+}
+impl Drain {
+    fn new(object_id: u32, pred: Vec<Rc<RefCell<dyn MaterialFlow>>>, proctime: EcTime) -> Drain {
+        Drain {
+            object_id,
+            content: None,
+            pred,
+            num_exits:0,
+            last_exit: 0.into(),
+            exit_interval: 0.into(),
+            state: ProcessState::Idle,            
+        }
+    }
+}
+impl EventInterface for Drain {
+    fn init(&mut self) -> Result<Vec<EventTemplate>, InitError> {
+        Ok(Vec::with_capacity(0))
+    }
+    fn execute_event(&mut self, simulator: &mut Simulator, eventtype: EventType) -> Result<Option<Vec<EventTemplate>>, RunTimeError> {
+        Err(RunTimeError)
+    }
+}
+impl MaterialFlow for Drain {
+    fn is_entrance_allowed(&self) -> bool {
+        match self.state {
+            ProcessState::Idle => {
+                return true;
+            }
+            ProcessState::Processing | ProcessState::Blocked => {
+                return false;
+            },
+        }
+    }
+    fn process_mu_entrance(&mut self, mu: MoveableUnit) -> Result<EventTemplate, MaterialflowError> {
+        Err(MaterialflowError::EntranceDenied)
+    }
+    fn process_mu_exit(&mut self) -> Result<Option<EventTemplate>, MaterialflowError> {
+        Ok(None)
     }
 }
 #[derive(Debug, Clone)]

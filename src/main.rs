@@ -180,6 +180,7 @@ trait EventInterface {
     fn init(&mut self) -> Result<Vec<EventTemplate>, InitError>;
 
     fn execute_event(&mut self, simulator: &mut Simulator, eventtype: EventType) -> Result<Option<Vec<EventTemplate>>, RunTimeError>;
+    
 }
 trait MaterialFlow: EventInterface{
     fn is_entrance_allowed(&self) -> bool;

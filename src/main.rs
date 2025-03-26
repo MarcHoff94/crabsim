@@ -1,6 +1,6 @@
 use splay_tree::SplayMap;
 use std::{
-    cell::RefCell, cmp::Ordering, collections::HashMap, fmt, ops::{Add, Div, Sub}, rc::{Rc, Weak}
+    arch::x86_64, cell::RefCell, cmp::Ordering, collections::HashMap, fmt, ops::{Add, Div, Sub}, rc::{Rc, Weak}
 };
 
 
@@ -107,9 +107,13 @@ impl EventController {
         }
     }
     fn run(&mut self, mut simulator: Simulator) -> Result<Simulator, RunTimeError> {
-        while let Some((event_time, mut event_group)) = self.events.take_smallest() {
+        while !self.events.is_empty() {
+            let event_time = *self.events.iter().min_by_key(|(time, _)| *time).unwrap().0;
+            let mut event_group = self.events.remove(&event_time).unwrap();
             self.time = event_time;
-            while let Some((event_id, event)) = event_group.events.take_smallest() {
+            while !event_group.events.is_empty() {
+                let event_id = *event_group.events.iter().min_by_key(|(id,_)| *id).unwrap().0;
+                let event = event_group.events.remove(&event_id).unwrap();
                 println!("At {}: {:#?}", event_time.0, event.eventtype);
                 simulator.drains.iter_mut().for_each(|drain| {
                     drain.borrow_mut().update_current_time(self.time);

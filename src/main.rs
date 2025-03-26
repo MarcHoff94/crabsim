@@ -281,7 +281,7 @@ impl MaterialFlow for SingleStation {
                     self.state = ProcessState::Idle;
                     
                     // Try to get MU from blocked objects
-                    while !self.blockedlist.is_empty() {
+                    if !self.blockedlist.is_empty() {
                         if let Some(blocked_obj) = self.blockedlist[0].upgrade() {
                             if let Ok(Some(blocked_event)) = blocked_obj.borrow_mut().process_mu_exit() {
                                 self.blockedlist.remove(0);
@@ -322,7 +322,12 @@ fn try_move_to_successor(station: &mut SingleStation) -> Result<Option<EventTemp
             if let Some(mu) = station.content.take() {
                 match succ_obj.borrow_mut().process_mu_entrance(mu) {
                     Ok(Some(next_event_template)) => {
-                        station.succ_pointer = (curr_succ_pointer + 1) % station.succ.len();
+                        curr_succ_pointer += 1;
+                        if station.succ.len() == curr_succ_pointer {
+                            station.succ_pointer = 0;
+                        } else {
+                            station.succ_pointer = curr_succ_pointer;
+                        }
                         return Ok(Some(next_event_template));
                     },
                     Ok(None) => return Ok(None),
@@ -331,13 +336,16 @@ fn try_move_to_successor(station: &mut SingleStation) -> Result<Option<EventTemp
                     }
                 }
             }
-        } else {
-            let station_ref = Rc::new(RefCell::new(station.clone())) as Rc<RefCell<dyn MaterialFlow>>;
-            succ_obj.borrow_mut().add_blocked(Rc::downgrade(&station_ref));
-        }
+        } 
         i += 1;
-        curr_succ_pointer = (curr_succ_pointer + 1) % station.succ.len();
+        curr_succ_pointer += 1;
+        if station.succ.len() < curr_succ_pointer {
+            curr_succ_pointer = 0;
+        }
     }
+
+    let station_ref = Rc::new(RefCell::new(station.clone())) as Rc<RefCell<dyn MaterialFlow>>;
+    station.succ.get(station.succ_pointer).unwrap().borrow_mut().add_blocked(Rc::downgrade(&station_ref));
     
     station.state = ProcessState::Blocked;
     Ok(None)
@@ -396,7 +404,7 @@ impl Source {
         }
     }
     fn create_mu(&mut self) -> Result<EventTemplate, MaterialflowError> {
-        self.mu_id = 1;
+        self.mu_id += 1;
         if self.content.is_none() {
             self.content = Some(MoveableUnit {id: self.mu_id, location_id: 0});
             self.state = ProcessState::Processing;
@@ -504,7 +512,12 @@ fn try_move_to_successor_source(source: &mut Source) -> Result<Option<EventTempl
             if let Some(mu) = source.content.take() {
                 match succ_obj.borrow_mut().process_mu_entrance(mu) {
                     Ok(Some(next_event_template)) => {
-                        source.succ_pointer = (curr_succ_pointer + 1) % source.succ.len();
+                        curr_succ_pointer += 1;
+                        if source.succ.len() == curr_succ_pointer {
+                            source.succ_pointer = 0;
+                        } else {
+                            source.succ_pointer = curr_succ_pointer;
+                        }
                         return Ok(Some(next_event_template));
                     },
                     Ok(None) => return Ok(None),
@@ -513,14 +526,16 @@ fn try_move_to_successor_source(source: &mut Source) -> Result<Option<EventTempl
                     }
                 }
             }
-        } else {
-            let source_ref = Rc::new(RefCell::new(source.clone())) as Rc<RefCell<dyn MaterialFlow>>;
-            succ_obj.borrow_mut().add_blocked(Rc::downgrade(&source_ref));
         }
         i += 1;
-        curr_succ_pointer = (curr_succ_pointer + 1) % source.succ.len();
+        curr_succ_pointer += 1;
+        if source.succ.len() < curr_succ_pointer {
+            curr_succ_pointer = 0;
+        }
     }
     
+    let source_ref = Rc::new(RefCell::new(source.clone())) as Rc<RefCell<dyn MaterialFlow>>;
+    source.succ.get(source.succ_pointer).unwrap().borrow_mut().add_blocked(Rc::downgrade(&source_ref));
     source.state = ProcessState::Blocked;
     Ok(None)
 }

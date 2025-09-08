@@ -1,4 +1,3 @@
-use splay_tree::SplayMap;
 use std::{
     cell::RefCell, cmp::Ordering, collections::{HashMap, VecDeque}, fmt, ops::{Add, Div, Sub}, rc::{Rc, Weak}
 };
@@ -23,6 +22,7 @@ fn main() {
     simulator.material_flows.insert(simulator.object_id, y.clone() as Rc<RefCell<dyn MaterialFlow>>);
     simulator.object_id += 1;
     simulator.add_drain(drain.clone());
+    eventcontroller.endtime = Some(500.into());
     eventcontroller.init(&mut simulator);
     let _simulator = eventcontroller.run(simulator).unwrap();
 }
@@ -96,6 +96,9 @@ impl EventController {
             for drain in &mut simulator.drains {
                 drain.borrow_mut().update_current_time(self.time);
             }
+            if self.time > self.endtime.unwrap_or(EcTime(u128::MAX)) {
+                break;
+            }
             // Lookup and clone the object Rc before mutable borrow
             let obj_rc = simulator.objects.get(&event_template.object_id).cloned();
             let eventtype = event_template.eventtype.clone();
@@ -116,50 +119,6 @@ impl EventController {
             }
         }
         Ok(simulator)
-    }
-}
-
-
-struct EventGroup {
-    event_id: u32,
-    events: SplayMap<u32, Event> //key is EventGroup.event_id
-}
-
-impl EventGroup {
-    fn new() -> EventGroup {
-        EventGroup {event_id: 0, events: SplayMap::new()}
-    }
-    fn add_event(&mut self, event: Event) -> u32 {
-        self.event_id += 1;
-        self.events.insert(self.event_id, event);
-        self.event_id
-    }
-    fn remove_event(&mut self, event_id: &u32) -> Option<Event> {
-        self.events.remove(event_id)
-    }
-}
-
-impl fmt::Debug for EventGroup {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("EventGroup")
-            .field("event_id", &self.event_id)
-            .field("events_count", &self.events.len())
-            .finish()
-    }
-}
-
-
-struct Event { 
-    eventtype: EventType,
-    object: Rc<RefCell<dyn EventInterface>>,
-}
-
-impl fmt::Debug for Event {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Event")
-            .field("eventtype", &self.eventtype)
-            // Skip the object field since it contains a trait object
-            .finish()
     }
 }
 
@@ -185,6 +144,8 @@ trait EventInterface {
     fn init(&mut self) -> Result<Vec<EventTemplate>, InitError>;
 
     fn execute_event(&mut self, simulator: &mut Simulator, eventtype: EventType) -> Result<Option<Vec<EventTemplate>>, RunTimeError>;
+
+    fn get_object_id(&self) -> &u32;
     
     fn as_any(&self) -> &dyn std::any::Any;
 }
@@ -192,10 +153,17 @@ trait MaterialFlow: EventInterface {
     fn is_entrance_allowed(&self) -> bool;
     fn process_mu_entrance(&mut self, _mu: MoveableUnit) -> Result<Option<EventTemplate>, MaterialflowError>;
     fn process_mu_exit(&mut self) -> Result<Option<EventTemplate>, MaterialflowError>;
-    fn add_blocked(&mut self, blocked: Weak<RefCell<dyn MaterialFlow>>);
+    fn add_blocked(&mut self, id_blocked: u32);
     fn as_any(&mut self) -> &mut dyn std::any::Any;
 }
 
+// Trait for objects with successors and round-robin pointer
+trait SuccessorContainer {
+    fn successors(&self) -> &Vec<Rc<RefCell<dyn MaterialFlow>>>;
+    fn succ_pointer(&self) -> usize;
+    fn succ_pointer_mut(&mut self) -> &mut usize;
+    fn clear_content_and_idle(&mut self);
+}
 
 #[derive(Clone)]
 struct SingleStation {
@@ -278,18 +246,8 @@ impl MaterialFlow for SingleStation {
             }
         }
     }
-    fn add_blocked(&mut self, blocked: Weak<RefCell<dyn MaterialFlow>>) {
-        // Instead of storing Weak, get the object_id and store it
-        if let Some(obj) = blocked.upgrade() {
-            let id = if let Some(station) = obj.borrow().as_any().downcast_ref::<SingleStation>() {
-                station.object_id
-            } else if let Some(drain) = obj.borrow().as_any().downcast_ref::<Drain>() {
-                drain.object_id
-            } else {
-                0
-            };
-            self.blockedlist.push(id);
-        }
+    fn add_blocked(&mut self, id_blocked: u32) {
+        self.blockedlist.push(id_blocked);
     }
     fn as_any(&mut self) -> &mut dyn std::any::Any {
         self
@@ -303,8 +261,7 @@ impl EventInterface for SingleStation {
     fn execute_event(&mut self, simulator: &mut Simulator, eventtype: EventType) -> Result<Option<Vec<EventTemplate>>, RunTimeError> {
         match eventtype {
             EventType::MUExit => {
-                // Use self directly, do not search for rc_self
-                match try_move_to_successor(self, simulator) {
+                match try_to_move_to_successor(self) {
                     Ok(Some(event_template)) => {
                         self.entrancelocked = false;
                         self.state = ProcessState::Idle;
@@ -333,50 +290,58 @@ impl EventInterface for SingleStation {
             }
         }
     }
+    fn get_object_id(&self) -> &u32 {
+        &self.object_id
+    }
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
 }
 
-// Helper function to try moving MU to successor
-fn try_move_to_successor(
-    station: &mut SingleStation,
-    _simulator: &Simulator,
-) -> Result<Option<EventTemplate>, MaterialflowError> {
-    if station.succ.len() == 0 {
+impl SuccessorContainer for SingleStation {
+    fn successors(&self) -> &Vec<Rc<RefCell<dyn MaterialFlow>>> { &self.succ }
+    fn succ_pointer(&self) -> usize { self.succ_pointer }
+    fn succ_pointer_mut(&mut self) -> &mut usize { &mut self.succ_pointer }
+    fn clear_content_and_idle(&mut self) {
+        self.content = None;
+        self.entrancelocked = false;
+        self.state = ProcessState::Idle;
+    }
+}
+
+// Generalized function for both SingleStation and Source
+fn try_to_move_to_successor<T: SuccessorContainer>(obj: &mut T) -> Result<Option<EventTemplate>, MaterialflowError> {
+    let succ = obj.successors();
+    if succ.is_empty() {
         return Ok(None);
     }
-    let mut curr_succ_pointer = station.succ_pointer;
-    let succ_obj = station.succ.get(curr_succ_pointer).unwrap();
-    // Only queue an event for the successor, do not call process_mu_entrance
-    let succ_id = if let Some(station) = succ_obj.borrow().as_any().downcast_ref::<SingleStation>() {
-        station.object_id
-    } else if let Some(drain) = succ_obj.borrow().as_any().downcast_ref::<Drain>() {
-        drain.object_id
-    } else {
-        0
-    };
-    // Advance pointer for round-robin
-    curr_succ_pointer += 1;
-    if station.succ.len() == curr_succ_pointer {
-        station.succ_pointer = 0;
-    } else {
-        station.succ_pointer = curr_succ_pointer;
+    let n = succ.len();
+    let mut checked = 0;
+    let mut curr_succ_pointer = obj.succ_pointer();
+    while checked < n {
+        let succ_obj = &succ[curr_succ_pointer];
+        if succ_obj.borrow().is_entrance_allowed() {
+            let succ_id = succ_obj.borrow().get_object_id().clone();
+            curr_succ_pointer = (curr_succ_pointer + 1) % n;
+            *obj.succ_pointer_mut() = curr_succ_pointer;
+            obj.clear_content_and_idle();
+            return Ok(Some(EventTemplate {
+                eventtype: EventType::MUEntrance,
+                exec_time: 0.into(),
+                object_id: succ_id,
+            }));
+        }
+        curr_succ_pointer = (curr_succ_pointer + 1) % n;
+        checked += 1;
     }
-    // Clear content and unlock entrance
-    station.content = None;
-    station.entrancelocked = false;
-    station.state = ProcessState::Idle;
-    Ok(Some(EventTemplate {
-        eventtype: EventType::MUEntrance,
-        exec_time: 0.into(),
-        object_id: succ_id,
-    }))
+    Ok(None)
 }
+
+// Helper function to try moving MU to successor
 
 // Helper function to handle Source event logic and avoid nested mutable borrows
 fn handle_source_mu_exit(source: &mut Source, simulator: &Simulator) -> Result<Option<Vec<EventTemplate>>, RunTimeError> {
-    let event_template_result = try_move_to_successor_source(source, simulator);
+    let event_template_result = try_to_move_to_successor(source);
     if let Ok(Some(event_template)) = event_template_result {
         let next_mu_event = match source.create_mu() {
             Ok(val) => val,
@@ -467,6 +432,9 @@ impl EventInterface for Source {
             }
         }
     }
+    fn get_object_id(&self) -> &u32 {
+        &self.object_id
+    }
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
@@ -490,7 +458,7 @@ impl MaterialFlow for Source {
         }
     }
 
-    fn add_blocked(&mut self, _blocked: Weak<RefCell<dyn MaterialFlow>>) {
+    fn add_blocked(&mut self, id_blocked: u32) {
         panic!("Source cannot receive blocked objects");
     }
     fn as_any(&mut self) -> &mut dyn std::any::Any {
@@ -498,37 +466,17 @@ impl MaterialFlow for Source {
     }
 }
 
-// Add helper function for Source
-fn try_move_to_successor_source(
-    source: &mut Source,
-    _simulator: &Simulator,
-) -> Result<Option<EventTemplate>, MaterialflowError> {
-    if source.succ.len() == 0 {
-        return Ok(None);
+impl SuccessorContainer for Source {
+    fn successors(&self) -> &Vec<Rc<RefCell<dyn MaterialFlow>>> { &self.succ }
+    fn succ_pointer(&self) -> usize { self.succ_pointer }
+    fn succ_pointer_mut(&mut self) -> &mut usize { &mut self.succ_pointer }
+    fn clear_content_and_idle(&mut self) {
+        self.content = None;
+        self.state = ProcessState::Idle;
     }
-    let mut curr_succ_pointer = source.succ_pointer;
-    let succ_obj = source.succ.get(curr_succ_pointer).unwrap();
-    let succ_id = if let Some(station) = succ_obj.borrow().as_any().downcast_ref::<SingleStation>() {
-        station.object_id
-    } else if let Some(drain) = succ_obj.borrow().as_any().downcast_ref::<Drain>() {
-        drain.object_id
-    } else {
-        0
-    };
-    curr_succ_pointer += 1;
-    if source.succ.len() == curr_succ_pointer {
-        source.succ_pointer = 0;
-    } else {
-        source.succ_pointer = curr_succ_pointer;
-    }
-    source.content = None;
-    source.state = ProcessState::Idle;
-    Ok(Some(EventTemplate {
-        eventtype: EventType::MUEntrance,
-        exec_time: 0.into(),
-        object_id: succ_id,
-    }))
 }
+
+// Add helper function for Source
 
 struct Drain {
     object_id: u32,
@@ -596,6 +544,9 @@ impl EventInterface for Drain {
             }
         }
     }
+    fn get_object_id(&self) -> &u32 {
+        &self.object_id
+    }
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
@@ -641,19 +592,10 @@ impl MaterialFlow for Drain {
     fn process_mu_exit(&mut self) -> Result<Option<EventTemplate>, MaterialflowError> {
         Ok(None)
     }
-    fn add_blocked(&mut self, blocked: Weak<RefCell<dyn MaterialFlow>>) {
-        // Instead of storing Weak, get the object_id and store it
-        if let Some(obj) = blocked.upgrade() {
-            let id = if let Some(station) = obj.borrow().as_any().downcast_ref::<SingleStation>() {
-                station.object_id
-            } else if let Some(drain) = obj.borrow().as_any().downcast_ref::<Drain>() {
-                drain.object_id
-            } else {
-                0
-            };
-            self.blockedlist.push(id);
-        }
+    fn add_blocked(&mut self, id_blocked: u32) {
+        self.blockedlist.push(id_blocked);
     }
+
     fn as_any(&mut self) -> &mut dyn std::any::Any {
         self
     }

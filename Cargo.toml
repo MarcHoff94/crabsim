@@ -7,3 +7,5 @@ edition = "2021"
 
 [dependencies]
 splay_tree = "0.3.1"
+log = "0.4"
+env_logger = "0.10"

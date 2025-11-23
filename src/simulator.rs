@@ -1,0 +1,236 @@
+#![allow(dead_code)]
+
+use crate::error::RunTimeError;
+use crate::event::{EcTime, EventTemplate, ScheduledEvent};
+use crate::flows::{Drain, EventInterface, MaterialFlow, ProcessState, SingleStation, Source};
+use std::{
+    cell::RefCell,
+    collections::{BinaryHeap, HashMap},
+    rc::Rc,
+};
+
+pub struct Simulator {
+    pub material_flows: HashMap<u32, Rc<RefCell<dyn MaterialFlow>>>,
+    pub drains: Vec<Rc<RefCell<Drain>>>,
+    pub object_id: u32,
+    pub current_seq: u64,
+}
+
+impl Simulator {
+    pub fn new() -> Simulator {
+        Simulator {
+            material_flows: HashMap::new(),
+            drains: Vec::new(),
+            object_id: 0,
+            current_seq: 0,
+        }
+    }
+    pub fn init(&mut self, eventcontroller: &mut EventController) {
+        for object in self.material_flows.values() {
+            let event_templates = object.borrow_mut().init().unwrap();
+            for event_template in event_templates {
+                eventcontroller.add_event(
+                    eventcontroller.time + event_template.exec_time,
+                    event_template.clone(),
+                );
+            }
+        }
+        for drain in &mut self.drains {
+            drain.borrow_mut().init().unwrap();
+        }
+    }
+    pub fn add_drain(&mut self, drain: Rc<RefCell<Drain>>) {
+        self.drains.push(drain);
+    }
+
+    pub fn register_material_flow<T>(&mut self, obj: Rc<RefCell<T>>) -> u32
+    where
+        T: MaterialFlow + 'static,
+    {
+        let id = self.object_id;
+        obj.borrow_mut().set_object_id(id);
+        let mf: Rc<RefCell<dyn MaterialFlow>> = obj;
+        self.material_flows.insert(id, mf);
+        self.object_id += 1;
+        id
+    }
+
+    pub fn print_materialflow_state(&self, current_time: EcTime) {
+        println!(
+            "\n=== MaterialFlow State at time {} (seq={}) ===",
+            current_time.0, self.current_seq
+        );
+        let mut ids: Vec<u32> = self.material_flows.keys().cloned().collect();
+        ids.sort_unstable();
+        println!(
+            "{:<6} {:<12} {:<12} {:<12}",
+            "id", "type", "content", "rem_proc"
+        );
+        for id in ids {
+            if let Some(obj_rc) = self.material_flows.get(&id) {
+                let obj_borrow = obj_rc.borrow();
+                let any: &dyn std::any::Any =
+                    <dyn MaterialFlow as EventInterface>::as_any(&*obj_borrow);
+                if let Some(st) = any.downcast_ref::<SingleStation>() {
+                    let content = match &st.content {
+                        Some(mu) => format!("MU{}", mu.id),
+                        None => "-".to_string(),
+                    };
+                    println!(
+                        "{:<6} {:<12} {:<12} {:<12}",
+                        id, "Station", content, st.remain_proc_time.0
+                    );
+                    continue;
+                }
+                if let Some(src) = any.downcast_ref::<Source>() {
+                    let content = match &src.content {
+                        Some(mu) => format!("MU{}", mu.id),
+                        None => "-".to_string(),
+                    };
+                    println!(
+                        "{:<6} {:<12} {:<12} {:<12}",
+                        id, "Source", content, src.remain_proc_time.0
+                    );
+                    continue;
+                }
+                if let Some(dr) = any.downcast_ref::<Drain>() {
+                    let content = match &dr.content {
+                        Some(mu) => format!("MU{}", mu.id),
+                        None => "-".to_string(),
+                    };
+                    println!("{:<6} {:<12} {:<12} {:<12}", id, "Drain", content, 0);
+                    continue;
+                }
+                println!("{:<6} {:<12} {:<12} {:<12}", id, "Unknown", "-", "-");
+            }
+        }
+        println!("=== End State ===\n");
+    }
+}
+
+impl Default for Simulator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub struct EventController {
+    pub event_queue: BinaryHeap<ScheduledEvent>,
+    pub time: EcTime,
+    pub endtime: Option<EcTime>,
+    pub seq_counter: u64,
+}
+
+impl EventController {
+    pub fn new() -> EventController {
+        EventController {
+            event_queue: BinaryHeap::new(),
+            time: EcTime::from(0),
+            endtime: None,
+            seq_counter: 0,
+        }
+    }
+
+    pub fn add_event(&mut self, time: EcTime, event_template: EventTemplate) {
+        let seq = self.seq_counter;
+        self.seq_counter = self.seq_counter.wrapping_add(1);
+        let mut tmpl = event_template;
+        tmpl.seq = seq;
+        self.event_queue.push(ScheduledEvent {
+            time,
+            template: tmpl,
+            seq,
+        });
+    }
+
+    pub fn init(&mut self, simulator: &mut Simulator) {
+        for object in simulator.material_flows.values() {
+            let event_templates = object.borrow_mut().init().unwrap();
+            for event_template in event_templates {
+                self.add_event(self.time + event_template.exec_time, event_template.clone());
+            }
+        }
+    }
+
+    pub fn run(&mut self, mut simulator: Simulator) -> Result<Simulator, RunTimeError> {
+        while let Some(scheduled) = self.event_queue.pop() {
+            let event_time = scheduled.time;
+            let event_template = scheduled.template;
+            // advance time and decrement remaining proc_time for processing objects
+            let delta = if event_time.0 > self.time.0 {
+                event_time - self.time
+            } else {
+                EcTime::from(0)
+            };
+            self.time = event_time;
+            simulator.current_seq = event_template.seq;
+            // decrement remaining proc time for stations and sources that are Processing
+            for obj in simulator.material_flows.values() {
+                let mut obj_mut = obj.borrow_mut();
+                // try SingleStation
+                if let Some(st) = <dyn MaterialFlow as MaterialFlow>::as_any(&mut *obj_mut)
+                    .downcast_mut::<SingleStation>()
+                {
+                    if let ProcessState::Processing = st.state {
+                        if st.remain_proc_time.0 > delta.0 {
+                            st.remain_proc_time = st.remain_proc_time - delta;
+                        } else {
+                            st.remain_proc_time = EcTime::from(0);
+                        }
+                    }
+                    continue;
+                }
+                // try Source
+                if let Some(src) = <dyn MaterialFlow as MaterialFlow>::as_any(&mut *obj_mut)
+                    .downcast_mut::<Source>()
+                {
+                    if let ProcessState::Processing = src.state {
+                        if src.remain_proc_time.0 > delta.0 {
+                            src.remain_proc_time = src.remain_proc_time - delta;
+                        } else {
+                            src.remain_proc_time = EcTime::from(0);
+                        }
+                    }
+                }
+            }
+            for drain in &mut simulator.drains {
+                drain.borrow_mut().update_current_time(self.time);
+            }
+            if self.time > self.endtime.unwrap_or(EcTime(u128::MAX)) {
+                break;
+            }
+            let obj_rc = simulator
+                .material_flows
+                .get(&event_template.object_id)
+                .cloned();
+            let eventtype = event_template.eventtype.clone();
+            if let Some(obj) = obj_rc {
+                let mut queued_events: Vec<EventTemplate> = Vec::new();
+                let mut obj_mut = obj.borrow_mut();
+                log::info!(
+                    "At {}: seq={} obj={} event={:#?}",
+                    event_time.0,
+                    event_template.seq,
+                    event_template.object_id,
+                    eventtype.clone()
+                );
+                if let Ok(Some(evts)) = obj_mut.execute_event(&mut simulator, eventtype) {
+                    queued_events.extend(evts);
+                }
+                drop(obj_mut);
+                for new_event in queued_events {
+                    let scheduled_time = self.time + new_event.exec_time;
+                    self.add_event(scheduled_time, new_event);
+                }
+                simulator.print_materialflow_state(self.time);
+            }
+        }
+        Ok(simulator)
+    }
+}
+
+impl Default for EventController {
+    fn default() -> Self {
+        Self::new()
+    }
+}

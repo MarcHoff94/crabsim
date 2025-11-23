@@ -25,6 +25,7 @@ fn main() {
     eventcontroller.endtime = Some(500.into());
     eventcontroller.init(&mut simulator);
     let _simulator = eventcontroller.run(simulator).unwrap();
+    println!("exit interval: {:#?}", _simulator.drains[0].borrow().exits);
 }
 
 struct Simulator {
@@ -105,7 +106,7 @@ impl EventController {
             if let Some(obj) = obj_rc {
                 let mut queued_events: Vec<EventTemplate> = Vec::new();
                 let mut obj_mut = obj.borrow_mut();
-                println!("At {}: {:#?}", event_time.0, eventtype.clone());
+                println!("At {}: {:#?} | obj_id = {}", event_time.0, eventtype.clone(), event_template.object_id);
                 if let Ok(new_events) = obj_mut.execute_event(&mut simulator, eventtype) {
                     if let Some(evts) = new_events {
                         queued_events.extend(evts);
@@ -495,7 +496,7 @@ impl Drain {
             content: None,
             pred,
             current_time: 0.into(),
-            exits: Vec::from([0.into()]),
+            exits: Vec::new(),
             exit_interval: 0.into(),
             entrance_locked: false,
             blockedlist: Vec::new(), // Initialize blockedlist

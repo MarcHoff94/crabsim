@@ -12,13 +12,10 @@ fn main() {
     let drain = Rc::new(RefCell::new(Drain::new(3, vec![y.clone()])));
     x.borrow_mut().succ = vec![y.clone()];
     y.borrow_mut().succ = vec![drain.clone()];
-    simulator.objects.insert(simulator.object_id, source.clone() as Rc<RefCell<dyn EventInterface>>);
     simulator.material_flows.insert(simulator.object_id, source.clone() as Rc<RefCell<dyn MaterialFlow>>);
     simulator.object_id += 1;
-    simulator.objects.insert(simulator.object_id, x.clone() as Rc<RefCell<dyn EventInterface>>);
     simulator.material_flows.insert(simulator.object_id, x.clone() as Rc<RefCell<dyn MaterialFlow>>);
     simulator.object_id += 1;
-    simulator.objects.insert(simulator.object_id, y.clone() as Rc<RefCell<dyn EventInterface>>);
     simulator.material_flows.insert(simulator.object_id, y.clone() as Rc<RefCell<dyn MaterialFlow>>);
     simulator.object_id += 1;
     simulator.add_drain(drain.clone());
@@ -84,6 +81,12 @@ impl EventController {
         self.event_queue.make_contiguous().sort_by_key(|(t, _)| *t);
     }
     fn init(&mut self, simulator: &mut Simulator) {
+        for object in simulator.material_flows.values() {
+            let event_templates = object.borrow_mut().init().unwrap();
+            for event_template in event_templates {
+                self.add_event(self.time + event_template.exec_time, event_template.clone());
+            }
+        }
         for object in simulator.objects.values() {
             let event_templates = object.borrow_mut().init().unwrap();
             for event_template in event_templates {

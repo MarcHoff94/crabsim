@@ -119,4 +119,3 @@ impl Ord for ScheduledEvent {
     }
 }
 
-// Errors moved to `src/error.rs` to centralize error types for the crate.

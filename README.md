@@ -1,102 +1,97 @@
 # crabsim
 
-A small Rust discrete-event material-flow simulator used for prototyping and testing process/network semantics.
+A compact Rust discrete-event material-flow simulator (library + demo binary).
 
-This repository contains a compact single-file simulator (`src/main.rs`) that implements:
-
-- Simulator: authoritative registry for material-flow objects and drains.
-- EventController: discrete-event queue implemented with `BinaryHeap` and stable FIFO tiebreaking via a sequence number.
-- MaterialFlow trait and concrete types: `Source`, `SingleStation`, and `Drain`.
-- MoveableUnit (MU) lifecycle: created by `Source`, moved through `SingleStation`s, and consumed by `Drain`.
-- Live in-place terminal state printer (optional) to view object states after each event.
+It models Moveable Units (MUs) produced by a `Source`, processed by one or more `SingleStation`s, and consumed by a `Drain`. A central `Simulator` holds the registered objects and an `EventController` advances time via a priority queue with FIFO tiebreaking.
 
 
-## Requirements
-
-- Rust toolchain (1.70+ recommended or current stable)
-- Cargo to build and run
-
-
-## Build
-
-From the repository root (PowerShell):
+## Quick Start (Windows PowerShell)
 
 ```powershell
-# build
+# Build
 cargo build --manifest-path C:\Users\marcu\projects\crabsim\Cargo.toml
 
-# run
+# Run demo (prints state snapshots after each event)
+$env:RUST_LOG = 'info'
 cargo run --manifest-path C:\Users\marcu\projects\crabsim\Cargo.toml
+
+# Run tests
+cargo test --manifest-path C:\Users\marcu\projects\crabsim\Cargo.toml
+
+# Run tests with logs
+$env:RUST_LOG = 'info'
+cargo test --manifest-path C:\Users\marcu\projects\crabsim\Cargo.toml -- --nocapture
 ```
+
+Notes:
+- The demo binary calls `crabsim::run_demo()` which initializes `env_logger` so `RUST_LOG` controls runtime logs.
+- Set `RUST_LOG=crabsim=debug` for crate-only verbose logs.
+
+
+## Architecture Overview
+
+- `Simulator` (`src/simulator.rs`): Authoritative registry of material-flow objects and drains. Assigns object IDs on registration and prints a text snapshot after each event via `print_materialflow_state`.
+- `EventController` (`src/simulator.rs`): Discrete-event engine with a `BinaryHeap<ScheduledEvent>`. Uses a monotonically increasing sequence (`seq`) to preserve FIFO order for events scheduled at the same time.
+- Material-flow objects (`src/materialflow_objects/`):
+	- `Source`: creates MUs at a configured processing interval and attempts to transfer them to successors.
+	- `SingleStation`: processes one MU at a time and forwards it. Tracks entrance/exit locks, blocked state, and blocked predecessors.
+	- `Drain`: consumes MUs, records exit times and IDs.
+- Movement semantics (`src/materialflow_objects/flows.rs`):
+	- `try_to_move_to_successor` (round-robin by default) attempts to transfer an MU from a predecessor to the first successor that accepts entrance, advancing `succ_pointer` and recording blocked predecessors when denied.
+	- Events: `MUExit` (processing-complete transfer attempt) and `BlockedRetry` (successor notified it freed up). They are distinct to preserve scheduling vs. reactive retry semantics.
 
 
 ## Logging
 
-This project uses the `log` crate with `env_logger` for runtime logging. There are two kinds of output:
+The crate uses `log` + `env_logger`.
 
-- Interactive live-inplace table printed directly to the terminal (kept as `println!`s in `print_materialflow_state`) when `Simulator::enable_live_inplace(true)` is set.
-- Diagnostic and lifecycle logs via `log::info!` / `log::debug!` calls.
+- Live state: `Simulator::print_materialflow_state` prints a compact table after each processed event.
+- Logs: `info!` for lifecycle events and `debug!` for routing/blocked details.
 
-Control log verbosity using the `RUST_LOG` environment variable in PowerShell. Examples:
+Examples (PowerShell):
 
 ```powershell
-# Show info and above (default useful runtime view)
+# Show info and above
 $env:RUST_LOG = 'info'
 cargo run --manifest-path C:\Users\marcu\projects\crabsim\Cargo.toml
 
-# Show debug for only this crate (very verbose)
+# Verbose for this crate only
 $env:RUST_LOG = 'crabsim=debug'
 cargo run --manifest-path C:\Users\marcu\projects\crabsim\Cargo.toml
-
-# When running tests and you want to see logs
-$env:RUST_LOG = 'info'
-cargo test --manifest-path C:\Users\marcu\projects\crabsim\Cargo.toml -- --nocapture
 ```
 
-If you want both a live terminal UI and full log output, consider writing logs to a file (future enhancement) to avoid cluttering the terminal UI.
 
+## Tests and Guarantees
 
-## Live-inplace UI
+Unit tests live in `src/lib.rs` and cover:
 
-The simulator prints the material-flow state after each processed event. The output is printed sequentially (one state snapshot per event). If you later want an in-place UI that clears and refreshes the terminal instead of appending, we can add a toggle for that, but for now sequential printing is used for simplicity and portability.
+- Ordering across stations and across parallel branches
+- Blocked retry semantics and dedup behavior
+- Drain FIFO ordering and throughput characteristics
 
-
-## Tests
-
-Run unit tests with cargo:
+Run with:
 
 ```powershell
 cargo test --manifest-path C:\Users\marcu\projects\crabsim\Cargo.toml
-```
-
-To see logging output during tests:
-
-```powershell
-$env:RUST_LOG = 'info'
-cargo test --manifest-path C:\Users\marcu\projects\crabsim\Cargo.toml -- --nocapture
+$env:RUST_LOG = 'info'; cargo test --manifest-path C:\Users\marcu\projects\crabsim\Cargo.toml -- --nocapture
 ```
 
 
-## Project layout (single-file)
+## Project Layout
 
-- `Cargo.toml` — dependencies and metadata. Current deps: `splay_tree`, `log`, `env_logger`.
-- `src/main.rs` — all code: types, traits, simulator, controller, and tests.
-
-Key symbols you may want to inspect:
-
-- `Simulator` — registry and live-inplace control
-- `EventController` — event queue and run loop
-- `EventTemplate`, `ScheduledEvent` — event representation and scheduling
-- `MaterialFlow` trait and `SingleStation`, `Source`, `Drain`
+- `Cargo.toml` — dependencies (`splay_tree`, `log`, `env_logger`) and metadata.
+- `src/lib.rs` — public API, re-exports, `run_demo()` and unit tests.
+- `src/main.rs` — binary entrypoint that invokes `run_demo()`.
+- `src/simulator.rs` — `Simulator`, `EventController`, scheduling and state printing.
+- `src/materialflow_objects/` — concrete types and movement traits:
+	- `flows.rs` — traits (`MaterialFlow`, `EventInterface`, `SuccessorContainer`), `MoveableUnit`, strategies, and `try_to_move_to_successor`.
+	- `source.rs`, `station.rs`, `drain.rs` — implementations.
 
 
-## Next suggestions
+## Extending
 
-If you'd like, I can:
+- Add a new material-flow type by implementing `EventInterface` + `MaterialFlow`, exposing it in `materialflow_objects::mod`, registering with `Simulator`, and wiring successors (`Rc<RefCell<dyn MaterialFlow>>`).
+- Preserve `EventController` seq tiebreaking to keep deterministic tests.
+- Keep `try_to_move_to_successor` semantics (advance `succ_pointer`, record blocked predecessors, return event when appropriate).
 
-- Add a small CLI (via `clap`) to toggle `live_inplace` and set default log level from command-line flags.
-- Configure `env_logger` or a custom writer to write logs to a file while keeping the terminal for the live UI.
-- Migrate to `tracing`/`tracing-subscriber` for structured logs (JSON output, better downstream processing).
-- Split `src/main.rs` into modules for maintainability as the simulator grows.
-
-Tell me which of the above you'd like next and I can implement it and run tests.
+If you want a small CLI (e.g., `clap`) to toggle log level or runtime options, or structured logs via `tracing`, open an issue and we can add it without changing default behavior.

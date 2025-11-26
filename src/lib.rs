@@ -11,7 +11,6 @@ pub use crate::event::{EcTime, EventTemplate, EventType};
 pub use crate::materialflow_objects::flows::{Drain, MoveableUnit, SingleStation, Source};
 pub use crate::simulator::{EventController, Simulator};
 
-// Demo runner kept at crate root for the binary to call
 pub fn run_demo() {
 	env_logger::init();
 	use std::{cell::RefCell, rc::Rc};
@@ -26,25 +25,34 @@ pub fn run_demo() {
 	)));
 	let y = Rc::new(RefCell::new(SingleStation::new(
 		2,
-		EcTime::from(10),
+		EcTime::from(20),
 		None,
 		Vec::new(),
 		vec![x.clone()],
 	)));
+	let z = Rc::new(RefCell::new(SingleStation::new(
+		2,
+		EcTime::from(50),
+		None,
+		Vec::new(),
+		vec![y.clone()],
+	)));
 	let source = Rc::new(RefCell::new(Source::new(
 		0,
-		EcTime::from(10),
+		EcTime::from(0),
 		vec![x.clone()],
 	)));
-	let drain = Rc::new(RefCell::new(Drain::new(3, vec![y.clone()])));
+	let drain = Rc::new(RefCell::new(Drain::new(3, vec![z.clone()])));
 	x.borrow_mut().succ = vec![y.clone()];
-	y.borrow_mut().succ = vec![drain.clone()];
+	y.borrow_mut().succ = vec![z.clone()];
+	z.borrow_mut().succ = vec![drain.clone()];
 	simulator.register_material_flow(source.clone());
 	simulator.register_material_flow(x.clone());
 	simulator.register_material_flow(y.clone());
+	simulator.register_material_flow(z.clone());
 	simulator.register_material_flow(drain.clone());
 	simulator.add_drain(drain.clone());
-	eventcontroller.endtime = Some(EcTime::from(50));
+	eventcontroller.endtime = Some(EcTime::from(500));
 	eventcontroller.init(&mut simulator);
 	let _simulator = eventcontroller.run(simulator).unwrap();
 	log::info!("exit interval: {:#?}", _simulator.drains[0].borrow().exits);
@@ -305,14 +313,14 @@ mod tests {
 		)));
 		let station_b = Rc::new(RefCell::new(SingleStation::new(
 			0,
-			EcTime::from(20),
+			EcTime::from(30),
 			None,
 			Vec::new(),
 			vec![station_a.clone()],
 		)));
 		let source = Rc::new(RefCell::new(Source::new(
 			0,
-			EcTime::from(20),
+			EcTime::from(0),
 			vec![station_a.clone()],
 		)));
 		let drain = Rc::new(RefCell::new(Drain::new(0, vec![station_b.clone()])));

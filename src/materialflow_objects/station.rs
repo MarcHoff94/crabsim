@@ -1,7 +1,7 @@
 use crate::error::{InitError, MaterialflowError, RunTimeError};
 use crate::event::{EcTime, EventTemplate, EventType};
 use crate::flows::{
-	EventInterface, InterruptionState, MaterialFlow, MoveableUnit, ProcessState, SuccessorContainer,
+	EventInterface, InterruptionState, MaterialFlow, MoveableUnit, ProcessState, SuccessorContainer, try_to_move_to_successor
 };
 use crate::simulator::Simulator;
 use std::{cell::RefCell, rc::Rc};
@@ -82,8 +82,7 @@ impl MaterialFlow for SingleStation {
 			ProcessState::Idle => matches!(self.interruption, InterruptionState::None),
 			// Processing: actively working on an MU, do not allow exit
 			ProcessState::Processing => false,
-			// Blocked: previous attempt to exit after processing found no successor; allow
-			// subsequent exit attempts (e.g., on BlockedRetry notifications).
+			// Blocked: allow exit when not interrupted
 			ProcessState::Blocked => matches!(self.interruption, InterruptionState::None),
 		}
 	}
@@ -118,6 +117,22 @@ impl MaterialFlow for SingleStation {
 	fn as_any(&mut self) -> &mut dyn std::any::Any {
 		self
 	}
+	fn notify_blocked_predecessors(&mut self) -> Result<Option<Vec<EventTemplate>>, MaterialflowError> {
+		let mut blocked_events = Vec::new();
+		while let Some(blocked_id) = self.blockedlist.pop() {
+			blocked_events.push(EventTemplate {
+				eventtype: EventType::BlockedRetry,
+				exec_time: 0.into(),
+				object_id: blocked_id,
+				seq: 0,
+			});
+		}
+		if blocked_events.is_empty() {
+			Ok(None)
+		} else {
+			Ok(Some(blocked_events))
+		}
+	}
 }
 
 impl EventInterface for SingleStation {
@@ -130,22 +145,20 @@ impl EventInterface for SingleStation {
 		eventtype: EventType,
 	) -> Result<Option<Vec<EventTemplate>>, RunTimeError> {
 		match eventtype {
-			EventType::MUExit => match crate::flows::try_to_move_to_successor(self, _simulator) {
+			EventType::MUExit => match try_to_move_to_successor(self, _simulator) {
 				Ok(Some(event_template)) => {
 					// Move succeeded and produced an event template.
 					self.entrancelocked = false;
 					self.state = ProcessState::Idle;
-					let mut blocked_events = Vec::new();
-					while let Some(blocked_id) = self.blockedlist.pop() {
-						blocked_events.push(EventTemplate {
-							eventtype: EventType::BlockedRetry,
-							exec_time: 0.into(),
-							object_id: blocked_id,
-							seq: 0,
-						});
+					let blocked_events = self.notify_blocked_predecessors();
+					match blocked_events {
+						Ok(Some(mut be)) => {
+							be.push(event_template);
+							Ok(Some(be))
+						}
+						Ok(None) => Ok(Some(vec![event_template])),
+						Err(e) => Err(RunTimeError {}),
 					}
-					blocked_events.push(event_template);
-					Ok(Some(blocked_events))
 				}
 				Ok(None) => {
 					// Ok(None) can mean either: (A) the MU was moved but no
@@ -156,19 +169,11 @@ impl EventInterface for SingleStation {
 						// notify any blocked predecessors.
 						self.entrancelocked = false;
 						self.state = ProcessState::Idle;
-						let mut blocked_events = Vec::new();
-						while let Some(blocked_id) = self.blockedlist.pop() {
-							blocked_events.push(EventTemplate {
-								eventtype: EventType::BlockedRetry,
-								exec_time: 0.into(),
-								object_id: blocked_id,
-								seq: 0,
-							});
-						}
-						if !blocked_events.is_empty() {
-							Ok(Some(blocked_events))
-						} else {
-							Ok(None)
+						let blocked_events = self.notify_blocked_predecessors();
+						match blocked_events {
+							Ok(Some(be)) => Ok(Some(be)),
+							Ok(None) => Ok(None),
+							Err(e) => Err(RunTimeError {}),
 						}
 					} else {
 						// MU could not be moved to any successor: remain blocked.
@@ -184,15 +189,47 @@ impl EventInterface for SingleStation {
 			EventType::BlockedRetry => {
 				// BlockedRetry is a notification from a successor that the
 				// successor has become available and requests the predecessor
-				// to attempt to move its MU. Use `is_exit_allowed()` to decide
-				// whether an exit/transfer may be attempted. Note: by design
-				// `is_exit_allowed` should not check `self.state`.
+				// to attempt to move its MU. 
 				if !self.is_exit_allowed() {
 					return Ok(None);
 				}
-				match crate::flows::try_to_move_to_successor(self, _simulator) {
-					Ok(Some(ev)) => Ok(Some(vec![ev])),
-					Ok(None) => Ok(None),
+				match try_to_move_to_successor(self, _simulator) {
+					Ok(Some(event_template)) => {
+						// If the move succeeded (content taken) we may need to unlock entrance
+						// and flush blocked predecessors similar to MUExit path.
+						if self.content.is_none() {
+							self.entrancelocked = false;
+							self.state = ProcessState::Idle;
+							let blocked_events = self.notify_blocked_predecessors();
+							match blocked_events {
+								Ok(Some(mut be)) => {
+									be.push(event_template);
+									Ok(Some(be))
+								}
+								Ok(None) => Ok(Some(vec![event_template])),
+								Err(e) => Err(RunTimeError {}),
+							}
+						} else {
+							Ok(Some(vec![event_template]))
+						}
+					}
+					Ok(None) => {
+						// Either moved with no immediate event or still blocked.
+						if self.content.is_none() {
+							self.entrancelocked = false;
+							self.state = ProcessState::Idle;
+							let blocked_events = self.notify_blocked_predecessors();
+							match blocked_events {
+								Ok(Some(be)) => Ok(Some(be)),
+								Ok(None) => Ok(None),
+								Err(e) => Err(RunTimeError {}),
+							}
+						} else {
+							// Still holding MU: remain blocked.
+							self.state = ProcessState::Blocked;
+							Ok(None)
+						}
+					}
 					Err(_) => Err(RunTimeError {}),
 				}
 			}

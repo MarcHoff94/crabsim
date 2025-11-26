@@ -64,26 +64,26 @@ impl EventInterface for Drain {
         eventtype: EventType,
     ) -> Result<Option<Vec<EventTemplate>>, crate::error::RunTimeError> {
         match eventtype {
-            EventType::MUExit => {
-                let mut blocked_events = Vec::new();
-                while let Some(blocked_id) = self.blockedlist.pop() {
-                    blocked_events.push(EventTemplate {
-                        eventtype: EventType::MUExit,
-                        exec_time: 0.into(),
-                        object_id: blocked_id,
-                        seq: 0,
-                    });
-                }
-                let mut events = blocked_events;
-                if let Ok(Some(event_template)) = self.process_mu_exit() {
-                    events.push(event_template);
-                }
-                if !events.is_empty() {
-                    Ok(Some(events))
-                } else {
-                    Ok(None)
-                }
-            }
+            // EventType::MUExit => {
+            //     let mut blocked_events = Vec::new();
+            //     while let Some(blocked_id) = self.blockedlist.pop() {
+            //         blocked_events.push(EventTemplate {
+            //             eventtype: EventType::MUExit,
+            //             exec_time: 0.into(),
+            //             object_id: blocked_id,
+            //             seq: 0,
+            //         });
+            //     }
+            //     let mut events = blocked_events;
+            //     if let Ok(Some(event_template)) = self.process_mu_exit() {
+            //         events.push(event_template);
+            //     }
+            //     if !events.is_empty() {
+            //         Ok(Some(events))
+            //     } else {
+            //         Ok(None)
+            //     }
+            // }
             _ => Err(crate::error::RunTimeError {}),
         }
     }
@@ -103,9 +103,6 @@ impl MaterialFlow for Drain {
         !self.entrance_locked
     }
     fn is_exit_allowed(&self) -> bool {
-        // Drain doesn't perform exits in the same way as stations/sources.
-        // Use entrance_locked as a proxy: if the drain is entrance-locked,
-        // it's not ready to accept new content/propagate blocked retries.
         !self.entrance_locked
     }
     fn process_mu_entrance(
@@ -127,18 +124,18 @@ impl MaterialFlow for Drain {
             self.exit_interval = intervals.iter().sum::<EcTime>() / intervals.len() as u128;
             log::info!("Average exit interval: {}", self.exit_interval.0);
         }
-        let mut blocked_events = Vec::new();
-        while let Some(blocked_id) = self.blockedlist.pop() {
-            blocked_events.push(EventTemplate {
-                eventtype: EventType::BlockedRetry,
-                exec_time: 0.into(),
-                object_id: blocked_id,
-                seq: 0,
-            });
-        }
-        if !blocked_events.is_empty() {
-            return Ok(Some(blocked_events.remove(0)));
-        }
+        // let mut blocked_events = Vec::new();
+        // while let Some(blocked_id) = self.blockedlist.pop() {
+        //     blocked_events.push(EventTemplate {
+        //         eventtype: EventType::BlockedRetry,
+        //         exec_time: 0.into(),
+        //         object_id: blocked_id,
+        //         seq: 0,
+        //     });
+        // }
+        // if !blocked_events.is_empty() {
+        //     return Ok(Some(blocked_events.remove(0)));
+        // }
         Ok(None)
     }
     fn process_mu_exit(&mut self) -> Result<Option<EventTemplate>, MaterialflowError> {
@@ -149,5 +146,24 @@ impl MaterialFlow for Drain {
     }
     fn as_any(&mut self) -> &mut dyn std::any::Any {
         self
+    }
+    fn notify_blocked_predecessors(&mut self) -> Result<Option<Vec<EventTemplate>>, MaterialflowError> {
+        
+        //predecessors do not get notified from drain because drain is never blocking them
+        Ok(None)
+        // let mut blocked_events = Vec::new();
+        // while let Some(blocked_id) = self.blockedlist.pop() {
+        //     blocked_events.push(EventTemplate {
+        //         eventtype: EventType::BlockedRetry,
+        //         exec_time: 0.into(),
+        //         object_id: blocked_id,
+        //         seq: 0,
+        //     });
+        // }
+        // if !blocked_events.is_empty() {
+        //     Ok(Some(blocked_events))
+        // } else {
+        //     Ok(None)
+        // }
     }
 }

@@ -51,6 +51,7 @@ pub trait MaterialFlow: EventInterface {
 	fn process_mu_exit(&mut self) -> Result<Option<EventTemplate>, MaterialflowError>;
 	fn add_blocked(&mut self, id_blocked: u32);
 	fn as_any(&mut self) -> &mut dyn std::any::Any;
+	fn notify_blocked_predecessors(&mut self) -> Result<Option<Vec<EventTemplate>>, MaterialflowError>;
 }
 
 pub trait SuccessorContainer {

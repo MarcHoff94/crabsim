@@ -1,7 +1,7 @@
 use crate::error::{InitError, MaterialflowError, RunTimeError};
 use crate::event::{EcTime, EventTemplate, EventType};
 use crate::flows::{
-	EventInterface, InterruptionState, MaterialFlow, MoveableUnit, ProcessState, SuccessorContainer,
+	EventInterface, InterruptionState, MaterialFlow, MoveableUnit, ProcessState, SuccessorContainer, try_to_move_to_successor
 };
 use crate::simulator::Simulator;
 use std::{cell::RefCell, rc::Rc};
@@ -10,7 +10,7 @@ pub fn handle_source_mu_exit(
 	source: &mut Source,
 	_simulator: &Simulator,
 ) -> Result<Option<Vec<EventTemplate>>, RunTimeError> {
-	let event_template_result = crate::materialflow_objects::flows::try_to_move_to_successor(source, _simulator);
+	let event_template_result = try_to_move_to_successor(source, _simulator);
 	match event_template_result {
 		Ok(opt_evt) => {
 			if source.content.is_none() {
@@ -104,7 +104,7 @@ impl EventInterface for Source {
 				if !self.is_exit_allowed() {
 					return Ok(None);
 				}
-				match crate::materialflow_objects::flows::try_to_move_to_successor(self, _simulator) {
+				match try_to_move_to_successor(self, _simulator) {
 					Ok(Some(ev)) => {
 						// If the MU was moved and the source is now empty, create the next MU
 						if self.content.is_none() {
@@ -168,6 +168,10 @@ impl MaterialFlow for Source {
 	}
 	fn as_any(&mut self) -> &mut dyn std::any::Any {
 		self
+	}
+	fn notify_blocked_predecessors(&mut self) -> Result<Option<Vec<EventTemplate>>, MaterialflowError> {
+		//source has no predecessors
+		Ok(None)
 	}
 }
 

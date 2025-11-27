@@ -157,7 +157,7 @@ impl EventInterface for SingleStation {
 							Ok(Some(be))
 						}
 						Ok(None) => Ok(Some(vec![event_template])),
-						Err(e) => Err(RunTimeError {}),
+						Err(_e) => Err(RunTimeError {}),
 					}
 				}
 				Ok(None) => {
@@ -173,7 +173,7 @@ impl EventInterface for SingleStation {
 						match blocked_events {
 							Ok(Some(be)) => Ok(Some(be)),
 							Ok(None) => Ok(None),
-							Err(e) => Err(RunTimeError {}),
+							Err(_e) => Err(RunTimeError {}),
 						}
 					} else {
 						// MU could not be moved to any successor: remain blocked.
@@ -207,7 +207,7 @@ impl EventInterface for SingleStation {
 									Ok(Some(be))
 								}
 								Ok(None) => Ok(Some(vec![event_template])),
-								Err(e) => Err(RunTimeError {}),
+								Err(_e) => Err(RunTimeError {}),
 							}
 						} else {
 							Ok(Some(vec![event_template]))
@@ -222,7 +222,7 @@ impl EventInterface for SingleStation {
 							match blocked_events {
 								Ok(Some(be)) => Ok(Some(be)),
 								Ok(None) => Ok(None),
-								Err(e) => Err(RunTimeError {}),
+								Err(_e) => Err(RunTimeError {}),
 							}
 						} else {
 							// Still holding MU: remain blocked.

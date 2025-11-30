@@ -5,6 +5,7 @@ pub use crate::materialflow_objects::flows;
 pub mod error;
 pub mod materialflow_objects;
 pub mod simulator;
+pub mod topology_visualizer;
 
 pub use crate::error::{InitError, MaterialflowError, RunTimeError};
 pub use crate::event::{EcTime, EventTemplate, EventType};
@@ -16,40 +17,155 @@ pub fn run_demo() {
 	use std::{cell::RefCell, rc::Rc};
 	let mut simulator = Simulator::new();
 	let mut eventcontroller = EventController::new();
-	let x = Rc::new(RefCell::new(SingleStation::new(
+	
+	// Station 1 - first station
+	let st1 = Rc::new(RefCell::new(SingleStation::new(
 		1,
 		EcTime::from(10),
 		None,
 		Vec::new(),
 		Vec::new(),
 	)));
-	let y = Rc::new(RefCell::new(SingleStation::new(
+	
+	// Station 2 - splits into two branches
+	let st2 = Rc::new(RefCell::new(SingleStation::new(
+		2,
+		EcTime::from(15),
+		None,
+		Vec::new(),
+		Vec::new(),
+	)));
+	
+	// Branch 1: Station 3
+	let st3 = Rc::new(RefCell::new(SingleStation::new(
 		2,
 		EcTime::from(20),
 		None,
 		Vec::new(),
-		vec![x.clone()],
+		Vec::new(),
 	)));
-	let z = Rc::new(RefCell::new(SingleStation::new(
+	
+	// Station 4 splits into 3 parallel stations
+	let st4 = Rc::new(RefCell::new(SingleStation::new(
 		2,
-		EcTime::from(50),
+		EcTime::from(25),
 		None,
 		Vec::new(),
-		vec![y.clone()],
+		Vec::new(),
 	)));
+	let st4a = Rc::new(RefCell::new(SingleStation::new(
+		2,
+		EcTime::from(12),
+		None,
+		Vec::new(),
+		Vec::new(),
+	)));
+	let st4b = Rc::new(RefCell::new(SingleStation::new(
+		2,
+		EcTime::from(15),
+		None,
+		Vec::new(),
+		Vec::new(),
+	)));
+	let st4c = Rc::new(RefCell::new(SingleStation::new(
+		2,
+		EcTime::from(18),
+		None,
+		Vec::new(),
+		Vec::new(),
+	)));
+	
+	// Station after st4 parallel merge
+	let st7 = Rc::new(RefCell::new(SingleStation::new(
+		2,
+		EcTime::from(30),
+		None,
+		Vec::new(),
+		Vec::new(),
+	)));
+	
+	// Branch 2: Station 5 splits into 3 parallel stations
+	let st5 = Rc::new(RefCell::new(SingleStation::new(
+		2,
+		EcTime::from(18),
+		None,
+		Vec::new(),
+		Vec::new(),
+	)));
+	let st5a = Rc::new(RefCell::new(SingleStation::new(
+		2,
+		EcTime::from(10),
+		None,
+		Vec::new(),
+		Vec::new(),
+	)));
+	let st5b = Rc::new(RefCell::new(SingleStation::new(
+		2,
+		EcTime::from(14),
+		None,
+		Vec::new(),
+		Vec::new(),
+	)));
+	let st5c = Rc::new(RefCell::new(SingleStation::new(
+		2,
+		EcTime::from(16),
+		None,
+		Vec::new(),
+		Vec::new(),
+	)));
+	
 	let source = Rc::new(RefCell::new(Source::new(
 		0,
 		EcTime::from(0),
-		vec![x.clone()],
+		vec![st1.clone()],
 	)));
-	let drain = Rc::new(RefCell::new(Drain::new(3, vec![z.clone()])));
-	x.borrow_mut().succ = vec![y.clone()];
-	y.borrow_mut().succ = vec![z.clone()];
-	z.borrow_mut().succ = vec![drain.clone()];
+	let drain = Rc::new(RefCell::new(Drain::new(3, vec![st7.clone(), st5a.clone(), st5b.clone(), st5c.clone()])));
+	
+	// Set up successor relationships
+	st1.borrow_mut().succ = vec![st2.clone()];
+	st2.borrow_mut().succ = vec![st3.clone(), st5.clone()];  // Split into two branches
+	
+	// Branch 1: st3 -> st4 -> 3 parallel -> st7 -> drain
+	st3.borrow_mut().succ = vec![st4.clone()];
+	st4.borrow_mut().succ = vec![st4a.clone(), st4b.clone(), st4c.clone()];  // 3 parallel
+	st4a.borrow_mut().succ = vec![st7.clone()];
+	st4b.borrow_mut().succ = vec![st7.clone()];
+	st4c.borrow_mut().succ = vec![st7.clone()];
+	st7.borrow_mut().succ = vec![drain.clone()];
+	
+	// Branch 2: st5 -> 3 parallel -> drain
+	st5.borrow_mut().succ = vec![st5a.clone(), st5b.clone(), st5c.clone()];  // 3 parallel
+	st5a.borrow_mut().succ = vec![drain.clone()];
+	st5b.borrow_mut().succ = vec![drain.clone()];
+	st5c.borrow_mut().succ = vec![drain.clone()];
+	
+	// Set up predecessor relationships to match successors
+	st1.borrow_mut().pred = vec![source.clone()];
+	st2.borrow_mut().pred = vec![st1.clone()];
+	st3.borrow_mut().pred = vec![st2.clone()];
+	st4.borrow_mut().pred = vec![st3.clone()];
+	st4a.borrow_mut().pred = vec![st4.clone()];
+	st4b.borrow_mut().pred = vec![st4.clone()];
+	st4c.borrow_mut().pred = vec![st4.clone()];
+	st7.borrow_mut().pred = vec![st4a.clone(), st4b.clone(), st4c.clone()];
+	st5.borrow_mut().pred = vec![st2.clone()];
+	st5a.borrow_mut().pred = vec![st5.clone()];
+	st5b.borrow_mut().pred = vec![st5.clone()];
+	st5c.borrow_mut().pred = vec![st5.clone()];
+	
 	simulator.register_material_flow(source.clone());
-	simulator.register_material_flow(x.clone());
-	simulator.register_material_flow(y.clone());
-	simulator.register_material_flow(z.clone());
+	simulator.register_material_flow(st1.clone());
+	simulator.register_material_flow(st2.clone());
+	simulator.register_material_flow(st3.clone());
+	simulator.register_material_flow(st4.clone());
+	simulator.register_material_flow(st4a.clone());
+	simulator.register_material_flow(st4b.clone());
+	simulator.register_material_flow(st4c.clone());
+	simulator.register_material_flow(st7.clone());
+	simulator.register_material_flow(st5.clone());
+	simulator.register_material_flow(st5a.clone());
+	simulator.register_material_flow(st5b.clone());
+	simulator.register_material_flow(st5c.clone());
 	simulator.register_material_flow(drain.clone());
 	simulator.add_drain(drain.clone());
 	eventcontroller.endtime = Some(EcTime::from(500));

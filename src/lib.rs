@@ -5,7 +5,7 @@ pub use crate::materialflow_objects::flows;
 pub mod error;
 pub mod materialflow_objects;
 pub mod simulator;
-pub mod topology_visualizer;
+pub mod visualization;
 
 pub use crate::error::{InitError, MaterialflowError, RunTimeError};
 pub use crate::event::{EcTime, EventTemplate, EventType};

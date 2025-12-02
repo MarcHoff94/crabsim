@@ -4,12 +4,15 @@ use crate::error::RunTimeError;
 use crate::event::{EcTime, EventTemplate, ScheduledEvent};
 use crate::flows::{Drain, EventInterface, MaterialFlow, ProcessState, SingleStation, Source};
 use crate::visualization::topology::TopologyVisualizer;
-use crate::visualization::state::StateVisualizer;
+use crate::visualization::state::{StateVisualizer, StateSnapshot};
 use std::{
     cell::RefCell,
     collections::{BinaryHeap, HashMap},
     rc::Rc,
 };
+use std::net::TcpStream;
+use std::io::Write;
+use serde_json;
 
 pub struct Simulator {
     pub material_flows: HashMap<u32, Rc<RefCell<dyn MaterialFlow>>>,
@@ -17,6 +20,10 @@ pub struct Simulator {
     pub object_id: u32,
     pub current_seq: u64,
     pub topology_printed: bool,
+    pub live_inplace: bool,
+    inplace_anchor_set: bool,
+    pub renderer_stream: Option<TcpStream>,
+    topology_sent: bool,
 }
 
 impl Simulator {
@@ -27,6 +34,10 @@ impl Simulator {
             object_id: 0,
             current_seq: 0,
             topology_printed: false,
+            live_inplace: false,
+            inplace_anchor_set: false,
+            renderer_stream: None,
+            topology_sent: false,
         }
     }
     pub fn init(&mut self, eventcontroller: &mut EventController) {
@@ -61,9 +72,51 @@ impl Simulator {
 
     pub fn print_network_topology(&self) {
         TopologyVisualizer::print_network_topology(&self.material_flows);
+        if let Some(stream) = self.renderer_stream.as_ref() {
+            let text = TopologyVisualizer::render_network_topology(&self.material_flows);
+            let _ = stream.try_clone().and_then(|mut s| {
+                let msg = serde_json::json!({"kind":"topology","text": text});
+                let line = serde_json::to_string(&msg).unwrap();
+                s.write_all(line.as_bytes())?; s.write_all(b"\n")?; s.flush()
+            });
+        }
     }
 
     pub fn print_materialflow_state(&mut self, current_time: EcTime) {
+        // If an external renderer is connected, send snapshot instead of printing locally
+        if let Some(stream) = self.renderer_stream.as_mut() {
+            // Ensure topology is sent at least once upon first snapshot
+            if !self.topology_sent {
+                let text = TopologyVisualizer::render_network_topology(&self.material_flows);
+                let topo_msg = serde_json::json!({"kind":"topology","text": text});
+                if let Ok(line) = serde_json::to_string(&topo_msg) {
+                    let _ = stream.write_all(line.as_bytes());
+                    let _ = stream.write_all(b"\n");
+                    let _ = stream.flush();
+                }
+                self.topology_sent = true;
+            }
+            let snapshot: StateSnapshot = StateVisualizer::collect_snapshot(&self.material_flows, current_time, self.current_seq);
+            let msg = serde_json::json!({"kind":"snapshot","snapshot": snapshot});
+            if let Ok(line) = serde_json::to_string(&msg) {
+                let _ = stream.write_all(line.as_bytes());
+                let _ = stream.write_all(b"\n");
+                let _ = stream.flush();
+                return;
+            }
+            // If sending failed, fall through to local printing as a fallback
+        }
+        if self.live_inplace {
+            enable_ansi_support();
+            // Clear screen and move cursor home, then redraw topology + state
+            print!("\x1B[2J\x1B[H");
+            self.print_network_topology();
+            StateVisualizer::print_materialflow_state(&self.material_flows, current_time, self.current_seq);
+            let _ = std::io::Write::flush(&mut std::io::stdout());
+            self.topology_printed = true;
+            return;
+        }
+
         if !self.topology_printed {
             self.print_network_topology();
             self.topology_printed = true;
@@ -71,6 +124,31 @@ impl Simulator {
         StateVisualizer::print_materialflow_state(&self.material_flows, current_time, self.current_seq);
     }
 }
+
+#[cfg(windows)]
+fn enable_ansi_support() {
+    #[allow(non_snake_case)]
+    unsafe fn SetVT() {
+        extern "system" {
+            fn GetStdHandle(nStdHandle: i32) -> *mut core::ffi::c_void;
+            fn GetConsoleMode(hConsoleHandle: *mut core::ffi::c_void, lpMode: *mut u32) -> i32;
+            fn SetConsoleMode(hConsoleHandle: *mut core::ffi::c_void, dwMode: u32) -> i32;
+        }
+        const STD_OUTPUT_HANDLE: i32 = -11; // from winbase.h
+        const ENABLE_VIRTUAL_TERMINAL_PROCESSING: u32 = 0x0004;
+        let h = GetStdHandle(STD_OUTPUT_HANDLE);
+        if !h.is_null() {
+            let mut mode: u32 = 0;
+            if GetConsoleMode(h, &mut mode) != 0 {
+                let _ = SetConsoleMode(h, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+            }
+        }
+    }
+    unsafe { SetVT(); }
+}
+
+#[cfg(not(windows))]
+fn enable_ansi_support() {}
 
 impl Default for Simulator {
     fn default() -> Self {

@@ -15,7 +15,74 @@ pub use crate::simulator::{EventController, Simulator};
 pub fn run_demo() {
 	env_logger::init();
 	use std::{cell::RefCell, rc::Rc};
+	use std::net::TcpListener;
+	use std::process::Command;
+    
 	let mut simulator = Simulator::new();
+	// Optional: enable in-place live rendering via env var
+	if std::env::var("CRABSIM_LIVE_INPLACE").ok().filter(|v| v != "0").is_some() {
+		simulator.live_inplace = true;
+	}
+
+	// Optional: start external renderer window and attach stream
+	let use_renderer = std::env::var("CRABSIM_RENDERER").ok().filter(|v| v != "0").is_some();
+	let speed_factor: String = std::env::var("CRABSIM_RENDERER_SPEED").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "5".to_string());
+	let mut _listener: Option<TcpListener> = None;
+	if use_renderer {
+		if let Ok(listener) = TcpListener::bind(("127.0.0.1", 0)) {
+			let addr = listener.local_addr().unwrap();
+			let connect_arg = format!("{}:{}", addr.ip(), addr.port());
+			// Resolve path to renderer binary next to current exe
+			let renderer_prog = {
+				let mut p = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("crabsim-renderer"));
+				p.set_file_name(if cfg!(windows) { "crabsim-renderer.exe" } else { "crabsim-renderer" });
+				p
+			};
+			// Spawn renderer: Windows -> start maximized console via PowerShell; others -> spawn normally
+			#[cfg(windows)]
+			{
+				// Try PowerShell Start-Process (maximized)
+				let ps_cmd = format!(
+					"Start-Process -FilePath '{}' -ArgumentList @('--connect','{}','--speed','{}') -WindowStyle Maximized",
+					renderer_prog.display(), connect_arg, speed_factor
+				);
+				let ps_res = Command::new("powershell")
+					.args(["-NoProfile", "-Command", &ps_cmd])
+					.spawn();
+				if ps_res.is_err() {
+					// Fallback: cmd.exe start with /MAX (maximized)
+					let path = renderer_prog.to_string_lossy().to_string();
+					let _ = Command::new("cmd")
+						.args([
+							"/C",
+							"start",
+							"CrabSim Renderer",
+							"/MAX",
+							&path,
+							"--connect",
+							&connect_arg,
+							"--speed",
+							&speed_factor,
+						])
+						.spawn();
+				}
+			}
+			#[cfg(not(windows))]
+			{
+				let _ = Command::new(renderer_prog)
+					.arg("--connect").arg(&connect_arg)
+					.arg("--speed").arg(&speed_factor)
+					.spawn();
+			}
+			// accept a single connection from renderer
+			if let Ok((stream, _peer)) = listener.accept() {
+				simulator.renderer_stream = Some(stream);
+				_listener = Some(listener); // keep listener alive for scope if needed (not strictly necessary)
+				// Immediately send topology to the renderer so it appears before the first state frame
+				simulator.print_network_topology();
+			}
+		}
+	}
 	let mut eventcontroller = EventController::new();
 	
 	// Station 1 - first station

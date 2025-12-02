@@ -6,6 +6,262 @@ use crate::materialflow_objects::flows::{MaterialFlow, Drain};
 pub struct TopologyVisualizer;
 
 impl TopologyVisualizer {
+    pub fn render_network_topology(
+        material_flows: &HashMap<u32, Rc<RefCell<dyn MaterialFlow>>>,
+    ) -> String {
+        let mut buf = String::new();
+        buf.push_str("\n╔═════════════════════════════════════════════════════════════════════════════════╗\n");
+        buf.push_str("║ Network Topology                                                                ║\n");
+        buf.push_str("╚═════════════════════════════════════════════════════════════════════════════════╝\n\n");
+
+        let mut type_map: HashMap<u32, String> = HashMap::new();
+        let mut successors_map: HashMap<u32, Vec<u32>> = HashMap::new();
+        let mut source_id: Option<u32> = None;
+
+        for (id, obj) in material_flows {
+            let obj_borrow = obj.borrow();
+            let any = obj_borrow.as_any();
+            let (obj_type, successors) = if let Some(st) = any.downcast_ref::<crate::flows::SingleStation>() {
+                let succ_ids: Vec<u32> = st.succ.iter().map(|s| *s.borrow().get_object_id()).collect();
+                ("St", succ_ids)
+            } else if let Some(src) = any.downcast_ref::<crate::flows::Source>() {
+                source_id = Some(*id);
+                let succ_ids: Vec<u32> = src.succ.iter().map(|s| *s.borrow().get_object_id()).collect();
+                ("So", succ_ids)
+            } else if any.downcast_ref::<Drain>().is_some() {
+                ("Dr", vec![])
+            } else {
+                ("??", vec![])
+            };
+            type_map.insert(*id, obj_type.to_string());
+            successors_map.insert(*id, successors);
+        }
+
+        if let Some(src_id) = source_id {
+            let mut node_column: HashMap<u32, usize> = HashMap::new();
+            let mut visited = HashSet::new();
+            let mut queue = VecDeque::new();
+            queue.push_back((src_id, 0));
+
+            let mut drain_ids = Vec::new();
+            for id in material_flows.keys() {
+                let obj = material_flows.get(id).unwrap();
+                let borrowed = obj.borrow();
+                let any = borrowed.as_any();
+                if any.downcast_ref::<Drain>().is_some() { drain_ids.push(*id); }
+            }
+
+            while let Some((id, col)) = queue.pop_front() {
+                if visited.contains(&id) { continue; }
+                visited.insert(id);
+                node_column.insert(id, col);
+                if let Some(successors) = successors_map.get(&id) {
+                    for &succ_id in successors { queue.push_back((succ_id, col + 1)); }
+                }
+            }
+
+            let mut max_col = node_column.values().max().copied().unwrap_or(0);
+            let mut drain_nodes = Vec::new();
+            for &drain_id in &drain_ids { node_column.insert(drain_id, max_col + 1); drain_nodes.push(drain_id); }
+            max_col = node_column.values().max().copied().unwrap_or(0);
+
+            let major_branch = Self::assign_major_branches(src_id, &successors_map);
+            let column_branch_nodes = Self::group_by_column_and_branch(&node_column, &major_branch);
+            let column_layout = Self::build_column_layout(&column_branch_nodes, max_col);
+            let (node_row, max_height) = Self::assign_rows_with_spacing(&column_layout, &column_branch_nodes, &major_branch, &drain_nodes, max_col);
+            let grid = Self::build_grid(&node_column, &node_row, max_col, max_height);
+            // Print into buffer using full arrow logic
+            Self::print_grid_to_string(&mut buf, &grid, &type_map, &successors_map, &node_column, max_col, max_height);
+        }
+        buf.push('\n');
+        buf
+    }
+
+    fn print_grid_to_string(
+        buf: &mut String,
+        grid: &[Vec<Option<u32>>],
+        type_map: &HashMap<u32, String>,
+        successors_map: &HashMap<u32, Vec<u32>>,
+        node_column: &HashMap<u32, usize>,
+        max_col: usize,
+        max_height: usize,
+    ) {
+        use std::fmt::Write as _;
+        for row in 0..max_height {
+            for col in 0..=max_col {
+                if let Some(id) = grid[row][col] {
+                    let type_label = type_map.get(&id).map(|s| s.as_str()).unwrap_or("??");
+                    let _ = write!(buf, "[{:>2}:{:2}]", type_label, id);
+                } else {
+                    buf.push_str("       ");
+                }
+                if col < max_col {
+                    Self::print_arrow_to_string(buf, grid, successors_map, node_column, row, col, max_height);
+                }
+            }
+            buf.push('\n');
+            if row < max_height - 1 {
+                Self::print_inter_row_connectors_to_string(buf, grid, successors_map, node_column, row, max_col, max_height);
+            }
+        }
+    }
+
+    fn print_arrow_to_string(
+        buf: &mut String,
+        grid: &[Vec<Option<u32>>],
+        successors_map: &HashMap<u32, Vec<u32>>,
+        node_column: &HashMap<u32, usize>,
+        row: usize,
+        col: usize,
+        max_height: usize,
+    ) {
+        let mut arrow_printed = false;
+        if let Some(id) = grid[row][col] {
+            if let Some(successors) = successors_map.get(&id) {
+                let mut next_col_successors = Vec::new();
+                for &succ_id in successors {
+                    if let Some(succ_col) = node_column.get(&succ_id) {
+                        if *succ_col == col + 1 {
+                            for check_row in 0..max_height {
+                                if grid[check_row][col + 1] == Some(succ_id) {
+                                    next_col_successors.push((check_row, succ_id));
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                let mut has_far_successor = false;
+                for &succ_id in successors {
+                    if let Some(succ_col) = node_column.get(&succ_id) {
+                        if *succ_col > col + 1 { has_far_successor = true; break; }
+                    }
+                }
+                if !next_col_successors.is_empty() {
+                    if next_col_successors.len() > 1 {
+                        let rows: Vec<usize> = next_col_successors.iter().map(|(r, _)| *r).collect();
+                        let min_row = *rows.iter().min().unwrap();
+                        let max_row = *rows.iter().max().unwrap();
+                        if row == min_row {
+                            buf.push_str(" ══╗ ");
+                        } else if row == max_row {
+                            buf.push_str("   ╚═");
+                        } else if row > min_row && row < max_row {
+                            buf.push_str("   ║ ");
+                        } else {
+                            buf.push_str("     ");
+                        }
+                    } else {
+                        let (succ_row, succ_id) = next_col_successors[0];
+                        let mut all_preds_to_succ = Vec::new();
+                        for check_row in 0..max_height {
+                            if let Some(check_id) = grid[check_row][col] {
+                                if let Some(check_successors) = successors_map.get(&check_id) {
+                                    if check_successors.contains(&succ_id) {
+                                        all_preds_to_succ.push(check_row);
+                                    }
+                                }
+                            }
+                        }
+                        if all_preds_to_succ.len() > 1 && succ_row == row {
+                            buf.push_str(" ──→ ");
+                        } else if all_preds_to_succ.len() > 1 {
+                            let min_pred = *all_preds_to_succ.iter().min().unwrap();
+                            let max_pred = *all_preds_to_succ.iter().max().unwrap();
+                            if row < min_pred || row > max_pred {
+                                buf.push_str("     ");
+                            } else if row == min_pred && succ_row == row {
+                                buf.push_str(" ──→ ");
+                            } else if row == max_pred && row != succ_row {
+                                buf.push_str(" ══╝ ");
+                            } else if row > min_pred && row < max_pred {
+                                buf.push_str("   ║ ");
+                            } else {
+                                buf.push_str("     ");
+                            }
+                        } else {
+                            if succ_row == row {
+                                buf.push_str(" ──→ ");
+                            } else if succ_row > row {
+                                buf.push_str(" ──╲ ");
+                            } else {
+                                buf.push_str(" ──╱ ");
+                            }
+                        }
+                    }
+                    arrow_printed = true;
+                } else if has_far_successor {
+                    buf.push_str(" ───→");
+                    arrow_printed = true;
+                }
+            }
+        }
+        if !arrow_printed {
+            let mut is_continuation = false;
+            for prev_col in (0..=col).rev() {
+                if let Some(prev_id) = grid[row][prev_col] {
+                    if let Some(successors) = successors_map.get(&prev_id) {
+                        for &succ_id in successors {
+                            if let Some(succ_col) = node_column.get(&succ_id) {
+                                if *succ_col > col {
+                                    let mut succ_in_next_col_same_row = false;
+                                    if *succ_col == col + 1 {
+                                        for check_row in 0..max_height {
+                                            if grid[check_row][*succ_col] == Some(succ_id) && check_row == row {
+                                                succ_in_next_col_same_row = true;
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    if !succ_in_next_col_same_row { is_continuation = true; break; }
+                                }
+                            }
+                        }
+                    }
+                    if is_continuation { break; }
+                }
+            }
+            if is_continuation { buf.push_str("────→"); } else { buf.push_str("     "); }
+        }
+    }
+
+    fn print_inter_row_connectors_to_string(
+        buf: &mut String,
+        grid: &[Vec<Option<u32>>],
+        successors_map: &HashMap<u32, Vec<u32>>,
+        node_column: &HashMap<u32, usize>,
+        row: usize,
+        max_col: usize,
+        max_height: usize,
+    ) {
+        for col in 0..=max_col {
+            let mut needs_vertical = false;
+            for check_row in 0..=row {
+                if let Some(id) = grid[check_row][col] {
+                    if let Some(successors) = successors_map.get(&id) {
+                        let mut next_col_successors = Vec::new();
+                        for &succ_id in successors {
+                            if let Some(succ_col) = node_column.get(&succ_id) {
+                                if *succ_col == col + 1 {
+                                    for r in 0..max_height {
+                                        if grid[r][col + 1] == Some(succ_id) { next_col_successors.push(r); break; }
+                                    }
+                                }
+                            }
+                        }
+                        if next_col_successors.len() > 1 {
+                            let min_r = *next_col_successors.iter().min().unwrap();
+                            let max_r = *next_col_successors.iter().max().unwrap();
+                            if check_row == min_r && row >= min_r && row < max_r { needs_vertical = true; break; }
+                        }
+                    }
+                }
+            }
+            buf.push_str("       ");
+            if col < max_col { if needs_vertical { buf.push_str("   ║ "); } else { buf.push_str("     "); } }
+        }
+        buf.push('\n');
+    }
     pub fn print_network_topology(
         material_flows: &HashMap<u32, Rc<RefCell<dyn MaterialFlow>>>,
     ) {

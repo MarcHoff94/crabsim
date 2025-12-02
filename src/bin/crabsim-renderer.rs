@@ -79,9 +79,13 @@ fn main() {
 
     // Main render loop: 1 Hz frame rate; advance current_time by 1 each second
     let mut last_tick = Instant::now();
+    let mut idle_final_ticks: u32 = 0; // count ticks at final time without new data
+    let hold_open: bool = std::env::var("CRABSIM_RENDERER_HOLD").map(|v| v != "0").unwrap_or(true);
     loop {
         // Drain any incoming messages
+        let mut got_msg = false;
         while let Ok(msg) = rx.try_recv() {
+            got_msg = true;
             let kind = msg.get("kind").and_then(|k| k.as_str()).unwrap_or("");
             if kind == "topology" {
                 if let Some(t) = msg.get("text").and_then(|t| t.as_str()) {
@@ -112,6 +116,14 @@ fn main() {
                 let final_time = *timeline.keys().next_back().unwrap_or(&current_time);
                 if current_time < final_time { current_time = current_time.saturating_add(1); }
                 if current_time > final_time { current_time = final_time; }
+
+                // Track idle ticks after reaching final time; if we are at final time
+                // and didn't receive any new messages this tick, increment counter.
+                if current_time == final_time {
+                    if got_msg { idle_final_ticks = 0; } else { idle_final_ticks = idle_final_ticks.saturating_add(1); }
+                } else {
+                    idle_final_ticks = 0;
+                }
             }
 
             // Clear screen and draw current frame
@@ -147,5 +159,18 @@ fn main() {
         }
         // Sleep a bit to avoid busy loop
         thread::sleep(Duration::from_millis(50));
+
+        // If we've been idle at final time for a few seconds (e.g., 3 seconds), stop rendering.
+        if idle_final_ticks >= 60 { // 60 * 50ms sleeps ~= 3 seconds
+            break;
+        }
+    }
+
+    // Graceful finish: keep the window open until user presses Enter (default),
+    // controlled by CRABSIM_RENDERER_HOLD (set to 0 to disable).
+    if hold_open {
+        println!("\nSimulation finished. Press Enter to close the renderer...");
+        use std::io::{stdin, Read};
+        let _ = stdin().read(&mut [0u8]); // waits for any key/Enter
     }
 }

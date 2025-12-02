@@ -13,18 +13,25 @@ cargo build --manifest-path C:\Users\marcu\projects\crabsim\Cargo.toml
 
 # Run demo (prints state snapshots after each event)
 $env:RUST_LOG = 'info'
-cargo run --manifest-path C:\Users\marcu\projects\crabsim\Cargo.toml
+cargo run --manifest-path C:\Users\marcu\projects\crabsim\Cargo.toml --bin crabsim
 
 # Run demo with in-place table updates in this terminal
 $env:RUST_LOG = 'info'
+# via CLI: inplace mode
+cargo run --manifest-path C:\Users\marcu\projects\crabsim\Cargo.toml --bin crabsim -- --inplace
+# or env var
 $env:CRABSIM_LIVE_INPLACE = '1'
-cargo run --manifest-path C:\Users\marcu\projects\crabsim\Cargo.toml
+cargo run --manifest-path C:\Users\marcu\projects\crabsim\Cargo.toml --bin crabsim
 
 # Run demo with external renderer window (maximized) at 5x speed
 $env:RUST_LOG = 'info'
+# via CLI: renderer window at 5x speed, hold 1s after finish
+cargo run --manifest-path C:\Users\marcu\projects\crabsim\Cargo.toml --bin crabsim -- --renderer-window --speed 5 --hold 1
+# or env vars
 $env:CRABSIM_RENDERER = '1'
 $env:CRABSIM_RENDERER_SPEED = '5'
-cargo run --manifest-path C:\Users\marcu\projects\crabsim\Cargo.toml
+$env:CRABSIM_RENDERER_HOLD = '1'
+cargo run --manifest-path C:\Users\marcu\projects\crabsim\Cargo.toml --bin crabsim
 
 # Run tests
 cargo test --manifest-path C:\Users\marcu\projects\crabsim\Cargo.toml
@@ -38,6 +45,8 @@ Notes:
 - The demo binary calls `crabsim::run_demo()` which initializes `env_logger` so `RUST_LOG` controls runtime logs.
 - Set `RUST_LOG=crabsim=debug` for crate-only verbose logs.
 - External renderer launch on Windows uses PowerShell `Start-Process -WindowStyle Maximized` with a `cmd /C start /MAX` fallback.
+- CLI flags available: `--inplace`, `--renderer-window`, `--speed <factor>`, `--hold <seconds>`.
+- Environment variables (equivalents): `CRABSIM_LIVE_INPLACE`, `CRABSIM_RENDERER`, `CRABSIM_RENDERER_SPEED`, `CRABSIM_RENDERER_HOLD`.
 
 
 ## Architecture Overview

@@ -27,6 +27,7 @@ pub fn handle_source_mu_exit(
 			if let Some(ev) = opt_evt {
 				Ok(Some(vec![ev]))
 			} else {
+				source.state = ProcessState::Blocked;
 				Ok(None)
 			}
 		}

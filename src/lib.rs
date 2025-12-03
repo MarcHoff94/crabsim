@@ -183,7 +183,7 @@ pub fn run_demo() {
 	
 	let source = Rc::new(RefCell::new(Source::new(
 		0,
-		EcTime::from(0),
+		EcTime::from(5),
 		vec![st1.clone()],
 	)));
 	let drain = Rc::new(RefCell::new(Drain::new(3, vec![st7.clone(), st5a.clone(), st5b.clone(), st5c.clone()])));

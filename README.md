@@ -42,11 +42,10 @@ cargo test --manifest-path C:\Users\marcu\projects\crabsim\Cargo.toml -- --nocap
 ```
 
 Notes:
-- The demo binary calls `crabsim::run_demo()` which initializes `env_logger` so `RUST_LOG` controls runtime logs.
-- Set `RUST_LOG=crabsim=debug` for crate-only verbose logs.
-- External renderer launch on Windows uses PowerShell `Start-Process -WindowStyle Maximized` with a `cmd /C start /MAX` fallback.
-- CLI flags available: `--inplace`, `--renderer-window`, `--speed <factor>`, `--hold <seconds>`.
-- Environment variables (equivalents): `CRABSIM_LIVE_INPLACE`, `CRABSIM_RENDERER`, `CRABSIM_RENDERER_SPEED`, `CRABSIM_RENDERER_HOLD`.
+- Demo calls `crabsim::run_demo()` which initializes `env_logger` so `RUST_LOG` controls runtime logs.
+- Renderer window on Windows launches maximized.
+- CLI flags: `--inplace`, `--renderer-window`, `--speed <factor|-1>`, `--hold <seconds>`.
+- Env vars: `CRABSIM_LIVE_INPLACE`, `CRABSIM_RENDERER`, `CRABSIM_RENDERER_SPEED`, `CRABSIM_RENDERER_HOLD`.
 
 
 ## Architecture Overview
@@ -69,7 +68,7 @@ Notes:
 	- `render_network_topology(...) -> String` returns a string with branches and connectors for the renderer.
 - State visualizer (`src/visualization/state.rs`):
 	- Snapshot structs (`StateRow`, `StateSnapshot`) and helpers to collect and render state tables.
-	- Supports in-place redraw in the same terminal via ANSI/VT sequences (Windows VT is enabled automatically).
+	- Supports in-place redraw in the same terminal via ANSI/VT sequences.
 
 ## External Renderer
 
@@ -79,28 +78,14 @@ Notes:
 		- `{ "kind": "topology", "text": "..." }`
 		- `{ "kind": "snapshot", "snapshot": { ... } }`
 	- Pacing: 1 simulated second maps to `1 / speed` wall seconds; use `CRABSIM_RENDERER_SPEED` to adjust.
+	- Unpaced mode: set `--speed -1` to render each simulation second immediately until the final event, then the renderer enters hold-open.
+	- Unpaced mode: set `--speed -1` to render each simulation second immediately (fast-forward) until the final event, then hold-open per `--hold`.
 - Launching:
 	- Set `CRABSIM_RENDERER=1` to auto-spawn and connect.
 	- On Windows, the renderer opens as a maximized console window.
 
 ## Logging
-
-The crate uses `log` + `env_logger`.
-
-- Live state: `Simulator::print_materialflow_state` prints a compact table after each processed event.
-- Logs: `info!` for lifecycle events and `debug!` for routing/blocked details.
-
-Examples (PowerShell):
-
-```powershell
-# Show info and above
-$env:RUST_LOG = 'info'
-cargo run --manifest-path C:\Users\marcu\projects\crabsim\Cargo.toml
-
-# Verbose for this crate only
-$env:RUST_LOG = 'crabsim=debug'
-cargo run --manifest-path C:\Users\marcu\projects\crabsim\Cargo.toml
-```
+- Uses `log` + `env_logger`. Control verbosity via `RUST_LOG` (e.g., `info`, `crabsim=debug`).
 
 
 ## Tests and Guarantees

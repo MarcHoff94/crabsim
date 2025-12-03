@@ -13,7 +13,7 @@ struct Opts {
     renderer_window: bool,
 
     /// Renderer pacing factor (sim seconds per wall-second)
-    #[arg(long = "speed", default_value = "5.0")]
+    #[arg(long = "speed", default_value = "5.0", allow_hyphen_values = true)]
     speed: String,
 
     /// Hold renderer window open after finish (set 0 to disable)

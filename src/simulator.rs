@@ -107,7 +107,6 @@ impl Simulator {
             // If sending failed, fall through to local printing as a fallback
         }
         if self.live_inplace {
-            enable_ansi_support();
             // Clear screen and move cursor home, then redraw topology + state
             print!("\x1B[2J\x1B[H");
             self.print_network_topology();
@@ -125,30 +124,7 @@ impl Simulator {
     }
 }
 
-#[cfg(windows)]
-fn enable_ansi_support() {
-    #[allow(non_snake_case)]
-    unsafe fn SetVT() {
-        extern "system" {
-            fn GetStdHandle(nStdHandle: i32) -> *mut core::ffi::c_void;
-            fn GetConsoleMode(hConsoleHandle: *mut core::ffi::c_void, lpMode: *mut u32) -> i32;
-            fn SetConsoleMode(hConsoleHandle: *mut core::ffi::c_void, dwMode: u32) -> i32;
-        }
-        const STD_OUTPUT_HANDLE: i32 = -11; // from winbase.h
-        const ENABLE_VIRTUAL_TERMINAL_PROCESSING: u32 = 0x0004;
-        let h = GetStdHandle(STD_OUTPUT_HANDLE);
-        if !h.is_null() {
-            let mut mode: u32 = 0;
-            if GetConsoleMode(h, &mut mode) != 0 {
-                let _ = SetConsoleMode(h, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
-            }
-        }
-    }
-    unsafe { SetVT(); }
-}
 
-#[cfg(not(windows))]
-fn enable_ansi_support() {}
 
 impl Default for Simulator {
     fn default() -> Self {

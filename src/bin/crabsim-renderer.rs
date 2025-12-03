@@ -8,30 +8,6 @@ use crabsim::visualization::state::{StateSnapshot, StateVisualizer};
 use serde_json::Value;
 // use crabsim::visualization::topology::TopologyVisualizer;
 
-#[cfg(windows)]
-fn enable_ansi_support() {
-    #[allow(non_snake_case)]
-    unsafe fn SetVT() {
-        extern "system" {
-            fn GetStdHandle(nStdHandle: i32) -> *mut core::ffi::c_void;
-            fn GetConsoleMode(hConsoleHandle: *mut core::ffi::c_void, lpMode: *mut u32) -> i32;
-            fn SetConsoleMode(hConsoleHandle: *mut core::ffi::c_void, dwMode: u32) -> i32;
-        }
-        const STD_OUTPUT_HANDLE: i32 = -11; // from winbase.h
-        const ENABLE_VIRTUAL_TERMINAL_PROCESSING: u32 = 0x0004;
-        let h = GetStdHandle(STD_OUTPUT_HANDLE);
-        if !h.is_null() {
-            let mut mode: u32 = 0;
-            if GetConsoleMode(h, &mut mode) != 0 {
-                let _ = SetConsoleMode(h, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
-            }
-        }
-    }
-    unsafe { SetVT(); }
-}
-
-#[cfg(not(windows))]
-fn enable_ansi_support() {}
 
 fn main() {
     let mut args = std::env::args().skip(1);
@@ -54,7 +30,7 @@ fn main() {
     let stream = TcpStream::connect(&connect).expect("renderer: failed to connect to simulator");
     let reader = BufReader::new(stream);
 
-    enable_ansi_support();
+
 
     // Reader thread: parse input lines and push to channel
     let (tx, rx): (Sender<Value>, Receiver<Value>) = mpsc::channel();

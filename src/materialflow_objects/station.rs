@@ -1,5 +1,6 @@
 use crate::error::{InitError, MaterialflowError, RunTimeError};
 use crate::event::{EcTime, EventTemplate, EventType};
+use super::flows::BaseObject;
 use crate::flows::{
 	EventInterface, InterruptionState, MaterialFlow, MoveableUnit, ProcessState, SuccessorContainer, try_to_move_to_successor
 };
@@ -8,7 +9,7 @@ use std::{cell::RefCell, rc::Rc};
 
 #[derive(Clone)]
 pub struct SingleStation {
-	pub object_id: u32,
+	pub base: BaseObject,
 	pub proc_time: EcTime,
 	pub remain_proc_time: EcTime,
 	pub content: Option<MoveableUnit>,
@@ -31,7 +32,7 @@ impl SingleStation {
 		pred: Vec<Rc<RefCell<dyn MaterialFlow>>>,
 	) -> SingleStation {
 		SingleStation {
-			object_id,
+			base: BaseObject { object_id, random_seed: 0 },
 			proc_time,
 			remain_proc_time: 0.into(),
 			content,
@@ -49,14 +50,14 @@ impl SingleStation {
 		if !self.blockedlist.contains(&blocked_id) {
 			log::debug!(
 				"{}: adding blocked predecessor {}",
-				self.object_id,
+				self.base.object_id,
 				blocked_id
 			);
 			self.blockedlist.push(blocked_id);
 		} else {
 			log::debug!(
 				"{}: predecessor {} already in blockedlist",
-				self.object_id,
+				self.base.object_id,
 				blocked_id
 			);
 		}
@@ -90,7 +91,7 @@ impl MaterialFlow for SingleStation {
 		&mut self,
 		_mu: MoveableUnit,
 	) -> Result<Option<EventTemplate>, MaterialflowError> {
-		log::info!("MU {} entered SingleStation {}", _mu.id, self.object_id);
+		log::info!("MU {} entered SingleStation {}", _mu.id, self.base.object_id);
 		self.content = Some(_mu);
 		self.remain_proc_time = self.proc_time;
 		self.entrancelocked = true;
@@ -98,7 +99,7 @@ impl MaterialFlow for SingleStation {
 		Ok(Some(EventTemplate {
 			eventtype: EventType::MUExit,
 			exec_time: self.proc_time,
-			object_id: self.object_id,
+			object_id: self.base.object_id,
 			seq: 0,
 		}))
 	}
@@ -142,10 +143,10 @@ impl EventInterface for SingleStation {
 	fn execute_event(
 		&mut self,
 		_simulator: &mut Simulator,
-		eventtype: EventType,
+		eventtype: &EventType,
 	) -> Result<Option<Vec<EventTemplate>>, RunTimeError> {
 		match eventtype {
-			EventType::MUExit => match try_to_move_to_successor(self, _simulator) {
+			&EventType::MUExit => match try_to_move_to_successor(self, _simulator) {
 				Ok(Some(event_template)) => {
 					// Move succeeded and produced an event template.
 					self.entrancelocked = false;
@@ -186,7 +187,7 @@ impl EventInterface for SingleStation {
 				}
 				Err(_) => Err(RunTimeError {}),
 			},
-			EventType::BlockedRetry => {
+			&EventType::BlockedRetry => {
 				// BlockedRetry is a notification from a successor that the
 				// successor has become available and requests the predecessor
 				// to attempt to move its MU. 
@@ -237,10 +238,13 @@ impl EventInterface for SingleStation {
 		}
 	}
 	fn get_object_id(&self) -> &u32 {
-		&self.object_id
+		&self.base.object_id
 	}
 	fn set_object_id(&mut self, id: u32) {
-		self.object_id = id;
+		self.base.object_id = id;
+	}
+	fn set_random_seed(&mut self, seed: u64) {
+		self.base.random_seed = seed;
 	}
 	fn as_any(&self) -> &dyn std::any::Any {
 		self

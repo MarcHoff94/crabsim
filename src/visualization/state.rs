@@ -6,7 +6,8 @@ use std::{
 
 use crate::event::EcTime;
 use serde::{Deserialize, Serialize};
-use crate::materialflow_objects::flows::{Drain, EventInterface, MaterialFlow, ProcessState, SingleStation, Source};
+use crate::flows::{EventInterface, MaterialFlow, ProcessState};
+use crate::materialflow_objects::{Drain, SingleStation, Source};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StateRow {

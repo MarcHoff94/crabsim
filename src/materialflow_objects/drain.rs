@@ -1,11 +1,12 @@
 use crate::error::MaterialflowError;
 use crate::event::{EcTime, EventTemplate, EventType};
+use super::flows::BaseObject;
 use crate::flows::{EventInterface, MaterialFlow, MoveableUnit};
 use crate::simulator::Simulator;
 use std::{cell::RefCell, rc::Rc};
 
 pub struct Drain {
-    pub object_id: u32,
+    pub base: BaseObject,
     pub content: Option<MoveableUnit>,
     pub pred: Vec<Rc<RefCell<dyn MaterialFlow>>>,
     pub current_time: EcTime,
@@ -18,7 +19,7 @@ pub struct Drain {
 impl Drain {
     pub fn new(object_id: u32, pred: Vec<Rc<RefCell<dyn MaterialFlow>>>) -> Drain {
         Drain {
-            object_id,
+            base: BaseObject { object_id, random_seed: 0 },
             content: None,
             pred,
             current_time: 0.into(),
@@ -36,14 +37,14 @@ impl Drain {
         if !self.blockedlist.contains(&blocked_id) {
             log::debug!(
                 "{}: adding blocked predecessor {}",
-                self.object_id,
+                self.base.object_id,
                 blocked_id
             );
             self.blockedlist.push(blocked_id);
         } else {
             log::debug!(
                 "{}: predecessor {} already in blockedlist",
-                self.object_id,
+                self.base.object_id,
                 blocked_id
             );
         }
@@ -61,7 +62,7 @@ impl EventInterface for Drain {
     fn execute_event(
         &mut self,
         _simulator: &mut Simulator,
-        eventtype: EventType,
+        eventtype: &EventType,
     ) -> Result<Option<Vec<EventTemplate>>, crate::error::RunTimeError> {
         match eventtype {
             // EventType::MUExit => {
@@ -88,10 +89,13 @@ impl EventInterface for Drain {
         }
     }
     fn get_object_id(&self) -> &u32 {
-        &self.object_id
+        &self.base.object_id
     }
     fn set_object_id(&mut self, id: u32) {
-        self.object_id = id;
+        self.base.object_id = id;
+    }
+    fn set_random_seed(&mut self, seed: u64) {
+        self.base.random_seed = seed;
     }
     fn as_any(&self) -> &dyn std::any::Any {
         self

@@ -1,10 +1,11 @@
 use crate::error::{InitError, MaterialflowError, RunTimeError};
 use crate::event::{EcTime, EventTemplate, EventType};
 use crate::flows::{
-	EventInterface, InterruptionState, MaterialFlow, MoveableUnit, ProcessState, SuccessorContainer, try_to_move_to_successor
+	EventInterface, InterruptionState, MaterialFlow, MoveableUnit, ProcessState, SuccessorContainer, try_to_move_to_successor,
 };
 use crate::simulator::Simulator;
 use std::{cell::RefCell, rc::Rc};
+use super::flows::BaseObject;
 
 pub fn handle_source_mu_exit(
 	source: &mut Source,
@@ -36,7 +37,7 @@ pub fn handle_source_mu_exit(
 }
 
 pub struct Source {
-	pub object_id: u32,
+	pub base: BaseObject,
 	pub content: Option<MoveableUnit>,
 	pub proc_time: EcTime,
 	pub remain_proc_time: EcTime,
@@ -53,7 +54,7 @@ impl Source {
 		succ: Vec<Rc<RefCell<dyn MaterialFlow>>>,
 	) -> Source {
 		Source {
-			object_id,
+			base: BaseObject { object_id, random_seed: 0 },
 			content: None,
 			proc_time,
 			remain_proc_time: 0.into(),
@@ -69,16 +70,16 @@ impl Source {
 		if self.content.is_none() {
 			self.content = Some(MoveableUnit {
 				id: self.mu_id,
-				location_id: self.object_id,
+				location_id: self.base.object_id,
 			});
-			log::info!("Source {} created MU {}", self.object_id, self.mu_id);
+			log::info!("Source {} created MU {}", self.base.object_id, self.mu_id);
 			self.state = ProcessState::Processing;
 			// set remaining processing time when a new MU is created
 			self.remain_proc_time = self.proc_time;
 			return Ok(EventTemplate {
 				eventtype: EventType::MUExit,
 				exec_time: self.proc_time,
-				object_id: self.object_id,
+				object_id: self.base.object_id,
 				seq: 0,
 			});
 		}
@@ -96,11 +97,11 @@ impl EventInterface for Source {
 	fn execute_event(
 		&mut self,
 		_simulator: &mut Simulator,
-		eventtype: EventType,
+		eventtype: &EventType,
 	) -> Result<Option<Vec<EventTemplate>>, RunTimeError> {
 		match eventtype {
-			EventType::MUExit => handle_source_mu_exit(self, _simulator),
-			EventType::BlockedRetry => {
+			&EventType::MUExit => handle_source_mu_exit(self, _simulator),
+			&EventType::BlockedRetry => {
 				// successor notified that it became available; attempt to move
 				if !self.is_exit_allowed() {
 					return Ok(None);
@@ -133,10 +134,13 @@ impl EventInterface for Source {
 		}
 	}
 	fn get_object_id(&self) -> &u32 {
-		&self.object_id
+		&self.base.object_id
 	}
 	fn set_object_id(&mut self, id: u32) {
-		self.object_id = id;
+		self.base.object_id = id;
+	}
+	fn set_random_seed(&mut self, seed: u64) {
+		self.base.random_seed = seed;
 	}
 	fn as_any(&self) -> &dyn std::any::Any {
 		self

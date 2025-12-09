@@ -2,12 +2,13 @@
 
 use crate::error::RunTimeError;
 use crate::event::{EcTime, EventTemplate, ScheduledEvent};
-use crate::flows::{Drain, EventInterface, MaterialFlow, ProcessState, SingleStation, Source};
+use crate::materialflow_objects::{Drain, SingleStation, Source};
+use crate::flows::{EventInterface, MaterialFlow, ProcessState};
 use crate::visualization::topology::TopologyVisualizer;
 use crate::visualization::state::{StateVisualizer, StateSnapshot};
 use std::{
     cell::RefCell,
-    collections::{BinaryHeap, HashMap},
+    collections::{BinaryHeap, HashMap, HashSet},
     rc::Rc,
 };
 use std::net::TcpStream;
@@ -46,7 +47,7 @@ impl Simulator {
             for event_template in event_templates {
                 eventcontroller.add_event(
                     eventcontroller.time + event_template.exec_time,
-                    event_template.clone(),
+                    event_template,
                 );
             }
         }
@@ -55,6 +56,10 @@ impl Simulator {
         }
     }
     pub fn add_drain(&mut self, drain: Rc<RefCell<Drain>>) {
+        // Assign a global unique object_id to drains as well
+        let id = self.object_id;
+        drain.borrow_mut().set_object_id(id);
+        self.object_id += 1;
         self.drains.push(drain);
     }
 
@@ -137,15 +142,17 @@ pub struct EventController {
     pub time: EcTime,
     pub endtime: Option<EcTime>,
     pub seq_counter: u64,
+    pub seed: u64,
 }
 
 impl EventController {
-    pub fn new() -> EventController {
+    pub fn new(endtime: Option<EcTime>) -> EventController {
         EventController {
             event_queue: BinaryHeap::new(),
             time: EcTime::from(0),
-            endtime: None,
+            endtime: endtime,
             seq_counter: 0,
+            seed: 0,
         }
     }
 
@@ -162,11 +169,26 @@ impl EventController {
     }
 
     pub fn init(&mut self, simulator: &mut Simulator) {
-        for object in simulator.material_flows.values() {
-            let event_templates = object.borrow_mut().init().unwrap();
+        // Initialize seeds and schedule initial events in a single pass.
+        let mut seen_seeds: HashSet<u64> = HashSet::new();
+        for (obj_id, object) in simulator.material_flows.iter() {
+            let mut obj_mut = object.borrow_mut();
+            // Compute a unique per-object seed derived from controller seed and object_id.
+            let unique_seed = self.seed ^ (*obj_id as u64).wrapping_mul(0x9E3779B97F4A7C15);
+            EventInterface::set_random_seed(&mut *obj_mut, unique_seed);
+            debug_assert!(seen_seeds.insert(unique_seed), "Duplicate seed found for material_flow object_id {}", obj_id);
+            let event_templates = obj_mut.init().unwrap();
             for event_template in event_templates {
-                self.add_event(self.time + event_template.exec_time, event_template.clone());
+                self.add_event(self.time + event_template.exec_time, event_template);
             }
+        }
+        // Assign unique seeds for drains based on their object_id
+        for drain in simulator.drains.iter_mut() {
+            let mut d = drain.borrow_mut();
+            let unique_seed = self.seed ^ (*d.get_object_id() as u64).wrapping_mul(0x517CC1B727220A95);
+            EventInterface::set_random_seed(&mut *d, unique_seed);
+            debug_assert!(seen_seeds.insert(unique_seed), "Duplicate seed found for drain object_id {}", d.get_object_id());
+            d.init().unwrap();
         }
     }
 
@@ -174,6 +196,13 @@ impl EventController {
         while let Some(scheduled) = self.event_queue.pop() {
             let event_time = scheduled.time;
             let event_template = scheduled.template;
+            // If an end time is set and the next event is at or beyond it, stop.
+            if let Some(end) = self.endtime {
+                if event_time.0 >= end.0 {
+                    self.time = end;
+                    break;
+                }
+            }
             // advance time and decrement remaining proc_time for processing objects
             let delta = if event_time.0 > self.time.0 {
                 event_time - self.time
@@ -214,14 +243,15 @@ impl EventController {
             for drain in &mut simulator.drains {
                 drain.borrow_mut().update_current_time(self.time);
             }
-            if self.time > self.endtime.unwrap_or(EcTime(u128::MAX)) {
+            // Stop if endtime reached
+            if self.time >= self.endtime.unwrap_or(EcTime(u128::MAX)) {
                 break;
             }
             let obj_rc = simulator
                 .material_flows
                 .get(&event_template.object_id)
                 .cloned();
-            let eventtype = event_template.eventtype.clone();
+            let eventtype_ref = &event_template.eventtype;
             if let Some(obj) = obj_rc {
                 let mut queued_events: Vec<EventTemplate> = Vec::new();
                 let mut obj_mut = obj.borrow_mut();
@@ -230,9 +260,9 @@ impl EventController {
                     event_time.0,
                     event_template.seq,
                     event_template.object_id,
-                    eventtype.clone()
+                    &event_template.eventtype
                 );
-                if let Ok(Some(evts)) = obj_mut.execute_event(&mut simulator, eventtype) {
+                if let Ok(Some(evts)) = obj_mut.execute_event(&mut simulator, eventtype_ref) {
                     queued_events.extend(evts);
                 }
                 drop(obj_mut);
@@ -240,8 +270,16 @@ impl EventController {
                     let scheduled_time = self.time + new_event.exec_time;
                     self.add_event(scheduled_time, new_event);
                 }
-                simulator.print_materialflow_state(self.time);
+                // Only print each step when a renderer is attached or live_inplace is enabled.
+                // Otherwise defer printing to the end of the run for a single final snapshot.
+                if simulator.renderer_stream.is_some() || simulator.live_inplace {
+                    simulator.print_materialflow_state(self.time);
+                }
             }
+        }
+        // If no external renderer and not live_inplace, emit one final snapshot at end.
+        if simulator.renderer_stream.is_none() && !simulator.live_inplace {
+            simulator.print_materialflow_state(self.time);
         }
         Ok(simulator)
     }
@@ -249,6 +287,6 @@ impl EventController {
 
 impl Default for EventController {
     fn default() -> Self {
-        Self::new()
+        Self::new(None)
     }
 }

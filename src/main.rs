@@ -19,6 +19,10 @@ struct Opts {
     /// Hold renderer window open after finish (set 0 to disable)
     #[arg(long = "hold", default_value = "1")]
     hold: String,
+
+    /// Choose the renderer launcher (powershell or cmd)
+    #[arg(long = "renderer-launcher")]
+    renderer_launcher: Option<String>,
 }
 
 fn main() {
@@ -34,6 +38,9 @@ fn main() {
     }
     if !opts.hold.is_empty() {
         std::env::set_var("CRABSIM_RENDERER_HOLD", &opts.hold);
+    }
+    if let Some(launcher) = opts.renderer_launcher {
+        std::env::set_var("CRABSIM_RENDERER_LAUNCHER", launcher);
     }
     crabsim::run_demo();
 }

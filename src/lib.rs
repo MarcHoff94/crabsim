@@ -1,7 +1,8 @@
 #![allow(dead_code)]
 
 pub mod event;
-pub use crate::materialflow_objects::flows;
+pub use crate::materialflow_objects::flows; // keep single module re-export
+pub use crate::materialflow_objects::flows::BaseObject;
 pub mod error;
 pub mod materialflow_objects;
 pub mod simulator;
@@ -9,14 +10,17 @@ pub mod visualization;
 
 pub use crate::error::{InitError, MaterialflowError, RunTimeError};
 pub use crate::event::{EcTime, EventTemplate, EventType};
-pub use crate::materialflow_objects::flows::{Drain, MoveableUnit, SingleStation, Source};
+pub use crate::materialflow_objects::{Drain, SingleStation, Source}; // Adjusted to use materialflow_objects for concrete types
+pub use crate::materialflow_objects::flows::MoveableUnit; // Moved MoveableUnit to be imported from flows
 pub use crate::simulator::{EventController, Simulator};
+
+use std::{cell::RefCell, rc::Rc};
+use std::net::TcpListener;
+use std::process::Command;
+use std::time::Instant;
 
 pub fn run_demo() {
 	env_logger::init();
-	use std::{cell::RefCell, rc::Rc};
-	use std::net::TcpListener;
-	use std::process::Command;
     
 	let mut simulator = Simulator::new();
 	// Optional: enable in-place live rendering via env var
@@ -38,33 +42,37 @@ pub fn run_demo() {
 				p.set_file_name(if cfg!(windows) { "crabsim-renderer.exe" } else { "crabsim-renderer" });
 				p
 			};
-			// Spawn renderer: Windows -> start maximized console via PowerShell; others -> spawn normally
+			// Spawn renderer: Windows -> choose launcher (powershell/cmd) via env CRABSIM_RENDERER_LAUNCHER; others -> spawn normally
 			#[cfg(windows)]
 			{
-				// Try PowerShell Start-Process (maximized)
-				let ps_cmd = format!(
-					"Start-Process -FilePath '{}' -ArgumentList @('--connect','{}','--speed','{}') -WindowStyle Maximized",
-					renderer_prog.display(), connect_arg, speed_factor
-				);
-				let ps_res = Command::new("powershell")
-					.args(["-NoProfile", "-Command", &ps_cmd])
-					.spawn();
-				if ps_res.is_err() {
-					// Fallback: cmd.exe start with /MAX (maximized)
-					let path = renderer_prog.to_string_lossy().to_string();
-					let _ = Command::new("cmd")
-						.args([
-							"/C",
-							"start",
-							"CrabSim Renderer",
-							"/MAX",
-							&path,
-							"--connect",
-							&connect_arg,
-							"--speed",
-							&speed_factor,
-						])
-						.spawn();
+				let launcher = std::env::var("CRABSIM_RENDERER_LAUNCHER").unwrap_or_else(|_| "powershell".to_string());
+				match launcher.as_str() {
+					"cmd" => {
+						let path = renderer_prog.to_string_lossy().to_string();
+						let _ = Command::new("cmd")
+							.args([
+								"/C",
+								"start",
+								"CrabSim Renderer",
+								"/MAX",
+								&path,
+								"--connect",
+								&connect_arg,
+								"--speed",
+								&speed_factor,
+							])
+							.spawn();
+					}
+					_ => {
+						// Default: PowerShell Start-Process (maximized)
+						let ps_cmd = format!(
+							"Start-Process -FilePath '{}' -ArgumentList @('--connect','{}','--speed','{}') -WindowStyle Maximized",
+							renderer_prog.display(), connect_arg, speed_factor
+						);
+						let _ = Command::new("powershell")
+							.args(["-NoProfile", "-Command", &ps_cmd])
+							.spawn();
+					}
 				}
 			}
 			#[cfg(not(windows))]
@@ -83,7 +91,7 @@ pub fn run_demo() {
 			}
 		}
 	}
-	let mut eventcontroller = EventController::new();
+	let mut eventcontroller = EventController::new(Some(EcTime::from(3600)));
 	
 	// Station 1 - first station
 	let st1 = Rc::new(RefCell::new(SingleStation::new(
@@ -235,9 +243,16 @@ pub fn run_demo() {
 	simulator.register_material_flow(st5c.clone());
 	simulator.register_material_flow(drain.clone());
 	simulator.add_drain(drain.clone());
-	eventcontroller.endtime = Some(EcTime::from(500));
+	// Measure simulation runtime
 	eventcontroller.init(&mut simulator);
+	let start = Instant::now();
 	let _simulator = eventcontroller.run(simulator).unwrap();
+	let elapsed = start.elapsed();
+	let ms = elapsed.as_secs_f64() * 1000.0;
+	let with_renderer = use_renderer;
+	let launcher = if cfg!(windows) { std::env::var("CRABSIM_RENDERER_LAUNCHER").unwrap_or_else(|_| "powershell".to_string()) } else { "n/a".to_string() };
+	log::info!("simulation runtime: {:.2} ms (renderer={}, launcher={})", ms, with_renderer, launcher);
+	println!("simulation runtime: {:.2} ms (renderer={}, launcher={})", ms, with_renderer, launcher);
 	log::info!("exit interval: {:#?}", _simulator.drains[0].borrow().exits);
 }
 
@@ -250,7 +265,7 @@ mod tests {
 	#[test]
 	fn simple_flow_records_exit() {
 		let mut simulator = Simulator::new();
-		let mut eventcontroller = EventController::new();
+		let mut eventcontroller = EventController::new(Some(EcTime::from(86400)));
 
 		let station = Rc::new(RefCell::new(SingleStation::new(
 			0,
@@ -366,13 +381,13 @@ mod tests {
 		assert_eq!(pred.succ_pointer, 0usize);
 
 		// first successor should have recorded blocked predecessor id
-		assert!(succ0.borrow().blockedlist.contains(&pred.object_id));
+		assert!(succ0.borrow().blockedlist.contains(&pred.base.object_id));
 	}
 
 	#[test]
 	fn blocked_flow_retries() {
 		let mut simulator = Simulator::new();
-		let mut eventcontroller = EventController::new();
+		let mut eventcontroller = EventController::new(Some(EcTime::from(86400)));
 
 		let station_a = Rc::new(RefCell::new(SingleStation::new(
 			0,
@@ -458,7 +473,7 @@ mod tests {
 	#[test]
 	fn drain_fifo_order() {
 		let mut simulator = Simulator::new();
-		let mut eventcontroller = EventController::new();
+		let mut eventcontroller = EventController::new(Some(EcTime::from(86400)));
 
 		let drain = Rc::new(RefCell::new(Drain::new(0, Vec::new())));
 		let source = Rc::new(RefCell::new(Source::new(
@@ -485,7 +500,7 @@ mod tests {
 	#[test]
 	fn ordering_across_stations_preserved() {
 		let mut simulator = Simulator::new();
-		let mut eventcontroller = EventController::new();
+		let mut eventcontroller = EventController::new(Some(EcTime::from(86400)));
 
 		let station_a = Rc::new(RefCell::new(SingleStation::new(
 			0,
@@ -553,7 +568,7 @@ mod tests {
 	#[test]
 	fn ordering_across_parallel_stations_preserved() {
 		let mut simulator = Simulator::new();
-		let mut eventcontroller = EventController::new();
+		let mut eventcontroller = EventController::new(Some(EcTime::from(86400)));
 
 		// First station
 		let station_a = Rc::new(RefCell::new(SingleStation::new(
@@ -634,7 +649,7 @@ mod tests {
 	#[test]
 	fn throughput_unbalanced_parallel_stations() {
 		let mut simulator = Simulator::new();
-		let mut eventcontroller = EventController::new();
+		let mut eventcontroller = EventController::new(None);
 
 		// First station
 		let station_a = Rc::new(RefCell::new(SingleStation::new(
@@ -745,11 +760,11 @@ mod tests {
 		station_1.borrow_mut().content = Some(MoveableUnit { id: 100, location_id: 1 });
 		let _ = station_1
 			.borrow_mut()
-			.execute_event(&mut simulator, EventType::MUExit)
+			.execute_event(&mut simulator, &EventType::MUExit)
 			.unwrap();
 
 		assert!(station_3.borrow().content.is_some(), "station_3 should have received MU100");
-		assert!(station_2.borrow().blockedlist.contains(&station_1.borrow().object_id));
+		assert!(station_2.borrow().blockedlist.contains(&station_1.borrow().base.object_id));
 
 		// now station_1 starts processing MU101 (in progress)
 		station_1.borrow_mut().content = Some(MoveableUnit { id: 101, location_id: 1 });
@@ -758,16 +773,16 @@ mod tests {
 
 		// station_2 becomes available and emits BlockedRetry
 		station_2.borrow_mut().entrancelocked = false;
-		let res_evts = station_2.borrow_mut().execute_event(&mut simulator, EventType::MUExit);
+		let res_evts = station_2.borrow_mut().execute_event(&mut simulator, &EventType::MUExit);
 		if let Ok(Some(evts)) = res_evts {
 			// process emitted events; find the BlockedRetry for station_1
 			let mut found = false;
 			for evt in evts {
 				if let EventType::BlockedRetry = evt.eventtype {
-					if evt.object_id == station_1.borrow().object_id {
+					if evt.object_id == station_1.borrow().base.object_id {
 						found = true;
 						// invoke the retry on station_1 while it's processing
-						let res = station_1.borrow_mut().execute_event(&mut simulator, evt.eventtype.clone());
+						let res = station_1.borrow_mut().execute_event(&mut simulator, &evt.eventtype);
 						assert!(res.is_ok());
 						// station_1 should still hold MU101 and must not have transferred it
 						assert!(station_1.borrow().content.is_some(), "station_1 should still hold MU101");
@@ -812,7 +827,7 @@ mod tests {
 		pred.borrow_mut().content = Some(MoveableUnit { id: 200, location_id: 1 });
 		let _ = pred
 			.borrow_mut()
-			.execute_event(&mut simulator, EventType::MUExit)
+			.execute_event(&mut simulator, &EventType::MUExit)
 			.unwrap();
 
 		// Since the successor denied entrance, predecessor should become Blocked
@@ -824,13 +839,13 @@ mod tests {
 		assert!(pred.borrow().content.is_some());
 		assert!(pred.borrow().entrancelocked);
 		// successor should have recorded the blocked predecessor id
-		assert!(succ.borrow().blockedlist.contains(&pred.borrow().object_id));
+		assert!(succ.borrow().blockedlist.contains(&pred.borrow().base.object_id));
 	}
 
 	#[test]
 	fn blocked_retry_full_flow() {
 		let mut simulator = Simulator::new();
-		let mut eventcontroller = EventController::new();
+		let mut eventcontroller = EventController::new(None);
 
 		let station_a = Rc::new(RefCell::new(SingleStation::new(
 			0,
@@ -906,7 +921,7 @@ mod tests {
 	#[test]
 	fn source_continues_producing_after_blocked_retry() {
 		let mut simulator = Simulator::new();
-		let mut eventcontroller = EventController::new();
+		let mut eventcontroller = EventController::new(None);
 
 		let station_a = Rc::new(RefCell::new(SingleStation::new(
 			0,

@@ -12,6 +12,11 @@ pub struct MoveableUnit {
 	pub location_id: u32,
 }
 
+#[derive(Debug, Clone)]
+pub struct BaseObject {
+	pub object_id: u32,
+	pub random_seed: u64,
+}
 // Errors and states
 #[derive(Debug, Clone)]
 pub enum ProcessState {
@@ -19,7 +24,7 @@ pub enum ProcessState {
 	Blocked,
 	Idle,
 }
-#[derive(Clone)]
+#[derive(Debug,Clone)]
 pub enum InterruptionState {
 	None,
 	Failed,
@@ -32,10 +37,11 @@ pub trait EventInterface {
 	fn execute_event(
 		&mut self,
 		simulator: &mut Simulator,
-		eventtype: EventType,
+		eventtype: &EventType,
 	) -> Result<Option<Vec<EventTemplate>>, RunTimeError>;
 	fn get_object_id(&self) -> &u32;
 	fn set_object_id(&mut self, id: u32);
+	fn set_random_seed(&mut self, seed: u64);
 	fn as_any(&self) -> &dyn std::any::Any;
 }
 
@@ -62,8 +68,9 @@ pub trait SuccessorContainer {
 	fn take_content(&mut self) -> Option<MoveableUnit>;
 }
 
-// Re-export concrete types from the sibling module
-pub use crate::materialflow_objects::{Drain, SingleStation, Source};
+// Note: Do not re-export concrete sibling types here to avoid
+// circular dependencies with `station.rs`/`source.rs` importing
+// items from this module.
 
 // try_to_move_to_successor helper (keeps generic movement logic near traits)
 pub trait DistributionStrategy {
@@ -155,7 +162,7 @@ pub fn try_to_move_to_successor_with_strategy<
 			log::debug!(
 				"seq={} Successor {} currently denies entrance; adding blocked predecessor {}",
 				simulator.current_seq,
-				succ_mut.get_object_id().clone(),
+				*succ_mut.get_object_id(),
 				pred_id
 			);
 			succ_mut.add_blocked(pred_id);

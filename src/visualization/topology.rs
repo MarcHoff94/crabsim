@@ -1,7 +1,8 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 use std::cell::RefCell;
-use crate::materialflow_objects::flows::{MaterialFlow, Drain};
+use crate::flows::MaterialFlow;
+use crate::materialflow_objects::Drain;
 
 pub struct TopologyVisualizer;
 
@@ -21,10 +22,10 @@ impl TopologyVisualizer {
         for (id, obj) in material_flows {
             let obj_borrow = obj.borrow();
             let any = obj_borrow.as_any();
-            let (obj_type, successors) = if let Some(st) = any.downcast_ref::<crate::flows::SingleStation>() {
+            let (obj_type, successors) = if let Some(st) = any.downcast_ref::<crate::materialflow_objects::SingleStation>() {
                 let succ_ids: Vec<u32> = st.succ.iter().map(|s| *s.borrow().get_object_id()).collect();
                 ("St", succ_ids)
-            } else if let Some(src) = any.downcast_ref::<crate::flows::Source>() {
+            } else if let Some(src) = any.downcast_ref::<crate::materialflow_objects::Source>() {
                 source_id = Some(*id);
                 let succ_ids: Vec<u32> = src.succ.iter().map(|s| *s.borrow().get_object_id()).collect();
                 ("So", succ_ids)
@@ -278,12 +279,12 @@ impl TopologyVisualizer {
             let obj_borrow = obj.borrow();
             let any = obj_borrow.as_any();
             
-            let (obj_type, successors) = if let Some(st) = any.downcast_ref::<crate::flows::SingleStation>() {
+            let (obj_type, successors) = if let Some(st) = any.downcast_ref::<crate::materialflow_objects::SingleStation>() {
                 let succ_ids: Vec<u32> = st.succ.iter()
                     .map(|s| *s.borrow().get_object_id())
                     .collect();
                 ("St", succ_ids)
-            } else if let Some(src) = any.downcast_ref::<crate::flows::Source>() {
+            } else if let Some(src) = any.downcast_ref::<crate::materialflow_objects::Source>() {
                 source_id = Some(*id);
                 let succ_ids: Vec<u32> = src.succ.iter()
                     .map(|s| *s.borrow().get_object_id())

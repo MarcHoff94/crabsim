@@ -7,6 +7,7 @@ pub mod error;
 pub mod materialflow_objects;
 pub mod simulator;
 pub mod visualization;
+pub mod random_numbers;
 
 pub use crate::error::{InitError, MaterialflowError, RunTimeError};
 pub use crate::event::{EcTime, EventTemplate, EventType};

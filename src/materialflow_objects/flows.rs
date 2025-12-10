@@ -1,8 +1,10 @@
 #![allow(dead_code)]
 
+use crate::EcTime;
 use crate::error::{InitError, MaterialflowError, RunTimeError};
 use crate::event::{EventTemplate, EventType};
 use crate::simulator::Simulator;
+use crate::random_numbers::{Distribution};
 use std::{cell::RefCell, rc::Rc};
 
 // Moveable unit
@@ -16,6 +18,18 @@ pub struct MoveableUnit {
 pub struct BaseObject {
 	pub object_id: u32,
 	pub random_seed: u64,
+}
+pub struct FailureProfile {
+	active: bool,
+	availablity: f32,
+	mttr: EcTime,
+	mtbf: EcTime,
+	distribution: Distribution,
+}
+impl FailureProfile {
+	fn schedule_failure(&mut self) -> Result<Option<EventTemplate>,MaterialflowError> {
+		Ok(None)
+	}
 }
 // Errors and states
 #[derive(Debug, Clone)]
@@ -47,13 +61,8 @@ pub trait EventInterface {
 
 pub trait MaterialFlow: EventInterface {
 	fn is_entrance_allowed(&self) -> bool;
-	/// Check whether the object is currently allowed to perform an exit (move its MU out).
-	/// Similar to `is_entrance_allowed` but focused on exit/transfer semantics.
 	fn is_exit_allowed(&self) -> bool;
-	fn process_mu_entrance(
-		&mut self,
-		_mu: MoveableUnit,
-	) -> Result<Option<EventTemplate>, MaterialflowError>;
+	fn process_mu_entrance(&mut self,_mu: MoveableUnit) -> Result<Option<EventTemplate>, MaterialflowError>;
 	fn process_mu_exit(&mut self) -> Result<Option<EventTemplate>, MaterialflowError>;
 	fn add_blocked(&mut self, id_blocked: u32);
 	fn as_any(&mut self) -> &mut dyn std::any::Any;

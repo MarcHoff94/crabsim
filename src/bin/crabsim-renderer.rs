@@ -58,9 +58,10 @@ fn main() {
     let mut current_time: u128 = 0;
     let mut latest_seq: u64 = 0;
 
-    // Main render loop: 1 Hz frame rate; advance current_time by 1 each second
+    // Main render loop: paced frame rate; advance current_time by step_ms per tick
     let mut last_tick = Instant::now();
     let hold_open: bool = std::env::var("CRABSIM_RENDERER_HOLD").map(|v| v != "0").unwrap_or(true);
+    let step_ms: u128 = 1000; // advance 1 simulated second per tick
     loop {
         // Drain any incoming messages
         while let Ok(msg) = rx.try_recv() {
@@ -86,7 +87,7 @@ fn main() {
         if speed < 0.0 {
             if !timeline.is_empty() {
                 let final_time = *timeline.keys().next_back().unwrap_or(&current_time);
-                if current_time < final_time { current_time = current_time.saturating_add(1); }
+                if current_time < final_time { current_time = current_time.saturating_add(step_ms); }
                 if current_time > final_time { current_time = final_time; }
                 should_render = true;
             }
@@ -97,7 +98,7 @@ fn main() {
                 last_tick = now;
                 if !timeline.is_empty() {
                     let final_time = *timeline.keys().next_back().unwrap_or(&current_time);
-                    if current_time < final_time { current_time = current_time.saturating_add(1); }
+                    if current_time < final_time { current_time = current_time.saturating_add(step_ms); }
                     if current_time > final_time { current_time = final_time; }
                 }
                 should_render = true;

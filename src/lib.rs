@@ -8,9 +8,11 @@ pub mod materialflow_objects;
 pub mod simulator;
 pub mod visualization;
 pub mod random_numbers;
+#[cfg(test)]
+pub mod tests_util;
 
 pub use crate::error::{InitError, MaterialflowError, RunTimeError};
-pub use crate::event::{EcTime, EventTemplate, EventType};
+pub use crate::event::{EventTemplate, EventType};
 pub use crate::materialflow_objects::{Drain, SingleStation, Source}; // Adjusted to use materialflow_objects for concrete types
 pub use crate::materialflow_objects::flows::MoveableUnit; // Moved MoveableUnit to be imported from flows
 pub use crate::simulator::{EventController, Simulator};
@@ -92,12 +94,12 @@ pub fn run_demo() {
 			}
 		}
 	}
-	let mut eventcontroller = EventController::new(Some(EcTime::from(3600)));
+	let mut eventcontroller = EventController::new(Some(std::time::Duration::from_secs_f64(3_600.0)));
 	
 	// Station 1 - first station
 	let st1 = Rc::new(RefCell::new(SingleStation::new(
 		1,
-		EcTime::from(10),
+		std::time::Duration::from_secs_f64(10.0),
 		None,
 		Vec::new(),
 		Vec::new(),
@@ -106,7 +108,7 @@ pub fn run_demo() {
 	// Station 2 - splits into two branches
 	let st2 = Rc::new(RefCell::new(SingleStation::new(
 		2,
-		EcTime::from(15),
+		std::time::Duration::from_secs_f64(15.0),
 		None,
 		Vec::new(),
 		Vec::new(),
@@ -115,7 +117,7 @@ pub fn run_demo() {
 	// Branch 1: Station 3
 	let st3 = Rc::new(RefCell::new(SingleStation::new(
 		2,
-		EcTime::from(20),
+		std::time::Duration::from_secs_f64(20.0),
 		None,
 		Vec::new(),
 		Vec::new(),
@@ -124,28 +126,28 @@ pub fn run_demo() {
 	// Station 4 splits into 3 parallel stations
 	let st4 = Rc::new(RefCell::new(SingleStation::new(
 		2,
-		EcTime::from(25),
+		std::time::Duration::from_secs_f64(25.0),
 		None,
 		Vec::new(),
 		Vec::new(),
 	)));
 	let st4a = Rc::new(RefCell::new(SingleStation::new(
 		2,
-		EcTime::from(12),
+		std::time::Duration::from_secs_f64(12.0),
 		None,
 		Vec::new(),
 		Vec::new(),
 	)));
 	let st4b = Rc::new(RefCell::new(SingleStation::new(
 		2,
-		EcTime::from(15),
+		std::time::Duration::from_secs_f64(15.0),
 		None,
 		Vec::new(),
 		Vec::new(),
 	)));
 	let st4c = Rc::new(RefCell::new(SingleStation::new(
 		2,
-		EcTime::from(18),
+		std::time::Duration::from_secs_f64(18.0),
 		None,
 		Vec::new(),
 		Vec::new(),
@@ -154,7 +156,7 @@ pub fn run_demo() {
 	// Station after st4 parallel merge
 	let st7 = Rc::new(RefCell::new(SingleStation::new(
 		2,
-		EcTime::from(30),
+		std::time::Duration::from_secs_f64(30.0),
 		None,
 		Vec::new(),
 		Vec::new(),
@@ -163,28 +165,28 @@ pub fn run_demo() {
 	// Branch 2: Station 5 splits into 3 parallel stations
 	let st5 = Rc::new(RefCell::new(SingleStation::new(
 		2,
-		EcTime::from(18),
+		std::time::Duration::from_secs_f64(18.0),
 		None,
 		Vec::new(),
 		Vec::new(),
 	)));
 	let st5a = Rc::new(RefCell::new(SingleStation::new(
 		2,
-		EcTime::from(10),
+		std::time::Duration::from_secs_f64(10.0),
 		None,
 		Vec::new(),
 		Vec::new(),
 	)));
 	let st5b = Rc::new(RefCell::new(SingleStation::new(
 		2,
-		EcTime::from(14),
+		std::time::Duration::from_secs_f64(14.0),
 		None,
 		Vec::new(),
 		Vec::new(),
 	)));
 	let st5c = Rc::new(RefCell::new(SingleStation::new(
 		2,
-		EcTime::from(16),
+		std::time::Duration::from_secs_f64(16.0),
 		None,
 		Vec::new(),
 		Vec::new(),
@@ -192,7 +194,7 @@ pub fn run_demo() {
 	
 	let source = Rc::new(RefCell::new(Source::new(
 		0,
-		EcTime::from(5),
+		std::time::Duration::from_secs_f64(5.0),
 		vec![st1.clone()],
 	)));
 	let drain = Rc::new(RefCell::new(Drain::new(3, vec![st7.clone(), st5a.clone(), st5b.clone(), st5c.clone()])));
@@ -266,18 +268,18 @@ mod tests {
 	#[test]
 	fn simple_flow_records_exit() {
 		let mut simulator = Simulator::new();
-		let mut eventcontroller = EventController::new(Some(EcTime::from(86400)));
+		let mut eventcontroller = EventController::new(Some(std::time::Duration::from_secs_f64(86_400.0)));
 
 		let station = Rc::new(RefCell::new(SingleStation::new(
 			0,
-			EcTime::from(60),
+			std::time::Duration::from_secs_f64(60.0),
 			None,
 			Vec::new(),
 			Vec::new(),
 		)));
 		let source = Rc::new(RefCell::new(Source::new(
 			0,
-			EcTime::from(30),
+			std::time::Duration::from_secs_f64(30.0),
 			vec![station.clone()],
 		)));
 		let drain = Rc::new(RefCell::new(Drain::new(0, vec![station.clone()])));
@@ -289,7 +291,7 @@ mod tests {
 		simulator.register_material_flow(drain.clone());
 		simulator.add_drain(drain.clone());
 
-		eventcontroller.endtime = Some(EcTime::from(1000));
+		eventcontroller.endtime = Some(std::time::Duration::from_secs_f64(1_000.0));
 		eventcontroller.init(&mut simulator);
 		let sim = eventcontroller.run(simulator).unwrap();
 
@@ -306,20 +308,20 @@ mod tests {
 		let simulator = Simulator::new();
 
 		// predecessor with a MU ready to move
-		let mut pred = SingleStation::new(0, EcTime::from(10), None, Vec::new(), Vec::new());
+		let mut pred = SingleStation::new(0, std::time::Duration::from_secs_f64(10.0), None, Vec::new(), Vec::new());
 		pred.content = Some(MoveableUnit { id: 1, location_id: 0 });
 
 		// two successors; both allow entrance by default
 		let succ0 = Rc::new(RefCell::new(SingleStation::new(
 			1,
-			EcTime::from(10),
+			std::time::Duration::from_secs_f64(10.0),
 			None,
 			Vec::new(),
 			Vec::new(),
 		)));
 		let succ1 = Rc::new(RefCell::new(SingleStation::new(
 			2,
-			EcTime::from(10),
+			std::time::Duration::from_secs_f64(10.0),
 			None,
 			Vec::new(),
 			Vec::new(),
@@ -345,13 +347,13 @@ mod tests {
 		let simulator = Simulator::new();
 
 		// predecessor with a MU ready to move
-		let mut pred = SingleStation::new(10, EcTime::from(10), None, Vec::new(), Vec::new());
+		let mut pred = SingleStation::new(10, std::time::Duration::from_secs_f64(10.0), None, Vec::new(), Vec::new());
 		pred.content = Some(MoveableUnit { id: 42, location_id: 10 });
 
 		// first successor denies entrance
 		let succ0 = Rc::new(RefCell::new(SingleStation::new(
 			11,
-			EcTime::from(10),
+			std::time::Duration::from_secs_f64(10.0),
 			None,
 			Vec::new(),
 			Vec::new(),
@@ -361,7 +363,7 @@ mod tests {
 		// second successor allows entrance
 		let succ1 = Rc::new(RefCell::new(SingleStation::new(
 			12,
-			EcTime::from(10),
+			std::time::Duration::from_secs_f64(10.0),
 			None,
 			Vec::new(),
 			Vec::new(),
@@ -388,18 +390,18 @@ mod tests {
 	#[test]
 	fn blocked_flow_retries() {
 		let mut simulator = Simulator::new();
-		let mut eventcontroller = EventController::new(Some(EcTime::from(86400)));
+		let mut eventcontroller = EventController::new(Some(std::time::Duration::from_secs_f64(86_400.0)));
 
 		let station_a = Rc::new(RefCell::new(SingleStation::new(
 			0,
-			EcTime::from(60),
+			std::time::Duration::from_secs_f64(60.0),
 			None,
 			Vec::new(),
 			Vec::new(),
 		)));
 		let mut busy_b = SingleStation::new(
 			0,
-			EcTime::from(75),
+			std::time::Duration::from_secs_f64(75.0),
 			None,
 			Vec::new(),
 			vec![station_a.clone()],
@@ -414,7 +416,7 @@ mod tests {
 
 		let source = Rc::new(RefCell::new(Source::new(
 			0,
-			EcTime::from(30),
+			std::time::Duration::from_secs_f64(30.0),
 			vec![station_a.clone()],
 		)));
 		let drain = Rc::new(RefCell::new(Drain::new(0, vec![station_b.clone()])));
@@ -429,16 +431,16 @@ mod tests {
 		simulator.add_drain(drain.clone());
 
 		eventcontroller.add_event(
-			EcTime::from(100),
+			std::time::Duration::from_secs_f64(100.0),
 			EventTemplate {
 				eventtype: EventType::MUExit,
-				exec_time: EcTime::from(0),
+				exec_time: std::time::Duration::from_secs_f64(0.0),
 				object_id: b_id,
 				seq: 0,
 			},
 		);
 
-		eventcontroller.endtime = Some(EcTime::from(1000));
+		eventcontroller.endtime = Some(std::time::Duration::from_secs_f64(1_000.0));
 		eventcontroller.init(&mut simulator);
 		let sim = eventcontroller.run(simulator).unwrap();
 
@@ -452,7 +454,7 @@ mod tests {
 
 	#[test]
 	fn blockedlist_dedup() {
-		let mut s = SingleStation::new(1, EcTime::from(10), None, Vec::new(), Vec::new());
+		let mut s = SingleStation::new(1, std::time::Duration::from_secs_f64(10.0), None, Vec::new(), Vec::new());
 		s.add_blocked(5);
 		s.add_blocked(5);
 		assert_eq!(
@@ -474,12 +476,12 @@ mod tests {
 	#[test]
 	fn drain_fifo_order() {
 		let mut simulator = Simulator::new();
-		let mut eventcontroller = EventController::new(Some(EcTime::from(86400)));
+		let mut eventcontroller = EventController::new(Some(std::time::Duration::from_secs_f64(86_400.0)));
 
 		let drain = Rc::new(RefCell::new(Drain::new(0, Vec::new())));
 		let source = Rc::new(RefCell::new(Source::new(
 			0,
-			EcTime::from(10),
+			std::time::Duration::from_secs_f64(10.0),
 			vec![drain.clone()],
 		)));
 
@@ -487,7 +489,7 @@ mod tests {
 		simulator.register_material_flow(drain.clone());
 		simulator.add_drain(drain.clone());
 
-		eventcontroller.endtime = Some(EcTime::from(200));
+		eventcontroller.endtime = Some(std::time::Duration::from_secs_f64(200.0));
 		eventcontroller.init(&mut simulator);
 		let sim = eventcontroller.run(simulator).unwrap();
 
@@ -501,25 +503,25 @@ mod tests {
 	#[test]
 	fn ordering_across_stations_preserved() {
 		let mut simulator = Simulator::new();
-		let mut eventcontroller = EventController::new(Some(EcTime::from(86400)));
+		let mut eventcontroller = EventController::new(Some(std::time::Duration::from_secs_f64(86_400.0)));
 
 		let station_a = Rc::new(RefCell::new(SingleStation::new(
 			0,
-			EcTime::from(10),
+			std::time::Duration::from_secs_f64(10.0),
 			None,
 			Vec::new(),
 			Vec::new(),
 		)));
 		let station_b = Rc::new(RefCell::new(SingleStation::new(
 			0,
-			EcTime::from(30),
+			std::time::Duration::from_secs_f64(30.0),
 			None,
 			Vec::new(),
 			vec![station_a.clone()],
 		)));
 		let source = Rc::new(RefCell::new(Source::new(
 			0,
-			EcTime::from(0),
+			std::time::Duration::from_secs_f64(0.0),
 			vec![station_a.clone()],
 		)));
 		let drain = Rc::new(RefCell::new(Drain::new(0, vec![station_b.clone()])));
@@ -533,15 +535,18 @@ mod tests {
 		simulator.register_material_flow(drain.clone());
 		simulator.add_drain(drain.clone());
 
-		eventcontroller.endtime = Some(EcTime::from(500));
+		eventcontroller.endtime = Some(std::time::Duration::from_secs_f64(500.0));
 		eventcontroller.init(&mut simulator);
 		let sim = eventcontroller.run(simulator).unwrap();
 
 		let exit_ids = &sim.drains[0].borrow().exit_ids;
 		assert!(!exit_ids.is_empty());
-		let endtime: EcTime = EcTime::from(500);
-		let first_exit =
-			source.borrow().proc_time + station_a.borrow().proc_time + station_b.borrow().proc_time;
+		let endtime: std::time::Duration = std::time::Duration::from_secs_f64(500.0);
+		let first_exit = std::time::Duration::from_millis(
+			(source.borrow().proc_time.as_millis()
+				+ station_a.borrow().proc_time.as_millis()
+				+ station_b.borrow().proc_time.as_millis()) as u64,
+		);
 		let steady_interval = std::cmp::max(
 			source.borrow().proc_time,
 			std::cmp::max(station_a.borrow().proc_time, station_b.borrow().proc_time),
@@ -549,7 +554,8 @@ mod tests {
 		let expected_drained = if endtime < first_exit {
 			0usize
 		} else {
-			1usize + ((endtime - first_exit).0 / steady_interval.0) as usize
+			let after_first_ms = endtime.as_millis().saturating_sub(first_exit.as_millis());
+			1usize + (after_first_ms / steady_interval.as_millis()) as usize
 		};
 		let drained = exit_ids.len();
 		assert_eq!(
@@ -569,12 +575,12 @@ mod tests {
 	#[test]
 	fn ordering_across_parallel_stations_preserved() {
 		let mut simulator = Simulator::new();
-		let mut eventcontroller = EventController::new(Some(EcTime::from(86400)));
+		let mut eventcontroller = EventController::new(None);
 
 		// First station
 		let station_a = Rc::new(RefCell::new(SingleStation::new(
 			0,
-			EcTime::from(10),
+			std::time::Duration::from_secs_f64(10.0),
 			None,
 			Vec::new(),
 			Vec::new(),
@@ -582,14 +588,14 @@ mod tests {
 		// Two parallel stations with double the process time
 		let station_b1 = Rc::new(RefCell::new(SingleStation::new(
 			0,
-			EcTime::from(20),
+			std::time::Duration::from_secs_f64(20.0),
 			None,
 			Vec::new(),
 			vec![station_a.clone()],
 		)));
 		let station_b2 = Rc::new(RefCell::new(SingleStation::new(
 			0,
-			EcTime::from(20),
+			std::time::Duration::from_secs_f64(20.0),
 			None,
 			Vec::new(),
 			vec![station_a.clone()],
@@ -597,7 +603,7 @@ mod tests {
 
 		let source = Rc::new(RefCell::new(Source::new(
 			0,
-			EcTime::from(20),
+			std::time::Duration::from_secs_f64(20.0),
 			vec![station_a.clone()],
 		)));
 		let drain = Rc::new(RefCell::new(Drain::new(0, vec![station_b1.clone(), station_b2.clone()])));
@@ -614,7 +620,7 @@ mod tests {
 		simulator.register_material_flow(drain.clone());
 		simulator.add_drain(drain.clone());
 
-		eventcontroller.endtime = Some(EcTime::from(500));
+		eventcontroller.endtime = Some(std::time::Duration::from_secs_f64(500.0));
 		eventcontroller.init(&mut simulator);
 		let sim = eventcontroller.run(simulator).unwrap();
 
@@ -625,29 +631,27 @@ mod tests {
 			assert_eq!(id as usize, i + 1, "MU ids should preserve source order across parallel stations");
 		}
 
-	// Assumptions for the calculation below:
-	// - Parallel branches are identical in processing time and are round-robin balanced
-	// - In steady state the combined throughput of identical parallel branches
-	//   can be approximated as branch_proc_time / num_branches (integer arithmetic)
-	// - This is a simplification for tests (works for identical branches);
-	//   unequal branch times require a different model (see next test)
-	// Also check the calculated number of drained MUs assuming parallel stations have identical proc_time
-		let endtime: EcTime = EcTime::from(500);
-		let first_exit = source.borrow().proc_time + station_a.borrow().proc_time + station_b1.borrow().proc_time;
-		// effective steady interval for parallel identical branches = branch_proc_time / num_branches
-		let num_branches = 2u128;
-		let branch_effective = EcTime::from((station_b1.borrow().proc_time.0) / num_branches);
-		let steady_interval = std::cmp::max(source.borrow().proc_time, std::cmp::max(station_a.borrow().proc_time, branch_effective));
-		let expected_drained = if endtime < first_exit {
-			0usize
-		} else {
-			1usize + ((endtime - first_exit).0 / steady_interval.0) as usize
-		};
+		// Also verify drained count matches steady-state for identical parallel branches
+		let endtime: std::time::Duration = std::time::Duration::from_secs_f64(500.0);
+		let first_exit = std::time::Duration::from_millis(
+			(source.borrow().proc_time.as_millis()
+				+ station_a.borrow().proc_time.as_millis()
+				+ station_b1.borrow().proc_time.as_millis()) as u64,
+		);
+		use crate::tests_util::expected_drained_identical_parallel;
+		let expected_drained = expected_drained_identical_parallel(
+			endtime,
+			first_exit,
+			source.borrow().proc_time,
+			station_a.borrow().proc_time,
+			station_b1.borrow().proc_time,
+			2u128,
+		);
 		let drained = exit_ids.len();
 		assert_eq!(drained, expected_drained, "expected {} drained MUs, got {}", expected_drained, drained);
 	}
 
-	#[test]
+// test utilities live in `tests_util.rs`
 	fn throughput_unbalanced_parallel_stations() {
 		let mut simulator = Simulator::new();
 		let mut eventcontroller = EventController::new(None);
@@ -655,7 +659,7 @@ mod tests {
 		// First station
 		let station_a = Rc::new(RefCell::new(SingleStation::new(
 			0,
-			EcTime::from(10),
+			std::time::Duration::from_secs_f64(10.0),
 			None,
 			Vec::new(),
 			Vec::new(),
@@ -663,14 +667,14 @@ mod tests {
 		// Two parallel stations with unequal process times
 		let station_b1 = Rc::new(RefCell::new(SingleStation::new(
 			0,
-			EcTime::from(30),
+			std::time::Duration::from_secs_f64(30.0),
 			None,
 			Vec::new(),
 			vec![station_a.clone()],
 		)));
 		let station_b2 = Rc::new(RefCell::new(SingleStation::new(
 			0,
-			EcTime::from(10),
+			std::time::Duration::from_secs_f64(10.0),
 			None,
 			Vec::new(),
 			vec![station_a.clone()],
@@ -678,7 +682,7 @@ mod tests {
 
 		let source = Rc::new(RefCell::new(Source::new(
 			0,
-			EcTime::from(20),
+			std::time::Duration::from_secs_f64(20.0),
 			vec![station_a.clone()],
 		)));
 		let drain = Rc::new(RefCell::new(Drain::new(0, vec![station_b1.clone(), station_b2.clone()])));
@@ -695,7 +699,7 @@ mod tests {
 		simulator.register_material_flow(drain.clone());
 		simulator.add_drain(drain.clone());
 
-		eventcontroller.endtime = Some(EcTime::from(500));
+		eventcontroller.endtime = Some(std::time::Duration::from_secs_f64(500.0));
 		eventcontroller.init(&mut simulator);
 		let sim = eventcontroller.run(simulator).unwrap();
 
@@ -707,11 +711,11 @@ mod tests {
 	// with unequal branch times is non-trivial; assert only that some units
 	// were drained and that the drained count does not exceed a safe upper
 	// bound (best-case: all work goes to the fastest branch every interval).
-	let endtime: EcTime = EcTime::from(500);
+	let endtime: std::time::Duration = std::time::Duration::from_secs_f64(500.0);
 	let first_exit = source.borrow().proc_time + station_a.borrow().proc_time + station_b1.borrow().proc_time;
-	let b1 = station_b1.borrow().proc_time.0;
-	let b2 = station_b2.borrow().proc_time.0;
-	let duration_after_first = if endtime < first_exit { 0u128 } else { (endtime - first_exit).0 };
+	let b1 = station_b1.borrow().proc_time.as_millis();
+	let b2 = station_b2.borrow().proc_time.as_millis();
+	let duration_after_first = if endtime < first_exit { 0u128 } else { endtime.as_millis().saturating_sub(first_exit.as_millis()) };
 	let fastest = std::cmp::min(b1, b2);
 	let max_additional = if fastest == 0 { 0usize } else { (duration_after_first / fastest) as usize };
 	let expected_max = if endtime < first_exit { 0usize } else { 1usize + max_additional };
@@ -727,14 +731,14 @@ mod tests {
 		// create station_2 (initially denying) and station_3 (allowing)
 		let station_2 = Rc::new(RefCell::new(SingleStation::new(
 			2,
-			EcTime::from(5),
+			std::time::Duration::from_secs_f64(5.0),
 			None,
 			Vec::new(),
 			Vec::new(),
 		)));
 		let station_3 = Rc::new(RefCell::new(SingleStation::new(
 			3,
-			EcTime::from(5),
+			std::time::Duration::from_secs_f64(5.0),
 			None,
 			Vec::new(),
 			Vec::new(),
@@ -745,7 +749,7 @@ mod tests {
 		// station_1 will prefer station_2 (index 0) then station_3
 		let station_1 = Rc::new(RefCell::new(SingleStation::new(
 			1,
-			EcTime::from(10),
+			std::time::Duration::from_secs_f64(10.0),
 			None,
 			vec![station_2.clone(), station_3.clone()],
 			Vec::new(),
@@ -804,7 +808,7 @@ mod tests {
 		// successor denies entrance
 		let succ = Rc::new(RefCell::new(SingleStation::new(
 			2,
-			EcTime::from(5),
+			std::time::Duration::from_secs_f64(5.0),
 			None,
 			Vec::new(),
 			Vec::new(),
@@ -814,7 +818,7 @@ mod tests {
 		// predecessor with an MU ready to move
 		let pred = Rc::new(RefCell::new(SingleStation::new(
 			1,
-			EcTime::from(10),
+			std::time::Duration::from_secs_f64(10.0),
 			None,
 			vec![succ.clone()],
 			Vec::new(),
@@ -850,7 +854,7 @@ mod tests {
 
 		let station_a = Rc::new(RefCell::new(SingleStation::new(
 			0,
-			EcTime::from(60),
+			std::time::Duration::from_secs_f64(60.0),
 			None,
 			Vec::new(),
 			Vec::new(),
@@ -858,7 +862,7 @@ mod tests {
 		// busy station_b that initially denies entrance
 		let mut busy_b = SingleStation::new(
 			0,
-			EcTime::from(75),
+			std::time::Duration::from_secs_f64(75.0),
 			None,
 			Vec::new(),
 			vec![station_a.clone()],
@@ -874,7 +878,7 @@ mod tests {
 		// station_c is free and can accept fallback MUs
 		let station_c = Rc::new(RefCell::new(SingleStation::new(
 			0,
-			EcTime::from(30),
+			std::time::Duration::from_secs_f64(30.0),
 			None,
 			Vec::new(),
 			vec![station_a.clone()],
@@ -882,7 +886,7 @@ mod tests {
 
 		let source = Rc::new(RefCell::new(Source::new(
 			0,
-			EcTime::from(30),
+			std::time::Duration::from_secs_f64(30.0),
 			vec![station_a.clone()],
 		)));
 		let drain = Rc::new(RefCell::new(Drain::new(0, vec![station_b.clone(), station_c.clone()])));
@@ -900,16 +904,16 @@ mod tests {
 
 		// schedule busy station_b to finish at time 100 so it will emit BlockedRetry
 		eventcontroller.add_event(
-			EcTime::from(100),
+			std::time::Duration::from_secs_f64(100.0),
 			EventTemplate {
 				eventtype: EventType::MUExit,
-				exec_time: EcTime::from(0),
+				exec_time: std::time::Duration::from_secs_f64(0.0),
 				object_id: b_id,
 				seq: 0,
 			},
 		);
 
-		eventcontroller.endtime = Some(EcTime::from(1000));
+		eventcontroller.endtime = Some(std::time::Duration::from_secs_f64(1000.0));
 		eventcontroller.init(&mut simulator);
 		let sim = eventcontroller.run(simulator).unwrap();
 
@@ -926,7 +930,7 @@ mod tests {
 
 		let station_a = Rc::new(RefCell::new(SingleStation::new(
 			0,
-			EcTime::from(60),
+			std::time::Duration::from_secs_f64(60.0),
 			None,
 			Vec::new(),
 			Vec::new(),
@@ -934,7 +938,7 @@ mod tests {
 		// busy station_b that initially denies entrance
 		let mut busy_b = SingleStation::new(
 			0,
-			EcTime::from(75),
+			std::time::Duration::from_secs_f64(75.0),
 			None,
 			Vec::new(),
 			vec![station_a.clone()],
@@ -950,7 +954,7 @@ mod tests {
 		// station_c is free and can accept fallback MUs
 		let station_c = Rc::new(RefCell::new(SingleStation::new(
 			0,
-			EcTime::from(30),
+			std::time::Duration::from_secs_f64(30.0),
 			None,
 			Vec::new(),
 			vec![station_a.clone()],
@@ -958,7 +962,7 @@ mod tests {
 
 		let source = Rc::new(RefCell::new(Source::new(
 			0,
-			EcTime::from(30),
+			std::time::Duration::from_secs_f64(30.0),
 			vec![station_a.clone()],
 		)));
 		let drain = Rc::new(RefCell::new(Drain::new(0, vec![station_b.clone(), station_c.clone()])));
@@ -976,16 +980,16 @@ mod tests {
 
 		// schedule busy station_b to finish at time 100 so it will emit BlockedRetry
 		eventcontroller.add_event(
-			EcTime::from(100),
+			std::time::Duration::from_secs_f64(100.0),
 			EventTemplate {
 				eventtype: EventType::MUExit,
-				exec_time: EcTime::from(0),
+				exec_time: std::time::Duration::from_millis(0),
 				object_id: b_id,
 				seq: 0,
 			},
 		);
 
-		eventcontroller.endtime = Some(EcTime::from(1000));
+		eventcontroller.endtime = Some(std::time::Duration::from_secs_f64(1000.0));
 		eventcontroller.init(&mut simulator);
 		let _sim = eventcontroller.run(simulator).unwrap();
 

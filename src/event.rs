@@ -2,74 +2,10 @@
 
 use std::{
     cmp::Ordering,
-    ops::{Add, Div, Sub},
+    time::Duration,
 };
 
-#[repr(transparent)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct EcTime(pub u128);
-
-impl std::iter::Sum for EcTime {
-    fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
-        iter.fold(EcTime(0), |acc, x| EcTime(acc.0 + x.0))
-    }
-}
-
-impl<'a> std::iter::Sum<&'a EcTime> for EcTime {
-    fn sum<I: Iterator<Item = &'a EcTime>>(iter: I) -> Self {
-        iter.fold(EcTime(0), |acc, x| EcTime(acc.0 + x.0))
-    }
-}
-
-impl Add<u128> for EcTime {
-    type Output = EcTime;
-    fn add(self, other: u128) -> EcTime {
-        EcTime(self.0 + other)
-    }
-}
-
-impl Add<EcTime> for EcTime {
-    type Output = EcTime;
-    fn add(self, other: EcTime) -> EcTime {
-        EcTime(self.0 + other.0)
-    }
-}
-impl Sub<EcTime> for EcTime {
-    type Output = EcTime;
-    fn sub(self, other: EcTime) -> EcTime {
-        EcTime(self.0 - other.0)
-    }
-}
-impl Sub<u128> for EcTime {
-    type Output = EcTime;
-    fn sub(self, other: u128) -> EcTime {
-        EcTime(self.0 - other)
-    }
-}
-impl Div<u128> for EcTime {
-    type Output = EcTime;
-    fn div(self, other: u128) -> EcTime {
-        EcTime(self.0 / other)
-    }
-}
-
-impl Ord for EcTime {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.0.cmp(&other.0)
-    }
-}
-
-impl PartialOrd for EcTime {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl From<u128> for EcTime {
-    fn from(value: u128) -> Self {
-        EcTime(value)
-    }
-}
+// EcTime removed: use std::time::Duration everywhere
 
 #[derive(Debug, Clone)]
 pub enum EventType {
@@ -84,14 +20,14 @@ pub enum EventType {
 #[derive(Debug, Clone)]
 pub struct EventTemplate {
     pub eventtype: EventType,
-    pub exec_time: EcTime,
+    pub exec_time: Duration,
     pub object_id: u32,
     pub seq: u64,
 }
 
 #[derive(Clone, Debug)]
 pub struct ScheduledEvent {
-    pub time: EcTime,
+    pub time: Duration,
     pub template: EventTemplate,
     pub seq: u64,
 }

@@ -266,6 +266,8 @@ impl TopologyVisualizer {
     pub fn print_network_topology(
         material_flows: &HashMap<u32, Rc<RefCell<dyn MaterialFlow>>>,
     ) {
+        // Avoid printing topology during tests to keep outputs clean
+        if cfg!(test) { return; }
         println!("\n╔═════════════════════════════════════════════════════════════════════════════════╗");
         println!("║ Network Topology                                                                ║");
         println!("╚═════════════════════════════════════════════════════════════════════════════════╝\n");

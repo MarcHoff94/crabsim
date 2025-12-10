@@ -1,5 +1,6 @@
 use crate::error::{InitError, MaterialflowError, RunTimeError};
-use crate::event::{EcTime, EventTemplate, EventType};
+use crate::event::{EventTemplate, EventType};
+use std::time::Duration;
 use crate::flows::{
 	EventInterface, InterruptionState, MaterialFlow, MoveableUnit, ProcessState, SuccessorContainer, try_to_move_to_successor,
 };
@@ -39,8 +40,8 @@ pub fn handle_source_mu_exit(
 pub struct Source {
 	pub base: BaseObject,
 	pub content: Option<MoveableUnit>,
-	pub proc_time: EcTime,
-	pub remain_proc_time: EcTime,
+	pub proc_time: Duration,
+	pub remain_proc_time: Duration,
 	pub succ: Vec<Rc<RefCell<dyn MaterialFlow>>>,
 	pub succ_pointer: usize,
 	pub state: ProcessState,
@@ -50,14 +51,14 @@ pub struct Source {
 impl Source {
 	pub fn new(
 		object_id: u32,
-		proc_time: EcTime,
+		proc_time: Duration,
 		succ: Vec<Rc<RefCell<dyn MaterialFlow>>>,
 	) -> Source {
 		Source {
 			base: BaseObject { object_id, random_seed: 0 },
 			content: None,
 			proc_time,
-			remain_proc_time: 0.into(),
+			remain_proc_time: Duration::from_millis(0),
 			succ,
 			succ_pointer: 0,
 			state: ProcessState::Idle,

@@ -1,5 +1,6 @@
 use crate::error::{InitError, MaterialflowError, RunTimeError};
-use crate::event::{EcTime, EventTemplate, EventType};
+use crate::event::{EventTemplate, EventType};
+use std::time::Duration;
 use super::flows::BaseObject;
 use crate::flows::{
 	EventInterface, InterruptionState, MaterialFlow, MoveableUnit, ProcessState, SuccessorContainer, try_to_move_to_successor
@@ -10,8 +11,8 @@ use std::{cell::RefCell, rc::Rc};
 #[derive(Clone)]
 pub struct SingleStation {
 	pub base: BaseObject,
-	pub proc_time: EcTime,
-	pub remain_proc_time: EcTime,
+	pub proc_time: Duration,
+	pub remain_proc_time: Duration,
 	pub content: Option<MoveableUnit>,
 	pub succ: Vec<Rc<RefCell<dyn MaterialFlow>>>,
 	pub succ_pointer: usize,
@@ -26,7 +27,7 @@ pub struct SingleStation {
 impl SingleStation {
 	pub fn new(
 		object_id: u32,
-		proc_time: EcTime,
+		proc_time: Duration,
 		content: Option<MoveableUnit>,
 		succ: Vec<Rc<RefCell<dyn MaterialFlow>>>,
 		pred: Vec<Rc<RefCell<dyn MaterialFlow>>>,
@@ -34,7 +35,7 @@ impl SingleStation {
 		SingleStation {
 			base: BaseObject { object_id, random_seed: 0 },
 			proc_time,
-			remain_proc_time: 0.into(),
+			remain_proc_time: Duration::from_millis(0),
 			content,
 			succ,
 			succ_pointer: 0,
@@ -123,7 +124,7 @@ impl MaterialFlow for SingleStation {
 		while let Some(blocked_id) = self.blockedlist.pop() {
 			blocked_events.push(EventTemplate {
 				eventtype: EventType::BlockedRetry,
-				exec_time: 0.into(),
+				exec_time: Duration::from_millis(0),
 				object_id: blocked_id,
 				seq: 0,
 			});

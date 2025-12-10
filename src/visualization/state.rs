@@ -4,10 +4,15 @@ use std::{
     rc::Rc,
 };
 
-use crate::event::EcTime;
+use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use crate::flows::{EventInterface, MaterialFlow, ProcessState};
 use crate::materialflow_objects::{Drain, SingleStation, Source};
+fn format_millis_s_ms(ms: u128) -> String {
+    let secs = ms / 1000;
+    let millis = ms % 1000;
+    format!("{}.{:03}", secs, millis)
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StateRow {
@@ -32,7 +37,7 @@ pub struct StateVisualizer;
 impl StateVisualizer {
     pub fn collect_snapshot(
         material_flows: &HashMap<u32, Rc<RefCell<dyn MaterialFlow>>>,
-        current_time: EcTime,
+        current_time: Duration,
         current_seq: u64,
     ) -> StateSnapshot {
         let mut ids: Vec<u32> = material_flows.keys().cloned().collect();
@@ -47,13 +52,13 @@ impl StateVisualizer {
                     let content = match &st.content { Some(mu) => format!("MU{}", mu.id), None => "-".to_string() };
                     let state = match st.state { ProcessState::Processing => "Process", ProcessState::Blocked => "Blocked", ProcessState::Idle => "Idle", };
                     let blocked = if st.blockedlist.is_empty() { "-".to_string() } else { st.blockedlist.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(",") };
-                    rows.push(StateRow { id, typ: "Station".into(), content, state: state.into(), rem_time: st.remain_proc_time.0, blocked });
+                    rows.push(StateRow { id, typ: "Station".into(), content, state: state.into(), rem_time: st.remain_proc_time.as_millis() as u128, blocked });
                     continue;
                 }
                 if let Some(src) = any.downcast_ref::<Source>() {
                     let content = match &src.content { Some(mu) => format!("MU{}", mu.id), None => "-".to_string() };
                     let state = match src.state { ProcessState::Processing => "Process", ProcessState::Blocked => "Blocked", ProcessState::Idle => "Idle", };
-                    rows.push(StateRow { id, typ: "Source".into(), content, state: state.into(), rem_time: src.remain_proc_time.0, blocked: "-".into() });
+                    rows.push(StateRow { id, typ: "Source".into(), content, state: state.into(), rem_time: src.remain_proc_time.as_millis() as u128, blocked: "-".into() });
                     continue;
                 }
                 if let Some(dr) = any.downcast_ref::<Drain>() {
@@ -65,11 +70,11 @@ impl StateVisualizer {
                 rows.push(StateRow { id, typ: "Unknown".into(), content: "-".into(), state: "-".into(), rem_time: 0, blocked: "-".into() });
             }
         }
-        StateSnapshot { current_time: current_time.0, current_seq, rows }
+        StateSnapshot { current_time: current_time.as_millis() as u128, current_seq, rows }
     }
 
     pub fn print_snapshot(snapshot: &StateSnapshot) {
-        let time_str = format!("State at time {} (seq={})", snapshot.current_time, snapshot.current_seq);
+        let time_str = format!("State at time {} (seq={})", format_millis_s_ms(snapshot.current_time), snapshot.current_seq);
         let padding = 80_usize.saturating_sub(time_str.len());
         println!("╔═════════════════════════════════════════════════════════════════════════════════╗");
         println!("║ {}{}║", time_str, " ".repeat(padding));
@@ -79,16 +84,17 @@ impl StateVisualizer {
         println!("│ {:3} │ {:8} │ {:8} │ {:10} │ {:12} │ {:15} │", "ID", "Type", "Content", "State", "RemTime", "Blocked");
         println!("├─────┼──────────┼──────────┼────────────┼──────────────┼─────────────────┤");
         for r in &snapshot.rows {
+            let rem_fmt = format_millis_s_ms(r.rem_time);
             println!(
                 "│ {:3} │ {:8} │ {:8} │ {:10} │ {:12} │ {:15} │",
-                r.id, r.typ, r.content, r.state, r.rem_time, r.blocked
+                r.id, r.typ, r.content, r.state, rem_fmt, r.blocked
             );
         }
         println!("└─────┴──────────┴──────────┴────────────┴──────────────┴─────────────────┘\n");
     }
 
     pub fn print_snapshot_with_topology(snapshot: &StateSnapshot, topology_text: &str) {
-        let time_str = format!("State at time {} (seq={})", snapshot.current_time, snapshot.current_seq);
+        let time_str = format!("State at time {} (seq={})", format_millis_s_ms(snapshot.current_time), snapshot.current_seq);
         let padding = 80_usize.saturating_sub(time_str.len());
         println!("╔═════════════════════════════════════════════════════════════════════════════════╗");
         println!("║ {}{}║", time_str, " ".repeat(padding));
@@ -103,18 +109,23 @@ impl StateVisualizer {
         println!("│ {:3} │ {:8} │ {:8} │ {:10} │ {:12} │ {:15} │", "ID", "Type", "Content", "State", "RemTime", "Blocked");
         println!("├─────┼──────────┼──────────┼────────────┼──────────────┼─────────────────┤");
         for r in &snapshot.rows {
+            let rem_fmt = format_millis_s_ms(r.rem_time);
             println!(
                 "│ {:3} │ {:8} │ {:8} │ {:10} │ {:12} │ {:15} │",
-                r.id, r.typ, r.content, r.state, r.rem_time, r.blocked
+                r.id, r.typ, r.content, r.state, rem_fmt, r.blocked
             );
         }
         println!("└─────┴──────────┴──────────┴────────────┴──────────────┴─────────────────┘\n");
     }
     pub fn print_materialflow_state(
         material_flows: &HashMap<u32, Rc<RefCell<dyn MaterialFlow>>>,
-        current_time: EcTime,
+        current_time: Duration,
         current_seq: u64,
     ) {
+        // Silence visualization during tests to avoid noisy output
+        if cfg!(test) {
+            return;
+        }
         let snapshot = Self::collect_snapshot(material_flows, current_time, current_seq);
         Self::print_snapshot(&snapshot);
     }

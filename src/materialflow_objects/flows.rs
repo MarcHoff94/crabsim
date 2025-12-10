@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use crate::EcTime;
+use std::time::Duration;
 use crate::error::{InitError, MaterialflowError, RunTimeError};
 use crate::event::{EventTemplate, EventType};
 use crate::simulator::Simulator;
@@ -20,15 +20,33 @@ pub struct BaseObject {
 	pub random_seed: u64,
 }
 pub struct FailureProfile {
-	active: bool,
-	availablity: f32,
-	mttr: EcTime,
-	mtbf: EcTime,
-	distribution: Distribution,
+	pub active: bool,
+	pub availablity: f32,
+	pub mttr: Duration,
+	pub mtbf: Duration,
+	pub distribution_mttr: Distribution,
+	pub distribution_mtbf: Distribution,
+	pub seed_increment: u64,
 }
 impl FailureProfile {
-	fn schedule_failure(&mut self) -> Result<Option<EventTemplate>,MaterialflowError> {
+	pub fn new(availablity: f32, mttr: Duration, distribution_mttr: Distribution, distribution_mtbf: Distribution, seed_increment: u64) -> FailureProfile {
+
+
+		FailureProfile {
+			active: false,
+			availablity,
+			mttr,
+			mtbf: Duration::from_millis(0),
+			distribution_mttr,
+			distribution_mtbf,
+			seed_increment,
+		}
+	}
+	pub fn schedule_failure(&mut self) -> Result<Option<EventTemplate>,MaterialflowError> {
 		Ok(None)
+	}
+	fn calculate_mtbf(&mut self) {
+		self.mtbf = Duration::from_millis((self.mttr.as_millis() /(1.0 / self.availablity - 1.0).round() as u128) as u64);
 	}
 }
 // Errors and states

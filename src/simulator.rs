@@ -1,7 +1,8 @@
 #![allow(dead_code)]
 
 use crate::error::RunTimeError;
-use crate::event::{EcTime, EventTemplate, ScheduledEvent};
+use crate::event::{EventTemplate, ScheduledEvent};
+use std::time::Duration;
 use crate::materialflow_objects::{Drain, SingleStation, Source};
 use crate::flows::{EventInterface, MaterialFlow, ProcessState};
 use crate::visualization::topology::TopologyVisualizer;
@@ -87,7 +88,7 @@ impl Simulator {
         }
     }
 
-    pub fn print_materialflow_state(&mut self, current_time: EcTime) {
+    pub fn print_materialflow_state(&mut self, current_time: Duration) {
         // If an external renderer is connected, send snapshot instead of printing locally
         if let Some(stream) = self.renderer_stream.as_mut() {
             // Ensure topology is sent at least once upon first snapshot
@@ -139,24 +140,24 @@ impl Default for Simulator {
 
 pub struct EventController {
     pub event_queue: BinaryHeap<ScheduledEvent>,
-    pub time: EcTime,
-    pub endtime: Option<EcTime>,
+    pub time: Duration,
+    pub endtime: Option<Duration>,
     pub seq_counter: u64,
     pub seed: u64,
 }
 
 impl EventController {
-    pub fn new(endtime: Option<EcTime>) -> EventController {
+    pub fn new(endtime: Option<Duration>) -> EventController {
         EventController {
             event_queue: BinaryHeap::new(),
-            time: EcTime::from(0),
+            time: Duration::from_millis(0),
             endtime: endtime,
             seq_counter: 0,
             seed: 0,
         }
     }
 
-    pub fn add_event(&mut self, time: EcTime, event_template: EventTemplate) {
+    pub fn add_event(&mut self, time: Duration, event_template: EventTemplate) {
         let seq = self.seq_counter;
         self.seq_counter = self.seq_counter.wrapping_add(1);
         let mut tmpl = event_template;
@@ -175,7 +176,8 @@ impl EventController {
             let mut obj_mut = object.borrow_mut();
             // Compute a unique per-object seed derived from controller seed and object_id.
             let unique_seed = self.seed ^ (*obj_id as u64).wrapping_mul(0x9E3779B97F4A7C15);
-            EventInterface::set_random_seed(&mut *obj_mut, unique_seed);
+            obj_mut.set_random_seed(unique_seed);
+            // EventInterface::set_random_seed(&mut *obj_mut, unique_seed);
             debug_assert!(seen_seeds.insert(unique_seed), "Duplicate seed found for material_flow object_id {}", obj_id);
             let event_templates = obj_mut.init().unwrap();
             for event_template in event_templates {
@@ -198,17 +200,15 @@ impl EventController {
             let event_template = scheduled.template;
             // If an end time is set and the next event is at or beyond it, stop.
             if let Some(end) = self.endtime {
-                if event_time.0 >= end.0 {
+                if event_time >= end {
                     self.time = end;
                     break;
                 }
             }
             // advance time and decrement remaining proc_time for processing objects
-            let delta = if event_time.0 > self.time.0 {
-                event_time - self.time
-            } else {
-                EcTime::from(0)
-            };
+            let delta_ms = if event_time > self.time {
+                event_time.as_millis().saturating_sub(self.time.as_millis())
+            } else { 0 };
             self.time = event_time;
             simulator.current_seq = event_template.seq;
             // decrement remaining proc time for stations and sources that are Processing
@@ -219,10 +219,12 @@ impl EventController {
                     .downcast_mut::<SingleStation>()
                 {
                     if let ProcessState::Processing = st.state {
-                        if st.remain_proc_time.0 > delta.0 {
-                            st.remain_proc_time = st.remain_proc_time - delta;
+                        let rem_ms = st.remain_proc_time.as_millis();
+                        if rem_ms > delta_ms {
+                            let new_ms = rem_ms - delta_ms;
+                            st.remain_proc_time = Duration::from_millis(new_ms as u64);
                         } else {
-                            st.remain_proc_time = EcTime::from(0);
+                            st.remain_proc_time = Duration::from_millis(0);
                         }
                     }
                     continue;
@@ -232,10 +234,12 @@ impl EventController {
                     .downcast_mut::<Source>()
                 {
                     if let ProcessState::Processing = src.state {
-                        if src.remain_proc_time.0 > delta.0 {
-                            src.remain_proc_time = src.remain_proc_time - delta;
+                        let rem_ms = src.remain_proc_time.as_millis();
+                        if rem_ms > delta_ms {
+                            let new_ms = rem_ms - delta_ms;
+                            src.remain_proc_time = Duration::from_millis(new_ms as u64);
                         } else {
-                            src.remain_proc_time = EcTime::from(0);
+                            src.remain_proc_time = Duration::from_millis(0);
                         }
                     }
                 }
@@ -244,7 +248,7 @@ impl EventController {
                 drain.borrow_mut().update_current_time(self.time);
             }
             // Stop if endtime reached
-            if self.time >= self.endtime.unwrap_or(EcTime(u128::MAX)) {
+            if self.time >= self.endtime.unwrap_or(Duration::from_millis(u128::MAX as u64)) {
                 break;
             }
             let obj_rc = simulator
@@ -255,9 +259,12 @@ impl EventController {
             if let Some(obj) = obj_rc {
                 let mut queued_events: Vec<EventTemplate> = Vec::new();
                 let mut obj_mut = obj.borrow_mut();
+                let secs = event_time.as_secs();
+                let ms = event_time.subsec_millis();
                 log::info!(
-                    "At {}: seq={} obj={} event={:#?}",
-                    event_time.0,
+                    "At {}.{:03}s: seq={} obj={} event={:#?}",
+                    secs,
+                    ms,
                     event_template.seq,
                     event_template.object_id,
                     &event_template.eventtype
@@ -267,7 +274,7 @@ impl EventController {
                 }
                 drop(obj_mut);
                 for new_event in queued_events {
-                    let scheduled_time = self.time + new_event.exec_time;
+                    let scheduled_time = Duration::from_millis(self.time.as_millis() as u64 + new_event.exec_time.as_millis() as u64);
                     self.add_event(scheduled_time, new_event);
                 }
                 // Only print each step when a renderer is attached or live_inplace is enabled.

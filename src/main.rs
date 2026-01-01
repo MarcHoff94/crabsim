@@ -26,7 +26,6 @@ struct Opts {
 }
 
 fn main() {
-   
     let opts = Opts::parse();
     if opts.inplace {
         std::env::set_var("CRABSIM_LIVE_INPLACE", "1");

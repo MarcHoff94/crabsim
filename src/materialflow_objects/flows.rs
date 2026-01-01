@@ -31,8 +31,7 @@ pub struct FailureProfile {
 impl FailureProfile {
 	pub fn new(availablity: f32, mttr: Duration, distribution_mttr: Distribution, distribution_mtbf: Distribution, seed_increment: u64) -> FailureProfile {
 
-
-		FailureProfile {
+		let mut result = FailureProfile {
 			active: false,
 			availablity,
 			mttr,
@@ -40,9 +39,25 @@ impl FailureProfile {
 			distribution_mttr,
 			distribution_mtbf,
 			seed_increment,
+		};
+		result.calculate_mtbf();
+		result
+	}
+	pub fn default(seed_increment: u64) -> FailureProfile {
+		FailureProfile {
+			active: true,
+			availablity: 1.0,
+			mttr: Duration::from_secs_f64(0.0),
+			mtbf: Duration::from_secs_f64(0.0),
+			distribution_mttr: Distribution::CONSTANT,
+			distribution_mtbf: Distribution::CONSTANT,
+			seed_increment: seed_increment,
 		}
 	}
 	pub fn schedule_failure(&mut self) -> Result<Option<EventTemplate>,MaterialflowError> {
+		let mut failure_start: Duration;
+		// match self.distribution_mtbf {
+		// }
 		Ok(None)
 	}
 	fn calculate_mtbf(&mut self) {

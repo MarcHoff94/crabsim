@@ -72,7 +72,7 @@ impl StateVisualizer {
         }
         StateSnapshot { current_time: current_time.as_millis() as u128, current_seq, rows }
     }
-
+    //implement caching -> save last state when calling and only apply changes and update them
     pub fn print_snapshot(snapshot: &StateSnapshot) {
         let time_str = format!("State at time {} (seq={})", format_millis_s_ms(snapshot.current_time), snapshot.current_seq);
         let padding = 80_usize.saturating_sub(time_str.len());

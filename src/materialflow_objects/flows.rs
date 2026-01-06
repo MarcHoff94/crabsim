@@ -1,10 +1,9 @@
-#![allow(dead_code)]
 
 use std::time::Duration;
 use crate::error::{InitError, MaterialflowError, RunTimeError};
 use crate::event::{EventTemplate, EventType};
 use crate::simulator::Simulator;
-use crate::random_numbers::{Distribution};
+use crate::random_numbers::{Distribution, DistributionSampler};
 use std::{cell::RefCell, rc::Rc};
 
 // Moveable unit
@@ -19,48 +18,47 @@ pub struct BaseObject {
 	pub object_id: u32,
 	pub random_seed: u64,
 }
+#[derive(Clone)]
 pub struct FailureProfile {
 	pub active: bool,
 	pub availablity: f32,
 	pub mttr: Duration,
 	pub mtbf: Duration,
-	pub distribution_mttr: Distribution,
-	pub distribution_mtbf: Distribution,
-	pub seed_increment: u64,
+	pub dist_sampler_mttr: DistributionSampler,
+	pub dist_sampler_mtbf: DistributionSampler,
+	pub seed: u64,
 }
 impl FailureProfile {
-	pub fn new(availablity: f32, mttr: Duration, distribution_mttr: Distribution, distribution_mtbf: Distribution, seed_increment: u64) -> FailureProfile {
-
+	pub fn new(availablity: f32, mttr: Duration, distribution_mttr: Distribution, distribution_mtbf: Distribution, seed: u64) -> FailureProfile {
 		let mut result = FailureProfile {
 			active: false,
 			availablity,
 			mttr,
 			mtbf: Duration::from_millis(0),
-			distribution_mttr,
-			distribution_mtbf,
-			seed_increment,
+			dist_sampler_mttr: DistributionSampler::new(distribution_mttr, seed),
+			dist_sampler_mtbf: DistributionSampler::new(distribution_mtbf, seed), 
+			seed,
 		};
 		result.calculate_mtbf();
+		
 		result
 	}
-	pub fn default(seed_increment: u64) -> FailureProfile {
-		FailureProfile {
-			active: true,
-			availablity: 1.0,
-			mttr: Duration::from_secs_f64(0.0),
-			mtbf: Duration::from_secs_f64(0.0),
-			distribution_mttr: Distribution::CONSTANT,
-			distribution_mtbf: Distribution::CONSTANT,
-			seed_increment: seed_increment,
+	pub fn get_time_to_next_failure(&mut self) -> Result<Option<Duration>,MaterialflowError> {
+		if self.active == false {
+			return Ok(None);
 		}
+		Ok(Some(Duration::from_millis(self.dist_sampler_mtbf.sample() as u64)))
 	}
-	pub fn schedule_failure(&mut self) -> Result<Option<EventTemplate>,MaterialflowError> {
-		let mut failure_start: Duration;
-		// match self.distribution_mtbf {
-		// }
-		Ok(None)
+	pub fn set_availability(&mut self, availablity: f32) {
+		self.availablity = availablity;
+		self.calculate_mtbf();
 	}
+
+
 	fn calculate_mtbf(&mut self) {
+		if self.availablity <= 0.0 || self.availablity >= 1.0 {
+			panic!("FailureProfile: availablity must be in (0.0,1.0) range");
+		}
 		self.mtbf = Duration::from_millis((self.mttr.as_millis() /(1.0 / self.availablity - 1.0).round() as u128) as u64);
 	}
 }

@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 pub mod event;
+use crate::flows::FailureProfile;
 pub use crate::materialflow_objects::flows; // keep single module re-export
 pub use crate::materialflow_objects::flows::BaseObject;
 pub mod error;
@@ -95,11 +96,12 @@ pub fn run_demo() {
 		}
 	}
 	let mut eventcontroller = EventController::new(Some(std::time::Duration::from_secs_f64(3_600.0)));
-	
+	let default_failureprofile = FailureProfile::new(100.0, std::time::Duration::from_secs_f64(0.0), random_numbers::Distribution::CONSTANT { value: 0.0 }, random_numbers::Distribution::CONSTANT { value: 0.0 }, 0);
 	// Station 1 - first station
 	let st1 = Rc::new(RefCell::new(SingleStation::new(
 		1,
 		std::time::Duration::from_secs_f64(10.0),
+		default_failureprofile.clone(),
 		None,
 		Vec::new(),
 		Vec::new(),
@@ -109,6 +111,7 @@ pub fn run_demo() {
 	let st2 = Rc::new(RefCell::new(SingleStation::new(
 		2,
 		std::time::Duration::from_secs_f64(15.0),
+		default_failureprofile.clone(),
 		None,
 		Vec::new(),
 		Vec::new(),
@@ -118,6 +121,7 @@ pub fn run_demo() {
 	let st3 = Rc::new(RefCell::new(SingleStation::new(
 		2,
 		std::time::Duration::from_secs_f64(20.0),
+		default_failureprofile.clone(),
 		None,
 		Vec::new(),
 		Vec::new(),
@@ -127,6 +131,7 @@ pub fn run_demo() {
 	let st4 = Rc::new(RefCell::new(SingleStation::new(
 		2,
 		std::time::Duration::from_secs_f64(25.0),
+		default_failureprofile.clone(),
 		None,
 		Vec::new(),
 		Vec::new(),
@@ -134,6 +139,7 @@ pub fn run_demo() {
 	let st4a = Rc::new(RefCell::new(SingleStation::new(
 		2,
 		std::time::Duration::from_secs_f64(12.0),
+		default_failureprofile.clone(),
 		None,
 		Vec::new(),
 		Vec::new(),
@@ -141,6 +147,7 @@ pub fn run_demo() {
 	let st4b = Rc::new(RefCell::new(SingleStation::new(
 		2,
 		std::time::Duration::from_secs_f64(15.0),
+		default_failureprofile.clone(),
 		None,
 		Vec::new(),
 		Vec::new(),
@@ -148,6 +155,7 @@ pub fn run_demo() {
 	let st4c = Rc::new(RefCell::new(SingleStation::new(
 		2,
 		std::time::Duration::from_secs_f64(18.0),
+		default_failureprofile.clone(),
 		None,
 		Vec::new(),
 		Vec::new(),
@@ -157,6 +165,7 @@ pub fn run_demo() {
 	let st7 = Rc::new(RefCell::new(SingleStation::new(
 		2,
 		std::time::Duration::from_secs_f64(30.0),
+		default_failureprofile.clone(),
 		None,
 		Vec::new(),
 		Vec::new(),
@@ -166,13 +175,15 @@ pub fn run_demo() {
 	let st5 = Rc::new(RefCell::new(SingleStation::new(
 		2,
 		std::time::Duration::from_secs_f64(18.0),
-		None,
+		default_failureprofile.clone(),
+ 		None,
 		Vec::new(),
 		Vec::new(),
 	)));
 	let st5a = Rc::new(RefCell::new(SingleStation::new(
 		2,
 		std::time::Duration::from_secs_f64(10.0),
+		default_failureprofile.clone(),
 		None,
 		Vec::new(),
 		Vec::new(),
@@ -180,6 +191,7 @@ pub fn run_demo() {
 	let st5b = Rc::new(RefCell::new(SingleStation::new(
 		2,
 		std::time::Duration::from_secs_f64(14.0),
+		default_failureprofile.clone(),
 		None,
 		Vec::new(),
 		Vec::new(),
@@ -187,6 +199,7 @@ pub fn run_demo() {
 	let st5c = Rc::new(RefCell::new(SingleStation::new(
 		2,
 		std::time::Duration::from_secs_f64(16.0),
+		default_failureprofile.clone(),
 		None,
 		Vec::new(),
 		Vec::new(),
@@ -261,7 +274,9 @@ pub fn run_demo() {
 
 #[cfg(test)]
 mod tests {
-	use super::*;
+	use serde::de;
+
+use super::*;
     use crate::materialflow_objects::flows::EventInterface;
 	use std::{cell::RefCell, rc::Rc};
 
@@ -269,10 +284,12 @@ mod tests {
 	fn simple_flow_records_exit() {
 		let mut simulator = Simulator::new();
 		let mut eventcontroller = EventController::new(Some(std::time::Duration::from_secs_f64(86_400.0)));
+		let default_failureprofile = FailureProfile::new(100.0, std::time::Duration::from_secs_f64(0.0), random_numbers::Distribution::CONSTANT { value: 0.0 }, random_numbers::Distribution::CONSTANT { value: 0.0 }, 0);
 
 		let station = Rc::new(RefCell::new(SingleStation::new(
 			0,
 			std::time::Duration::from_secs_f64(60.0),
+			default_failureprofile.clone(),
 			None,
 			Vec::new(),
 			Vec::new(),
@@ -306,15 +323,16 @@ mod tests {
 	#[test]
 	fn selects_lowest_index_successor_when_all_allowed() {
 		let simulator = Simulator::new();
-
+		let default_failureprofile = FailureProfile::new(100.0, std::time::Duration::from_secs_f64(0.0), random_numbers::Distribution::CONSTANT { value: 0.0 }, random_numbers::Distribution::CONSTANT { value: 0.0 }, 0);
 		// predecessor with a MU ready to move
-		let mut pred = SingleStation::new(0, std::time::Duration::from_secs_f64(10.0), None, Vec::new(), Vec::new());
+		let mut pred = SingleStation::new(0, std::time::Duration::from_secs_f64(10.0), default_failureprofile.clone(),None, Vec::new(), Vec::new());
 		pred.content = Some(MoveableUnit { id: 1, location_id: 0 });
 
 		// two successors; both allow entrance by default
 		let succ0 = Rc::new(RefCell::new(SingleStation::new(
 			1,
 			std::time::Duration::from_secs_f64(10.0),
+			default_failureprofile.clone(),
 			None,
 			Vec::new(),
 			Vec::new(),
@@ -322,6 +340,7 @@ mod tests {
 		let succ1 = Rc::new(RefCell::new(SingleStation::new(
 			2,
 			std::time::Duration::from_secs_f64(10.0),
+			default_failureprofile.clone(),
 			None,
 			Vec::new(),
 			Vec::new(),
@@ -345,15 +364,17 @@ mod tests {
 	#[test]
 	fn skips_blocked_successor_and_selects_next_lowest() {
 		let simulator = Simulator::new();
-
+		let default_failureprofile = FailureProfile::new(100.0, std::time::Duration::from_secs_f64(0.0), random_numbers::Distribution::CONSTANT { value: 0.0 }, random_numbers::Distribution::CONSTANT { value: 0.0 }, 0);
+		
 		// predecessor with a MU ready to move
-		let mut pred = SingleStation::new(10, std::time::Duration::from_secs_f64(10.0), None, Vec::new(), Vec::new());
+		let mut pred = SingleStation::new(10, std::time::Duration::from_secs_f64(10.0),default_failureprofile.clone(), None, Vec::new(), Vec::new());
 		pred.content = Some(MoveableUnit { id: 42, location_id: 10 });
 
 		// first successor denies entrance
 		let succ0 = Rc::new(RefCell::new(SingleStation::new(
 			11,
 			std::time::Duration::from_secs_f64(10.0),
+			default_failureprofile.clone(),
 			None,
 			Vec::new(),
 			Vec::new(),
@@ -364,6 +385,7 @@ mod tests {
 		let succ1 = Rc::new(RefCell::new(SingleStation::new(
 			12,
 			std::time::Duration::from_secs_f64(10.0),
+			default_failureprofile.clone(),
 			None,
 			Vec::new(),
 			Vec::new(),
@@ -391,10 +413,13 @@ mod tests {
 	fn blocked_flow_retries() {
 		let mut simulator = Simulator::new();
 		let mut eventcontroller = EventController::new(Some(std::time::Duration::from_secs_f64(86_400.0)));
+		let default_failureprofile = FailureProfile::new(100.0, std::time::Duration::from_secs_f64(0.0), random_numbers::Distribution::CONSTANT { value: 0.0 }, random_numbers::Distribution::CONSTANT { value: 0.0 }, 0);
+		
 
 		let station_a = Rc::new(RefCell::new(SingleStation::new(
 			0,
 			std::time::Duration::from_secs_f64(60.0),
+			default_failureprofile.clone(),
 			None,
 			Vec::new(),
 			Vec::new(),
@@ -402,6 +427,7 @@ mod tests {
 		let mut busy_b = SingleStation::new(
 			0,
 			std::time::Duration::from_secs_f64(75.0),
+			default_failureprofile.clone(),
 			None,
 			Vec::new(),
 			vec![station_a.clone()],
@@ -454,7 +480,9 @@ mod tests {
 
 	#[test]
 	fn blockedlist_dedup() {
-		let mut s = SingleStation::new(1, std::time::Duration::from_secs_f64(10.0), None, Vec::new(), Vec::new());
+		let default_failureprofile = FailureProfile::new(100.0, std::time::Duration::from_secs_f64(0.0), random_numbers::Distribution::CONSTANT { value: 0.0 }, random_numbers::Distribution::CONSTANT { value: 0.0 }, 0);
+		
+		let mut s = SingleStation::new(1, std::time::Duration::from_secs_f64(10.0),default_failureprofile.clone(), None, Vec::new(), Vec::new());
 		s.add_blocked(5);
 		s.add_blocked(5);
 		assert_eq!(
@@ -477,7 +505,7 @@ mod tests {
 	fn drain_fifo_order() {
 		let mut simulator = Simulator::new();
 		let mut eventcontroller = EventController::new(Some(std::time::Duration::from_secs_f64(86_400.0)));
-
+		
 		let drain = Rc::new(RefCell::new(Drain::new(0, Vec::new())));
 		let source = Rc::new(RefCell::new(Source::new(
 			0,
@@ -504,10 +532,12 @@ mod tests {
 	fn ordering_across_stations_preserved() {
 		let mut simulator = Simulator::new();
 		let mut eventcontroller = EventController::new(Some(std::time::Duration::from_secs_f64(86_400.0)));
-
+		let default_failureprofile = FailureProfile::new(100.0, std::time::Duration::from_secs_f64(0.0), random_numbers::Distribution::CONSTANT { value: 0.0 }, random_numbers::Distribution::CONSTANT { value: 0.0 }, 0);
+		
 		let station_a = Rc::new(RefCell::new(SingleStation::new(
 			0,
 			std::time::Duration::from_secs_f64(10.0),
+			default_failureprofile.clone(),
 			None,
 			Vec::new(),
 			Vec::new(),
@@ -515,6 +545,7 @@ mod tests {
 		let station_b = Rc::new(RefCell::new(SingleStation::new(
 			0,
 			std::time::Duration::from_secs_f64(30.0),
+			default_failureprofile.clone(),
 			None,
 			Vec::new(),
 			vec![station_a.clone()],
@@ -571,16 +602,18 @@ mod tests {
 			);
 		}
 	}
-
+		
 	#[test]
 	fn ordering_across_parallel_stations_preserved() {
 		let mut simulator = Simulator::new();
 		let mut eventcontroller = EventController::new(None);
+		let default_failureprofile = FailureProfile::new(100.0, std::time::Duration::from_secs_f64(0.0), random_numbers::Distribution::CONSTANT { value: 0.0 }, random_numbers::Distribution::CONSTANT { value: 0.0 }, 0);
 
 		// First station
 		let station_a = Rc::new(RefCell::new(SingleStation::new(
 			0,
 			std::time::Duration::from_secs_f64(10.0),
+			default_failureprofile.clone(),
 			None,
 			Vec::new(),
 			Vec::new(),
@@ -589,6 +622,7 @@ mod tests {
 		let station_b1 = Rc::new(RefCell::new(SingleStation::new(
 			0,
 			std::time::Duration::from_secs_f64(20.0),
+			default_failureprofile.clone(),
 			None,
 			Vec::new(),
 			vec![station_a.clone()],
@@ -596,6 +630,7 @@ mod tests {
 		let station_b2 = Rc::new(RefCell::new(SingleStation::new(
 			0,
 			std::time::Duration::from_secs_f64(20.0),
+			default_failureprofile.clone(),
 			None,
 			Vec::new(),
 			vec![station_a.clone()],
@@ -655,11 +690,13 @@ mod tests {
 	fn throughput_unbalanced_parallel_stations() {
 		let mut simulator = Simulator::new();
 		let mut eventcontroller = EventController::new(None);
+		let default_failureprofile = FailureProfile::new(100.0, std::time::Duration::from_secs_f64(0.0), random_numbers::Distribution::CONSTANT { value: 0.0 }, random_numbers::Distribution::CONSTANT { value: 0.0 }, 0);
 
 		// First station
 		let station_a = Rc::new(RefCell::new(SingleStation::new(
 			0,
 			std::time::Duration::from_secs_f64(10.0),
+			default_failureprofile.clone(),
 			None,
 			Vec::new(),
 			Vec::new(),
@@ -668,6 +705,7 @@ mod tests {
 		let station_b1 = Rc::new(RefCell::new(SingleStation::new(
 			0,
 			std::time::Duration::from_secs_f64(30.0),
+			default_failureprofile.clone(),
 			None,
 			Vec::new(),
 			vec![station_a.clone()],
@@ -675,6 +713,7 @@ mod tests {
 		let station_b2 = Rc::new(RefCell::new(SingleStation::new(
 			0,
 			std::time::Duration::from_secs_f64(10.0),
+			default_failureprofile.clone(),
 			None,
 			Vec::new(),
 			vec![station_a.clone()],
@@ -727,11 +766,13 @@ mod tests {
 	#[test]
 	fn blocked_retry_while_predecessor_processing_does_not_move_mu() {
 		let mut simulator = Simulator::new();
+		let default_failureprofile = FailureProfile::new(100.0, std::time::Duration::from_secs_f64(0.0), random_numbers::Distribution::CONSTANT { value: 0.0 }, random_numbers::Distribution::CONSTANT { value: 0.0 }, 0);
 
 		// create station_2 (initially denying) and station_3 (allowing)
 		let station_2 = Rc::new(RefCell::new(SingleStation::new(
 			2,
 			std::time::Duration::from_secs_f64(5.0),
+			default_failureprofile.clone(),
 			None,
 			Vec::new(),
 			Vec::new(),
@@ -739,6 +780,7 @@ mod tests {
 		let station_3 = Rc::new(RefCell::new(SingleStation::new(
 			3,
 			std::time::Duration::from_secs_f64(5.0),
+			default_failureprofile.clone(),
 			None,
 			Vec::new(),
 			Vec::new(),
@@ -750,6 +792,7 @@ mod tests {
 		let station_1 = Rc::new(RefCell::new(SingleStation::new(
 			1,
 			std::time::Duration::from_secs_f64(10.0),
+			default_failureprofile.clone(),
 			None,
 			vec![station_2.clone(), station_3.clone()],
 			Vec::new(),
@@ -804,11 +847,13 @@ mod tests {
 	#[test]
 	fn station_becomes_blocked_when_no_successor_accepts() {
 		let mut simulator = Simulator::new();
+		let default_failureprofile = FailureProfile::new(100.0, std::time::Duration::from_secs_f64(0.0), random_numbers::Distribution::CONSTANT { value: 0.0 }, random_numbers::Distribution::CONSTANT { value: 0.0 }, 0);
 
 		// successor denies entrance
 		let succ = Rc::new(RefCell::new(SingleStation::new(
 			2,
 			std::time::Duration::from_secs_f64(5.0),
+			default_failureprofile.clone(),
 			None,
 			Vec::new(),
 			Vec::new(),
@@ -819,6 +864,7 @@ mod tests {
 		let pred = Rc::new(RefCell::new(SingleStation::new(
 			1,
 			std::time::Duration::from_secs_f64(10.0),
+			default_failureprofile.clone(),
 			None,
 			vec![succ.clone()],
 			Vec::new(),
@@ -851,10 +897,12 @@ mod tests {
 	fn blocked_retry_full_flow() {
 		let mut simulator = Simulator::new();
 		let mut eventcontroller = EventController::new(None);
+		let default_failureprofile = FailureProfile::new(100.0, std::time::Duration::from_secs_f64(0.0), random_numbers::Distribution::CONSTANT { value: 0.0 }, random_numbers::Distribution::CONSTANT { value: 0.0 }, 0);
 
 		let station_a = Rc::new(RefCell::new(SingleStation::new(
 			0,
 			std::time::Duration::from_secs_f64(60.0),
+			default_failureprofile.clone(),
 			None,
 			Vec::new(),
 			Vec::new(),
@@ -863,6 +911,7 @@ mod tests {
 		let mut busy_b = SingleStation::new(
 			0,
 			std::time::Duration::from_secs_f64(75.0),
+			default_failureprofile.clone(),
 			None,
 			Vec::new(),
 			vec![station_a.clone()],
@@ -879,6 +928,7 @@ mod tests {
 		let station_c = Rc::new(RefCell::new(SingleStation::new(
 			0,
 			std::time::Duration::from_secs_f64(30.0),
+			default_failureprofile.clone(),
 			None,
 			Vec::new(),
 			vec![station_a.clone()],
@@ -927,10 +977,12 @@ mod tests {
 	fn source_continues_producing_after_blocked_retry() {
 		let mut simulator = Simulator::new();
 		let mut eventcontroller = EventController::new(None);
+		let default_failureprofile = FailureProfile::new(100.0, std::time::Duration::from_secs_f64(0.0), random_numbers::Distribution::CONSTANT { value: 0.0 }, random_numbers::Distribution::CONSTANT { value: 0.0 }, 0);
 
 		let station_a = Rc::new(RefCell::new(SingleStation::new(
 			0,
 			std::time::Duration::from_secs_f64(60.0),
+			default_failureprofile.clone(),
 			None,
 			Vec::new(),
 			Vec::new(),
@@ -939,6 +991,7 @@ mod tests {
 		let mut busy_b = SingleStation::new(
 			0,
 			std::time::Duration::from_secs_f64(75.0),
+			default_failureprofile.clone(),
 			None,
 			Vec::new(),
 			vec![station_a.clone()],
@@ -955,6 +1008,7 @@ mod tests {
 		let station_c = Rc::new(RefCell::new(SingleStation::new(
 			0,
 			std::time::Duration::from_secs_f64(30.0),
+			default_failureprofile.clone(),
 			None,
 			Vec::new(),
 			vec![station_a.clone()],

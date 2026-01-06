@@ -3,7 +3,7 @@ use crate::event::{EventTemplate, EventType};
 use std::time::Duration;
 use super::flows::BaseObject;
 use crate::flows::{
-	EventInterface, InterruptionState, MaterialFlow, MoveableUnit, ProcessState, SuccessorContainer, try_to_move_to_successor
+	EventInterface, InterruptionState, MaterialFlow, MoveableUnit, ProcessState, SuccessorContainer, try_to_move_to_successor, FailureProfile
 };
 use crate::simulator::Simulator;
 use std::{cell::RefCell, rc::Rc};
@@ -13,6 +13,7 @@ pub struct SingleStation {
 	pub base: BaseObject,
 	pub proc_time: Duration,
 	pub remain_proc_time: Duration,
+	pub failure_profile: FailureProfile,
 	pub content: Option<MoveableUnit>,
 	pub succ: Vec<Rc<RefCell<dyn MaterialFlow>>>,
 	pub succ_pointer: usize,
@@ -28,6 +29,7 @@ impl SingleStation {
 	pub fn new(
 		object_id: u32,
 		proc_time: Duration,
+		failure_profile: FailureProfile,
 		content: Option<MoveableUnit>,
 		succ: Vec<Rc<RefCell<dyn MaterialFlow>>>,
 		pred: Vec<Rc<RefCell<dyn MaterialFlow>>>,
@@ -36,6 +38,7 @@ impl SingleStation {
 			base: BaseObject { object_id, random_seed: 0 },
 			proc_time,
 			remain_proc_time: Duration::from_millis(0),
+			failure_profile,
 			content,
 			succ,
 			succ_pointer: 0,

@@ -1,119 +1,82 @@
 use rand::{Rng, SeedableRng};
 use rand::rngs::StdRng;
+use std::rc::Rc;
 
+#[derive(Debug, Clone)]
 pub enum Distribution {
-    ERLANG,
-    NORMAL,
-    UNIFORM,
-    CONSTANT,
+    CONSTANT {value: f64},
+    UNIFORM {min: f64, max: f64},
+    ERLANG {mean: f64, k: usize},
+    NORMAL {mean: f64, std: f64},   
 }
-pub trait DistributionSampler {
-    type Params;
-    fn sample(&mut self) -> f64;
-    fn change_seed(&mut self, new_seed: u64);
-    fn parametrize(&mut self, params: Self::Params);
-    
-}
-
-pub struct UniformParams {min: f64,max: f64}
-pub struct UniformSampler {
-    params: Option<UniformParams>,
-    seed: u64,
+#[derive(Clone)]
+pub struct DistributionSampler {
+    pub params: Distribution,
+    pub seed: u64,
     prng: StdRng,
+    sample_func: Rc<dyn Fn(&Distribution, &mut StdRng) -> Result<f64,()>>,
 }
-impl UniformSampler {
-    pub fn new(seed: u64, params: Option<UniformParams>) -> UniformSampler {
-        let prng: StdRng = StdRng::seed_from_u64(seed);
-        UniformSampler { params,seed, prng}
-    }
-}
-impl DistributionSampler for UniformSampler {
-    type Params = Option<UniformParams>;
-    fn sample(&mut self) -> f64 {
-        match &self.params {
-            Some(p) => {
-                self.prng.random_range(p.min..p.max)
-            },
-            None => self.prng.random::<f64>(),
-        }
-    }
-    fn change_seed(&mut self, new_seed: u64) {
-        self.prng = StdRng::seed_from_u64(new_seed)
-    }
-    fn parametrize(&mut self, new_params: Option<UniformParams>) {
-        self.params = new_params;
-    }
-}
-pub struct ErlangParams {mean: f64,k: i32}
-pub struct ErlangSampler {
-    mean: f64,
-    k: i32,
-    lambda: f64,
-    seed: u64,
-    prng: StdRng,
-}
-impl ErlangSampler {
-    pub fn new(mean: f64, k: i32, seed: u64) -> ErlangSampler {
-        let prng: StdRng = StdRng::seed_from_u64(seed);
-        ErlangSampler {
-            mean,
-            k,
-            lambda: k as f64 / mean,
+impl DistributionSampler {
+    pub fn new(distribution: Distribution, seed: u64) -> DistributionSampler{
+        let sample_func: Rc<dyn Fn(&Distribution, &mut StdRng) -> Result<f64, ()>> = match distribution {
+            Distribution::CONSTANT {value} => Rc::new(sample_constant),
+            Distribution::UNIFORM {min,max} => Rc::new(sample_uniform),
+            Distribution::NORMAL {mean,std} => Rc::new(sample_normal),
+            Distribution::ERLANG {mean,k} => Rc::new(sample_erlang),
+        };
+        DistributionSampler {
+            params: distribution,
             seed,
-            prng,
+            prng: StdRng::seed_from_u64(seed),
+            sample_func,
         }
     }
-}
-impl DistributionSampler for ErlangSampler {
-    type Params = ErlangParams;
-    fn sample(&mut self) -> f64 {
-        let mut product: f64 = 1.0;
-        for _ in 0..self.k {
-            let u: f64 = self.prng.random::<f64>().max(f64::MIN_POSITIVE);
-            product *= u;
+    pub fn sample(&mut self) -> f64 {
+        match (self.sample_func)(&self.params, &mut self.prng) {
+            Ok(v) => v,
+            Err(_) => panic!("DistributionSampler: sampling failed for params: {:?}", self.params),
         }
-        -1.0 / self.lambda * product.ln()
     }
-    fn change_seed(&mut self, new_seed: u64) {
-        self.prng = StdRng::seed_from_u64(new_seed)
-    }
-    fn parametrize(&mut self, new_params: ErlangParams) {
-        self.mean = new_params.mean;
-        self.k = new_params.k;
-        self.lambda = self.k as f64 / self.mean;
-    }
-}
 
-pub struct NormalParams {mean: f64,std: f64}
-pub struct NormalSampler {
-    params: NormalParams,
-    seed: u64,
-    prng: StdRng,
 }
-impl NormalSampler {
-    pub fn new(mean: f64, std: f64, seed: u64) -> NormalSampler {
-        let prng: StdRng = StdRng::seed_from_u64(seed);
-        NormalSampler {
-            params: NormalParams {mean,std},
-            seed,
-            prng,
+fn sample_constant(params: &Distribution, _prng: &mut StdRng) -> Result<f64, ()> {
+    match params {
+        Distribution::CONSTANT { value } => Ok(*value),
+        _ => Err(())
+    }
+}
+fn sample_uniform(params: &Distribution, prng: &mut StdRng) -> Result<f64, ()> {
+    match params {
+        Distribution::UNIFORM { min, max } => {
+            Ok(prng.random_range(*min..*max))
         }
+        _ => Err(())
     }
 }
-impl DistributionSampler for NormalSampler {
-    type Params = NormalParams;
-    fn sample(&mut self) -> f64 {
-        // Box-Muller
-        let u1: f64 = self.prng.random::<f64>().max(f64::MIN_POSITIVE);
-        let u2: f64 = self.prng.random::<f64>();
-        let z0: f64 = (-2.0f64 * u1.ln()).sqrt() * (2.0f64 * std::f64::consts::PI * u2).cos();
-        self.params.mean + self.params.std * z0
+fn sample_normal(params: &Distribution, prng: &mut StdRng) -> Result<f64, ()> {
+    match params {
+        Distribution::NORMAL { mean, std } => {
+            // Box-Muller
+            let u1: f64 = prng.random::<f64>().max(f64::MIN_POSITIVE);
+            let u2: f64 = prng.random::<f64>();
+            let z0: f64 = (-2.0f64 * u1.ln()).sqrt() * (2.0f64 * std::f64::consts::PI * u2).cos();
+            Ok(mean + std * z0)
+        }
+        _ => Err(())
     }
-    fn change_seed(&mut self, new_seed: u64) {
-        self.prng = StdRng::seed_from_u64(new_seed)
-    }
-    fn parametrize(&mut self, new_params: NormalParams) {
-        self.params = new_params;
+}
+fn sample_erlang(params: &Distribution, prng: &mut StdRng) -> Result<f64, ()> {
+    match params {
+        Distribution::ERLANG { mean, k } => {
+            let mut product: f64 = 1.0;
+            let lambda = *k as f64 / *mean;
+            for _ in 0..*k{
+                let u: f64 = prng.random::<f64>().max(f64::MIN_POSITIVE);
+                product *= u;
+            }
+            Ok(-1.0 / lambda * product.ln())
+        }
+        _ => Err(())
     }
 }
 
@@ -171,7 +134,7 @@ mod tests {
     }
 
     // Erlang CDF for integer k: 1 - e^{-lambda x} * sum_{i=0}^{k-1} (lambda x)^i / i!
-    fn erlang_cdf(x: f64, k: i32, lambda: f64) -> f64 {
+    fn erlang_cdf(x: f64, k: usize, lambda: f64) -> f64 {
         if x <= 0.0 {
             return 0.0;
         }
@@ -233,7 +196,7 @@ mod tests {
         // Sample many times using an `ErlangSampler` instance
         let samples = 200_000;
         let mut xs = Vec::with_capacity(samples);
-        let mut sampler = ErlangSampler::new(target_mean, k, 0xDEADBEEFCAFEBABE_u64);
+        let mut sampler = DistributionSampler::new(Distribution::ERLANG { mean: target_mean, k }, 0xDEADBEEFCAFEBABE_u64);
         for _ in 0..samples {
             xs.push(sampler.sample());
         }
@@ -250,7 +213,7 @@ mod tests {
     fn uniform_distribution_statistics_are_close() {
         let samples = 200_000;
         let mut xs = Vec::with_capacity(samples);
-        let mut sampler = UniformSampler::new(0x1234_5678_9ABC_DEF0_u64, None);
+        let mut sampler = DistributionSampler::new(Distribution::UNIFORM { min: 0.0, max: 1.0 }, 0x1234_5678_9ABC_DEF0_u64);
         for _ in 0..samples {
             xs.push(sampler.sample());
         }
@@ -267,7 +230,7 @@ mod tests {
         let target_std = 2.0;
         let samples = 200_000;
         let mut xs = Vec::with_capacity(samples);
-        let mut sampler = NormalSampler::new(target_mean, target_std, 0xCAFEBABE_DEADBEEF_u64);
+        let mut sampler = DistributionSampler::new(Distribution::NORMAL { mean: target_mean, std: target_std }, 0xCAFEBABE_DEADBEEF_u64);
         for _ in 0..samples {
             xs.push(sampler.sample());
         }

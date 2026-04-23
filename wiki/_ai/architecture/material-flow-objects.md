@@ -30,8 +30,8 @@ section: architecture
 - `execute_event` has no active match arms — drain receives no scheduled events
 
 ## FailureProfile
-- `availability=100.0` → `active=false`, no failure scheduling
-- `availability<1.0` → `active=true`, `mtbf` calculated from `mttr/(1/availability - 1)`
+- `availability=1.0` → `active=false`, no failure scheduling (availability is a fraction in `(0.0,1.0)`, not a percentage)
+- `availability<1.0` → `active=true`, `mtbf` calculated as `mttr/(1/availability - 1)` using f64 arithmetic
 - Four distributions: `CONSTANT`, `UNIFORM`, `NORMAL`, `ERLANG`
 
 ## Code locations

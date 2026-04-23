@@ -82,7 +82,7 @@ Key state transitions:
 
 ### FailureProfile
 
-`SingleStation` carries a `FailureProfile` for failure modelling (availability, MTTR, MTBF, distributions). In the current demo all stations use a no-failure profile (`availability = 100%`, `CONSTANT{0.0}` distributions). `FailureProfile::set_availability(1.0)` sets `active = false` which disables all failure scheduling.
+`SingleStation` carries a `FailureProfile` for failure modelling (availability, MTTR, MTBF, distributions). Availability is expressed as a fraction in `(0.0, 1.0)` where `1.0` means 100% available. In the current demo all stations use a no-failure profile (`availability = 1.0`, `CONSTANT{0.0}` distributions). `FailureProfile::set_availability(1.0)` sets `active = false` which disables all failure scheduling.
 
 ## Drain
 

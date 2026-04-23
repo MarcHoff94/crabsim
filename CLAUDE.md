@@ -57,7 +57,7 @@ This is a Rust discrete-event material-flow simulator structured as a library (`
 - `register_material_flow` must be called for every object (including the `Source`); `add_drain` must additionally be called for each `Drain` so exit stats are tracked.
 - `EventController::seq` tiebreaking is load-bearing for deterministic tests — preserve it when changing scheduling logic.
 - `blockedlist` is deduped (`add_blocked` checks before inserting). Tests assert this; don't change to a plain `Vec` push.
-- `FailureProfile` is the failure/availability model for stations. The demo uses a no-failure profile (`availability=100.0`, zero durations, `CONSTANT{value:0.0}`).
+- `FailureProfile` is the failure/availability model for stations. Availability is a fraction in `(0.0, 1.0)` where `1.0` = 100% available (inactive). The demo uses a no-failure profile (`availability=1.0`, zero durations, `CONSTANT{value:0.0}`).
 
 ## Wiki sync
 

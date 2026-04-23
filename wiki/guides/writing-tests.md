@@ -18,7 +18,7 @@ let mut simulator = Simulator::new();
 let mut eventcontroller = EventController::new(Some(Duration::from_secs_f64(1000.0)));
 
 let default_fp = FailureProfile::new(
-    100.0,
+    1.0,   // 1.0 = 100% available (no failures); availability is a fraction, not a percentage
     Duration::ZERO,
     Distribution::CONSTANT { value: 0.0 },
     Distribution::CONSTANT { value: 0.0 },

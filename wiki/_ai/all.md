@@ -56,7 +56,7 @@ Discrete-event material-flow simulator in Rust. Use this file for full project c
 - **Source**: `init()` creates first MU immediately. `is_entrance_allowed()=false`. `add_blocked` panics.
 - **SingleStation**: `state: Idle|Processing|Blocked`. `is_entrance_allowed()` = `!entrancelocked && state==Idle && interruption==None`. `is_exit_allowed()` = `!exitlocked && (Idle||Blocked) && interruption==None`.
 - **Drain**: always accepts (`entrance_locked` starts false). `notify_blocked_predecessors` = no-op. No scheduled events.
-- `FailureProfile`: `availability=100.0` → inactive. Otherwise calculates `mtbf` from `mttr/(1/availability - 1)`.
+- `FailureProfile`: `availability=1.0` → inactive (fraction, not percentage). Otherwise calculates `mtbf` from `mttr/(1/availability - 1)` using f64 arithmetic.
 
 ### Visualization
 - Topology printed once; state snapshot after each event

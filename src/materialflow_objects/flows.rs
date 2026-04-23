@@ -64,7 +64,7 @@ impl FailureProfile {
 		if self.availablity <= 0.0 || self.availablity >= 1.0 {
 			panic!("FailureProfile: availablity must be in (0.0,1.0) range");
 		}
-		self.mtbf = Duration::from_millis((self.mttr.as_millis() /(1.0 / self.availablity - 1.0).round() as u128) as u64);
+		self.mtbf = Duration::from_millis((self.mttr.as_millis() as f64 / (1.0 / self.availablity as f64 - 1.0)) as u64);
 	}
 }
 // Errors and states

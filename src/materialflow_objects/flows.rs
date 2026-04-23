@@ -39,7 +39,7 @@ impl FailureProfile {
 			dist_sampler_mtbf: DistributionSampler::new(distribution_mtbf, seed), 
 			seed,
 		};
-		result.calculate_mtbf();
+		result.set_availability(availablity);
 		
 		result
 	}
@@ -51,7 +51,12 @@ impl FailureProfile {
 	}
 	pub fn set_availability(&mut self, availablity: f32) {
 		self.availablity = availablity;
-		self.calculate_mtbf();
+		if availablity == 1.0 {
+			self.active = false;
+		} else {
+			self.active = true;
+			self.calculate_mtbf();
+		};
 	}
 
 

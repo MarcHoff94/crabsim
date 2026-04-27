@@ -46,14 +46,23 @@ Follow these steps exactly:
    Re-read all compact summary files under wiki/_ai/ in this order: concepts, architecture, guides, reference.
    Rebuild all.md to reflect the current state of all summaries.
 
-5. Commit the wiki changes.
-   Run: git add wiki/
+5. Update wiki.html for every wiki page that was changed.
+   wiki.html embeds each wiki page as a <script type="text/markdown" id="PAGE_ID"> block.
+   The PAGE_ID maps from the file path: wiki/foo/bar-baz.md → page-foo-bar-baz
+   (strip "wiki/", replace "/" with "-", drop ".md", prefix "page-").
+   For each updated .md file, replace the full content of the matching <script> block
+   (everything between the opening tag and the next </script>) with the current content
+   of the .md file. Do not touch any other part of wiki.html.
+
+6. Commit all changes.
+   Run: git add wiki/ wiki.html
    Then: git commit -m "wiki: sync with source changes from $(git log -1 --format='%h %s' HEAD)"
    If there is nothing to commit (git add produced no staged changes), skip the commit.
 
-6. Print a concise report:
+7. Print a concise report:
    - Source files changed in this commit
    - Wiki pages updated (one line per page describing what changed)
+   - wiki.html sections updated (list page IDs)
    - Wiki pages checked and found accurate (no changes needed)
 " > "$LOG" 2>&1 &
 

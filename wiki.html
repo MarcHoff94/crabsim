@@ -882,6 +882,8 @@ The core processing unit.
 ```rust
 pub struct SingleStation {
     pub proc_time: Duration,
+    pub remain_proc_time: Duration,
+    pub interrupted_remain_proc_time: Option<Duration>,  // saved on StartFailure if Processing
     pub content: Option<MoveableUnit>,  // None = idle
     pub succ: Vec<Rc<RefCell<dyn MaterialFlow>>>,
     pub pred: Vec<Rc<RefCell<dyn MaterialFlow>>>,
@@ -889,7 +891,7 @@ pub struct SingleStation {
     pub blockedlist: Vec<u32>,
     pub entrancelocked: bool,
     pub exitlocked: bool,
-    pub state: ProcessState,         // Idle | Processing | Blocked
+    pub state: ProcessState,             // Idle | Processing | Blocked
     pub interruption: InterruptionState, // None | Failed | Paused
     pub failure_profile: FailureProfile,
 }
@@ -902,14 +904,33 @@ Key state transitions:
 | `process_mu_entrance` | Idle | Processing, entrance locked |
 | `MUExit` (move succeeds) | Processing | Idle, entrance unlocked |
 | `MUExit` (all blocked) | Processing | Blocked, entrance stays locked |
+| `MUExit` (interruption active) | any | no-op (returns `Ok(None)`) |
 | `BlockedRetry` (exit allowed, move succeeds) | Blocked | Idle, entrance unlocked |
 | `BlockedRetry` (exit not allowed) | Processing | Processing (no-op) |
+| `StartFailure` | any | `InterruptionState::Failed`; saves `remain_proc_time` if Processing; schedules `EndFailure` |
+| `EndFailure` | Failed | `InterruptionState::None`; resumes MUExit or notifies predecessors; schedules next `StartFailure` |
 
 `is_entrance_allowed()` returns `true` only when `state == Idle` AND `interruption == None` AND `!entrancelocked`.
 
 ### FailureProfile
 
-`SingleStation` carries a `FailureProfile` for failure modelling (availability, MTTR, MTBF, distributions). Availability is expressed as a fraction in `(0.0, 1.0)` where `1.0` means 100% available. In the current demo all stations use a no-failure profile (`availability = 1.0`, `CONSTANT{0.0}` distributions). `FailureProfile::set_availability(1.0)` sets `active = false` which disables all failure scheduling.
+`SingleStation` carries a `FailureProfile` for failure modelling. Availability is a fraction in `(0.0, 1.0)` where `1.0` means 100% available; `availability = 1.0` sets `active = false` and disables all failure scheduling.
+
+Constructor:
+```rust
+FailureProfile::new(
+    availablity: f32,               // fraction in (0.0,1.0]; 1.0 = always available
+    distribution_mttr: Distribution, // MTTR distribution; MTBF derived automatically
+    seed: u64,                       // base RNG seed (MTBF sampler uses seed+1)
+)
+```
+MTBF mean is derived as `mttr_mean / (1/availability - 1)`. The MTBF distribution uses the same shape as the MTTR distribution, scaled to the derived mean.
+
+`reseed(seed)` replaces both samplers while preserving their shape — called by `set_random_seed` so each registered object gets a unique RNG stream.
+
+`init()` schedules the first `StartFailure` event if `active == true`.
+
+The demo currently uses `availability = 0.9` with an Erlang(mean=60 000 ms, k=2) MTTR distribution.
 
 ## Drain
 
@@ -920,7 +941,11 @@ Key state transitions:
 
 ## FailureProfile and distributions
 
-`FailureProfile` encapsulates two `DistributionSampler`s (one for MTTR, one for MTBF). Available distributions: `CONSTANT`, `UNIFORM`, `NORMAL`, `ERLANG`. Each sampler holds a seeded `StdRng` for reproducibility.
+`FailureProfile` encapsulates two `DistributionSampler`s (MTTR and MTBF). Available distributions: `CONSTANT`, `UNIFORM`, `NORMAL`, `ERLANG`. Each sampler holds a seeded `StdRng` for reproducibility.
+
+`Distribution` provides two utility methods:
+- `mean() -> f64` — returns the configured mean of the distribution.
+- `with_mean(mean) -> Distribution` — returns a new distribution of the same shape with a different mean (used to derive the MTBF distribution from the MTTR distribution).
 
 ## Code references
 
@@ -961,20 +986,34 @@ After every processed event the simulator emits two things: a static **topology*
 `Simulator::print_network_topology()` (or `render_network_topology` for the renderer) prints the directed graph of objects as an ASCII tree. It walks `succ` relationships and draws branches and connectors.
 
 For the external renderer it is sent as:
-
 ```json
 { "kind": "topology", "text": "..." }
 ```
 
 ### State snapshot
 
-`Simulator::print_materialflow_state()` collects a `StateSnapshot` from all registered objects — each becomes a `StateRow` containing the object's current state, content, and timing info — and renders it as a table.
+`Simulator::print_materialflow_state()` collects a `StateSnapshot` from all registered objects — each becomes a `StateRow` containing the object's current state, content, timing info, and interruption status — and renders it as a table with columns: ID, Type, Content, State, Interr (interruption), RemTime, Blocked.
 
 For the external renderer:
-
 ```json
 { "kind": "snapshot", "snapshot": { ... } }
 ```
+
+### StateRow fields
+
+```rust
+pub struct StateRow {
+    pub id: u32,
+    pub typ: String,         // "Station", "Source", "Drain", "Unknown"
+    pub content: String,     // "MU<n>" or "-"
+    pub state: String,       // "Process", "Blocked", "Idle", or "-"
+    pub interruption: String, // "-", "Failed", or "Paused"
+    pub rem_time: u128,      // remaining processing time in milliseconds
+    pub blocked: String,     // comma-separated blocked predecessor IDs or "-"
+}
+```
+
+The renderer only counts down `rem_time` when `interruption == "-"`; a failing or paused station's displayed remaining time is frozen until the interruption clears.
 
 ## External renderer
 
@@ -1245,11 +1284,9 @@ let mut simulator = Simulator::new();
 let mut eventcontroller = EventController::new(Some(Duration::from_secs_f64(1000.0)));
 
 let default_fp = FailureProfile::new(
-    1.0,   // 1.0 = 100% available (no failures); availability is a fraction, not a percentage
-    Duration::ZERO,
-    Distribution::CONSTANT { value: 0.0 },
-    Distribution::CONSTANT { value: 0.0 },
-    0,
+    1.0,                                    // 1.0 = 100% available (no failures); fraction, not percentage
+    Distribution::CONSTANT { value: 0.0 },  // MTTR distribution (MTBF derived automatically)
+    0,                                      // seed
 );
 
 let station = Rc::new(RefCell::new(SingleStation::new(
@@ -1339,6 +1376,11 @@ When refactoring core scheduling or movement logic, keep these test guarantees i
 | `blocked_retry_full_flow` | End-to-end blocked/retry reaches the drain |
 | `blockedlist_dedup` | Inherent `add_blocked` method deduplicates |
 | `source_continues_producing_after_blocked_retry` | Source creates ≥3 MUs after a blocked-retry cycle |
+| `no_duplicate_random_seeds_after_init` | Each registered object receives a unique random seed after `init()` |
+| `failure_blocks_mu_exit` | A `Failed` station ignores `MUExit` events (stale events from before failure) |
+| `start_failure_schedules_end_failure` | `StartFailure` transitions to `Failed` and schedules an `EndFailure` |
+| `failure_interrupts_processing_and_resumes` | Failure mid-processing resumes with remaining proc time after repair |
+| `failure_on_idle_station_blocks_entrance_and_recovers` | Failure on idle station blocks entrance; `EndFailure` restores it and schedules next `StartFailure` |
 </script>
 
 <script type="text/markdown" id="page-reference-event-types">
@@ -1380,14 +1422,38 @@ Defined in `src/event.rs` as `pub enum EventType`.
 1. `is_exit_allowed()` is checked first. Returns `false` if `ProcessState::Processing` — the retry is a **no-op**.
 2. If exit allowed: `try_to_move_to_successor` is called. If successful, predecessor goes Idle.
 
+### StartFailure
+
+**Fires when:** a station's next failure is due (scheduled by `FailureProfile`).
+
+**Who emits it:**
+- `SingleStation::init()` — if `failure_profile.active`, schedules the first `StartFailure` at time-to-next-failure.
+- `EndFailure` handler — schedules the next failure cycle after repair.
+
+**What happens on dispatch:**
+1. Sets `interruption = InterruptionState::Failed`.
+2. If station was `Processing`, saves `remain_proc_time` into `interrupted_remain_proc_time`.
+3. Schedules `EndFailure` after MTTR (sampled from `dist_sampler_mttr`).
+
+### EndFailure
+
+**Fires when:** the repair period expires.
+
+**Who emits it:** `StartFailure` handler, after sampling MTTR.
+
+**What happens on dispatch:**
+1. Clears `interruption` back to `InterruptionState::None`.
+2. Schedules the next `StartFailure` (if profile still active).
+3. If `interrupted_remain_proc_time` is set: resumes processing, schedules `MUExit` with the saved remaining time.
+4. If station was `Blocked` when failure hit: retries `try_to_move_to_successor`.
+5. If station was `Idle`: notifies blocked predecessors they can push MUs again.
+
 ## Defined but not yet active
 
 | Type | Status |
 |---|---|
 | `MUEntrance` | Defined; entrance is handled directly via `process_mu_entrance()` from `try_to_move_to_successor`, not via a scheduled event |
 | `Finished` | Defined; not dispatched in current implementation |
-| `StartFailure` | Defined; failure scheduling infrastructure exists in `FailureProfile` but not yet wired |
-| `EndFailure` | Defined; same as above |
 
 ## EventTemplate
 

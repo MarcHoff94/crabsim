@@ -42,9 +42,20 @@ If any pages were updated, regenerate `wiki/_ai/all.md`.
 Re-read all compact summaries under `wiki/_ai/` in order: concepts → architecture → guides → reference.
 Rebuild `all.md` to reflect the current state of all summaries.
 
-## Step 6 — Report
+## Step 6 — Update wiki.html
+
+`wiki.html` embeds every wiki page as a `<script type="text/markdown" id="PAGE_ID">` block.
+The PAGE_ID maps from the file path: `wiki/foo/bar-baz.md` → `page-foo-bar-baz`
+(strip `wiki/`, replace `/` with `-`, drop `.md`, prefix `page-`).
+
+For each wiki page that was updated, replace the full content of its matching `<script>` block
+(everything between the opening tag and the next `</script>`) with the current content of the `.md` file.
+Do not touch any other part of `wiki.html`.
+
+## Step 7 — Report
 
 Print:
 - Source files that had changes (and whether from uncommitted work or last commit)
 - Wiki pages updated, with a one-line description of what changed in each
+- `wiki.html` sections updated (list page IDs)
 - Wiki pages checked and found accurate

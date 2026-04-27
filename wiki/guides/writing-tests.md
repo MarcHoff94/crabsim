@@ -18,11 +18,9 @@ let mut simulator = Simulator::new();
 let mut eventcontroller = EventController::new(Some(Duration::from_secs_f64(1000.0)));
 
 let default_fp = FailureProfile::new(
-    1.0,   // 1.0 = 100% available (no failures); availability is a fraction, not a percentage
-    Duration::ZERO,
-    Distribution::CONSTANT { value: 0.0 },
-    Distribution::CONSTANT { value: 0.0 },
-    0,
+    1.0,                                    // 1.0 = 100% available (no failures); fraction, not percentage
+    Distribution::CONSTANT { value: 0.0 },  // MTTR distribution (MTBF derived automatically)
+    0,                                      // seed
 );
 
 let station = Rc::new(RefCell::new(SingleStation::new(
@@ -112,3 +110,8 @@ When refactoring core scheduling or movement logic, keep these test guarantees i
 | `blocked_retry_full_flow` | End-to-end blocked/retry reaches the drain |
 | `blockedlist_dedup` | Inherent `add_blocked` method deduplicates |
 | `source_continues_producing_after_blocked_retry` | Source creates ≥3 MUs after a blocked-retry cycle |
+| `no_duplicate_random_seeds_after_init` | Each registered object receives a unique random seed after `init()` |
+| `failure_blocks_mu_exit` | A `Failed` station ignores `MUExit` events (stale events from before failure) |
+| `start_failure_schedules_end_failure` | `StartFailure` transitions to `Failed` and schedules an `EndFailure` |
+| `failure_interrupts_processing_and_resumes` | Failure mid-processing resumes with remaining proc time after repair |
+| `failure_on_idle_station_blocks_entrance_and_recovers` | Failure on idle station blocks entrance; `EndFailure` restores it and schedules next `StartFailure` |

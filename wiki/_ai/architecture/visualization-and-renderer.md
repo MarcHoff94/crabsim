@@ -10,6 +10,14 @@ section: architecture
 - State after every event: `print_materialflow_state()` — collects `StateSnapshot` from all objects
 - External renderer is a separate binary (`crabsim-renderer`) co-located with the main binary
 
+## StateRow fields
+```rust
+StateRow { id: u32, typ: String, content: String, state: String, interruption: String, rem_time: u128, blocked: String }
+```
+- `interruption`: `"-"` (None), `"Failed"`, or `"Paused"`
+- Table column header is `"Interr"` (7-char column)
+- Renderer `rem_time` countdown is frozen while `interruption != "-"` (failure/pause)
+
 ## Renderer JSON protocol
 ```
 {"kind": "topology", "text": "..."}       // sent once at connection

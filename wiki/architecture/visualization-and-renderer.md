@@ -33,12 +33,28 @@ For the external renderer it is sent as:
 
 ### State snapshot
 
-`Simulator::print_materialflow_state()` collects a `StateSnapshot` from all registered objects — each becomes a `StateRow` containing the object's current state, content, and timing info — and renders it as a table.
+`Simulator::print_materialflow_state()` collects a `StateSnapshot` from all registered objects — each becomes a `StateRow` containing the object's current state, content, timing info, and interruption status — and renders it as a table with columns: ID, Type, Content, State, Interr (interruption), RemTime, Blocked.
 
 For the external renderer:
 ```json
 { "kind": "snapshot", "snapshot": { ... } }
 ```
+
+### StateRow fields
+
+```rust
+pub struct StateRow {
+    pub id: u32,
+    pub typ: String,         // "Station", "Source", "Drain", "Unknown"
+    pub content: String,     // "MU<n>" or "-"
+    pub state: String,       // "Process", "Blocked", "Idle", or "-"
+    pub interruption: String, // "-", "Failed", or "Paused"
+    pub rem_time: u128,      // remaining processing time in milliseconds
+    pub blocked: String,     // comma-separated blocked predecessor IDs or "-"
+}
+```
+
+The renderer only counts down `rem_time` when `interruption == "-"`; a failing or paused station's displayed remaining time is frozen until the interruption clears.
 
 ## External renderer
 

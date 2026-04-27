@@ -17,11 +17,14 @@ section: architecture
 
 ## SingleStation key fields
 - `content: Option<MoveableUnit>` — None = idle; Some = processing or blocked
+- `remain_proc_time: Duration` — tracks time left; reset on each `process_mu_entrance`
+- `interrupted_remain_proc_time: Option<Duration>` — saved by `StartFailure` if station was Processing; consumed by `EndFailure` to resume the `MUExit`
 - `entrancelocked: bool` — set true on `process_mu_entrance`, cleared when MU exits
 - `state: ProcessState` — `Idle | Processing | Blocked`
-- `interruption: InterruptionState` — `None | Failed | Paused`; only `None` used in demo
+- `interruption: InterruptionState` — `None | Failed | Paused`
 - `is_entrance_allowed()` = `!entrancelocked && state==Idle && interruption==None`
 - `is_exit_allowed()` = `!exitlocked && (state==Idle||state==Blocked) && interruption==None`
+- `set_random_seed(seed)` also calls `failure_profile.reseed(seed)` so each object has an independent RNG stream
 
 ## Drain
 - `entrance_locked` starts false; nothing sets it true in current code → always accepts
@@ -30,9 +33,12 @@ section: architecture
 - `execute_event` has no active match arms — drain receives no scheduled events
 
 ## FailureProfile
-- `availability=1.0` → `active=false`, no failure scheduling (availability is a fraction in `(0.0,1.0)`, not a percentage)
-- `availability<1.0` → `active=true`, `mtbf` calculated as `mttr/(1/availability - 1)` using f64 arithmetic
-- Four distributions: `CONSTANT`, `UNIFORM`, `NORMAL`, `ERLANG`
+- `FailureProfile::new(availablity, distribution_mttr, seed)` — 3 args; MTBF distribution derived automatically as same shape scaled to `mttr_mean / (1/availablity - 1)`
+- `availability=1.0` → `active=false`, no failure scheduling (availability is a fraction in `(0.0,1.0]`, not a percentage)
+- `availability<1.0` → `active=true`; `init()` schedules first `StartFailure`; MTBF mean = `mttr_mean / (1/availability - 1)`
+- `reseed(seed)`: replaces both samplers preserving shape (MTBF sampler uses `seed+1`)
+- Demo: `availability=0.9`, Erlang(mean=60 000 ms, k=2) MTTR
+- `Distribution` has `mean() -> f64` and `with_mean(f64) -> Distribution` utility methods
 
 ## Code locations
 - Traits + `FailureProfile` + `ProcessState` — `src/materialflow_objects/flows.rs`

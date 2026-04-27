@@ -54,12 +54,14 @@ Discrete-event material-flow simulator in Rust. Use this file for full project c
 - `MaterialFlow: EventInterface`: entrance/exit gates, `process_mu_entrance/exit`, `add_blocked`, `notify_blocked_predecessors`
 - `SuccessorContainer`: `successors`, `succ_pointer`, `take_content`, `clear_content_and_idle`
 - **Source**: `init()` creates first MU immediately. `is_entrance_allowed()=false`. `add_blocked` panics.
-- **SingleStation**: `state: Idle|Processing|Blocked`. `is_entrance_allowed()` = `!entrancelocked && state==Idle && interruption==None`. `is_exit_allowed()` = `!exitlocked && (Idle||Blocked) && interruption==None`.
+- **SingleStation**: `state: Idle|Processing|Blocked`. `interruption: None|Failed|Paused`. `is_entrance_allowed()` = `!entrancelocked && state==Idle && interruption==None`. `is_exit_allowed()` = `!exitlocked && (Idle||Blocked) && interruption==None`. `interrupted_remain_proc_time: Option<Duration>` saves remaining proc time on `StartFailure`. `set_random_seed` also reseeds `failure_profile`.
 - **Drain**: always accepts (`entrance_locked` starts false). `notify_blocked_predecessors` = no-op. No scheduled events.
-- `FailureProfile`: `availability=1.0` → inactive (fraction, not percentage). Otherwise calculates `mtbf` from `mttr/(1/availability - 1)` using f64 arithmetic.
+- **FailureProfile**: `new(availablity, distribution_mttr, seed)` — 3 args; MTBF dist derived automatically (same shape, scaled mean = `mttr_mean / (1/availablity - 1)`). `availability=1.0` → inactive. `availability<1.0` → `init()` schedules first `StartFailure`. Demo: `availability=0.9`, Erlang(mean=60 000 ms, k=2). `Distribution.mean()` and `.with_mean(f64)` utilities.
 
 ### Visualization
 - Topology printed once; state snapshot after each event
+- `StateRow` fields: `id, typ, content, state, interruption, rem_time, blocked`
+- `interruption` column: `"-"`, `"Failed"`, or `"Paused"` — renderer freezes `rem_time` countdown while `interruption != "-"`
 - External renderer: TCP + newline-delimited JSON `{"kind":"topology"/"snapshot",...}`
 - `speed = N` → 1 sim-second = 1/N wall-seconds; `speed = -1` → unpaced
 
@@ -68,9 +70,11 @@ Discrete-event material-flow simulator in Rust. Use this file for full project c
 ## REFERENCE
 
 ### Event Types
-- `MUExit`: processing complete → `try_to_move_to_successor` → Idle+notify OR Blocked
-- `BlockedRetry`: successor freed → retry transfer (no-op if Processing)
-- `MUEntrance`, `Finished`, `StartFailure`, `EndFailure`: defined but not actively dispatched
+- `MUExit`: processing complete → `try_to_move_to_successor` → Idle+notify OR Blocked. Guard: returns `Ok(None)` if `interruption != None`.
+- `BlockedRetry`: successor freed → retry transfer (no-op if `is_exit_allowed()==false`)
+- `StartFailure`: sets `InterruptionState::Failed`, saves `remain_proc_time` if Processing, schedules `EndFailure` after sampled MTTR
+- `EndFailure`: clears interruption, schedules next `StartFailure`, resumes `MUExit` with saved time OR retries blocked exit OR notifies predecessors
+- `MUEntrance`, `Finished`: defined but not actively dispatched
 
 ### Key file locations
 - Traits + helpers: `src/materialflow_objects/flows.rs`
@@ -84,7 +88,7 @@ Discrete-event material-flow simulator in Rust. Use this file for full project c
 - CLI: `src/main.rs`
 
 ### Tests that must not regress
-`drain_fifo_order`, `ordering_across_stations_preserved`, `ordering_across_parallel_stations_preserved`, `station_becomes_blocked_when_no_successor_accepts`, `blocked_retry_while_predecessor_processing_does_not_move_mu`, `blocked_retry_full_flow`, `blockedlist_dedup`, `source_continues_producing_after_blocked_retry`
+`drain_fifo_order`, `ordering_across_stations_preserved`, `ordering_across_parallel_stations_preserved`, `station_becomes_blocked_when_no_successor_accepts`, `blocked_retry_while_predecessor_processing_does_not_move_mu`, `blocked_retry_full_flow`, `blockedlist_dedup`, `source_continues_producing_after_blocked_retry`, `no_duplicate_random_seeds_after_init`, `failure_blocks_mu_exit`, `start_failure_schedules_end_failure`, `failure_interrupts_processing_and_resumes`, `failure_on_idle_station_blocks_entrance_and_recovers`
 
 ### CLI / env vars
 - `--inplace` / `CRABSIM_LIVE_INPLACE=1` — in-place ANSI rendering

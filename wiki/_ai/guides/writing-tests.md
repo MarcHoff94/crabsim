@@ -8,12 +8,13 @@ section: guides
 ```rust
 let mut sim = Simulator::new();
 let mut ec = EventController::new(Some(Duration::from_secs_f64(1000.0)));
-let fp = FailureProfile::new(100.0, Duration::ZERO, Distribution::CONSTANT{value:0.0}, Distribution::CONSTANT{value:0.0}, 0);
+let fp = FailureProfile::new(1.0, Distribution::CONSTANT { value: 0.0 }, 0);
 // create objects, wire succ/pred, register (register_material_flow + add_drain for Drain)
 ec.init(&mut sim);
 let sim = ec.run(sim).unwrap();
 let exit_ids = &sim.drains[0].borrow().exit_ids;
 ```
+`FailureProfile::new` takes 3 args: `(availablity: f32, distribution_mttr: Distribution, seed: u64)`. MTBF distribution is derived automatically; 1.0 availability = inactive.
 
 ## Manual event scheduling
 ```rust
@@ -29,4 +30,4 @@ for (i, &id) in exit_ids.iter().enumerate() { assert_eq!(id as usize, i + 1); }
 ```
 
 ## Tests that must not regress
-`drain_fifo_order`, `ordering_across_stations_preserved`, `ordering_across_parallel_stations_preserved`, `station_becomes_blocked_when_no_successor_accepts`, `blocked_retry_while_predecessor_processing_does_not_move_mu`, `blocked_retry_full_flow`, `blockedlist_dedup`, `source_continues_producing_after_blocked_retry`
+`drain_fifo_order`, `ordering_across_stations_preserved`, `ordering_across_parallel_stations_preserved`, `station_becomes_blocked_when_no_successor_accepts`, `blocked_retry_while_predecessor_processing_does_not_move_mu`, `blocked_retry_full_flow`, `blockedlist_dedup`, `source_continues_producing_after_blocked_retry`, `no_duplicate_random_seeds_after_init`, `failure_blocks_mu_exit`, `start_failure_schedules_end_failure`, `failure_interrupts_processing_and_resumes`, `failure_on_idle_station_blocks_entrance_and_recovers`

@@ -36,14 +36,38 @@ Defined in `src/event.rs` as `pub enum EventType`.
 1. `is_exit_allowed()` is checked first. Returns `false` if `ProcessState::Processing` — the retry is a **no-op**.
 2. If exit allowed: `try_to_move_to_successor` is called. If successful, predecessor goes Idle.
 
+### StartFailure
+
+**Fires when:** a station's next failure is due (scheduled by `FailureProfile`).
+
+**Who emits it:**
+- `SingleStation::init()` — if `failure_profile.active`, schedules the first `StartFailure` at time-to-next-failure.
+- `EndFailure` handler — schedules the next failure cycle after repair.
+
+**What happens on dispatch:**
+1. Sets `interruption = InterruptionState::Failed`.
+2. If station was `Processing`, saves `remain_proc_time` into `interrupted_remain_proc_time`.
+3. Schedules `EndFailure` after MTTR (sampled from `dist_sampler_mttr`).
+
+### EndFailure
+
+**Fires when:** the repair period expires.
+
+**Who emits it:** `StartFailure` handler, after sampling MTTR.
+
+**What happens on dispatch:**
+1. Clears `interruption` back to `InterruptionState::None`.
+2. Schedules the next `StartFailure` (if profile still active).
+3. If `interrupted_remain_proc_time` is set: resumes processing, schedules `MUExit` with the saved remaining time.
+4. If station was `Blocked` when failure hit: retries `try_to_move_to_successor`.
+5. If station was `Idle`: notifies blocked predecessors they can push MUs again.
+
 ## Defined but not yet active
 
 | Type | Status |
 |---|---|
 | `MUEntrance` | Defined; entrance is handled directly via `process_mu_entrance()` from `try_to_move_to_successor`, not via a scheduled event |
 | `Finished` | Defined; not dispatched in current implementation |
-| `StartFailure` | Defined; failure scheduling infrastructure exists in `FailureProfile` but not yet wired |
-| `EndFailure` | Defined; same as above |
 
 ## EventTemplate
 

@@ -55,6 +55,8 @@ The core processing unit.
 ```rust
 pub struct SingleStation {
     pub proc_time: Duration,
+    pub remain_proc_time: Duration,
+    pub interrupted_remain_proc_time: Option<Duration>,  // saved on StartFailure if Processing
     pub content: Option<MoveableUnit>,  // None = idle
     pub succ: Vec<Rc<RefCell<dyn MaterialFlow>>>,
     pub pred: Vec<Rc<RefCell<dyn MaterialFlow>>>,
@@ -62,7 +64,7 @@ pub struct SingleStation {
     pub blockedlist: Vec<u32>,
     pub entrancelocked: bool,
     pub exitlocked: bool,
-    pub state: ProcessState,         // Idle | Processing | Blocked
+    pub state: ProcessState,             // Idle | Processing | Blocked
     pub interruption: InterruptionState, // None | Failed | Paused
     pub failure_profile: FailureProfile,
 }
@@ -75,14 +77,33 @@ Key state transitions:
 | `process_mu_entrance` | Idle | Processing, entrance locked |
 | `MUExit` (move succeeds) | Processing | Idle, entrance unlocked |
 | `MUExit` (all blocked) | Processing | Blocked, entrance stays locked |
+| `MUExit` (interruption active) | any | no-op (returns `Ok(None)`) |
 | `BlockedRetry` (exit allowed, move succeeds) | Blocked | Idle, entrance unlocked |
 | `BlockedRetry` (exit not allowed) | Processing | Processing (no-op) |
+| `StartFailure` | any | `InterruptionState::Failed`; saves `remain_proc_time` if Processing; schedules `EndFailure` |
+| `EndFailure` | Failed | `InterruptionState::None`; resumes MUExit or notifies predecessors; schedules next `StartFailure` |
 
 `is_entrance_allowed()` returns `true` only when `state == Idle` AND `interruption == None` AND `!entrancelocked`.
 
 ### FailureProfile
 
-`SingleStation` carries a `FailureProfile` for failure modelling (availability, MTTR, MTBF, distributions). Availability is expressed as a fraction in `(0.0, 1.0)` where `1.0` means 100% available. In the current demo all stations use a no-failure profile (`availability = 1.0`, `CONSTANT{0.0}` distributions). `FailureProfile::set_availability(1.0)` sets `active = false` which disables all failure scheduling.
+`SingleStation` carries a `FailureProfile` for failure modelling. Availability is a fraction in `(0.0, 1.0)` where `1.0` means 100% available; `availability = 1.0` sets `active = false` and disables all failure scheduling.
+
+Constructor:
+```rust
+FailureProfile::new(
+    availablity: f32,               // fraction in (0.0,1.0]; 1.0 = always available
+    distribution_mttr: Distribution, // MTTR distribution; MTBF derived automatically
+    seed: u64,                       // base RNG seed (MTBF sampler uses seed+1)
+)
+```
+MTBF mean is derived as `mttr_mean / (1/availability - 1)`. The MTBF distribution uses the same shape as the MTTR distribution, scaled to the derived mean.
+
+`reseed(seed)` replaces both samplers while preserving their shape — called by `set_random_seed` so each registered object gets a unique RNG stream.
+
+`init()` schedules the first `StartFailure` event if `active == true`.
+
+The demo currently uses `availability = 0.9` with an Erlang(mean=60 000 ms, k=2) MTTR distribution.
 
 ## Drain
 
@@ -93,7 +114,11 @@ Key state transitions:
 
 ## FailureProfile and distributions
 
-`FailureProfile` encapsulates two `DistributionSampler`s (one for MTTR, one for MTBF). Available distributions: `CONSTANT`, `UNIFORM`, `NORMAL`, `ERLANG`. Each sampler holds a seeded `StdRng` for reproducibility.
+`FailureProfile` encapsulates two `DistributionSampler`s (MTTR and MTBF). Available distributions: `CONSTANT`, `UNIFORM`, `NORMAL`, `ERLANG`. Each sampler holds a seeded `StdRng` for reproducibility.
+
+`Distribution` provides two utility methods:
+- `mean() -> f64` — returns the configured mean of the distribution.
+- `with_mean(mean) -> Distribution` — returns a new distribution of the same shape with a different mean (used to derive the MTBF distribution from the MTTR distribution).
 
 ## Code references
 

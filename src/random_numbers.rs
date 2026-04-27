@@ -7,7 +7,28 @@ pub enum Distribution {
     CONSTANT {value: f64},
     UNIFORM {min: f64, max: f64},
     ERLANG {mean: f64, k: usize},
-    NORMAL {mean: f64, std: f64},   
+    NORMAL {mean: f64, std: f64},
+}
+impl Distribution {
+    pub fn mean(&self) -> f64 {
+        match self {
+            Distribution::CONSTANT { value } => *value,
+            Distribution::UNIFORM { min, max } => (min + max) / 2.0,
+            Distribution::ERLANG { mean, .. } => *mean,
+            Distribution::NORMAL { mean, .. } => *mean,
+        }
+    }
+    pub fn with_mean(&self, mean: f64) -> Distribution {
+        match self {
+            Distribution::CONSTANT { .. } => Distribution::CONSTANT { value: mean },
+            Distribution::UNIFORM { min, max } => {
+                let half_range = (max - min) / 2.0;
+                Distribution::UNIFORM { min: mean - half_range, max: mean + half_range }
+            }
+            Distribution::ERLANG { k, .. } => Distribution::ERLANG { mean, k: *k },
+            Distribution::NORMAL { std, .. } => Distribution::NORMAL { mean, std: *std },
+        }
+    }
 }
 #[derive(Clone)]
 pub struct DistributionSampler {

@@ -19,7 +19,7 @@ LOG=/tmp/crabsim-wiki-update.log
 echo "[wiki] Source changes detected: $CHANGED_LIST"
 echo "[wiki] Updating wiki in background — log: $LOG"
 
-claude --print "
+claude --print --no-session-persistence "
 You are updating the crabsim wiki after a git commit. Work inside the repository at $(pwd).
 
 The following Rust source files were changed in the last commit:
@@ -46,10 +46,15 @@ Follow these steps exactly:
    Re-read all compact summary files under wiki/_ai/ in this order: concepts, architecture, guides, reference.
    Rebuild all.md to reflect the current state of all summaries.
 
-5. Print a concise report:
+5. Commit the wiki changes.
+   Run: git add wiki/
+   Then: git commit -m "wiki: sync with source changes from $(git log -1 --format='%h %s' HEAD)"
+   If there is nothing to commit (git add produced no staged changes), skip the commit.
+
+6. Print a concise report:
    - Source files changed in this commit
    - Wiki pages updated (one line per page describing what changed)
    - Wiki pages checked and found accurate (no changes needed)
-" --no-conversation-history > "$LOG" 2>&1 &
+" > "$LOG" 2>&1 &
 
 echo "[wiki] Wiki update PID: $! — check $LOG when complete"

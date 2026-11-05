@@ -4,10 +4,36 @@ A discrete-event simulator for modelling any material flow, such as a factory li
 
 ## Language
 
+### Running a simulation
+
+**Simulation run**:
+One execution of a model, from its Init until it is reset or discarded.
+
+**Init**:
+The first step of every simulation run: time is set to 0, every object's init is called and the first events are generated. This fixed part cannot be changed, and users may later add their own behaviour after it.
+
+**Start**:
+The control that begins or continues advancing time, doing Init first if it has not happened yet.
+
+**Halt**:
+The control that stops time advancing while everything stays exactly as it is. Start continues from there.
+_Avoid_: Pause, Stop (those happen to a material-flow object)
+
+**Reset**:
+The control that returns every object to its default state, ready for a new simulation run. The objects stay in the model. This fixed part cannot be changed, and users may later add their own behaviour after it.
+_Avoid_: Init, delete, clear
+
+**Default state**:
+The state a material-flow object is in before a simulation run's Init, as configured by the user, including any starting MUs.
+
+**Occurrence**:
+Something that happened in the model at a point in simulation time, such as an MU moving or a stop beginning.
+_Avoid_: Event (events are the simulator's internal schedule)
+
 ### Material flow
 
 **Moveable Unit (MU)**:
-An item that travels through the modelled material flow.
+An item that travels through the modelled material flow. Its identity is unique across the whole model.
 _Avoid_: Part, product, item
 
 **Material-flow object**:
@@ -39,6 +65,9 @@ A Station's work begins only once it is full, and all its MUs are worked on toge
 A Station's work on each MU begins when that MU enters.
 
 ### Moving MUs
+
+**Move**:
+An MU passing from one material-flow object to the next. It takes no simulation time.
 
 **Push**:
 The object holding a finished MU sends it to a successor that can accept it. This is the current flow concept.

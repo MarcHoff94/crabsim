@@ -13,6 +13,7 @@ pub struct SingleStation {
 	pub base: BaseObject,
 	pub proc_time: Duration,
 	pub remain_proc_time: Duration,
+	pub interrupted_remain_proc_time: Option<Duration>,
 	pub start_proc_time: Duration,
 	pub failure_profile: FailureProfile,
 	pub content: Option<MoveableUnit>,
@@ -39,6 +40,7 @@ impl SingleStation {
 			base: BaseObject { object_id, random_seed: 0 },
 			proc_time,
 			remain_proc_time: Duration::from_millis(0),
+			interrupted_remain_proc_time: None,
 			start_proc_time: Duration::from_millis(0),
 			failure_profile,
 			content,
@@ -100,6 +102,7 @@ impl MaterialFlow for SingleStation {
 		log::info!("MU {} entered SingleStation {}", mu.id, self.base.object_id);
 		self.content = Some(mu);
 		self.remain_proc_time = self.proc_time;
+		self.interrupted_remain_proc_time = None;
 		self.entrancelocked = true;
 		self.state = ProcessState::Processing;
 		Ok(Some(EventTemplate {
@@ -144,6 +147,16 @@ impl MaterialFlow for SingleStation {
 
 impl EventInterface for SingleStation {
 	fn init(&mut self) -> Result<Vec<EventTemplate>, InitError> {
+		if self.failure_profile.active {
+			if let Ok(Some(ttf)) = self.failure_profile.get_time_to_next_failure() {
+				return Ok(vec![EventTemplate {
+					eventtype: EventType::StartFailure,
+					exec_time: ttf,
+					object_id: self.base.object_id,
+					seq: 0,
+				}]);
+			}
+		}
 		Ok(Vec::new())
 	}
 	fn execute_event(
@@ -152,58 +165,49 @@ impl EventInterface for SingleStation {
 		eventtype: &EventType,
 	) -> Result<Option<Vec<EventTemplate>>, RunTimeError> {
 		match eventtype {
-			&EventType::MUExit => match try_to_move_to_successor(self, _simulator) {
-				Ok(Some(event_template)) => {
-					// Move succeeded and produced an event template.
-					self.entrancelocked = false;
-					self.state = ProcessState::Idle;
-					let blocked_events = self.notify_blocked_predecessors();
-					match blocked_events {
-						Ok(Some(mut be)) => {
-							be.push(event_template);
-							Ok(Some(be))
-						}
-						Ok(None) => Ok(Some(vec![event_template])),
-						Err(_e) => Err(RunTimeError {}),
-					}
+			&EventType::MUExit => {
+				if !matches!(self.interruption, InterruptionState::None) {
+					return Ok(None);
 				}
-				Ok(None) => {
-					// Ok(None) can mean either: (A) the MU was moved but no
-					// immediate event was returned by the successor, or (B)
-					// no successor could accept the MU and it remains here.
-					if self.content.is_none() {
-						// MU was moved (no event). Station becomes idle and
-						// notify any blocked predecessors.
+				match try_to_move_to_successor(self, _simulator) {
+					Ok(Some(event_template)) => {
 						self.entrancelocked = false;
 						self.state = ProcessState::Idle;
 						let blocked_events = self.notify_blocked_predecessors();
 						match blocked_events {
-							Ok(Some(be)) => Ok(Some(be)),
-							Ok(None) => Ok(None),
+							Ok(Some(mut be)) => {
+								be.push(event_template);
+								Ok(Some(be))
+							}
+							Ok(None) => Ok(Some(vec![event_template])),
 							Err(_e) => Err(RunTimeError {}),
 						}
-					} else {
-						// MU could not be moved to any successor: remain blocked.
-						self.state = ProcessState::Blocked;
-						// ensure entrance stays locked to prevent additional MU
-						// entrances while this MU waits for successors to free up.
-						self.entrancelocked = true;
-						Ok(None)
 					}
+					Ok(None) => {
+						if self.content.is_none() {
+							self.entrancelocked = false;
+							self.state = ProcessState::Idle;
+							let blocked_events = self.notify_blocked_predecessors();
+							match blocked_events {
+								Ok(Some(be)) => Ok(Some(be)),
+								Ok(None) => Ok(None),
+								Err(_e) => Err(RunTimeError {}),
+							}
+						} else {
+							self.state = ProcessState::Blocked;
+							self.entrancelocked = true;
+							Ok(None)
+						}
+					}
+					Err(_) => Err(RunTimeError {}),
 				}
-				Err(_) => Err(RunTimeError {}),
-			},
+			}
 			&EventType::BlockedRetry => {
-				// BlockedRetry is a notification from a successor that the
-				// successor has become available and requests the predecessor
-				// to attempt to move its MU. 
 				if !self.is_exit_allowed() {
 					return Ok(None);
 				}
 				match try_to_move_to_successor(self, _simulator) {
 					Ok(Some(event_template)) => {
-						// If the move succeeded (content taken) we may need to unlock entrance
-						// and flush blocked predecessors similar to MUExit path.
 						if self.content.is_none() {
 							self.entrancelocked = false;
 							self.state = ProcessState::Idle;
@@ -221,7 +225,6 @@ impl EventInterface for SingleStation {
 						}
 					}
 					Ok(None) => {
-						// Either moved with no immediate event or still blocked.
 						if self.content.is_none() {
 							self.entrancelocked = false;
 							self.state = ProcessState::Idle;
@@ -232,13 +235,85 @@ impl EventInterface for SingleStation {
 								Err(_e) => Err(RunTimeError {}),
 							}
 						} else {
-							// Still holding MU: remain blocked.
 							self.state = ProcessState::Blocked;
 							Ok(None)
 						}
 					}
 					Err(_) => Err(RunTimeError {}),
 				}
+			}
+			&EventType::StartFailure => {
+				if matches!(self.interruption, InterruptionState::Failed) {
+					return Ok(None);
+				}
+				self.interruption = InterruptionState::Failed;
+				if matches!(self.state, ProcessState::Processing) {
+					self.interrupted_remain_proc_time = Some(self.remain_proc_time);
+				}
+				let mttr = Duration::from_millis(
+					self.failure_profile.dist_sampler_mttr.sample() as u64,
+				);
+				Ok(Some(vec![EventTemplate {
+					eventtype: EventType::EndFailure,
+					exec_time: mttr,
+					object_id: self.base.object_id,
+					seq: 0,
+				}]))
+			}
+			&EventType::EndFailure => {
+				self.interruption = InterruptionState::None;
+				let mut events: Vec<EventTemplate> = Vec::new();
+				// Schedule next failure
+				if let Ok(Some(ttf)) = self.failure_profile.get_time_to_next_failure() {
+					events.push(EventTemplate {
+						eventtype: EventType::StartFailure,
+						exec_time: ttf,
+						object_id: self.base.object_id,
+						seq: 0,
+					});
+				}
+				if let Some(remain) = self.interrupted_remain_proc_time.take() {
+					// Resume interrupted processing
+					self.remain_proc_time = remain;
+					self.state = ProcessState::Processing;
+					events.push(EventTemplate {
+						eventtype: EventType::MUExit,
+						exec_time: remain,
+						object_id: self.base.object_id,
+						seq: 0,
+					});
+				} else if self.content.is_some() {
+					// Blocked when failure hit (MU done, waiting to exit) — retry move
+					match try_to_move_to_successor(self, _simulator) {
+						Ok(Some(evt)) => {
+							self.entrancelocked = false;
+							self.state = ProcessState::Idle;
+							events.push(evt);
+							if let Ok(Some(be)) = self.notify_blocked_predecessors() {
+								events.extend(be);
+							}
+						}
+						Ok(None) => {
+							if self.content.is_none() {
+								self.entrancelocked = false;
+								self.state = ProcessState::Idle;
+								if let Ok(Some(be)) = self.notify_blocked_predecessors() {
+									events.extend(be);
+								}
+							} else {
+								self.state = ProcessState::Blocked;
+							}
+						}
+						Err(_) => return Err(RunTimeError {}),
+					}
+				} else {
+					// Idle when failure hit — notify predecessors we're available again
+					self.state = ProcessState::Idle;
+					if let Ok(Some(be)) = self.notify_blocked_predecessors() {
+						events.extend(be);
+					}
+				}
+				if events.is_empty() { Ok(None) } else { Ok(Some(events)) }
 			}
 			_ => Err(RunTimeError {}),
 		}
@@ -251,6 +326,7 @@ impl EventInterface for SingleStation {
 	}
 	fn set_random_seed(&mut self, seed: u64) {
 		self.base.random_seed = seed;
+		self.failure_profile.reseed(seed);
 		todo!("re-initialize prngs")
 	}
 	fn as_any(&self) -> &dyn std::any::Any {

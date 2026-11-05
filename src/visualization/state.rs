@@ -6,7 +6,7 @@ use std::{
 
 use std::time::Duration;
 use serde::{Deserialize, Serialize};
-use crate::flows::{EventInterface, MaterialFlow, ProcessState};
+use crate::flows::{EventInterface, InterruptionState, MaterialFlow, ProcessState};
 use crate::materialflow_objects::{Drain, SingleStation, Source};
 fn format_millis_s_ms(ms: u128) -> String {
     let secs = ms / 1000;
@@ -20,6 +20,7 @@ pub struct StateRow {
     pub typ: String,
     pub content: String,
     pub state: String,
+    pub interruption: String,
     pub rem_time: u128,
     pub blocked: String,
 }
@@ -51,23 +52,24 @@ impl StateVisualizer {
                 if let Some(st) = any.downcast_ref::<SingleStation>() {
                     let content = match &st.content { Some(mu) => format!("MU{}", mu.id), None => "-".to_string() };
                     let state = match st.state { ProcessState::Processing => "Process", ProcessState::Blocked => "Blocked", ProcessState::Idle => "Idle", };
+                    let interruption = match st.interruption { InterruptionState::None => "-", InterruptionState::Failed => "Failed", InterruptionState::Paused => "Paused", }.to_string();
                     let blocked = if st.blockedlist.is_empty() { "-".to_string() } else { st.blockedlist.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(",") };
-                    rows.push(StateRow { id, typ: "Station".into(), content, state: state.into(), rem_time: st.remain_proc_time.as_millis() as u128, blocked });
+                    rows.push(StateRow { id, typ: "Station".into(), content, state: state.into(), interruption, rem_time: st.remain_proc_time.as_millis() as u128, blocked });
                     continue;
                 }
                 if let Some(src) = any.downcast_ref::<Source>() {
                     let content = match &src.content { Some(mu) => format!("MU{}", mu.id), None => "-".to_string() };
                     let state = match src.state { ProcessState::Processing => "Process", ProcessState::Blocked => "Blocked", ProcessState::Idle => "Idle", };
-                    rows.push(StateRow { id, typ: "Source".into(), content, state: state.into(), rem_time: src.remain_proc_time.as_millis() as u128, blocked: "-".into() });
+                    rows.push(StateRow { id, typ: "Source".into(), content, state: state.into(), interruption: "-".into(), rem_time: src.remain_proc_time.as_millis() as u128, blocked: "-".into() });
                     continue;
                 }
                 if let Some(dr) = any.downcast_ref::<Drain>() {
                     let content = match &dr.content { Some(mu) => format!("MU{}", mu.id), None => "-".to_string() };
                     let blocked = if dr.blockedlist.is_empty() { "-".to_string() } else { dr.blockedlist.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(",") };
-                    rows.push(StateRow { id, typ: "Drain".into(), content, state: "-".into(), rem_time: 0, blocked });
+                    rows.push(StateRow { id, typ: "Drain".into(), content, state: "-".into(), interruption: "-".into(), rem_time: 0, blocked });
                     continue;
                 }
-                rows.push(StateRow { id, typ: "Unknown".into(), content: "-".into(), state: "-".into(), rem_time: 0, blocked: "-".into() });
+                rows.push(StateRow { id, typ: "Unknown".into(), content: "-".into(), state: "-".into(), interruption: "-".into(), rem_time: 0, blocked: "-".into() });
             }
         }
         StateSnapshot { current_time: current_time.as_millis() as u128, current_seq, rows }
@@ -80,17 +82,17 @@ impl StateVisualizer {
         println!("║ {}{}║", time_str, " ".repeat(padding));
         println!("╚═════════════════════════════════════════════════════════════════════════════════╝");
 
-        println!("\n┌─────┬──────────┬──────────┬────────────┬──────────────┬─────────────────┐");
-        println!("│ {:3} │ {:8} │ {:8} │ {:10} │ {:12} │ {:15} │", "ID", "Type", "Content", "State", "RemTime", "Blocked");
-        println!("├─────┼──────────┼──────────┼────────────┼──────────────┼─────────────────┤");
+        println!("\n┌─────┬──────────┬──────────┬────────────┬─────────┬──────────────┬─────────────────┐");
+        println!("│ {:3} │ {:8} │ {:8} │ {:10} │ {:7} │ {:12} │ {:15} │", "ID", "Type", "Content", "State", "Interr", "RemTime", "Blocked");
+        println!("├─────┼──────────┼──────────┼────────────┼─────────┼──────────────┼─────────────────┤");
         for r in &snapshot.rows {
             let rem_fmt = format_millis_s_ms(r.rem_time);
             println!(
-                "│ {:3} │ {:8} │ {:8} │ {:10} │ {:12} │ {:15} │",
-                r.id, r.typ, r.content, r.state, rem_fmt, r.blocked
+                "│ {:3} │ {:8} │ {:8} │ {:10} │ {:7} │ {:12} │ {:15} │",
+                r.id, r.typ, r.content, r.state, r.interruption, rem_fmt, r.blocked
             );
         }
-        println!("└─────┴──────────┴──────────┴────────────┴──────────────┴─────────────────┘\n");
+        println!("└─────┴──────────┴──────────┴────────────┴─────────┴──────────────┴─────────────────┘\n");
     }
 
     pub fn print_snapshot_with_topology(snapshot: &StateSnapshot, topology_text: &str) {
@@ -105,17 +107,17 @@ impl StateVisualizer {
             println!("{}", topology_text);
         }
 
-        println!("\n┌─────┬──────────┬──────────┬────────────┬──────────────┬─────────────────┐");
-        println!("│ {:3} │ {:8} │ {:8} │ {:10} │ {:12} │ {:15} │", "ID", "Type", "Content", "State", "RemTime", "Blocked");
-        println!("├─────┼──────────┼──────────┼────────────┼──────────────┼─────────────────┤");
+        println!("\n┌─────┬──────────┬──────────┬────────────┬─────────┬──────────────┬─────────────────┐");
+        println!("│ {:3} │ {:8} │ {:8} │ {:10} │ {:7} │ {:12} │ {:15} │", "ID", "Type", "Content", "State", "Interr", "RemTime", "Blocked");
+        println!("├─────┼──────────┼──────────┼────────────┼─────────┼──────────────┼─────────────────┤");
         for r in &snapshot.rows {
             let rem_fmt = format_millis_s_ms(r.rem_time);
             println!(
-                "│ {:3} │ {:8} │ {:8} │ {:10} │ {:12} │ {:15} │",
-                r.id, r.typ, r.content, r.state, rem_fmt, r.blocked
+                "│ {:3} │ {:8} │ {:8} │ {:10} │ {:7} │ {:12} │ {:15} │",
+                r.id, r.typ, r.content, r.state, r.interruption, rem_fmt, r.blocked
             );
         }
-        println!("└─────┴──────────┴──────────┴────────────┴──────────────┴─────────────────┘\n");
+        println!("└─────┴──────────┴──────────┴────────────┴─────────┴──────────────┴─────────────────┘\n");
     }
     pub fn print_materialflow_state(
         material_flows: &HashMap<u32, Rc<RefCell<dyn MaterialFlow>>>,

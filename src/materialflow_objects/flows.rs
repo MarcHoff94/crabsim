@@ -22,25 +22,23 @@ pub struct BaseObject{
 pub struct FailureProfile {
 	pub active: bool,
 	pub availablity: f32,
-	pub mttr: Duration,
 	pub mtbf: Duration,
 	pub dist_sampler_mttr: DistributionSampler,
 	pub dist_sampler_mtbf: DistributionSampler,
 	pub seed: u64,
 }
 impl FailureProfile {
-	pub fn new(availablity: f32, mttr: Duration, distribution_mttr: Distribution, distribution_mtbf: Distribution, seed: u64) -> FailureProfile {
+	pub fn new(availablity: f32, distribution_mttr: Distribution, seed: u64) -> FailureProfile {
+		let placeholder = distribution_mttr.with_mean(0.0);
 		let mut result = FailureProfile {
 			active: false,
 			availablity,
-			mttr,
 			mtbf: Duration::from_millis(0),
 			dist_sampler_mttr: DistributionSampler::new(distribution_mttr, seed),
-			dist_sampler_mtbf: DistributionSampler::new(distribution_mtbf, seed), 
+			dist_sampler_mtbf: DistributionSampler::new(placeholder, seed.wrapping_add(1)),
 			seed,
 		};
-		result.calculate_mtbf();
-		
+		result.set_availability(availablity);
 		result
 	}
 	pub fn get_time_to_next_failure(&mut self) -> Result<Option<Duration>,MaterialflowError> {
@@ -51,9 +49,19 @@ impl FailureProfile {
 	}
 	pub fn set_availability(&mut self, availablity: f32) {
 		self.availablity = availablity;
-		self.calculate_mtbf();
+		if availablity == 1.0 {
+			self.active = false;
+		} else {
+			self.active = true;
+			self.calculate_mtbf();
+		};
 	}
 
+	pub fn reseed(&mut self, seed: u64) {
+		self.seed = seed;
+		self.dist_sampler_mttr = DistributionSampler::new(self.dist_sampler_mttr.params.clone(), seed);
+		self.dist_sampler_mtbf = DistributionSampler::new(self.dist_sampler_mtbf.params.clone(), seed.wrapping_add(1));
+	}
 
 	fn calculate_mtbf(&mut self) {
 		if self.availablity == 1.0 {
@@ -63,7 +71,11 @@ impl FailureProfile {
 		} else if self.availablity < 0.0 || self.availablity > 1.0 {
 			panic!("FailureProfile: availablity must be > 0 and <= 1.0");
 		}
-		self.mtbf = Duration::from_millis((self.mttr.as_millis() /(1.0 / self.availablity - 1.0).round() as u128) as u64);
+		let mttr_mean = self.dist_sampler_mttr.params.mean();
+		let mtbf_mean = mttr_mean / (1.0 / self.availablity as f64 - 1.0);
+		self.mtbf = Duration::from_millis(mtbf_mean as u64);
+		let mtbf_dist = self.dist_sampler_mttr.params.with_mean(mtbf_mean);
+		self.dist_sampler_mtbf = DistributionSampler::new(mtbf_dist, self.seed.wrapping_add(1));
 	}
 }
 // Errors and states

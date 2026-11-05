@@ -112,7 +112,9 @@ fn main() {
                 let elapsed = current_time.saturating_sub(snap.current_time);
                 if elapsed > 0 {
                     for r in current.rows.iter_mut() {
-                        if r.state == "Process" { r.rem_time = r.rem_time.saturating_sub(elapsed); }
+                        if r.state == "Process" && r.interruption == "-" {
+                            r.rem_time = r.rem_time.saturating_sub(elapsed);
+                        }
                     }
                 }
                 current.current_time = current_time;

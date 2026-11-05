@@ -1,0 +1,69 @@
+#!/bin/bash
+# After each commit: update crabsim wiki pages for any changed Rust source files.
+# Runs claude non-interactively in the background — does not block the commit.
+
+CHANGED=$(git diff HEAD~1 HEAD --name-only -- src/ | grep '\.rs$' || true)
+
+if [ -z "$CHANGED" ]; then
+    exit 0
+fi
+
+if ! command -v claude &> /dev/null; then
+    echo "[wiki] claude CLI not found — skipping wiki sync (install Claude Code to enable)"
+    exit 0
+fi
+
+CHANGED_LIST=$(echo "$CHANGED" | tr '\n' ' ')
+LOG=/tmp/crabsim-wiki-update.log
+
+echo "[wiki] Source changes detected: $CHANGED_LIST"
+echo "[wiki] Updating wiki in background — log: $LOG"
+
+claude --print --no-session-persistence "
+You are updating the crabsim wiki after a git commit. Work inside the repository at $(pwd).
+
+The following Rust source files were changed in the last commit:
+$CHANGED_LIST
+
+Follow these steps exactly:
+
+1. Run: git diff HEAD~1 HEAD -- $CHANGED_LIST
+   Read the diff carefully to understand what changed (renamed fields, new methods, removed behaviour, changed signatures, etc).
+
+2. Find which wiki pages are affected.
+   List all files under wiki/ excluding wiki/_ai/ and wiki/_template/.
+   Read each page. Check its 'Code references' section for mentions of the changed source files.
+   Collect the set of pages that reference those files.
+
+3. For each affected wiki page:
+   a. Read the full page content.
+   b. Read the current source file(s) it references.
+   c. Identify every inaccuracy introduced by the commit (outdated field names, missing new methods, removed items still described, changed behaviour).
+   d. Update only the inaccurate parts — preserve the page structure, tone, and YAML front-matter.
+   e. Immediately after, update the matching wiki/_ai/<section>/<filename>.md compact summary with the same corrections.
+
+4. If any pages were updated, regenerate wiki/_ai/all.md.
+   Re-read all compact summary files under wiki/_ai/ in this order: concepts, architecture, guides, reference.
+   Rebuild all.md to reflect the current state of all summaries.
+
+5. Update wiki.html for every wiki page that was changed.
+   wiki.html embeds each wiki page as a <script type="text/markdown" id="PAGE_ID"> block.
+   The PAGE_ID maps from the file path: wiki/foo/bar-baz.md → page-foo-bar-baz
+   (strip "wiki/", replace "/" with "-", drop ".md", prefix "page-").
+   For each updated .md file, replace the full content of the matching <script> block
+   (everything between the opening tag and the next </script>) with the current content
+   of the .md file. Do not touch any other part of wiki.html.
+
+6. Commit all changes.
+   Run: git add wiki/ wiki.html
+   Then: git commit -m "wiki: sync with source changes from $(git log -1 --format='%h %s' HEAD)"
+   If there is nothing to commit (git add produced no staged changes), skip the commit.
+
+7. Print a concise report:
+   - Source files changed in this commit
+   - Wiki pages updated (one line per page describing what changed)
+   - wiki.html sections updated (list page IDs)
+   - Wiki pages checked and found accurate (no changes needed)
+" > "$LOG" 2>&1 &
+
+echo "[wiki] Wiki update PID: $! — check $LOG when complete"

@@ -3,7 +3,7 @@ use crate::event::{EventTemplate, EventType};
 use std::time::Duration;
 use super::flows::BaseObject;
 use crate::flows::{
-	EventInterface, InterruptionState, MaterialFlow, MoveableUnit, ProcessState, SuccessorContainer, try_to_move_to_successor, FailureProfile
+	EventInterface, StopCtrl, FailureProfile, InterruptionState, MaterialFlow, MoveableUnit, ProcessState, SuccessorContainer, try_to_move_to_successor
 };
 use crate::simulator::Simulator;
 use std::{cell::RefCell, rc::Rc};
@@ -13,6 +13,7 @@ pub struct SingleStation {
 	pub base: BaseObject,
 	pub proc_time: Duration,
 	pub remain_proc_time: Duration,
+	pub start_proc_time: Duration,
 	pub failure_profile: FailureProfile,
 	pub content: Option<MoveableUnit>,
 	pub succ: Vec<Rc<RefCell<dyn MaterialFlow>>>,
@@ -38,6 +39,7 @@ impl SingleStation {
 			base: BaseObject { object_id, random_seed: 0 },
 			proc_time,
 			remain_proc_time: Duration::from_millis(0),
+			start_proc_time: Duration::from_millis(0),
 			failure_profile,
 			content,
 			succ,
@@ -93,10 +95,10 @@ impl MaterialFlow for SingleStation {
 	}
 	fn process_mu_entrance(
 		&mut self,
-		_mu: MoveableUnit,
+		mu: MoveableUnit,
 	) -> Result<Option<EventTemplate>, MaterialflowError> {
-		log::info!("MU {} entered SingleStation {}", _mu.id, self.base.object_id);
-		self.content = Some(_mu);
+		log::info!("MU {} entered SingleStation {}", mu.id, self.base.object_id);
+		self.content = Some(mu);
 		self.remain_proc_time = self.proc_time;
 		self.entrancelocked = true;
 		self.state = ProcessState::Processing;
@@ -249,12 +251,22 @@ impl EventInterface for SingleStation {
 	}
 	fn set_random_seed(&mut self, seed: u64) {
 		self.base.random_seed = seed;
+		todo!("re-initialize prngs")
 	}
 	fn as_any(&self) -> &dyn std::any::Any {
 		self
 	}
 }
-
+impl StopCtrl for SingleStation{
+	fn set_stop(&mut self, failure_start: &Duration, reason: InterruptionState) -> Result<Option<EventTemplate>, MaterialflowError> {
+		self.interruption = reason;
+		
+		todo!("not fully implemented yet")
+	}
+	fn remove_stop(&mut self) -> Result<Option<EventTemplate>, MaterialflowError> {
+		todo!("not fully implemented yet")
+	}
+}
 impl SuccessorContainer for SingleStation {
 	fn successors(&self) -> &Vec<Rc<RefCell<dyn MaterialFlow>>> {
 		&self.succ

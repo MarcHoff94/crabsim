@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use crate::error::RunTimeError;
-use crate::event::{EventTemplate, ScheduledEvent};
+use crate::event::{self, EventTemplate, ScheduledEvent};
 use std::time::Duration;
 use crate::materialflow_objects::{Drain, SingleStation, Source};
 use crate::flows::{EventInterface, MaterialFlow, ProcessState};
@@ -188,7 +188,7 @@ impl EventController {
         for drain in simulator.drains.iter_mut() {
             let mut d = drain.borrow_mut();
             let unique_seed = self.seed ^ (*d.get_object_id() as u64).wrapping_mul(0x517CC1B727220A95);
-            EventInterface::set_random_seed(&mut *d, unique_seed);
+            d.set_random_seed(unique_seed);
             debug_assert!(seen_seeds.insert(unique_seed), "Duplicate seed found for drain object_id {}", d.get_object_id());
             d.init().unwrap();
         }

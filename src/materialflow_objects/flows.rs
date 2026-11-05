@@ -64,6 +64,7 @@ impl FailureProfile {
 }
 // Errors and states
 #[derive(Debug, Clone)]
+#[derive(PartialEq)]
 pub enum ProcessState {
 	Processing,
 	Blocked,

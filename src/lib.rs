@@ -277,7 +277,7 @@ mod tests {
 	use serde::de;
 
 use super::*;
-    use crate::materialflow_objects::flows::EventInterface;
+    use crate::materialflow_objects::flows::{EventInterface, MaterialFlow};
 	use std::{cell::RefCell, rc::Rc};
 
 	#[test]
@@ -971,6 +971,204 @@ use super::*;
 		assert!(!sim.drains.is_empty());
 		let exits = &sim.drains[0].borrow().exits;
 		assert!(exits.len() > 0, "expected at least one exit recorded after blocked retry flow");
+	}
+
+	#[test]
+	fn no_duplicate_random_seeds_after_init() {
+		// Every material-flow object (source, stations, drains) must receive a unique
+		// random seed from EventController::init(). Duplicate seeds would make failure
+		// profiles and other stochastic components correlated.
+		let mut simulator = Simulator::new();
+		let mut eventcontroller = EventController::new(None);
+		let fp = FailureProfile::new(1.0, random_numbers::Distribution::CONSTANT { value: 0.0 }, 0);
+
+		let source = Rc::new(RefCell::new(Source::new(
+			0, std::time::Duration::from_secs(5), Vec::new(),
+		)));
+		let st1 = Rc::new(RefCell::new(SingleStation::new(0, std::time::Duration::from_secs(10), fp.clone(), None, Vec::new(), Vec::new())));
+		let st2 = Rc::new(RefCell::new(SingleStation::new(0, std::time::Duration::from_secs(10), fp.clone(), None, Vec::new(), Vec::new())));
+		let st3 = Rc::new(RefCell::new(SingleStation::new(0, std::time::Duration::from_secs(10), fp.clone(), None, Vec::new(), Vec::new())));
+		let drain = Rc::new(RefCell::new(Drain::new(0, Vec::new())));
+
+		source.borrow_mut().succ = vec![st1.clone()];
+		st1.borrow_mut().succ = vec![st2.clone()];
+		st2.borrow_mut().succ = vec![st3.clone()];
+		st3.borrow_mut().succ = vec![drain.clone()];
+
+		simulator.register_material_flow(source.clone());
+		simulator.register_material_flow(st1.clone());
+		simulator.register_material_flow(st2.clone());
+		simulator.register_material_flow(st3.clone());
+		simulator.register_material_flow(drain.clone());
+		simulator.add_drain(drain.clone());
+
+		eventcontroller.init(&mut simulator);
+
+		// Collect seeds directly from concrete Rc<RefCell<T>> references
+		let mut seeds = std::collections::HashSet::new();
+		let all = vec![
+			("source", source.borrow().base.random_seed),
+			("st1",    st1.borrow().base.random_seed),
+			("st2",    st2.borrow().base.random_seed),
+			("st3",    st3.borrow().base.random_seed),
+			("drain",  drain.borrow().base.random_seed),
+		];
+		for (name, seed) in all {
+			assert!(seeds.insert(seed), "duplicate random seed {:#018x} on object '{}'", seed, name);
+		}
+	}
+
+	#[test]
+	fn failure_blocks_mu_exit() {
+		// A station that is Failed must ignore MUExit events (stale from before the failure).
+		let mut simulator = Simulator::new();
+		let default_fp = FailureProfile::new(1.0, random_numbers::Distribution::CONSTANT { value: 0.0 }, 0);
+		let mut station = SingleStation::new(
+			0,
+			std::time::Duration::from_secs_f64(10.0),
+			default_fp,
+			Some(MoveableUnit { id: 1, location_id: 0 }),
+			Vec::new(),
+			Vec::new(),
+		);
+		simulator.register_material_flow(Rc::new(RefCell::new(SingleStation::new(
+			99,
+			std::time::Duration::from_secs_f64(10.0),
+			FailureProfile::new(1.0, random_numbers::Distribution::CONSTANT { value: 0.0 }, 0),
+			None, Vec::new(), Vec::new(),
+		))));
+		station.state = crate::flows::ProcessState::Processing;
+		station.entrancelocked = true;
+		station.interruption = crate::flows::InterruptionState::Failed;
+
+		let result = station.execute_event(&mut simulator, &EventType::MUExit).unwrap();
+		assert!(result.is_none(), "Failed station must ignore MUExit");
+		assert!(station.content.is_some(), "MU must still be in station");
+	}
+
+	#[test]
+	fn start_failure_schedules_end_failure() {
+		// StartFailure must transition to Failed and schedule an EndFailure.
+		let mut simulator = Simulator::new();
+		let fp = FailureProfile::new(
+			0.8,
+			random_numbers::Distribution::CONSTANT { value: 60_000.0 },
+			42,
+		);
+		let mut station = SingleStation::new(
+			1,
+			std::time::Duration::from_secs(10),
+			fp,
+			None,
+			Vec::new(),
+			Vec::new(),
+		);
+		simulator.register_material_flow(Rc::new(RefCell::new(SingleStation::new(
+			99,
+			std::time::Duration::from_secs_f64(10.0),
+			FailureProfile::new(1.0, random_numbers::Distribution::CONSTANT { value: 0.0 }, 0),
+			None, Vec::new(), Vec::new(),
+		))));
+
+		let evts = station.execute_event(&mut simulator, &EventType::StartFailure).unwrap();
+		assert!(matches!(station.interruption, crate::flows::InterruptionState::Failed));
+		let evts = evts.expect("StartFailure must return EndFailure event");
+		assert_eq!(evts.len(), 1);
+		assert!(matches!(evts[0].eventtype, EventType::EndFailure));
+		assert_eq!(evts[0].exec_time, std::time::Duration::from_millis(60_000));
+	}
+
+	#[test]
+	fn failure_interrupts_processing_and_resumes() {
+		// Full cycle: station processes MU, failure hits mid-way, station repairs, MU continues.
+		let mut simulator = Simulator::new();
+		let mut eventcontroller = EventController::new(None);
+
+		let fp = FailureProfile::new(
+			0.5,
+			random_numbers::Distribution::CONSTANT { value: 30_000.0 },
+			7,
+		);
+		let station = Rc::new(RefCell::new(SingleStation::new(
+			0,
+			std::time::Duration::from_secs(60),
+			fp,
+			None,
+			Vec::new(),
+			Vec::new(),
+		)));
+		let source = Rc::new(RefCell::new(Source::new(
+			0,
+			std::time::Duration::from_secs(5),
+			vec![station.clone()],
+		)));
+		let drain = Rc::new(RefCell::new(Drain::new(0, vec![station.clone()])));
+		station.borrow_mut().succ = vec![drain.clone()];
+
+		let s_id = simulator.register_material_flow(source.clone());
+		let st_id = simulator.register_material_flow(station.clone());
+		let _d_id = simulator.register_material_flow(drain.clone());
+		simulator.add_drain(drain.clone());
+
+		// Schedule a failure while station is processing (MU enters at ~5s, failure at 20s)
+		eventcontroller.add_event(
+			std::time::Duration::from_secs(20),
+			EventTemplate {
+				eventtype: EventType::StartFailure,
+				exec_time: std::time::Duration::from_millis(0),
+				object_id: st_id,
+				seq: 0,
+			},
+		);
+
+		eventcontroller.endtime = Some(std::time::Duration::from_secs(300));
+		eventcontroller.init(&mut simulator);
+		let sim = eventcontroller.run(simulator).unwrap();
+
+		// At least one MU must have made it through despite the failure
+		let exits = &sim.drains[0].borrow().exits;
+		assert!(!exits.is_empty(), "at least one MU must exit despite failure");
+		let _ = s_id; // suppress unused warning
+	}
+
+	#[test]
+	fn failure_on_idle_station_blocks_entrance_and_recovers() {
+		// A failure on an Idle station must block entrance; after EndFailure, predecessors
+		// get BlockedRetry and can push MUs in again.
+		let mut simulator = Simulator::new();
+		let fp = FailureProfile::new(
+			0.5,
+			random_numbers::Distribution::CONSTANT { value: 60_000.0 },
+			0,
+		);
+		let mut station = SingleStation::new(
+			1,
+			std::time::Duration::from_secs(10),
+			fp,
+			None,
+			Vec::new(),
+			Vec::new(),
+		);
+		simulator.register_material_flow(Rc::new(RefCell::new(SingleStation::new(
+			99,
+			std::time::Duration::from_secs_f64(10.0),
+			FailureProfile::new(1.0, random_numbers::Distribution::CONSTANT { value: 0.0 }, 0),
+			None, Vec::new(), Vec::new(),
+		))));
+
+		// Trigger StartFailure while Idle
+		station.execute_event(&mut simulator, &EventType::StartFailure).unwrap();
+		assert!(!station.is_entrance_allowed(), "entrance must be denied while Failed");
+
+		// Trigger EndFailure
+		let evts = station.execute_event(&mut simulator, &EventType::EndFailure).unwrap();
+		assert!(matches!(station.interruption, crate::flows::InterruptionState::None));
+		assert!(station.is_entrance_allowed(), "entrance must be allowed after repair");
+
+		// EndFailure must schedule the next StartFailure (active profile)
+		let evts = evts.expect("EndFailure on active profile must return next StartFailure");
+		assert!(evts.iter().any(|e| matches!(e.eventtype, EventType::StartFailure)),
+			"EndFailure must schedule next StartFailure");
 	}
 
 	#[test]

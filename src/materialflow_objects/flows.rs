@@ -14,7 +14,7 @@ pub struct MoveableUnit {
 }
 
 #[derive(Debug, Clone)]
-pub struct BaseObject {
+pub struct BaseObject{
 	pub object_id: u32,
 	pub random_seed: u64,
 }
@@ -22,25 +22,23 @@ pub struct BaseObject {
 pub struct FailureProfile {
 	pub active: bool,
 	pub availablity: f32,
-	pub mttr: Duration,
 	pub mtbf: Duration,
 	pub dist_sampler_mttr: DistributionSampler,
 	pub dist_sampler_mtbf: DistributionSampler,
 	pub seed: u64,
 }
 impl FailureProfile {
-	pub fn new(availablity: f32, mttr: Duration, distribution_mttr: Distribution, distribution_mtbf: Distribution, seed: u64) -> FailureProfile {
+	pub fn new(availablity: f32, distribution_mttr: Distribution, seed: u64) -> FailureProfile {
+		let placeholder = distribution_mttr.with_mean(0.0);
 		let mut result = FailureProfile {
 			active: false,
 			availablity,
-			mttr,
 			mtbf: Duration::from_millis(0),
 			dist_sampler_mttr: DistributionSampler::new(distribution_mttr, seed),
-			dist_sampler_mtbf: DistributionSampler::new(distribution_mtbf, seed), 
+			dist_sampler_mtbf: DistributionSampler::new(placeholder, seed.wrapping_add(1)),
 			seed,
 		};
-		result.calculate_mtbf();
-		
+		result.set_availability(availablity);
 		result
 	}
 	pub fn get_time_to_next_failure(&mut self) -> Result<Option<Duration>,MaterialflowError> {
@@ -51,15 +49,33 @@ impl FailureProfile {
 	}
 	pub fn set_availability(&mut self, availablity: f32) {
 		self.availablity = availablity;
-		self.calculate_mtbf();
+		if availablity == 1.0 {
+			self.active = false;
+		} else {
+			self.active = true;
+			self.calculate_mtbf();
+		};
 	}
 
+	pub fn reseed(&mut self, seed: u64) {
+		self.seed = seed;
+		self.dist_sampler_mttr = DistributionSampler::new(self.dist_sampler_mttr.params.clone(), seed);
+		self.dist_sampler_mtbf = DistributionSampler::new(self.dist_sampler_mtbf.params.clone(), seed.wrapping_add(1));
+	}
 
 	fn calculate_mtbf(&mut self) {
-		if self.availablity <= 0.0 || self.availablity >= 1.0 {
-			panic!("FailureProfile: availablity must be in (0.0,1.0) range");
+		if self.availablity == 1.0 {
+			self.active = false;
+			self.mtbf = Duration::from_secs_f64(0.0);
+			return
+		} else if self.availablity < 0.0 || self.availablity > 1.0 {
+			panic!("FailureProfile: availablity must be > 0 and <= 1.0");
 		}
-		self.mtbf = Duration::from_millis((self.mttr.as_millis() /(1.0 / self.availablity - 1.0).round() as u128) as u64);
+		let mttr_mean = self.dist_sampler_mttr.params.mean();
+		let mtbf_mean = mttr_mean / (1.0 / self.availablity as f64 - 1.0);
+		self.mtbf = Duration::from_millis(mtbf_mean as u64);
+		let mtbf_dist = self.dist_sampler_mttr.params.with_mean(mtbf_mean);
+		self.dist_sampler_mtbf = DistributionSampler::new(mtbf_dist, self.seed.wrapping_add(1));
 	}
 }
 // Errors and states
@@ -77,7 +93,6 @@ pub enum InterruptionState {
 	Paused,
 }
 
-// Traits
 pub trait EventInterface {
 	fn init(&mut self) -> Result<Vec<EventTemplate>, InitError>;
 	fn execute_event(
@@ -90,8 +105,12 @@ pub trait EventInterface {
 	fn set_random_seed(&mut self, seed: u64);
 	fn as_any(&self) -> &dyn std::any::Any;
 }
+pub trait StopCtrl {
+	fn set_stop(&mut self, failure_start: &Duration, reason: InterruptionState) -> Result<Option<EventTemplate>, MaterialflowError>;
+	fn remove_stop(&mut self) -> Result<Option<EventTemplate>, MaterialflowError>;
+}
 
-pub trait MaterialFlow: EventInterface {
+pub trait MaterialFlow: EventInterface + StopCtrl + SuccessorContainer {
 	fn is_entrance_allowed(&self) -> bool;
 	fn is_exit_allowed(&self) -> bool;
 	fn process_mu_entrance(&mut self,_mu: MoveableUnit) -> Result<Option<EventTemplate>, MaterialflowError>;
@@ -143,7 +162,7 @@ impl DistributionStrategy for LowestIndexStrategy {
 
 /// New implementation that accepts a distribution strategy.
 pub fn try_to_move_to_successor_with_strategy<
-	T: SuccessorContainer + EventInterface,
+	T: MaterialFlow,
 	S: DistributionStrategy,
 >(obj: &mut T, simulator: &Simulator, strategy: &S) -> Result<Option<EventTemplate>, MaterialflowError> {
 	let succ = obj.successors().clone();
@@ -213,7 +232,7 @@ pub fn try_to_move_to_successor_with_strategy<
 }
 
 /// Backwards-compatible default that uses round-robin ordering.
-pub fn try_to_move_to_successor<T: SuccessorContainer + EventInterface>(
+pub fn try_to_move_to_successor<T: MaterialFlow>(
 	obj: &mut T,
 	simulator: &Simulator,
 ) -> Result<Option<EventTemplate>, MaterialflowError> {

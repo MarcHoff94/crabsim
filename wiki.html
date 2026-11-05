@@ -1,0 +1,1843 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>crabsim Wiki</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --sidebar-w: 260px;
+    --bg: #f8f9fa;
+    --sidebar-bg: #1e1e2e;
+    --sidebar-text: #cdd6f4;
+    --sidebar-muted: #6c7086;
+    --sidebar-hover: #313244;
+    --sidebar-active: #89b4fa;
+    --sidebar-active-bg: #1e1e2e;
+    --content-bg: #ffffff;
+    --text: #24292f;
+    --muted: #57606a;
+    --border: #d0d7de;
+    --code-bg: #f6f8fa;
+    --code-border: #d0d7de;
+    --pre-bg: #282c34;
+    --pre-text: #abb2bf;
+    --link: #0969da;
+    --link-hover: #0550ae;
+    --accent: #89b4fa;
+    --th-bg: #f6f8fa;
+    --section-label: #7f8c9a;
+    --radius: 6px;
+  }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    font-size: 15px;
+    line-height: 1.6;
+    color: var(--text);
+    background: var(--bg);
+    display: flex;
+    height: 100vh;
+    overflow: hidden;
+  }
+
+  /* ── Sidebar ─────────────────────────────────────────────── */
+  #sidebar {
+    width: var(--sidebar-w);
+    min-width: var(--sidebar-w);
+    background: var(--sidebar-bg);
+    color: var(--sidebar-text);
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    overflow-y: auto;
+    overflow-x: hidden;
+    flex-shrink: 0;
+  }
+
+  #sidebar-header {
+    padding: 20px 16px 16px;
+    border-bottom: 1px solid #313244;
+    flex-shrink: 0;
+  }
+
+  #sidebar-header .brand {
+    font-size: 17px;
+    font-weight: 700;
+    color: #cdd6f4;
+    letter-spacing: -0.3px;
+  }
+
+  #sidebar-header .brand span {
+    color: var(--accent);
+  }
+
+  #sidebar-header .subtitle {
+    font-size: 11px;
+    color: var(--sidebar-muted);
+    margin-top: 2px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+
+  #sidebar-search {
+    padding: 10px 12px;
+    border-bottom: 1px solid #313244;
+    flex-shrink: 0;
+  }
+
+  #search-input {
+    width: 100%;
+    background: #313244;
+    border: 1px solid #45475a;
+    border-radius: var(--radius);
+    padding: 6px 10px;
+    font-size: 13px;
+    color: var(--sidebar-text);
+    outline: none;
+    transition: border-color 0.15s;
+  }
+
+  #search-input::placeholder { color: var(--sidebar-muted); }
+  #search-input:focus { border-color: var(--accent); }
+
+  #nav {
+    padding: 8px 0 20px;
+    flex: 1;
+    overflow-y: auto;
+  }
+
+  .nav-home {
+    display: block;
+    padding: 7px 16px;
+    font-size: 13.5px;
+    color: var(--sidebar-text);
+    text-decoration: none;
+    cursor: pointer;
+    border-left: 3px solid transparent;
+    transition: background 0.1s;
+  }
+
+  .nav-home:hover { background: var(--sidebar-hover); }
+  .nav-home.active {
+    color: var(--sidebar-active);
+    border-left-color: var(--sidebar-active);
+    background: #252535;
+  }
+
+  .nav-section {
+    padding: 14px 16px 4px;
+    font-size: 10.5px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--sidebar-muted);
+  }
+
+  .nav-item {
+    display: block;
+    padding: 6px 16px 6px 24px;
+    font-size: 13.5px;
+    color: var(--sidebar-text);
+    text-decoration: none;
+    cursor: pointer;
+    border-left: 3px solid transparent;
+    transition: background 0.1s;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .nav-item:hover { background: var(--sidebar-hover); }
+  .nav-item.active {
+    color: var(--sidebar-active);
+    border-left-color: var(--sidebar-active);
+    background: #252535;
+    font-weight: 500;
+  }
+
+  /* search results */
+  .nav-item.search-match { display: block; }
+  .nav-item.search-hidden { display: none; }
+
+  /* ── Content ──────────────────────────────────────────────── */
+  #main {
+    flex: 1;
+    overflow-y: auto;
+    background: var(--content-bg);
+  }
+
+  #content {
+    max-width: 820px;
+    margin: 0 auto;
+    padding: 40px 48px 80px;
+  }
+
+  /* Markdown styles */
+  #content h1 { font-size: 2em; font-weight: 700; margin: 0 0 20px; color: #1a1a2e; border-bottom: 2px solid var(--border); padding-bottom: 10px; }
+  #content h2 { font-size: 1.35em; font-weight: 700; margin: 2em 0 0.75em; color: #24292f; border-bottom: 1px solid var(--border); padding-bottom: 6px; }
+  #content h3 { font-size: 1.1em; font-weight: 700; margin: 1.5em 0 0.5em; color: #24292f; }
+  #content h4 { font-size: 1em; font-weight: 700; margin: 1.2em 0 0.4em; color: #24292f; }
+
+  #content p { margin: 0.75em 0; }
+  #content p + p { margin-top: 0.75em; }
+
+  #content a { color: var(--link); text-decoration: none; }
+  #content a:hover { text-decoration: underline; color: var(--link-hover); }
+
+  #content ul, #content ol { margin: 0.6em 0 0.6em 1.5em; }
+  #content li { margin: 0.25em 0; }
+  #content li > ul, #content li > ol { margin: 0.2em 0 0.2em 1.2em; }
+
+  #content code {
+    font-family: "SF Mono", "Fira Code", "Cascadia Code", Consolas, "Liberation Mono", monospace;
+    font-size: 0.875em;
+    background: var(--code-bg);
+    border: 1px solid var(--code-border);
+    border-radius: 4px;
+    padding: 0.15em 0.4em;
+    color: #d63384;
+  }
+
+  #content pre {
+    background: var(--pre-bg);
+    border-radius: var(--radius);
+    padding: 16px 20px;
+    overflow-x: auto;
+    margin: 1em 0;
+    border: 1px solid #3a3a4a;
+  }
+
+  #content pre code {
+    font-family: "SF Mono", "Fira Code", "Cascadia Code", Consolas, "Liberation Mono", monospace;
+    font-size: 0.85em;
+    background: none;
+    border: none;
+    padding: 0;
+    color: var(--pre-text);
+    white-space: pre;
+  }
+
+  #content table {
+    border-collapse: collapse;
+    width: 100%;
+    margin: 1em 0;
+    font-size: 0.93em;
+    overflow-x: auto;
+    display: block;
+  }
+
+  #content th, #content td {
+    border: 1px solid var(--border);
+    padding: 8px 14px;
+    text-align: left;
+    vertical-align: top;
+  }
+
+  #content th {
+    background: var(--th-bg);
+    font-weight: 600;
+  }
+
+  #content tr:nth-child(even) td { background: #fafbfc; }
+
+  #content hr {
+    border: none;
+    border-top: 2px solid var(--border);
+    margin: 2em 0;
+  }
+
+  #content blockquote {
+    border-left: 4px solid var(--accent);
+    background: #f0f6ff;
+    margin: 1em 0;
+    padding: 10px 16px;
+    border-radius: 0 var(--radius) var(--radius) 0;
+    color: var(--muted);
+  }
+
+  /* Related pages */
+  #related-pages {
+    margin-top: 3em;
+    padding-top: 1.5em;
+    border-top: 1px solid var(--border);
+  }
+
+  #related-pages h4 {
+    font-size: 0.85em;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--muted);
+    margin-bottom: 0.6em;
+  }
+
+  #related-pages .related-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  #related-pages a {
+    display: inline-block;
+    padding: 4px 12px;
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 20px;
+    font-size: 0.85em;
+    color: var(--link);
+    text-decoration: none;
+    cursor: pointer;
+  }
+
+  #related-pages a:hover {
+    background: #e7f0fb;
+    border-color: var(--accent);
+  }
+
+  /* Breadcrumb */
+  #breadcrumb {
+    font-size: 12px;
+    color: var(--muted);
+    margin-bottom: 8px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  #breadcrumb span { color: var(--muted); }
+  #breadcrumb a { color: var(--muted); text-decoration: none; cursor: pointer; }
+  #breadcrumb a:hover { color: var(--link); }
+
+  /* No results */
+  #no-results {
+    display: none;
+    padding: 40px;
+    text-align: center;
+    color: var(--muted);
+    font-size: 0.95em;
+  }
+
+  /* Scrollbar */
+  #sidebar::-webkit-scrollbar { width: 5px; }
+  #sidebar::-webkit-scrollbar-track { background: transparent; }
+  #sidebar::-webkit-scrollbar-thumb { background: #45475a; border-radius: 3px; }
+
+  #main::-webkit-scrollbar { width: 6px; }
+  #main::-webkit-scrollbar-track { background: transparent; }
+  #main::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+</style>
+</head>
+<body>
+
+<nav id="sidebar">
+  <div id="sidebar-header">
+    <div class="brand">🦀 <span>crabsim</span></div>
+    <div class="subtitle">Wiki</div>
+  </div>
+  <div id="sidebar-search">
+    <input id="search-input" type="text" placeholder="Search…" autocomplete="off">
+  </div>
+  <div id="nav">
+    <a class="nav-home" onclick="navigate('index')">🏠 Home</a>
+
+    <div class="nav-section">Concepts</div>
+    <a class="nav-item" onclick="navigate('concepts/discrete-event-simulation')">Discrete-Event Simulation</a>
+    <a class="nav-item" onclick="navigate('concepts/material-flow-model')">Material Flow Model</a>
+    <a class="nav-item" onclick="navigate('concepts/moveable-units')">Moveable Units</a>
+    <a class="nav-item" onclick="navigate('concepts/blocked-retry')">Blocked Retry Semantics</a>
+
+    <div class="nav-section">Architecture</div>
+    <a class="nav-item" onclick="navigate('architecture/overview')">Overview</a>
+    <a class="nav-item" onclick="navigate('architecture/simulator-and-event-controller')">Simulator &amp; EventController</a>
+    <a class="nav-item" onclick="navigate('architecture/material-flow-objects')">Material Flow Objects</a>
+    <a class="nav-item" onclick="navigate('architecture/visualization-and-renderer')">Visualization &amp; Renderer</a>
+
+    <div class="nav-section">Guides</div>
+    <a class="nav-item" onclick="navigate('guides/running-the-demo')">Running the Demo</a>
+    <a class="nav-item" onclick="navigate('guides/adding-a-new-station-type')">Adding a New Station Type</a>
+    <a class="nav-item" onclick="navigate('guides/writing-tests')">Writing Tests</a>
+
+    <div class="nav-section">Reference</div>
+    <a class="nav-item" onclick="navigate('reference/event-types')">Event Types</a>
+    <a class="nav-item" onclick="navigate('reference/configuration-flags')">Configuration Flags</a>
+  </div>
+</nav>
+
+<div id="main">
+  <div id="content">
+    <div id="no-results">No pages found.</div>
+  </div>
+</div>
+
+<!-- ═══════════════════════ PAGE CONTENT ═══════════════════════ -->
+
+<script type="text/markdown" id="page-index">
+---
+title: crabsim Wiki
+section: root
+---
+
+# crabsim Wiki
+
+Discrete-event material-flow simulator written in Rust. Models production lines where parts (Moveable Units) are created by a Source, processed by SingleStations, and consumed by a Drain.
+
+## Start here
+
+Read these in order if you are new to the codebase:
+
+1. [Discrete-Event Simulation](concepts/discrete-event-simulation.md) — the core time model
+2. [Material Flow Model](concepts/material-flow-model.md) — how objects connect into a network
+3. [Blocked Retry Semantics](concepts/blocked-retry.md) — the key non-obvious mechanic
+4. [Architecture Overview](architecture/overview.md) — how the Rust code is organized
+
+## Sections
+
+### Concepts
+Domain ideas a reader must grasp before the code makes sense.
+
+- [Discrete-Event Simulation](concepts/discrete-event-simulation.md)
+- [Material Flow Model](concepts/material-flow-model.md)
+- [Moveable Units](concepts/moveable-units.md)
+- [Blocked Retry Semantics](concepts/blocked-retry.md)
+
+### Architecture
+How the main components are structured and why.
+
+- [Overview](architecture/overview.md)
+- [Simulator & EventController](architecture/simulator-and-event-controller.md)
+- [Material Flow Objects](architecture/material-flow-objects.md)
+- [Visualization & Renderer](architecture/visualization-and-renderer.md)
+
+### Guides
+How to do common tasks.
+
+- [Running the Demo](guides/running-the-demo.md)
+- [Adding a New Station Type](guides/adding-a-new-station-type.md)
+- [Writing Tests](guides/writing-tests.md)
+
+### Reference
+Quick-lookup facts.
+
+- [Event Types](reference/event-types.md)
+- [Configuration Flags](reference/configuration-flags.md)
+</script>
+
+<script type="text/markdown" id="page-concepts-discrete-event-simulation">
+---
+title: Discrete-Event Simulation
+section: concepts
+related:
+  - simulator-and-event-controller
+  - event-types
+---
+
+# Discrete-Event Simulation
+
+## What it is
+
+In a discrete-event simulation (DES), time does not tick forward continuously. Instead, the simulation jumps directly from one event to the next. Between events, nothing changes. This makes DES extremely efficient for systems where meaningful activity is sparse relative to real time — like a factory floor where a machine might run for 30 seconds before anything interesting happens.
+
+## How time advances in crabsim
+
+The `EventController` holds a priority queue (`BinaryHeap<ScheduledEvent>`) of future events sorted by their scheduled time. The run loop is:
+
+1. Pop the earliest event from the queue.
+2. Advance the simulation clock to that event's time.
+3. Dispatch the event to the object it targets (looked up by `object_id` in the `Simulator`).
+4. The object processes the event and returns zero or more new `EventTemplate`s, each with a relative `exec_time` offset.
+5. Schedule those new events at `current_time + exec_time`.
+6. Repeat until the queue is empty or `endtime` is reached.
+
+No time passes inside step 3. The state at any point is exactly the state at the most recently processed event.
+
+## FIFO tiebreaking
+
+Events scheduled at the same time are processed in the order they were created. The `EventController` assigns a monotonically increasing `seq` number to every scheduled event. When two events have identical times, the one with the lower `seq` fires first. This makes the simulation deterministic and the test suite reproducible.
+
+## Why DES for a production line
+
+A manufacturing simulation has natural events: a machine finishes processing, a part transfers to the next station, a failure begins. These happen at well-defined moments with nothing to compute in between. DES captures this cleanly without the overhead of a time-step loop that would spin through thousands of idle ticks.
+
+## Code references
+
+- `EventController` — `src/simulator.rs`
+- `ScheduledEvent`, `EventTemplate` — `src/event.rs`
+- `BinaryHeap` ordering (time + seq) — `src/event.rs` (`Ord` impl on `ScheduledEvent`)
+</script>
+
+<script type="text/markdown" id="page-concepts-material-flow-model">
+---
+title: Material Flow Model
+section: concepts
+related:
+  - moveable-units
+  - blocked-retry
+  - material-flow-objects
+---
+
+# Material Flow Model
+
+## The production line abstraction
+
+A material flow network models a production line: parts enter at a source, pass through one or more processing stations, and exit at a drain. crabsim uses three object types to represent this:
+
+| Object | Role |
+|---|---|
+| `Source` | Creates new Moveable Units at a fixed interval and pushes them into the network |
+| `SingleStation` | Holds and processes one MU at a time, then forwards it |
+| `Drain` | Consumes MUs and records their exit times |
+
+## Topology
+
+Objects are connected by wiring `succ` (successors) and `pred` (predecessors) vectors on each object before the simulation starts. The topology is static — it does not change during a run.
+
+```
+Source → Station A → Station B → Drain
+                  ↘ Station C ↗
+```
+
+A predecessor can have multiple successors (fan-out); a successor can have multiple predecessors (fan-in). `SingleStation`s track both directions. `Source` has no predecessors; `Drain` has no successors.
+
+## Routing
+
+When a predecessor has multiple successors, `try_to_move_to_successor` uses **round-robin** routing by default: it starts at `succ_pointer`, tries successors in order, and advances `succ_pointer` to one past the chosen index on success. This distributes load across parallel branches over time.
+
+An alternative `LowestIndexStrategy` always tries from index 0 first (useful for preferring a primary branch). Both strategies implement the `DistributionStrategy` trait.
+
+## Wiring conventions
+
+Both `succ` and `pred` must be wired to match before `eventcontroller.init()` is called. Forgetting to wire one direction doesn't crash immediately but breaks `BlockedRetry` routing — a freed successor won't know which predecessors to notify.
+
+## Code references
+
+- `MaterialFlow` trait — `src/materialflow_objects/flows.rs`
+- `SuccessorContainer` trait — `src/materialflow_objects/flows.rs`
+- `try_to_move_to_successor` / `try_to_move_to_successor_with_strategy` — `src/materialflow_objects/flows.rs`
+- `RoundRobinStrategy`, `LowestIndexStrategy` — `src/materialflow_objects/flows.rs`
+- `Source`, `SingleStation`, `Drain` — `src/materialflow_objects/`
+</script>
+
+<script type="text/markdown" id="page-concepts-moveable-units">
+---
+title: Moveable Units
+section: concepts
+related:
+  - material-flow-model
+  - blocked-retry
+  - event-types
+---
+
+# Moveable Units
+
+## What a MU is
+
+A Moveable Unit (MU) is the "part" that travels through the material flow network. In crabsim it is a small value type:
+
+```rust
+pub struct MoveableUnit {
+    pub id: u32,
+    pub location_id: u32,
+}
+```
+
+`id` is a globally unique identifier assigned sequentially by the `Source`. `location_id` is the `object_id` of the station currently holding the MU — it gets updated as the MU moves.
+
+## Identity and ordering
+
+The `Source` assigns IDs starting at 1, incrementing with each new MU (`mu_id` counter). Because IDs are sequential and the source produces MUs in order, the ID also encodes creation order. The `Drain` records `exit_ids` in arrival order, so comparing `exit_ids` against `[1, 2, 3, ...]` is how tests verify FIFO semantics end-to-end.
+
+## One MU per station
+
+`SingleStation` holds `content: Option<MoveableUnit>`. It can process exactly one MU at a time. When `content` is `Some`, the station's entrance is locked and no further MUs can enter. The MU is taken from `content` (via `take_content()`) only when it successfully transfers to a successor.
+
+## Lifecycle
+
+1. `Source::create_mu()` — allocates MU with next `mu_id`, stores in `content`, schedules `MUExit` after `proc_time`.
+2. `try_to_move_to_successor` — takes the MU from the predecessor via `take_content()` and hands it to the successor via `process_mu_entrance(mu)`.
+3. `Drain::process_mu_entrance(mu)` — records `current_time` in `exits` and `mu.id` in `exit_ids`. MU is not stored; it is consumed.
+
+## Code references
+
+- `MoveableUnit` struct — `src/materialflow_objects/flows.rs`
+- `Source::create_mu` — `src/materialflow_objects/source.rs`
+- `SingleStation::content` — `src/materialflow_objects/station.rs`
+- `Drain::exits`, `Drain::exit_ids` — `src/materialflow_objects/drain.rs`
+- `take_content` (SuccessorContainer trait) — `src/materialflow_objects/flows.rs`
+</script>
+
+<script type="text/markdown" id="page-concepts-blocked-retry">
+---
+title: Blocked Retry Semantics
+section: concepts
+related:
+  - event-types
+  - simulator-and-event-controller
+  - material-flow-objects
+---
+
+# Blocked Retry Semantics
+
+## The problem
+
+A station finishing its work does not guarantee a free downstream station. The successor might already be processing another part. crabsim handles this with a **blocked/retry** mechanism: when a station cannot forward its MU, it parks itself as blocked and waits to be woken up — rather than polling or re-scheduling blind retries.
+
+## Step-by-step flow
+
+### 1. Transfer attempt (MUExit)
+
+When a station finishes processing it fires a `MUExit` event and calls `try_to_move_to_successor`. This function walks the successor list (round-robin from `succ_pointer`) and checks `is_entrance_allowed()` on each.
+
+### 2. All successors locked → Blocked
+
+If every successor returns `false` from `is_entrance_allowed()`, `try_to_move_to_successor` records the predecessor's `object_id` in each denied successor's `blockedlist` (via `add_blocked`). The predecessor then:
+
+- Stays in `ProcessState::Blocked`
+- Keeps its MU in `content`
+- Keeps `entrancelocked = true` (prevents new MUs entering while it holds the current one)
+
+### 3. Successor frees up → notify
+
+When a station successfully transfers its MU and becomes idle, it calls `notify_blocked_predecessors()`. This drains its `blockedlist` and emits one `BlockedRetry` event per recorded predecessor, scheduled at `exec_time = 0` (i.e., immediately).
+
+### 4. Retry
+
+The predecessor receives `BlockedRetry` and calls `is_exit_allowed()` before attempting anything. If the station is currently processing a new MU (`ProcessState::Processing`), `is_exit_allowed()` returns `false` and the retry is a no-op — the MU will move when that processing completes via the normal `MUExit` path.
+
+If exit is allowed, `try_to_move_to_successor` is called again.
+
+## Why two separate event types
+
+`MUExit` and `BlockedRetry` both trigger a transfer attempt but carry different meaning:
+
+- `MUExit` is **scheduled**: processing finished at a known future time.
+- `BlockedRetry` is **reactive**: a successor just became available.
+
+Keeping them separate means a `BlockedRetry` arriving on a busy station is correctly ignored. Merging them would require extra state to distinguish "just finished my own work" from "woken up while already working".
+
+## Source and Drain differences
+
+`Source` also handles `BlockedRetry` — if it was blocked trying to push its MU, it retries on notification, then immediately creates the next MU once the current one is forwarded.
+
+`Drain` never blocks predecessors. Its entrance is always open (`entrance_locked` starts `false`), so predecessors never end up in a Drain's `blockedlist`.
+
+## Known subtlety: dedup vs runtime path
+
+`SingleStation` has two `add_blocked` methods with different behaviour:
+
+- The **inherent method** (`impl SingleStation`) checks for duplicates before inserting.
+- The **trait method** (`impl MaterialFlow for SingleStation`) pushes unconditionally.
+
+`try_to_move_to_successor` calls through the `MaterialFlow` trait (dynamic dispatch), so the dedup check does **not** apply in the runtime path. Duplicate predecessors in `blockedlist` result in multiple `BlockedRetry` events to the same object, which is harmless (the retry is a no-op if the station is busy), but the test `blockedlist_dedup` tests the inherent method path, not the runtime path.
+
+## Code references
+
+- `try_to_move_to_successor` — `src/materialflow_objects/flows.rs`
+- `notify_blocked_predecessors` — `src/materialflow_objects/station.rs`
+- `ProcessState` enum — `src/materialflow_objects/flows.rs`
+- `is_exit_allowed`, `is_entrance_allowed` — `src/materialflow_objects/station.rs`
+- `BlockedRetry` dispatch in `execute_event` — `src/materialflow_objects/station.rs`
+- Tests: `blocked_retry_while_predecessor_processing_does_not_move_mu`, `station_becomes_blocked_when_no_successor_accepts`, `blocked_retry_full_flow`, `blockedlist_dedup` — `src/lib.rs`
+</script>
+
+<script type="text/markdown" id="page-architecture-overview">
+---
+title: Architecture Overview
+section: architecture
+related:
+  - simulator-and-event-controller
+  - material-flow-objects
+  - discrete-event-simulation
+---
+
+# Architecture Overview
+
+## The four layers
+
+```
+┌─────────────────────────────────────────────────┐
+│  EventController  (time engine)                 │
+│  BinaryHeap<ScheduledEvent>  ·  seq counter     │
+├─────────────────────────────────────────────────┤
+│  Simulator  (registry)                          │
+│  HashMap<u32, Rc<RefCell<dyn MaterialFlow>>>    │
+├─────────────────────────────────────────────────┤
+│  Material flow objects  (domain logic)          │
+│  Source · SingleStation · Drain                 │
+├─────────────────────────────────────────────────┤
+│  Visualization  (output)                        │
+│  Console (ANSI) · External renderer (TCP/JSON)  │
+└─────────────────────────────────────────────────┘
+```
+
+## Control flow during a simulation run
+
+```
+eventcontroller.init(&mut simulator)
+  └─ calls init() on every registered object
+  └─ objects return initial EventTemplates
+  └─ EventController schedules them
+
+eventcontroller.run(simulator)
+  loop:
+    pop earliest ScheduledEvent from BinaryHeap
+    advance clock to event.time
+    look up object by event.object_id in simulator.material_flows
+    call object.execute_event(eventtype)
+    object returns Vec<EventTemplate>
+    schedule each at current_time + template.exec_time
+  until queue empty or endtime reached
+```
+
+## Data flow for a single MU
+
+```
+Source::create_mu()
+  → schedules MUExit after proc_time
+
+Source::execute_event(MUExit)
+  → try_to_move_to_successor → SingleStation::process_mu_entrance(mu)
+  → SingleStation schedules MUExit after its proc_time
+  → Source creates next MU
+
+SingleStation::execute_event(MUExit)
+  → try_to_move_to_successor → next station or Drain
+  → on success: unlocks entrance, notifies blocked predecessors
+  → on failure: goes Blocked, records self in successors' blockedlists
+
+Drain::process_mu_entrance(mu)
+  → records current_time in exits, mu.id in exit_ids
+```
+
+## Ownership model
+
+Every material flow object is heap-allocated behind `Rc<RefCell<T>>`. This allows multiple owners (a station can appear in both its predecessor's `succ` list and its successor's `pred` list) while still providing mutable access at event dispatch time. The `Simulator` holds the canonical `HashMap` reference; `succ`/`pred` vectors hold additional clones of the same `Rc`.
+
+## Module map
+
+```
+src/
+  lib.rs              public API, run_demo(), unit tests
+  main.rs             CLI parsing, calls run_demo()
+  simulator.rs        Simulator, EventController
+  event.rs            EventType, EventTemplate, ScheduledEvent
+  error.rs            error types
+  random_numbers.rs   Distribution, DistributionSampler
+  materialflow_objects/
+    mod.rs            re-exports
+    flows.rs          traits, MoveableUnit, FailureProfile, movement helpers
+    source.rs         Source
+    station.rs        SingleStation
+    drain.rs          Drain
+  visualization/
+    mod.rs
+    topology.rs       network topology printer
+    state.rs          state snapshot structs and renderer
+```
+</script>
+
+<script type="text/markdown" id="page-architecture-simulator-and-event-controller">
+---
+title: Simulator & EventController
+section: architecture
+related:
+  - discrete-event-simulation
+  - material-flow-objects
+  - event-types
+---
+
+# Simulator & EventController
+
+These two structs in `src/simulator.rs` are the engine of the simulation. They are intentionally separated: `Simulator` is state, `EventController` is behaviour.
+
+## Simulator
+
+`Simulator` is the authoritative registry of all material flow objects in the simulation.
+
+```rust
+pub struct Simulator {
+    pub material_flows: HashMap<u32, Rc<RefCell<dyn MaterialFlow>>>,
+    pub drains: Vec<Rc<RefCell<Drain>>>,
+    pub object_id: u32,          // increments with each registration
+    pub current_seq: u64,        // current event sequence number
+    pub live_inplace: bool,      // in-place ANSI terminal rendering
+    pub renderer_stream: Option<TcpStream>,  // external renderer connection
+    // ...
+}
+```
+
+### Registration
+
+`register_material_flow(obj)` assigns the next `object_id` to the object (via `set_object_id`), stores a clone of the `Rc` in `material_flows`, and returns the assigned ID. Registration order determines IDs — this matters for tests that manually schedule events by `object_id`.
+
+`add_drain(drain)` registers a drain separately so the simulator can access typed drain data (exit records) after the run. Drains must be registered with both methods.
+
+### Simulation init
+
+`Simulator::init(&mut eventcontroller)` calls `init()` on every registered object. Each object returns initial `EventTemplate`s which the EventController schedules at `current_time + exec_time`. The `Source` uses this to schedule the creation of the first MU at time 0.
+
+## EventController
+
+`EventController` owns the event queue and drives time forward.
+
+```rust
+pub struct EventController {
+    pub time: Duration,                   // current simulation clock
+    pub endtime: Option<Duration>,        // stop condition
+    event_queue: BinaryHeap<ScheduledEvent>,
+    seq: u64,                             // monotonic counter for FIFO order
+}
+```
+
+### Scheduling: add_event
+
+```rust
+eventcontroller.add_event(scheduled_time, event_template)
+```
+
+Wraps the template in a `ScheduledEvent` (time + template + seq), assigns the next `seq`, and pushes onto the heap.
+
+### Run loop
+
+`run(simulator)` consumes the simulator, processes events until the queue is empty or `endtime` is exceeded, then returns the simulator so callers can inspect drain results.
+
+For each event:
+1. Pop from heap (earliest time, lowest seq for ties).
+2. Look up the object in `simulator.material_flows` by `object_id`.
+3. Call `execute_event(&mut simulator, &eventtype)`.
+4. Schedule any returned `EventTemplate`s at `current_time + exec_time`.
+5. Update `simulator.current_seq` for logging.
+6. Call `simulator.print_materialflow_state()` (console or renderer output).
+
+### FIFO tiebreaking
+
+The `seq` counter is the mechanism that makes same-time events deterministic. `ScheduledEvent::cmp` orders first by time (ascending), then by `seq` (ascending). Because `BinaryHeap` is a max-heap and the comparison is reversed, the event with the smallest time and smallest seq is popped first.
+
+Preserve `seq` assignment order when refactoring scheduling code — deterministic tests depend on it.
+
+## Code references
+
+- `Simulator`, `EventController` — `src/simulator.rs`
+- `ScheduledEvent` ordering — `src/event.rs`
+- `Simulator::init` — `src/simulator.rs`
+- `EventController::run` — `src/simulator.rs`
+</script>
+
+<script type="text/markdown" id="page-architecture-material-flow-objects">
+---
+title: Material Flow Objects
+section: architecture
+related:
+  - material-flow-model
+  - blocked-retry
+  - moveable-units
+---
+
+# Material Flow Objects
+
+## Trait hierarchy
+
+Every material flow object implements two traits, and objects with successors implement a third:
+
+```
+EventInterface
+  init() → Vec<EventTemplate>
+  execute_event(simulator, eventtype) → Option<Vec<EventTemplate>>
+  get/set_object_id, set_random_seed, as_any
+
+MaterialFlow : EventInterface
+  is_entrance_allowed() → bool
+  is_exit_allowed() → bool
+  process_mu_entrance(mu) → Option<EventTemplate>
+  process_mu_exit() → Option<EventTemplate>
+  add_blocked(id)
+  notify_blocked_predecessors() → Option<Vec<EventTemplate>>
+
+SuccessorContainer   (Source and SingleStation only)
+  successors() → &Vec<Rc<RefCell<dyn MaterialFlow>>>
+  succ_pointer() / succ_pointer_mut()
+  take_content() → Option<MoveableUnit>
+  clear_content_and_idle()
+```
+
+`SuccessorContainer` is the interface `try_to_move_to_successor` operates on — it does not need to know the concrete type of the predecessor.
+
+## BaseObject
+
+Every object holds a `BaseObject { object_id: u32, random_seed: u64 }`. The `object_id` is assigned at registration time by `Simulator::register_material_flow`. Before registration it holds whatever value was passed to `new()` — tests sometimes rely on the registration-assigned ID, so store the return value of `register_material_flow`.
+
+## Source
+
+- Creates MUs with a sequentially incrementing `mu_id` (starts at 1).
+- `init()` immediately calls `create_mu()` to schedule the first MU at time 0.
+- `execute_event(MUExit)`: tries to push its MU to a successor. On success, creates the next MU (scheduling another `MUExit` after `proc_time`). On failure (all successors locked), goes `Blocked`.
+- Never accepts entrance: `is_entrance_allowed()` returns `false`; `process_mu_entrance` panics.
+- Has no predecessors: `notify_blocked_predecessors()` returns `None`; `add_blocked` panics.
+
+## SingleStation
+
+The core processing unit.
+
+```rust
+pub struct SingleStation {
+    pub proc_time: Duration,
+    pub remain_proc_time: Duration,
+    pub interrupted_remain_proc_time: Option<Duration>,  // saved on StartFailure if Processing
+    pub content: Option<MoveableUnit>,  // None = idle
+    pub succ: Vec<Rc<RefCell<dyn MaterialFlow>>>,
+    pub pred: Vec<Rc<RefCell<dyn MaterialFlow>>>,
+    pub succ_pointer: usize,
+    pub blockedlist: Vec<u32>,
+    pub entrancelocked: bool,
+    pub exitlocked: bool,
+    pub state: ProcessState,             // Idle | Processing | Blocked
+    pub interruption: InterruptionState, // None | Failed | Paused
+    pub failure_profile: FailureProfile,
+}
+```
+
+Key state transitions:
+
+| Event | Before | After |
+|---|---|---|
+| `process_mu_entrance` | Idle | Processing, entrance locked |
+| `MUExit` (move succeeds) | Processing | Idle, entrance unlocked |
+| `MUExit` (all blocked) | Processing | Blocked, entrance stays locked |
+| `MUExit` (interruption active) | any | no-op (returns `Ok(None)`) |
+| `BlockedRetry` (exit allowed, move succeeds) | Blocked | Idle, entrance unlocked |
+| `BlockedRetry` (exit not allowed) | Processing | Processing (no-op) |
+| `StartFailure` | any | `InterruptionState::Failed`; saves `remain_proc_time` if Processing; schedules `EndFailure` |
+| `EndFailure` | Failed | `InterruptionState::None`; resumes MUExit or notifies predecessors; schedules next `StartFailure` |
+
+`is_entrance_allowed()` returns `true` only when `state == Idle` AND `interruption == None` AND `!entrancelocked`.
+
+### FailureProfile
+
+`SingleStation` carries a `FailureProfile` for failure modelling. Availability is a fraction in `(0.0, 1.0)` where `1.0` means 100% available; `availability = 1.0` sets `active = false` and disables all failure scheduling.
+
+Constructor:
+```rust
+FailureProfile::new(
+    availablity: f32,               // fraction in (0.0,1.0]; 1.0 = always available
+    distribution_mttr: Distribution, // MTTR distribution; MTBF derived automatically
+    seed: u64,                       // base RNG seed (MTBF sampler uses seed+1)
+)
+```
+MTBF mean is derived as `mttr_mean / (1/availability - 1)`. The MTBF distribution uses the same shape as the MTTR distribution, scaled to the derived mean.
+
+`reseed(seed)` replaces both samplers while preserving their shape — called by `set_random_seed` so each registered object gets a unique RNG stream.
+
+`init()` schedules the first `StartFailure` event if `active == true`.
+
+The demo currently uses `availability = 0.9` with an Erlang(mean=60 000 ms, k=2) MTTR distribution.
+
+## Drain
+
+- Always accepts entrance (`entrance_locked` starts `false`, nothing sets it `true` in current code).
+- `process_mu_entrance(mu)`: records `current_time` in `exits` and `mu.id` in `exit_ids`. Computes running average `exit_interval`.
+- Does **not** notify blocked predecessors (`notify_blocked_predecessors` returns `None`). This is safe because the Drain never becomes a blocker.
+- `execute_event` has no active match arms — the Drain receives no scheduled events.
+
+## FailureProfile and distributions
+
+`FailureProfile` encapsulates two `DistributionSampler`s (MTTR and MTBF). Available distributions: `CONSTANT`, `UNIFORM`, `NORMAL`, `ERLANG`. Each sampler holds a seeded `StdRng` for reproducibility.
+
+`Distribution` provides two utility methods:
+- `mean() -> f64` — returns the configured mean of the distribution.
+- `with_mean(mean) -> Distribution` — returns a new distribution of the same shape with a different mean (used to derive the MTBF distribution from the MTTR distribution).
+
+## Code references
+
+- `EventInterface`, `MaterialFlow`, `SuccessorContainer`, `FailureProfile`, `ProcessState` — `src/materialflow_objects/flows.rs`
+- `Source` — `src/materialflow_objects/source.rs`
+- `SingleStation` — `src/materialflow_objects/station.rs`
+- `Drain` — `src/materialflow_objects/drain.rs`
+- `Distribution`, `DistributionSampler` — `src/random_numbers.rs`
+</script>
+
+<script type="text/markdown" id="page-architecture-visualization-and-renderer">
+---
+title: Visualization & Renderer
+section: architecture
+related:
+  - simulator-and-event-controller
+  - configuration-flags
+---
+
+# Visualization & Renderer
+
+## Two output modes
+
+crabsim supports two ways to display the simulation state:
+
+| Mode | How | When |
+|---|---|---|
+| Console (plain) | Prints a new table after each event | Default |
+| Console (in-place) | Rewrites the same table using ANSI escape sequences | `--inplace` |
+| External renderer | Sends JSON to a separate terminal window | `--renderer-window` |
+
+## What gets printed
+
+After every processed event the simulator emits two things: a static **topology** (once, at the start) and a **state snapshot** (after each event).
+
+### Topology
+
+`Simulator::print_network_topology()` (or `render_network_topology` for the renderer) prints the directed graph of objects as an ASCII tree. It walks `succ` relationships and draws branches and connectors.
+
+For the external renderer it is sent as:
+```json
+{ "kind": "topology", "text": "..." }
+```
+
+### State snapshot
+
+`Simulator::print_materialflow_state()` collects a `StateSnapshot` from all registered objects — each becomes a `StateRow` containing the object's current state, content, timing info, and interruption status — and renders it as a table with columns: ID, Type, Content, State, Interr (interruption), RemTime, Blocked.
+
+For the external renderer:
+```json
+{ "kind": "snapshot", "snapshot": { ... } }
+```
+
+### StateRow fields
+
+```rust
+pub struct StateRow {
+    pub id: u32,
+    pub typ: String,         // "Station", "Source", "Drain", "Unknown"
+    pub content: String,     // "MU<n>" or "-"
+    pub state: String,       // "Process", "Blocked", "Idle", or "-"
+    pub interruption: String, // "-", "Failed", or "Paused"
+    pub rem_time: u128,      // remaining processing time in milliseconds
+    pub blocked: String,     // comma-separated blocked predecessor IDs or "-"
+}
+```
+
+The renderer only counts down `rem_time` when `interruption == "-"`; a failing or paused station's displayed remaining time is frozen until the interruption clears.
+
+## External renderer
+
+The external renderer is a second binary (`crabsim-renderer`) that:
+
+1. Connects to the simulator via TCP on a port chosen by the simulator.
+2. Receives newline-delimited JSON messages.
+3. Displays: header, topology string, live state table.
+4. Paces display: `1 sim-second = 1/speed wall-seconds`. At `speed = -1` (unpaced), renders immediately until the last event then holds open.
+
+### Launch sequence
+
+When `CRABSIM_RENDERER=1`:
+1. Simulator binds a random local TCP port.
+2. Spawns `crabsim-renderer --connect <ip>:<port> --speed <factor>`.
+   - On Linux: direct `Command::new(renderer_prog)`.
+   - On Windows: `PowerShell Start-Process` (maximized) or `cmd /C start /MAX`.
+3. Accepts the single inbound connection.
+4. Immediately sends the topology message.
+
+The renderer binary path is resolved relative to the current executable (same directory). If the renderer binary is missing, the simulator silently continues without it.
+
+## In-place console mode
+
+When `live_inplace = true`, the simulator:
+1. Prints an ANSI anchor marker on the first snapshot.
+2. On subsequent snapshots, moves the cursor back to the anchor and overwrites the previous table.
+
+This gives a live-updating dashboard in the terminal without scroll.
+
+## Code references
+
+- `Simulator::print_materialflow_state`, `print_network_topology` — `src/simulator.rs`
+- `StateSnapshot`, `StateRow`, `StateVisualizer` — `src/visualization/state.rs`
+- `TopologyVisualizer`, `render_network_topology` — `src/visualization/topology.rs`
+- Renderer spawn logic — `src/lib.rs` (`run_demo`)
+</script>
+
+<script type="text/markdown" id="page-guides-running-the-demo">
+---
+title: Running the Demo
+section: guides
+related:
+  - configuration-flags
+  - visualization-and-renderer
+---
+
+# Running the Demo
+
+## Three modes
+
+### Plain (default)
+
+Prints a new state table to stdout after each event.
+
+```bash
+RUST_LOG=info cargo run --bin crabsim
+```
+
+### In-place
+
+Rewrites the same table in the terminal using ANSI escape sequences — gives a live-updating dashboard.
+
+```bash
+# Via CLI flag
+RUST_LOG=info cargo run --bin crabsim -- --inplace
+
+# Via env var
+CRABSIM_LIVE_INPLACE=1 RUST_LOG=info cargo run --bin crabsim
+```
+
+### External renderer window
+
+Spawns a second terminal running `crabsim-renderer`, connected via TCP, displaying the simulation at a configurable playback speed.
+
+```bash
+# At 5× speed, hold window open 1s after finish
+RUST_LOG=info cargo run --bin crabsim -- --renderer-window --speed 5 --hold 1
+
+# Via env vars
+CRABSIM_RENDERER=1 CRABSIM_RENDERER_SPEED=5 CRABSIM_RENDERER_HOLD=1 RUST_LOG=info cargo run --bin crabsim
+```
+
+Use `--speed -1` for unpaced mode: renders each simulation second immediately (fast-forward) then enters hold-open.
+
+## Logging
+
+`run_demo()` calls `env_logger::init()`. Control verbosity via `RUST_LOG`:
+
+| Value | Effect |
+|---|---|
+| `info` | MU moves, exit times, simulation runtime |
+| `debug` | Blocked predecessor registration details |
+| `crabsim=debug` | Debug only for this crate |
+
+## Build first
+
+```bash
+cargo build
+```
+
+The renderer binary (`crabsim-renderer`) is built alongside the main binary. Both must be built before using renderer window mode. `cargo run` builds automatically.
+
+## After the run
+
+The demo prints simulation runtime in milliseconds and the exit interval list from the drain:
+
+```
+simulation runtime: 1.23 ms (renderer=false, launcher=n/a)
+```
+</script>
+
+<script type="text/markdown" id="page-guides-adding-a-new-station-type">
+---
+title: Adding a New Station Type
+section: guides
+related:
+  - material-flow-objects
+  - blocked-retry
+  - writing-tests
+---
+
+# Adding a New Station Type
+
+This guide walks through adding a new type of material flow object — for example, a station that buffers multiple MUs, or one with variable processing time.
+
+## Step 1: Define the struct
+
+Your struct needs a `BaseObject` and fields for whatever state it tracks.
+
+```rust
+pub struct BufferStation {
+    pub base: BaseObject,
+    pub capacity: usize,
+    pub queue: VecDeque<MoveableUnit>,
+    pub succ: Vec<Rc<RefCell<dyn MaterialFlow>>>,
+    pub succ_pointer: usize,
+    pub blockedlist: Vec<u32>,
+    pub proc_time: Duration,
+}
+```
+
+## Step 2: Implement EventInterface
+
+```rust
+impl EventInterface for BufferStation {
+    fn init(&mut self) -> Result<Vec<EventTemplate>, InitError> {
+        Ok(Vec::new())  // no initial events unless you pre-load MUs
+    }
+
+    fn execute_event(
+        &mut self,
+        simulator: &mut Simulator,
+        eventtype: &EventType,
+    ) -> Result<Option<Vec<EventTemplate>>, RunTimeError> {
+        match eventtype {
+            EventType::MUExit => { /* move front of queue to successor */ }
+            EventType::BlockedRetry => { /* retry if exit allowed */ }
+            _ => return Err(RunTimeError {}),
+        }
+    }
+
+    fn get_object_id(&self) -> &u32 { &self.base.object_id }
+    fn set_object_id(&mut self, id: u32) { self.base.object_id = id; }
+    fn set_random_seed(&mut self, seed: u64) { self.base.random_seed = seed; }
+    fn as_any(&self) -> &dyn std::any::Any { self }
+}
+```
+
+## Step 3: Implement MaterialFlow
+
+```rust
+impl MaterialFlow for BufferStation {
+    fn is_entrance_allowed(&self) -> bool {
+        self.queue.len() < self.capacity
+    }
+    fn is_exit_allowed(&self) -> bool {
+        !self.queue.is_empty()
+    }
+    fn process_mu_entrance(&mut self, mu: MoveableUnit) -> Result<Option<EventTemplate>, MaterialflowError> {
+        self.queue.push_back(mu);
+        // schedule processing if first item
+        if self.queue.len() == 1 {
+            return Ok(Some(EventTemplate {
+                eventtype: EventType::MUExit,
+                exec_time: self.proc_time,
+                object_id: self.base.object_id,
+                seq: 0,
+            }));
+        }
+        Ok(None)
+    }
+    fn process_mu_exit(&mut self) -> Result<Option<EventTemplate>, MaterialflowError> { Ok(None) }
+    fn add_blocked(&mut self, id: u32) { self.blockedlist.push(id); }
+    fn notify_blocked_predecessors(&mut self) -> Result<Option<Vec<EventTemplate>>, MaterialflowError> {
+        let events: Vec<_> = self.blockedlist.drain(..)
+            .map(|id| EventTemplate {
+                eventtype: EventType::BlockedRetry,
+                exec_time: Duration::ZERO,
+                object_id: id,
+                seq: 0,
+            })
+            .collect();
+        Ok(if events.is_empty() { None } else { Some(events) })
+    }
+    fn as_any(&mut self) -> &mut dyn std::any::Any { self }
+}
+```
+
+## Step 4: Implement SuccessorContainer
+
+Required if your type has successors (so `try_to_move_to_successor` can use it).
+
+```rust
+impl SuccessorContainer for BufferStation {
+    fn successors(&self) -> &Vec<Rc<RefCell<dyn MaterialFlow>>> { &self.succ }
+    fn succ_pointer(&self) -> usize { self.succ_pointer }
+    fn succ_pointer_mut(&mut self) -> &mut usize { &mut self.succ_pointer }
+    fn take_content(&mut self) -> Option<MoveableUnit> { self.queue.pop_front() }
+    fn clear_content_and_idle(&mut self) { self.queue.clear(); }
+}
+```
+
+## Step 5: Expose in mod.rs
+
+Add a `pub use` in `src/materialflow_objects/mod.rs`:
+
+```rust
+pub use crate::materialflow_objects::buffer_station::BufferStation;
+```
+
+## Step 6: Register and wire
+
+```rust
+let buf = Rc::new(RefCell::new(BufferStation::new(...)));
+simulator.register_material_flow(buf.clone());
+
+// wire successors and predecessors
+buf.borrow_mut().succ = vec![next_station.clone()];
+next_station.borrow_mut().pred = vec![buf.clone()];
+```
+
+## Rules to preserve
+
+- Call `notify_blocked_predecessors()` whenever your object frees up space, otherwise blocked predecessors will never be woken.
+- In `BlockedRetry`, check `is_exit_allowed()` first and return `Ok(None)` if `false` — this prevents moving MUs out of an object that hasn't finished processing.
+- Keep `seq = 0` in returned `EventTemplate`s — the `EventController` overwrites it with the real sequence number at scheduling time.
+</script>
+
+<script type="text/markdown" id="page-guides-writing-tests">
+---
+title: Writing Tests
+section: guides
+related:
+  - simulator-and-event-controller
+  - material-flow-objects
+  - blocked-retry
+---
+
+# Writing Tests
+
+Tests live in `src/lib.rs` under `#[cfg(test)]`. All tests use the same pattern: build a small network, run the simulation, assert on drain exits.
+
+## Minimal setup pattern
+
+```rust
+let mut simulator = Simulator::new();
+let mut eventcontroller = EventController::new(Some(Duration::from_secs_f64(1000.0)));
+
+let default_fp = FailureProfile::new(
+    1.0,                                    // 1.0 = 100% available (no failures); fraction, not percentage
+    Distribution::CONSTANT { value: 0.0 },  // MTTR distribution (MTBF derived automatically)
+    0,                                      // seed
+);
+
+let station = Rc::new(RefCell::new(SingleStation::new(
+    0,
+    Duration::from_secs_f64(10.0),
+    default_fp.clone(),
+    None,
+    Vec::new(),  // succ — wire after creation
+    Vec::new(),  // pred
+)));
+let source = Rc::new(RefCell::new(Source::new(0, Duration::from_secs_f64(5.0), vec![station.clone()])));
+let drain = Rc::new(RefCell::new(Drain::new(0, vec![station.clone()])));
+
+station.borrow_mut().succ = vec![drain.clone()];
+
+simulator.register_material_flow(source.clone());
+simulator.register_material_flow(station.clone());
+simulator.register_material_flow(drain.clone());
+simulator.add_drain(drain.clone());
+
+eventcontroller.init(&mut simulator);
+let sim = eventcontroller.run(simulator).unwrap();
+```
+
+## Asserting on exits
+
+```rust
+let exits = &sim.drains[0].borrow().exits;      // Vec<Duration> — timestamps
+let exit_ids = &sim.drains[0].borrow().exit_ids; // Vec<u32> — MU ids in arrival order
+
+assert!(!exit_ids.is_empty());
+
+// FIFO check: IDs should be sequential from 1
+for (i, &id) in exit_ids.iter().enumerate() {
+    assert_eq!(id as usize, i + 1);
+}
+
+// Throughput check
+assert!(exits.len() >= expected_count);
+```
+
+## Manually scheduling an event
+
+Use this to set up a specific mid-simulation state, e.g., a busy station that finishes at a known time:
+
+```rust
+let b_id = simulator.register_material_flow(station_b.clone());
+
+eventcontroller.add_event(
+    Duration::from_secs_f64(100.0),
+    EventTemplate {
+        eventtype: EventType::MUExit,
+        exec_time: Duration::ZERO,
+        object_id: b_id,
+        seq: 0,
+    },
+);
+```
+
+Always store the return value of `register_material_flow` when you need the assigned `object_id` for manual event scheduling.
+
+## Testing blocked/retry behaviour
+
+Pre-configure a station as busy and locked to test the blocked/retry path:
+
+```rust
+let mut busy = SingleStation::new(0, Duration::from_secs_f64(75.0), fp.clone(), None, Vec::new(), Vec::new());
+busy.content = Some(MoveableUnit { id: 9999, location_id: 0 });
+busy.entrancelocked = true;
+busy.state = ProcessState::Processing;
+let station_b = Rc::new(RefCell::new(busy));
+```
+
+Then schedule its `MUExit` manually to trigger the retry flow at a known time.
+
+## Behaviours tests must preserve
+
+When refactoring core scheduling or movement logic, keep these test guarantees intact:
+
+| Test | What it verifies |
+|---|---|
+| `drain_fifo_order` | MU IDs arrive at drain in creation order |
+| `ordering_across_stations_preserved` | FIFO preserved across a linear chain |
+| `ordering_across_parallel_stations_preserved` | FIFO preserved across parallel branches |
+| `station_becomes_blocked_when_no_successor_accepts` | Predecessor goes Blocked when all successors deny |
+| `blocked_retry_while_predecessor_processing_does_not_move_mu` | BlockedRetry is no-op when station is Processing |
+| `blocked_retry_full_flow` | End-to-end blocked/retry reaches the drain |
+| `blockedlist_dedup` | Inherent `add_blocked` method deduplicates |
+| `source_continues_producing_after_blocked_retry` | Source creates ≥3 MUs after a blocked-retry cycle |
+| `no_duplicate_random_seeds_after_init` | Each registered object receives a unique random seed after `init()` |
+| `failure_blocks_mu_exit` | A `Failed` station ignores `MUExit` events (stale events from before failure) |
+| `start_failure_schedules_end_failure` | `StartFailure` transitions to `Failed` and schedules an `EndFailure` |
+| `failure_interrupts_processing_and_resumes` | Failure mid-processing resumes with remaining proc time after repair |
+| `failure_on_idle_station_blocks_entrance_and_recovers` | Failure on idle station blocks entrance; `EndFailure` restores it and schedules next `StartFailure` |
+</script>
+
+<script type="text/markdown" id="page-reference-event-types">
+---
+title: Event Types
+section: reference
+related:
+  - discrete-event-simulation
+  - blocked-retry
+  - simulator-and-event-controller
+---
+
+# Event Types
+
+Defined in `src/event.rs` as `pub enum EventType`.
+
+## Active event types
+
+### MUExit
+
+**Fires when:** processing is complete and the object should try to move its MU to a successor.
+
+**Who emits it:**
+- `Source::create_mu()` — schedules itself after `proc_time` to signal the new MU is ready to move.
+- `SingleStation::process_mu_entrance()` — schedules itself after `proc_time` to signal processing complete.
+
+**What happens on dispatch:**
+1. `try_to_move_to_successor` is called.
+2. If a successor accepts: predecessor goes Idle, `notify_blocked_predecessors()` fires.
+3. If all successors deny: predecessor goes Blocked, stays locked.
+
+### BlockedRetry
+
+**Fires when:** a successor that previously denied entrance has just freed up, and is notifying its blocked predecessors to retry.
+
+**Who emits it:** `SingleStation::notify_blocked_predecessors()` — one event per `object_id` in `blockedlist`, at `exec_time = 0` (immediate).
+
+**What happens on dispatch:**
+1. `is_exit_allowed()` is checked first. Returns `false` if `ProcessState::Processing` — the retry is a **no-op**.
+2. If exit allowed: `try_to_move_to_successor` is called. If successful, predecessor goes Idle.
+
+### StartFailure
+
+**Fires when:** a station's next failure is due (scheduled by `FailureProfile`).
+
+**Who emits it:**
+- `SingleStation::init()` — if `failure_profile.active`, schedules the first `StartFailure` at time-to-next-failure.
+- `EndFailure` handler — schedules the next failure cycle after repair.
+
+**What happens on dispatch:**
+1. Sets `interruption = InterruptionState::Failed`.
+2. If station was `Processing`, saves `remain_proc_time` into `interrupted_remain_proc_time`.
+3. Schedules `EndFailure` after MTTR (sampled from `dist_sampler_mttr`).
+
+### EndFailure
+
+**Fires when:** the repair period expires.
+
+**Who emits it:** `StartFailure` handler, after sampling MTTR.
+
+**What happens on dispatch:**
+1. Clears `interruption` back to `InterruptionState::None`.
+2. Schedules the next `StartFailure` (if profile still active).
+3. If `interrupted_remain_proc_time` is set: resumes processing, schedules `MUExit` with the saved remaining time.
+4. If station was `Blocked` when failure hit: retries `try_to_move_to_successor`.
+5. If station was `Idle`: notifies blocked predecessors they can push MUs again.
+
+## Defined but not yet active
+
+| Type | Status |
+|---|---|
+| `MUEntrance` | Defined; entrance is handled directly via `process_mu_entrance()` from `try_to_move_to_successor`, not via a scheduled event |
+| `Finished` | Defined; not dispatched in current implementation |
+
+## EventTemplate
+
+```rust
+pub struct EventTemplate {
+    pub eventtype: EventType,
+    pub exec_time: Duration,  // relative offset from current time when scheduling
+    pub object_id: u32,       // which object receives the event
+    pub seq: u64,             // set to 0 by objects; overwritten by EventController
+}
+```
+
+## ScheduledEvent
+
+```rust
+pub struct ScheduledEvent {
+    pub time: Duration,       // absolute simulation time (current_time + exec_time)
+    pub template: EventTemplate,
+    pub seq: u64,             // for FIFO tiebreaking — assigned by EventController
+}
+```
+
+Ordering: earlier time wins; equal time → lower seq wins.
+</script>
+
+<script type="text/markdown" id="page-reference-configuration-flags">
+---
+title: Configuration Flags
+section: reference
+related:
+  - running-the-demo
+  - visualization-and-renderer
+---
+
+# Configuration Flags
+
+## CLI flags
+
+Parsed by `clap` in `src/main.rs`. All flags set the corresponding env var before calling `run_demo()`.
+
+| Flag | Env var set | Default | Effect |
+|---|---|---|---|
+| `--inplace` / `-i` | `CRABSIM_LIVE_INPLACE=1` | off | Redraw state table in-place using ANSI |
+| `--renderer-window` | `CRABSIM_RENDERER=1` | off | Spawn external renderer window |
+| `--speed <f>` | `CRABSIM_RENDERER_SPEED=<f>` | `5.0` | Renderer pacing: sim-seconds per wall-second. `-1` = unpaced |
+| `--hold <s>` | `CRABSIM_RENDERER_HOLD=<s>` | `1` | Seconds to hold renderer window open after simulation ends |
+| `--renderer-launcher <l>` | `CRABSIM_RENDERER_LAUNCHER=<l>` | `powershell` (Windows) | Windows only: `powershell` or `cmd` |
+
+## Environment variables
+
+Can be set directly without using the CLI. `run_demo()` reads these after `clap` may have set them.
+
+| Variable | Values | Effect |
+|---|---|---|
+| `CRABSIM_LIVE_INPLACE` | `1` (or any non-empty, non-`0` value) | Enable in-place terminal rendering |
+| `CRABSIM_RENDERER` | `1` (or any non-empty, non-`0` value) | Spawn and connect external renderer |
+| `CRABSIM_RENDERER_SPEED` | float string, e.g. `5` or `-1` | Renderer playback speed factor |
+| `CRABSIM_RENDERER_HOLD` | integer string, seconds | Hold renderer open after last event |
+| `CRABSIM_RENDERER_LAUNCHER` | `powershell` or `cmd` | Windows renderer launch method |
+| `RUST_LOG` | `info`, `debug`, `crabsim=debug`, etc. | Controls `env_logger` output level |
+
+## Env var precedence
+
+CLI flags **set** env vars, so if both a CLI flag and env var are present, the CLI flag wins (it overwrites the env var before `run_demo()` reads it).
+
+## Endtime
+
+The simulation endtime is hardcoded in `run_demo()`:
+
+```rust
+EventController::new(Some(Duration::from_secs_f64(3_600.0)))
+```
+
+To change the simulated duration, edit this value in `src/lib.rs`. Tests each set their own endtime via `eventcontroller.endtime = Some(...)`.
+</script>
+
+<!-- ═══════════════════════ JAVASCRIPT ═══════════════════════ -->
+<script>
+'use strict';
+
+// ── Page metadata ────────────────────────────────────────────────
+const PAGES = {
+  'index': { title: 'Home', section: null, related: [] },
+  'concepts/discrete-event-simulation': {
+    title: 'Discrete-Event Simulation', section: 'concepts',
+    related: ['architecture/simulator-and-event-controller', 'reference/event-types'],
+  },
+  'concepts/material-flow-model': {
+    title: 'Material Flow Model', section: 'concepts',
+    related: ['concepts/moveable-units', 'concepts/blocked-retry', 'architecture/material-flow-objects'],
+  },
+  'concepts/moveable-units': {
+    title: 'Moveable Units', section: 'concepts',
+    related: ['concepts/material-flow-model', 'concepts/blocked-retry', 'reference/event-types'],
+  },
+  'concepts/blocked-retry': {
+    title: 'Blocked Retry Semantics', section: 'concepts',
+    related: ['reference/event-types', 'architecture/simulator-and-event-controller', 'architecture/material-flow-objects'],
+  },
+  'architecture/overview': {
+    title: 'Architecture Overview', section: 'architecture',
+    related: ['architecture/simulator-and-event-controller', 'architecture/material-flow-objects', 'concepts/discrete-event-simulation'],
+  },
+  'architecture/simulator-and-event-controller': {
+    title: 'Simulator & EventController', section: 'architecture',
+    related: ['concepts/discrete-event-simulation', 'architecture/material-flow-objects', 'reference/event-types'],
+  },
+  'architecture/material-flow-objects': {
+    title: 'Material Flow Objects', section: 'architecture',
+    related: ['concepts/material-flow-model', 'concepts/blocked-retry', 'concepts/moveable-units'],
+  },
+  'architecture/visualization-and-renderer': {
+    title: 'Visualization & Renderer', section: 'architecture',
+    related: ['architecture/simulator-and-event-controller', 'reference/configuration-flags'],
+  },
+  'guides/running-the-demo': {
+    title: 'Running the Demo', section: 'guides',
+    related: ['reference/configuration-flags', 'architecture/visualization-and-renderer'],
+  },
+  'guides/adding-a-new-station-type': {
+    title: 'Adding a New Station Type', section: 'guides',
+    related: ['architecture/material-flow-objects', 'concepts/blocked-retry', 'guides/writing-tests'],
+  },
+  'guides/writing-tests': {
+    title: 'Writing Tests', section: 'guides',
+    related: ['architecture/simulator-and-event-controller', 'architecture/material-flow-objects', 'concepts/blocked-retry'],
+  },
+  'reference/event-types': {
+    title: 'Event Types', section: 'reference',
+    related: ['concepts/discrete-event-simulation', 'concepts/blocked-retry', 'architecture/simulator-and-event-controller'],
+  },
+  'reference/configuration-flags': {
+    title: 'Configuration Flags', section: 'reference',
+    related: ['guides/running-the-demo', 'architecture/visualization-and-renderer'],
+  },
+};
+
+// ── Utilities ────────────────────────────────────────────────────
+function escHtml(s) {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function slugToId(slug) {
+  return 'page-' + slug.replace(/\//g, '-');
+}
+
+function getMarkdown(slug) {
+  const el = document.getElementById(slugToId(slug));
+  return el ? el.textContent : '';
+}
+
+// ── Markdown renderer ────────────────────────────────────────────
+function renderMarkdown(src) {
+  // Strip YAML frontmatter
+  src = src.replace(/^\s*---\n[\s\S]*?\n---\s*\n/, '');
+
+  // Extract fenced code blocks
+  const codeBlocks = [];
+  src = src.replace(/```(\w*)\r?\n([\s\S]*?)```/g, (_, lang, code) => {
+    codeBlocks.push({ lang: lang || '', code });
+    return '\x01CODE' + (codeBlocks.length - 1) + '\x01';
+  });
+
+  // Split into lines and process block-level elements
+  const lines = src.split('\n');
+  let html = '';
+  let i = 0;
+
+  while (i < lines.length) {
+    const line = lines[i];
+
+    // Code block placeholder
+    const codeMatch = line.trim().match(/^\x01CODE(\d+)\x01$/);
+    if (codeMatch) {
+      const { lang, code } = codeBlocks[+codeMatch[1]];
+      html += `<pre><code class="lang-${escHtml(lang)}">${escHtml(code.replace(/\n$/, ''))}</code></pre>\n`;
+      i++; continue;
+    }
+
+    // ATX headings
+    const hMatch = line.match(/^(#{1,6})\s+(.+)$/);
+    if (hMatch) {
+      const level = hMatch[1].length;
+      const text = inlineProcess(hMatch[2].trim());
+      const id = hMatch[2].trim().toLowerCase().replace(/[^\w\s-]/g, '').replace(/\s+/g, '-');
+      html += `<h${level} id="${id}">${text}</h${level}>\n`;
+      i++; continue;
+    }
+
+    // Horizontal rule (---) — must not look like a list item
+    if (/^[-*_]{3,}\s*$/.test(line) && !/^-\s/.test(line)) {
+      html += '<hr>\n'; i++; continue;
+    }
+
+    // Table
+    if (line.trim().startsWith('|') && line.trim().endsWith('|')) {
+      const rows = [];
+      while (i < lines.length && lines[i].trim().startsWith('|') && lines[i].trim().endsWith('|')) {
+        rows.push(lines[i]);
+        i++;
+      }
+      html += renderTable(rows);
+      continue;
+    }
+
+    // Unordered list
+    if (/^(\s*)[-*+]\s/.test(line)) {
+      html += '<ul>\n';
+      while (i < lines.length && /^(\s*)[-*+]\s/.test(lines[i])) {
+        const text = lines[i].replace(/^\s*[-*+]\s+/, '');
+        html += `<li>${inlineProcess(text)}</li>\n`;
+        i++;
+      }
+      html += '</ul>\n';
+      continue;
+    }
+
+    // Ordered list
+    if (/^\d+\.\s/.test(line)) {
+      html += '<ol>\n';
+      while (i < lines.length && /^\d+\.\s/.test(lines[i])) {
+        const text = lines[i].replace(/^\d+\.\s+/, '');
+        html += `<li>${inlineProcess(text)}</li>\n`;
+        i++;
+      }
+      html += '</ol>\n';
+      continue;
+    }
+
+    // Blank line
+    if (line.trim() === '') { i++; continue; }
+
+    // Paragraph — collect until blank/heading/list/code/table
+    const paraLines = [];
+    while (
+      i < lines.length &&
+      lines[i].trim() !== '' &&
+      !/^#{1,6}\s/.test(lines[i]) &&
+      !/^[-*_]{3,}\s*$/.test(lines[i]) &&
+      !(lines[i].trim().startsWith('|') && lines[i].trim().endsWith('|')) &&
+      !/^\s*[-*+]\s/.test(lines[i]) &&
+      !/^\d+\.\s/.test(lines[i]) &&
+      !/^\x01CODE\d+\x01/.test(lines[i].trim())
+    ) {
+      paraLines.push(lines[i]);
+      i++;
+    }
+    if (paraLines.length > 0) {
+      html += `<p>${inlineProcess(paraLines.join('\n'))}</p>\n`;
+    }
+  }
+
+  return html;
+}
+
+function renderTable(rows) {
+  let html = '<table>\n';
+  let inBody = false;
+  let firstRow = true;
+
+  for (const row of rows) {
+    // Separator row (|---|---|)
+    if (/^\|[-| :]+\|$/.test(row.trim())) {
+      if (firstRow) { html += '</thead>\n<tbody>\n'; inBody = true; }
+      continue;
+    }
+    const cells = row.split('|').slice(1, -1).map(c => c.trim());
+    if (firstRow && !inBody) {
+      html += '<thead>\n<tr>' + cells.map(c => `<th>${inlineProcess(c)}</th>`).join('') + '</tr>\n';
+      firstRow = false;
+    } else {
+      html += '<tr>' + cells.map(c => `<td>${inlineProcess(c)}</td>`).join('') + '</tr>\n';
+    }
+  }
+  if (inBody) html += '</tbody>\n';
+  html += '</table>\n';
+  return html;
+}
+
+function inlineProcess(text) {
+  // Inline code (protect first so bold/italic don't touch it)
+  const codes = [];
+  text = text.replace(/`([^`]+)`/g, (_, c) => {
+    codes.push(c); return '\x02' + (codes.length - 1) + '\x02';
+  });
+
+  // Bold
+  text = text.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  // Italic
+  text = text.replace(/\*([^*\n]+)\*/g, '<em>$1</em>');
+
+  // Links — convert internal .md links to hash navigation
+  text = text.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_, label, href) => {
+    if (href.startsWith('http://') || href.startsWith('https://')) {
+      return `<a href="${href}" target="_blank" rel="noopener">${label}</a>`;
+    }
+    // Convert relative .md path to slug
+    let slug = href.replace(/\.md$/, '').replace(/^\.\.\//, '');
+    return `<a href="#${slug}" onclick="navigate('${slug}'); return false;">${label}</a>`;
+  });
+
+  // Restore inline code
+  text = text.replace(/\x02(\d+)\x02/g, (_, i) => `<code>${escHtml(codes[+i])}</code>`);
+
+  return text;
+}
+
+// ── Navigation ───────────────────────────────────────────────────
+let currentSlug = null;
+
+function navigate(slug) {
+  if (!PAGES[slug]) { slug = 'index'; }
+  currentSlug = slug;
+  window.location.hash = slug;
+  renderPage(slug);
+  updateActiveNav(slug);
+  document.getElementById('main').scrollTop = 0;
+}
+
+function renderPage(slug) {
+  const meta = PAGES[slug] || PAGES['index'];
+  const md = getMarkdown(slug);
+  const bodyHtml = renderMarkdown(md);
+
+  // Breadcrumb
+  let breadcrumb = '';
+  if (meta.section) {
+    const sectionLabel = { concepts: 'Concepts', architecture: 'Architecture', guides: 'Guides', reference: 'Reference' }[meta.section] || meta.section;
+    breadcrumb = `<div id="breadcrumb"><a onclick="navigate('index')">Wiki</a><span>›</span><span>${sectionLabel}</span><span>›</span><span>${meta.title}</span></div>`;
+  } else if (slug !== 'index') {
+    breadcrumb = `<div id="breadcrumb"><a onclick="navigate('index')">Wiki</a><span>›</span><span>${meta.title}</span></div>`;
+  }
+
+  // Related pages
+  let relatedHtml = '';
+  if (meta.related && meta.related.length > 0) {
+    const links = meta.related.map(r => {
+      const rm = PAGES[r];
+      if (!rm) return '';
+      return `<a onclick="navigate('${r}'); return false;" href="#${r}">${rm.title}</a>`;
+    }).filter(Boolean).join('');
+    relatedHtml = `<div id="related-pages"><h4>Related pages</h4><div class="related-list">${links}</div></div>`;
+  }
+
+  document.getElementById('content').innerHTML = breadcrumb + bodyHtml + relatedHtml;
+}
+
+function updateActiveNav(slug) {
+  document.querySelectorAll('.nav-item, .nav-home').forEach(el => {
+    el.classList.remove('active');
+  });
+  document.querySelectorAll('.nav-item, .nav-home').forEach(el => {
+    const onclick = el.getAttribute('onclick') || '';
+    if (onclick.includes(`'${slug}'`)) {
+      el.classList.add('active');
+    }
+  });
+}
+
+// ── Search ───────────────────────────────────────────────────────
+const searchInput = document.getElementById('search-input');
+searchInput.addEventListener('input', () => {
+  const q = searchInput.value.trim().toLowerCase();
+  document.querySelectorAll('.nav-item').forEach(el => {
+    if (!q) {
+      el.classList.remove('search-hidden');
+    } else {
+      const text = el.textContent.toLowerCase();
+      el.classList.toggle('search-hidden', !text.includes(q));
+    }
+  });
+  document.querySelectorAll('.nav-home').forEach(el => {
+    el.classList.toggle('search-hidden', !!q && !el.textContent.toLowerCase().includes(q));
+  });
+});
+
+// ── Init ─────────────────────────────────────────────────────────
+window.addEventListener('hashchange', () => {
+  const slug = window.location.hash.slice(1) || 'index';
+  if (slug !== currentSlug) navigate(slug);
+});
+
+const initialSlug = window.location.hash.slice(1) || 'index';
+navigate(initialSlug);
+</script>
+</body>
+</html>

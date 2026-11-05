@@ -91,3 +91,17 @@ Deep-context pages live in `wiki/`. Pull these in with `@` when working on a spe
 2. Expose it in `src/materialflow_objects/mod.rs`.
 3. Register instances with `simulator.register_material_flow(obj.clone())`.
 4. Wire `succ`/`pred` vecs using `Rc<RefCell<dyn MaterialFlow>>` references.
+
+## Agent skills
+
+### Issue tracker
+
+Issues live in GitHub Issues (MarcHoff94/crabsim), managed with the `gh` CLI. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Uses the five default labels: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: one `GLOSSARY.md` and `docs/adr/` at the repo root. See `docs/agents/domain.md`.

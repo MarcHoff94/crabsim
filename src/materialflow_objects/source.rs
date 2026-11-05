@@ -1,5 +1,5 @@
 use crate::error::{InitError, MaterialflowError, RunTimeError};
-use crate::event::{EventTemplate, EventType};
+use crate::event::{EventTemplate, EventType, ExitTicket};
 use std::time::Duration;
 use crate::flows::{
 	EventInterface, InterruptionState, MaterialFlow, MoveableUnit, ProcessState, StopCtrl, SuccessorContainer, try_to_move_to_successor,
@@ -78,7 +78,7 @@ impl Source {
 			// set remaining processing time when a new MU is created
 			self.remain_proc_time = self.proc_time;
 			return Ok(EventTemplate {
-				eventtype: EventType::MUExit,
+				eventtype: EventType::MUExit(ExitTicket::new(self.mu_id)),
 				exec_time: self.proc_time,
 				object_id: self.base.object_id,
 				seq: 0,
@@ -101,7 +101,7 @@ impl EventInterface for Source {
 		eventtype: &EventType,
 	) -> Result<Option<Vec<EventTemplate>>, RunTimeError> {
 		match eventtype {
-			&EventType::MUExit => handle_source_mu_exit(self, _simulator),
+			&EventType::MUExit(_) => handle_source_mu_exit(self, _simulator),
 			&EventType::BlockedRetry => {
 				// successor notified that it became available; attempt to move
 				if !self.is_exit_allowed() {

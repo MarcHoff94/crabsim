@@ -7,10 +7,25 @@ use std::{
 
 // EcTime removed: use std::time::Duration everywhere
 
+/// Names the MU an `MUExit` is for and how many times its object had been stopped
+/// when that exit was scheduled. The event heap can't cancel events, so an exit
+/// scheduled before a stop stays queued and is recognised as stale by this count.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ExitTicket {
+    pub mu_id: u32,
+    pub stop_count: u32,
+}
+
+impl ExitTicket {
+    pub fn new(mu_id: u32) -> ExitTicket {
+        ExitTicket { mu_id, stop_count: 0 }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum EventType {
     MUEntrance,
-    MUExit,
+    MUExit(ExitTicket),
     BlockedRetry,
     Finished,
     StartFailure,

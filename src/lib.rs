@@ -13,7 +13,7 @@ pub mod random_numbers;
 pub mod tests_util;
 
 pub use crate::error::{InitError, MaterialflowError, RunTimeError};
-pub use crate::event::{EventTemplate, EventType};
+pub use crate::event::{EventTemplate, EventType, ExitTicket};
 pub use crate::materialflow_objects::{Drain, SingleStation, Source}; // Adjusted to use materialflow_objects for concrete types
 pub use crate::materialflow_objects::flows::MoveableUnit; // Moved MoveableUnit to be imported from flows
 pub use crate::simulator::{EventController, Simulator};
@@ -464,7 +464,7 @@ use super::*;
 		eventcontroller.add_event(
 			std::time::Duration::from_secs_f64(100.0),
 			EventTemplate {
-				eventtype: EventType::MUExit,
+				eventtype: EventType::MUExit(ExitTicket::new(9999)),
 				exec_time: std::time::Duration::from_secs_f64(0.0),
 				object_id: b_id,
 				seq: 0,
@@ -813,7 +813,7 @@ use super::*;
 		station_1.borrow_mut().content = Some(MoveableUnit { id: 100, location_id: 1 });
 		let _ = station_1
 			.borrow_mut()
-			.execute_event(&mut simulator, &EventType::MUExit)
+			.execute_event(&mut simulator, &EventType::MUExit(ExitTicket::new(100)))
 			.unwrap();
 
 		assert!(station_3.borrow().content.is_some(), "station_3 should have received MU100");
@@ -826,7 +826,7 @@ use super::*;
 
 		// station_2 becomes available and emits BlockedRetry
 		station_2.borrow_mut().entrancelocked = false;
-		let res_evts = station_2.borrow_mut().execute_event(&mut simulator, &EventType::MUExit);
+		let res_evts = station_2.borrow_mut().execute_event(&mut simulator, &EventType::MUExit(ExitTicket::new(0)));
 		if let Ok(Some(evts)) = res_evts {
 			// process emitted events; find the BlockedRetry for station_1
 			let mut found = false;
@@ -883,7 +883,7 @@ use super::*;
 		pred.borrow_mut().content = Some(MoveableUnit { id: 200, location_id: 1 });
 		let _ = pred
 			.borrow_mut()
-			.execute_event(&mut simulator, &EventType::MUExit)
+			.execute_event(&mut simulator, &EventType::MUExit(ExitTicket::new(200)))
 			.unwrap();
 
 		// Since the successor denied entrance, predecessor should become Blocked
@@ -961,7 +961,7 @@ use super::*;
 		eventcontroller.add_event(
 			std::time::Duration::from_secs_f64(100.0),
 			EventTemplate {
-				eventtype: EventType::MUExit,
+				eventtype: EventType::MUExit(ExitTicket::new(9999)),
 				exec_time: std::time::Duration::from_secs_f64(0.0),
 				object_id: b_id,
 				seq: 0,
@@ -1046,7 +1046,7 @@ use super::*;
 		station.entrancelocked = true;
 		station.interruption = crate::flows::InterruptionState::Failed;
 
-		let result = station.execute_event(&mut simulator, &EventType::MUExit).unwrap();
+		let result = station.execute_event(&mut simulator, &EventType::MUExit(ExitTicket::new(1))).unwrap();
 		assert!(result.is_none(), "Failed station must ignore MUExit");
 		assert!(station.content.is_some(), "MU must still be in station");
 	}
@@ -1134,6 +1134,71 @@ use super::*;
 		let exits = &sim.drains[0].borrow().exits;
 		assert!(!exits.is_empty(), "at least one MU must exit despite failure");
 		let _ = s_id; // suppress unused warning
+	}
+
+	/// Runs Source (one MU every 10s) -> Station (60s process time) -> Drain for 200s,
+	/// with a repair time of `repair_ms` for failures starting at each of `failures_at`,
+	/// and returns the Drain's exit times in seconds. The first MU enters at t=10.
+	fn exit_times_with_failures(failures_at: &[u64], repair_ms: f64) -> Vec<f64> {
+		let mut simulator = Simulator::new();
+		let mut eventcontroller = EventController::new(Some(std::time::Duration::from_secs(200)));
+		let fp = FailureProfile::new(1.0, random_numbers::Distribution::CONSTANT { value: repair_ms }, 0);
+		let station = Rc::new(RefCell::new(SingleStation::new(
+			1,
+			std::time::Duration::from_secs(60),
+			fp,
+			None,
+			Vec::new(),
+			Vec::new(),
+		)));
+		let source = Rc::new(RefCell::new(Source::new(0, std::time::Duration::from_secs(10), vec![station.clone()])));
+		let drain = Rc::new(RefCell::new(Drain::new(0, vec![station.clone()])));
+		station.borrow_mut().succ = vec![drain.clone()];
+
+		simulator.register_material_flow(source.clone());
+		let station_id = simulator.register_material_flow(station.clone());
+		simulator.register_material_flow(drain.clone());
+		simulator.add_drain(drain.clone());
+
+		for &at in failures_at {
+			eventcontroller.add_event(
+				std::time::Duration::from_secs(at),
+				EventTemplate {
+					eventtype: EventType::StartFailure,
+					exec_time: std::time::Duration::from_millis(0),
+					object_id: station_id,
+					seq: 0,
+				},
+			);
+		}
+		eventcontroller.init(&mut simulator);
+		let sim = eventcontroller.run(simulator).unwrap();
+		let exits = sim.drains[0].borrow().exits.iter().map(|d| d.as_secs_f64()).collect();
+		exits
+	}
+
+	#[test]
+	fn failure_moves_completion_time_later() {
+		// MU 1 enters at t=10 and would complete at t=70. A 5s failure moves that to t=75.
+		// MU 2 then enters at t=75 and gets its full 60s, completing at t=135, and so on.
+		assert_eq!(exit_times_with_failures(&[20], 5_000.0), vec![75.0, 135.0, 195.0]);
+	}
+
+	#[test]
+	fn each_failure_during_processing_moves_completion_time_later() {
+		// Two 5s failures while MU 1 is in the station: 10 + 60 + 5 + 5 = 80.
+		assert_eq!(exit_times_with_failures(&[20, 40], 5_000.0), vec![80.0, 140.0]);
+	}
+
+	#[test]
+	fn failure_outlasting_the_original_completion_time_moves_it_by_its_full_length() {
+		// A 50s failure runs past the original completion at t=70: 10 + 60 + 50 = 120.
+		assert_eq!(exit_times_with_failures(&[20], 50_000.0), vec![120.0, 180.0]);
+	}
+
+	#[test]
+	fn completion_time_without_failures_is_entry_plus_process_time() {
+		assert_eq!(exit_times_with_failures(&[], 5_000.0), vec![70.0, 130.0, 190.0]);
 	}
 
 	#[test]
@@ -1239,7 +1304,7 @@ use super::*;
 		eventcontroller.add_event(
 			std::time::Duration::from_secs_f64(100.0),
 			EventTemplate {
-				eventtype: EventType::MUExit,
+				eventtype: EventType::MUExit(ExitTicket::new(9999)),
 				exec_time: std::time::Duration::from_millis(0),
 				object_id: b_id,
 				seq: 0,

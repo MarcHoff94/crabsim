@@ -1,5 +1,5 @@
 use std::time::Duration;
-use crate::{event::{EventTemplate, EventType}, simulator::Simulator};
+use crate::{event::{EventTemplate, EventType, ExitTicket}, simulator::Simulator};
 use super::flows::{BaseObject, ProcessState, InterruptionState, MaterialFlow, StopCtrl, SuccessorContainer, MoveableUnit, EventInterface, try_to_move_to_successor};
 use std::{cell::RefCell, rc::Rc};
 
@@ -76,7 +76,7 @@ impl MaterialFlow for Buffer {
         if self.state == ProcessState::Idle && !self.content.is_empty() {
             self.state = ProcessState::Processing;
             Ok(Some(EventTemplate {
-                eventtype: EventType::MUExit,
+                eventtype: EventType::MUExit(ExitTicket::new(self.content[0].id)),
                 exec_time: Duration::from_millis(0),
                 object_id: self.base.object_id,
                 seq: 0,
@@ -187,7 +187,7 @@ impl EventInterface for Buffer {
         eventtype: &EventType,
     ) -> Result<Option<Vec<EventTemplate>>, crate::error::RunTimeError> {
         match eventtype {
-            EventType::MUExit => {
+            EventType::MUExit(_) => {
                 // Attempt to move one MU
                 let res = self.process_mu_exit();
                 match res {
@@ -195,7 +195,7 @@ impl EventInterface for Buffer {
                         // schedule next exit if more MU
                         if !self.content.is_empty() {
                             Ok(Some(vec![event_template, EventTemplate {
-                                eventtype: EventType::MUExit,
+                                eventtype: EventType::MUExit(ExitTicket::new(self.content[0].id)),
                                 exec_time: Duration::from_millis(0),
                                 object_id: self.base.object_id,
                                 seq: 0,

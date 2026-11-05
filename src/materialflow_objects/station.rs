@@ -1,5 +1,5 @@
 use crate::error::{InitError, MaterialflowError, RunTimeError};
-use crate::event::{EventTemplate, EventType};
+use crate::event::{EventTemplate, EventType, ExitTicket};
 use std::time::Duration;
 use super::flows::BaseObject;
 use crate::flows::{
@@ -14,6 +14,7 @@ pub struct SingleStation {
 	pub proc_time: Duration,
 	pub remain_proc_time: Duration,
 	pub interrupted_remain_proc_time: Option<Duration>,
+	pub stop_count: u32,
 	pub start_proc_time: Duration,
 	pub failure_profile: FailureProfile,
 	pub content: Option<MoveableUnit>,
@@ -41,6 +42,7 @@ impl SingleStation {
 			proc_time,
 			remain_proc_time: Duration::from_millis(0),
 			interrupted_remain_proc_time: None,
+			stop_count: 0,
 			start_proc_time: Duration::from_millis(0),
 			failure_profile,
 			content,
@@ -53,6 +55,20 @@ impl SingleStation {
 			state: ProcessState::Idle,
 			interruption: InterruptionState::None,
 		}
+	}
+	fn exit_event(&self, mu_id: u32, after: Duration) -> EventTemplate {
+		EventTemplate {
+			eventtype: EventType::MUExit(ExitTicket { mu_id, stop_count: self.stop_count }),
+			exec_time: after,
+			object_id: self.base.object_id,
+			seq: 0,
+		}
+	}
+	/// An exit is stale if the station has been stopped since it was scheduled,
+	/// because resuming schedules a new exit for the moved completion time.
+	fn is_stale_exit(&self, ticket: ExitTicket) -> bool {
+		ticket.stop_count != self.stop_count
+			|| self.content.as_ref().is_some_and(|mu| mu.id != ticket.mu_id)
 	}
 	pub fn add_blocked(&mut self, blocked_id: u32) {
 		if !self.blockedlist.contains(&blocked_id) {
@@ -100,17 +116,13 @@ impl MaterialFlow for SingleStation {
 		mu: MoveableUnit,
 	) -> Result<Option<EventTemplate>, MaterialflowError> {
 		log::info!("MU {} entered SingleStation {}", mu.id, self.base.object_id);
+		let mu_id = mu.id;
 		self.content = Some(mu);
 		self.remain_proc_time = self.proc_time;
 		self.interrupted_remain_proc_time = None;
 		self.entrancelocked = true;
 		self.state = ProcessState::Processing;
-		Ok(Some(EventTemplate {
-			eventtype: EventType::MUExit,
-			exec_time: self.proc_time,
-			object_id: self.base.object_id,
-			seq: 0,
-		}))
+		Ok(Some(self.exit_event(mu_id, self.proc_time)))
 	}
 	fn process_mu_exit(&mut self) -> Result<Option<EventTemplate>, MaterialflowError> {
 		match self.interruption {
@@ -165,8 +177,8 @@ impl EventInterface for SingleStation {
 		eventtype: &EventType,
 	) -> Result<Option<Vec<EventTemplate>>, RunTimeError> {
 		match eventtype {
-			&EventType::MUExit => {
-				if !matches!(self.interruption, InterruptionState::None) {
+			&EventType::MUExit(ticket) => {
+				if !matches!(self.interruption, InterruptionState::None) || self.is_stale_exit(ticket) {
 					return Ok(None);
 				}
 				match try_to_move_to_successor(self, _simulator) {
@@ -249,6 +261,7 @@ impl EventInterface for SingleStation {
 				self.interruption = InterruptionState::Failed;
 				if matches!(self.state, ProcessState::Processing) {
 					self.interrupted_remain_proc_time = Some(self.remain_proc_time);
+					self.stop_count += 1;
 				}
 				let mttr = Duration::from_millis(
 					self.failure_profile.dist_sampler_mttr.sample() as u64,
@@ -276,12 +289,9 @@ impl EventInterface for SingleStation {
 					// Resume interrupted processing
 					self.remain_proc_time = remain;
 					self.state = ProcessState::Processing;
-					events.push(EventTemplate {
-						eventtype: EventType::MUExit,
-						exec_time: remain,
-						object_id: self.base.object_id,
-						seq: 0,
-					});
+					if let Some(mu_id) = self.content.as_ref().map(|mu| mu.id) {
+						events.push(self.exit_event(mu_id, remain));
+					}
 				} else if self.content.is_some() {
 					// Blocked when failure hit (MU done, waiting to exit) — retry move
 					match try_to_move_to_successor(self, _simulator) {

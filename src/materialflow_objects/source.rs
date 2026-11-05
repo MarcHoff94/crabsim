@@ -2,7 +2,7 @@ use crate::error::{InitError, MaterialflowError, RunTimeError};
 use crate::event::{EventTemplate, EventType};
 use std::time::Duration;
 use crate::flows::{
-	EventInterface, InterruptionState, MaterialFlow, MoveableUnit, ProcessState, SuccessorContainer, try_to_move_to_successor,
+	EventInterface, InterruptionState, MaterialFlow, MoveableUnit, ProcessState, StopCtrl, SuccessorContainer, try_to_move_to_successor,
 };
 use crate::simulator::Simulator;
 use std::{cell::RefCell, rc::Rc};
@@ -147,6 +147,15 @@ impl EventInterface for Source {
 		self
 	}
 }
+impl StopCtrl for Source {
+	fn set_stop(&mut self, _failure_start: &Duration, _reason: InterruptionState) -> Result<Option<EventTemplate>, MaterialflowError> {
+		todo!("StopCtrl is not implemented for Source yet")
+	}
+	fn remove_stop(&mut self) -> Result<Option<EventTemplate>, MaterialflowError> {
+		todo!("StopCtrl is not implemented for Source yet")
+	}
+}
+
 impl MaterialFlow for Source {
 	fn is_exit_allowed(&self) -> bool {
 		true

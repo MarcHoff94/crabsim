@@ -96,7 +96,12 @@ pub fn run_demo() {
 		}
 	}
 	let mut eventcontroller = EventController::new(Some(std::time::Duration::from_secs_f64(3_600.0)));
-	let default_failureprofile = FailureProfile::new(0.99, std::time::Duration::from_secs_f64(0.0), random_numbers::Distribution::CONSTANT { value: 0.0 }, random_numbers::Distribution::CONSTANT { value: 0.0 }, 0);
+	// availability=0.9, mttr=60s → mtbf=540s derived automatically
+	let default_failureprofile = FailureProfile::new(
+		0.9,
+		random_numbers::Distribution::ERLANG { mean: 60_000.0, k: 2 },
+		0,
+	);
 	// Station 1 - first station
 	let st1 = Rc::new(RefCell::new(SingleStation::new(
 		1,
@@ -284,7 +289,7 @@ use super::*;
 	fn simple_flow_records_exit() {
 		let mut simulator = Simulator::new();
 		let mut eventcontroller = EventController::new(Some(std::time::Duration::from_secs_f64(86_400.0)));
-		let default_failureprofile = FailureProfile::new(0.99, std::time::Duration::from_secs_f64(0.0), random_numbers::Distribution::CONSTANT { value: 0.0 }, random_numbers::Distribution::CONSTANT { value: 0.0 }, 0);
+		let default_failureprofile = FailureProfile::new(1.0, random_numbers::Distribution::CONSTANT { value: 0.0 }, 0);
 
 		let station = Rc::new(RefCell::new(SingleStation::new(
 			0,
@@ -323,7 +328,7 @@ use super::*;
 	#[test]
 	fn selects_lowest_index_successor_when_all_allowed() {
 		let simulator = Simulator::new();
-		let default_failureprofile = FailureProfile::new(0.99, std::time::Duration::from_secs_f64(0.0), random_numbers::Distribution::CONSTANT { value: 0.0 }, random_numbers::Distribution::CONSTANT { value: 0.0 }, 0);
+		let default_failureprofile = FailureProfile::new(1.0, random_numbers::Distribution::CONSTANT { value: 0.0 }, 0);
 		// predecessor with a MU ready to move
 		let mut pred = SingleStation::new(0, std::time::Duration::from_secs_f64(10.0), default_failureprofile.clone(),None, Vec::new(), Vec::new());
 		pred.content = Some(MoveableUnit { id: 1, location_id: 0 });
@@ -364,7 +369,7 @@ use super::*;
 	#[test]
 	fn skips_blocked_successor_and_selects_next_lowest() {
 		let simulator = Simulator::new();
-		let default_failureprofile = FailureProfile::new(0.99, std::time::Duration::from_secs_f64(0.0), random_numbers::Distribution::CONSTANT { value: 0.0 }, random_numbers::Distribution::CONSTANT { value: 0.0 }, 0);
+		let default_failureprofile = FailureProfile::new(1.0, random_numbers::Distribution::CONSTANT { value: 0.0 }, 0);
 		
 		// predecessor with a MU ready to move
 		let mut pred = SingleStation::new(10, std::time::Duration::from_secs_f64(10.0),default_failureprofile.clone(), None, Vec::new(), Vec::new());
@@ -413,7 +418,7 @@ use super::*;
 	fn blocked_flow_retries() {
 		let mut simulator = Simulator::new();
 		let mut eventcontroller = EventController::new(Some(std::time::Duration::from_secs_f64(86_400.0)));
-		let default_failureprofile = FailureProfile::new(0.99, std::time::Duration::from_secs_f64(0.0), random_numbers::Distribution::CONSTANT { value: 0.0 }, random_numbers::Distribution::CONSTANT { value: 0.0 }, 0);
+		let default_failureprofile = FailureProfile::new(1.0, random_numbers::Distribution::CONSTANT { value: 0.0 }, 0);
 		
 
 		let station_a = Rc::new(RefCell::new(SingleStation::new(
@@ -480,7 +485,7 @@ use super::*;
 
 	#[test]
 	fn blockedlist_dedup() {
-		let default_failureprofile = FailureProfile::new(0.99, std::time::Duration::from_secs_f64(0.0), random_numbers::Distribution::CONSTANT { value: 0.0 }, random_numbers::Distribution::CONSTANT { value: 0.0 }, 0);
+		let default_failureprofile = FailureProfile::new(1.0, random_numbers::Distribution::CONSTANT { value: 0.0 }, 0);
 		
 		let mut s = SingleStation::new(1, std::time::Duration::from_secs_f64(10.0),default_failureprofile.clone(), None, Vec::new(), Vec::new());
 		s.add_blocked(5);
@@ -532,7 +537,7 @@ use super::*;
 	fn ordering_across_stations_preserved() {
 		let mut simulator = Simulator::new();
 		let mut eventcontroller = EventController::new(Some(std::time::Duration::from_secs_f64(86_400.0)));
-		let default_failureprofile = FailureProfile::new(0.99, std::time::Duration::from_secs_f64(1.0), random_numbers::Distribution::CONSTANT { value: 0.0 }, random_numbers::Distribution::CONSTANT { value: 0.0 }, 0);
+		let default_failureprofile = FailureProfile::new(1.0, random_numbers::Distribution::CONSTANT { value: 0.0 }, 0);
 		
 		let station_a = Rc::new(RefCell::new(SingleStation::new(
 			0,
@@ -607,7 +612,7 @@ use super::*;
 	fn ordering_across_parallel_stations_preserved() {
 		let mut simulator = Simulator::new();
 		let mut eventcontroller = EventController::new(None);
-		let default_failureprofile = FailureProfile::new(0.99, std::time::Duration::from_secs_f64(1.0), random_numbers::Distribution::CONSTANT { value: 0.0 }, random_numbers::Distribution::CONSTANT { value: 0.0 }, 0);
+		let default_failureprofile = FailureProfile::new(1.0, random_numbers::Distribution::CONSTANT { value: 0.0 }, 0);
 
 		// First station
 		let station_a = Rc::new(RefCell::new(SingleStation::new(
@@ -690,7 +695,7 @@ use super::*;
 	fn throughput_unbalanced_parallel_stations() {
 		let mut simulator = Simulator::new();
 		let mut eventcontroller = EventController::new(None);
-		let default_failureprofile = FailureProfile::new(0.99, std::time::Duration::from_secs_f64(1.0), random_numbers::Distribution::CONSTANT { value: 0.0 }, random_numbers::Distribution::CONSTANT { value: 0.0 }, 0);
+		let default_failureprofile = FailureProfile::new(1.0, random_numbers::Distribution::CONSTANT { value: 0.0 }, 0);
 
 		// First station
 		let station_a = Rc::new(RefCell::new(SingleStation::new(
@@ -766,7 +771,7 @@ use super::*;
 	#[test]
 	fn blocked_retry_while_predecessor_processing_does_not_move_mu() {
 		let mut simulator = Simulator::new();
-		let default_failureprofile = FailureProfile::new(0.99, std::time::Duration::from_secs_f64(1.0), random_numbers::Distribution::CONSTANT { value: 0.0 }, random_numbers::Distribution::CONSTANT { value: 0.0 }, 0);
+		let default_failureprofile = FailureProfile::new(1.0, random_numbers::Distribution::CONSTANT { value: 0.0 }, 0);
 
 		// create station_2 (initially denying) and station_3 (allowing)
 		let station_2 = Rc::new(RefCell::new(SingleStation::new(
@@ -847,7 +852,7 @@ use super::*;
 	#[test]
 	fn station_becomes_blocked_when_no_successor_accepts() {
 		let mut simulator = Simulator::new();
-		let default_failureprofile = FailureProfile::new(0.99, std::time::Duration::from_secs(1), random_numbers::Distribution::CONSTANT { value: 0.0 }, random_numbers::Distribution::CONSTANT { value: 0.0 }, 0);
+		let default_failureprofile = FailureProfile::new(1.0, random_numbers::Distribution::CONSTANT { value: 0.0 }, 0);
 
 		// successor denies entrance
 		let succ = Rc::new(RefCell::new(SingleStation::new(
@@ -897,7 +902,7 @@ use super::*;
 	fn blocked_retry_full_flow() {
 		let mut simulator = Simulator::new();
 		let mut eventcontroller = EventController::new(None);
-		let default_failureprofile = FailureProfile::new(100.0, std::time::Duration::from_secs_f64(0.0), random_numbers::Distribution::CONSTANT { value: 0.0 }, random_numbers::Distribution::CONSTANT { value: 0.0 }, 0);
+		let default_failureprofile = FailureProfile::new(1.0, random_numbers::Distribution::CONSTANT { value: 0.0 }, 0);
 
 		let station_a = Rc::new(RefCell::new(SingleStation::new(
 			0,
@@ -1175,7 +1180,7 @@ use super::*;
 	fn source_continues_producing_after_blocked_retry() {
 		let mut simulator = Simulator::new();
 		let mut eventcontroller = EventController::new(None);
-		let default_failureprofile = FailureProfile::new(100.0, std::time::Duration::from_secs_f64(0.0), random_numbers::Distribution::CONSTANT { value: 0.0 }, random_numbers::Distribution::CONSTANT { value: 0.0 }, 0);
+		let default_failureprofile = FailureProfile::new(1.0, random_numbers::Distribution::CONSTANT { value: 0.0 }, 0);
 
 		let station_a = Rc::new(RefCell::new(SingleStation::new(
 			0,

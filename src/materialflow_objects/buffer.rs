@@ -1,6 +1,6 @@
 use std::time::Duration;
 use crate::{event::{EventTemplate, EventType}, simulator::Simulator};
-use super::flows::{BaseObject, ProcessState, InterruptionState, MaterialFlow, SuccessorContainer, MoveableUnit, EventInterface, try_to_move_to_successor};
+use super::flows::{BaseObject, ProcessState, InterruptionState, MaterialFlow, StopCtrl, SuccessorContainer, MoveableUnit, EventInterface, try_to_move_to_successor};
 use std::{cell::RefCell, rc::Rc};
 
 /// A buffer that can hold up to `capacity` moveable units.
@@ -47,6 +47,15 @@ impl Buffer {
             log::debug!("{}: adding blocked predecessor {}", self.base.object_id, blocked_id);
             self.blockedlist.push(blocked_id);
         }
+    }
+}
+
+impl StopCtrl for Buffer {
+    fn set_stop(&mut self, _failure_start: &Duration, _reason: InterruptionState) -> Result<Option<EventTemplate>, crate::error::MaterialflowError> {
+        todo!("StopCtrl is not implemented for Buffer yet")
+    }
+    fn remove_stop(&mut self) -> Result<Option<EventTemplate>, crate::error::MaterialflowError> {
+        todo!("StopCtrl is not implemented for Buffer yet")
     }
 }
 

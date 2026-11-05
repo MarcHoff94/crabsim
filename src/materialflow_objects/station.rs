@@ -327,7 +327,6 @@ impl EventInterface for SingleStation {
 	fn set_random_seed(&mut self, seed: u64) {
 		self.base.random_seed = seed;
 		self.failure_profile.reseed(seed);
-		todo!("re-initialize prngs")
 	}
 	fn as_any(&self) -> &dyn std::any::Any {
 		self

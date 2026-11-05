@@ -2,7 +2,7 @@ use crate::error::MaterialflowError;
 use crate::event::{EventTemplate, EventType};
 use std::time::Duration;
 use super::flows::BaseObject;
-use crate::flows::{EventInterface, MaterialFlow, MoveableUnit};
+use crate::flows::{EventInterface, InterruptionState, MaterialFlow, MoveableUnit, StopCtrl};
 use crate::simulator::Simulator;
 use std::{cell::RefCell, rc::Rc};
 
@@ -100,6 +100,15 @@ impl EventInterface for Drain {
     }
     fn as_any(&self) -> &dyn std::any::Any {
         self
+    }
+}
+
+impl StopCtrl for Drain {
+    fn set_stop(&mut self, _failure_start: &Duration, _reason: InterruptionState) -> Result<Option<EventTemplate>, MaterialflowError> {
+        todo!("StopCtrl is not implemented for Drain yet")
+    }
+    fn remove_stop(&mut self) -> Result<Option<EventTemplate>, MaterialflowError> {
+        todo!("StopCtrl is not implemented for Drain yet")
     }
 }
 

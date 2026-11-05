@@ -1,0 +1,3 @@
+# Station capacity instead of a ParallelStation, and Buffer stays separate
+
+A Station that handles several MUs at once is one machine working on them in parallel, not several machines, so we model it as a single Station with a capacity (1 by default) and a batch or individual start rather than a separate ParallelStation type. A Buffer stays its own concept even though a Buffer with a dwelling time can behave exactly like an individual-start Station: a Station works on an MU while a Buffer only holds it for time to pass, which matters for reporting and for how a stop affects it by default. Code may be shared underneath, but the two should not be merged in the model.

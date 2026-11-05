@@ -1,8 +1,8 @@
 
 use std::time::Duration;
 use crate::error::{InitError, MaterialflowError, RunTimeError};
-use crate::event::{EventTemplate, EventType};
-use crate::simulator::Simulator;
+use crate::event::{EventContext, EventTemplate, EventType};
+use crate::observation::{ObjectState, OccurrenceKind, StopCause};
 use crate::random_numbers::{Distribution, DistributionSampler};
 use std::{cell::RefCell, rc::Rc};
 
@@ -88,14 +88,29 @@ pub enum InterruptionState {
 	Failed,
 	Paused,
 }
+impl InterruptionState {
+	pub fn cause(&self) -> Option<StopCause> {
+		match self {
+			InterruptionState::None => None,
+			InterruptionState::Failed => Some(StopCause::Failure),
+			InterruptionState::Paused => Some(StopCause::Pause),
+		}
+	}
+}
 
 pub trait EventInterface {
-	fn init(&mut self) -> Result<Vec<EventTemplate>, InitError>;
+	/// Prepares the object for a run and returns its first events. Called from the default state.
+	fn init(&mut self, context: &mut EventContext) -> Result<Vec<EventTemplate>, InitError>;
 	fn execute_event(
 		&mut self,
-		simulator: &mut Simulator,
+		context: &mut EventContext,
 		eventtype: &EventType,
 	) -> Result<Option<Vec<EventTemplate>>, RunTimeError>;
+	/// Returns the object to its default state: every MU from the run is gone, and the
+	/// configured settings and starting MUs are back.
+	fn reset(&mut self);
+	/// Reports the object's current state at simulation time `now`.
+	fn report(&self, now: Duration) -> ObjectState;
 	fn get_object_id(&self) -> &u32;
 	fn set_object_id(&mut self, id: u32);
 	fn set_random_seed(&mut self, seed: u64);
@@ -109,10 +124,8 @@ pub trait StopCtrl {
 pub trait MaterialFlow: EventInterface + StopCtrl {
 	fn is_entrance_allowed(&self) -> bool;
 	fn is_exit_allowed(&self) -> bool;
-	fn process_mu_entrance(&mut self,_mu: MoveableUnit) -> Result<Option<EventTemplate>, MaterialflowError>;
-	fn process_mu_exit(&mut self) -> Result<Option<EventTemplate>, MaterialflowError>;
+	fn process_mu_entrance(&mut self, mu: MoveableUnit, context: &mut EventContext) -> Result<Option<EventTemplate>, MaterialflowError>;
 	fn add_blocked(&mut self, id_blocked: u32);
-	fn as_any(&mut self) -> &mut dyn std::any::Any;
 	fn notify_blocked_predecessors(&mut self) -> Result<Option<Vec<EventTemplate>>, MaterialflowError>;
 }
 
@@ -160,7 +173,7 @@ impl DistributionStrategy for LowestIndexStrategy {
 pub fn try_to_move_to_successor_with_strategy<
 	T: SuccessorContainer + EventInterface,
 	S: DistributionStrategy,
->(obj: &mut T, simulator: &Simulator, strategy: &S) -> Result<Option<EventTemplate>, MaterialflowError> {
+>(obj: &mut T, context: &mut EventContext, strategy: &S) -> Result<Option<EventTemplate>, MaterialflowError> {
 	let succ = obj.successors().clone();
 	if succ.is_empty() {
 		return Ok(None);
@@ -175,28 +188,19 @@ pub fn try_to_move_to_successor_with_strategy<
 			if let Some(mu) = obj.take_content() {
 				let succ_id = *succ_obj.borrow().get_object_id();
 				let pred_id = *obj.get_object_id();
+				let mu_id = mu.id;
+				let seq = context.seq;
 				let mut succ_mut = succ_obj.borrow_mut();
-				match succ_mut.process_mu_entrance(mu) {
+				context.record(OccurrenceKind::MuMoved { mu_id, from: pred_id, to: succ_id });
+				log::info!("seq={} MU {} moved from {} to {}", seq, mu_id, pred_id, succ_id);
+				match succ_mut.process_mu_entrance(mu, context) {
 					Ok(Some(event_template)) => {
 						// advance pointer to next after chosen index on success
 						*obj.succ_pointer_mut() = (idx + 1) % n;
-						log::info!(
-							"seq={} MU {} moved from {} to {}",
-							simulator.current_seq,
-							event_template.object_id,
-							pred_id,
-							succ_id
-						);
 						return Ok(Some(event_template));
 					}
 					Ok(None) => {
 						*obj.succ_pointer_mut() = (idx + 1) % n;
-						log::info!(
-							"seq={} MU moved from {} to {} (no immediate event)",
-							simulator.current_seq,
-							pred_id,
-							succ_id
-						);
 						return Ok(None);
 					}
 					Err(_) => {
@@ -217,7 +221,7 @@ pub fn try_to_move_to_successor_with_strategy<
 			let mut succ_mut = succ_obj.borrow_mut();
 			log::debug!(
 				"seq={} Successor {} currently denies entrance; adding blocked predecessor {}",
-				simulator.current_seq,
+				context.seq,
 				*succ_mut.get_object_id(),
 				pred_id
 			);
@@ -230,9 +234,9 @@ pub fn try_to_move_to_successor_with_strategy<
 /// Backwards-compatible default that uses round-robin ordering.
 pub fn try_to_move_to_successor<T: SuccessorContainer + EventInterface>(
 	obj: &mut T,
-	simulator: &Simulator,
+	context: &mut EventContext,
 ) -> Result<Option<EventTemplate>, MaterialflowError> {
 	let strategy = RoundRobinStrategy;
-	try_to_move_to_successor_with_strategy(obj, simulator, &strategy)
+	try_to_move_to_successor_with_strategy(obj, context, &strategy)
 }
 

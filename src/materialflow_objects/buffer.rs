@@ -1,5 +1,6 @@
 use std::time::Duration;
-use crate::{event::{EventTemplate, EventType, ExitTicket}, simulator::Simulator};
+use crate::event::{EventContext, EventTemplate, EventType, ExitTicket};
+use crate::observation::{ObjectKind, ObjectState};
 use super::flows::{BaseObject, ProcessState, InterruptionState, MaterialFlow, StopCtrl, SuccessorContainer, MoveableUnit, EventInterface, try_to_move_to_successor};
 use std::{cell::RefCell, rc::Rc};
 
@@ -48,49 +49,11 @@ impl Buffer {
             self.blockedlist.push(blocked_id);
         }
     }
-}
 
-impl StopCtrl for Buffer {
-    fn set_stop(&mut self, _failure_start: &Duration, _reason: InterruptionState) -> Result<Option<EventTemplate>, crate::error::MaterialflowError> {
-        todo!("StopCtrl is not implemented for Buffer yet")
-    }
-    fn remove_stop(&mut self) -> Result<Option<EventTemplate>, crate::error::MaterialflowError> {
-        todo!("StopCtrl is not implemented for Buffer yet")
-    }
-}
-
-impl MaterialFlow for Buffer {
-    fn is_entrance_allowed(&self) -> bool {
-        !self.entrancelocked && self.content.len() < self.capacity
-    }
-    fn is_exit_allowed(&self) -> bool {
-        !self.exitlocked && !self.content.is_empty()
-    }
-    fn process_mu_entrance(
-        &mut self,
-        mu: MoveableUnit,
-    ) -> Result<Option<EventTemplate>, crate::error::MaterialflowError> {
-        log::info!("MU {} entered Buffer {}", mu.id, self.base.object_id);
-        self.content.push(mu);
-        // If this is the first MU and we are idle, schedule an exit attempt
-        if self.state == ProcessState::Idle && !self.content.is_empty() {
-            self.state = ProcessState::Processing;
-            Ok(Some(EventTemplate {
-                eventtype: EventType::MUExit(ExitTicket::new(self.content[0].id)),
-                exec_time: Duration::from_millis(0),
-                object_id: self.base.object_id,
-                seq: 0,
-            }))
-        } else {
-            Ok(None)
-        }
-    }
-    fn process_mu_exit(&mut self) -> Result<Option<EventTemplate>, crate::error::MaterialflowError> {
+    fn process_mu_exit(&mut self, context: &mut EventContext) -> Result<Option<EventTemplate>, crate::error::MaterialflowError> {
         // Buffer does not have a processing time; simply attempt to move one MU
         if let Some(mu) = self.take_content() {
-            // Create a minimal simulator instance for sequence numbers
-            let simulator = Simulator::new();
-            match try_to_move_to_successor(self, &simulator) {
+            match try_to_move_to_successor(self, context) {
                 Ok(Some(event_template)) => {
                     // MU moved; set state to Processing if more MU remain
                     if !self.content.is_empty() {
@@ -114,15 +77,50 @@ impl MaterialFlow for Buffer {
             Ok(None)
         }
     }
+}
+
+impl StopCtrl for Buffer {
+    fn set_stop(&mut self, _failure_start: &Duration, _reason: InterruptionState) -> Result<Option<EventTemplate>, crate::error::MaterialflowError> {
+        todo!("StopCtrl is not implemented for Buffer yet")
+    }
+    fn remove_stop(&mut self) -> Result<Option<EventTemplate>, crate::error::MaterialflowError> {
+        todo!("StopCtrl is not implemented for Buffer yet")
+    }
+}
+
+impl MaterialFlow for Buffer {
+    fn is_entrance_allowed(&self) -> bool {
+        !self.entrancelocked && self.content.len() < self.capacity
+    }
+    fn is_exit_allowed(&self) -> bool {
+        !self.exitlocked && !self.content.is_empty()
+    }
+    fn process_mu_entrance(
+        &mut self,
+        mu: MoveableUnit,
+        _context: &mut EventContext,
+    ) -> Result<Option<EventTemplate>, crate::error::MaterialflowError> {
+        log::info!("MU {} entered Buffer {}", mu.id, self.base.object_id);
+        self.content.push(mu);
+        // If this is the first MU and we are idle, schedule an exit attempt
+        if self.state == ProcessState::Idle && !self.content.is_empty() {
+            self.state = ProcessState::Processing;
+            Ok(Some(EventTemplate {
+                eventtype: EventType::MUExit(ExitTicket::new(self.content[0].id)),
+                exec_time: Duration::from_millis(0),
+                object_id: self.base.object_id,
+                seq: 0,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
     fn add_blocked(&mut self, id_blocked: u32) {
         // Avoid recursive call; directly push to blockedlist
         if !self.blockedlist.contains(&id_blocked) {
             log::debug!("{}: adding blocked predecessor {}", self.base.object_id, id_blocked);
             self.blockedlist.push(id_blocked);
         }
-    }
-    fn as_any(&mut self) -> &mut dyn std::any::Any {
-        self
     }
     fn notify_blocked_predecessors(&mut self) -> Result<Option<Vec<EventTemplate>>, crate::error::MaterialflowError> {
         let mut blocked_events = Vec::new();
@@ -166,8 +164,30 @@ impl SuccessorContainer for Buffer {
 }
 
 impl EventInterface for Buffer {
-    fn init(&mut self) -> Result<Vec<EventTemplate>, crate::error::InitError> {
+    fn init(&mut self, _context: &mut EventContext) -> Result<Vec<EventTemplate>, crate::error::InitError> {
         Ok(Vec::new())
+    }
+    fn reset(&mut self) {
+        self.content.clear();
+        self.succ_pointer = 0;
+        self.blockedlist.clear();
+        self.entrancelocked = false;
+        self.exitlocked = false;
+        self.state = ProcessState::Idle;
+        self.interruption = InterruptionState::None;
+    }
+    fn report(&self, _now: Duration) -> ObjectState {
+        ObjectState {
+            id: self.base.object_id,
+            kind: ObjectKind::Buffer,
+            contents: self.content.iter().map(|mu| mu.id).collect(),
+            process: self.state.clone(),
+            stop: self.interruption.cause(),
+            remaining: None,
+            blocked_predecessors: self.blockedlist.clone(),
+            successors: self.succ.iter().map(|s| *s.borrow().get_object_id()).collect(),
+            mus_left: 0,
+        }
     }
     fn as_any(&self) -> &dyn std::any::Any {
         self
@@ -183,13 +203,13 @@ impl EventInterface for Buffer {
     }
     fn execute_event(
         &mut self,
-        _simulator: &mut Simulator,
+        context: &mut EventContext,
         eventtype: &EventType,
     ) -> Result<Option<Vec<EventTemplate>>, crate::error::RunTimeError> {
         match eventtype {
             EventType::MUExit(_) => {
                 // Attempt to move one MU
-                let res = self.process_mu_exit();
+                let res = self.process_mu_exit(context);
                 match res {
                     Ok(Some(event_template)) => {
                         // schedule next exit if more MU
@@ -213,7 +233,7 @@ impl EventInterface for Buffer {
                     return Ok(None);
                 }
                 // Try to move MU again
-                let res = self.process_mu_exit();
+                let res = self.process_mu_exit(context);
                 match res {
                     Ok(Some(event_template)) => Ok(Some(vec![event_template])),
                     Ok(None) => Ok(None),

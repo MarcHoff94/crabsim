@@ -14,9 +14,6 @@ RUST_LOG=info cargo run --bin crabsim
 # Run with in-place terminal table
 RUST_LOG=info cargo run --bin crabsim -- --inplace
 
-# Run with external renderer at 5x speed
-RUST_LOG=info cargo run --bin crabsim -- --renderer-window --speed 5 --hold 1
-
 # Run all tests
 cargo test
 
@@ -31,32 +28,42 @@ cargo test <test_name>
 
 This is a Rust discrete-event material-flow simulator structured as a library (`src/`) with a demo binary (`src/main.rs`).
 
-**Core engine** (`src/simulator.rs`):
-- `Simulator` — registry of material-flow objects keyed by `u32` object_id (`HashMap<u32, Rc<RefCell<dyn MaterialFlow>>>`). Assigns IDs sequentially via `register_material_flow`. Also holds drain references and optional TCP stream for the renderer.
-- `EventController` — discrete-event loop using `BinaryHeap<ScheduledEvent>`. Uses a monotonically increasing `seq` counter to break ties and preserve FIFO order for same-timestamp events. `init()` collects initial events from all objects; `run()` processes the heap until `endtime`.
+**Core engine** (`src/simulation_run.rs`): `SimulationRun` owns the objects (`BTreeMap<u32, Rc<RefCell<dyn MaterialFlow>>>`), clock and event queue (`BinaryHeap<ScheduledEvent>`). A monotonically increasing `seq` breaks ties, preserving FIFO order for same-timestamp events. A run only advances when asked and knows nothing about views or pacing:
+- `add_object` — adds an object and assigns its id.
+- `init` — sets t=0, calls each object's `init` in id order and queues the first events without processing them. Only allowed from the default state.
+- `step` — processes one event. `advance_to(t)` — processes events up to and including `t`, then leaves the clock at `t`.
+- `reset` — returns every object to its default state. Objects stay in the model.
+- `state` — the full typed `RunState`. `schedule_event` — queues an event from outside the model.
+
+**Observation** (`src/observation.rs`): every advance returns `Occurrence`s (MU created/moved/left, work started/finished, blocked/unblocked, stop began/ended). Scheduling events are engine internals and are never shown to views. Objects record occurrences through the `EventContext` they receive with each event, which also gives them the time and new MU ids.
 
 **Material-flow objects** (`src/materialflow_objects/`):
 - `flows.rs` — `MaterialFlow` and `EventInterface` traits; `MoveableUnit`; `ProcessState` enum (Processing/Blocked/Idle); `try_to_move_to_successor` (round-robin via `succ_pointer`, records blocked predecessors in `blockedlist`).
 - `source.rs` — creates MUs at `proc_time` intervals and pushes them to successors.
 - `station.rs` (`SingleStation`) — processes one MU at a time; tracks `entrancelocked`, `exitlocked`, `blockedlist`, `pred`/`succ` vecs. Emits `BlockedRetry` events to blocked predecessors when it frees up.
 - `drain.rs` — consumes MUs, records `exits` (timestamps) and `exit_ids` (in-order).
+- `buffer.rs` — holds MUs up to a capacity. Known to be broken and not yet used by the demo.
 
 **Movement semantics**: `try_to_move_to_successor` advances `succ_pointer` (round-robin), skips locked successors, and records the predecessor's `object_id` in each skipped successor's `blockedlist`. When all successors are locked, the predecessor goes `Blocked`. When a station frees up, it emits `BlockedRetry` events to everything in its `blockedlist` so they can retry.
 
 **Event types** (`src/event.rs`): `MUExit` (processing complete, try to transfer) and `BlockedRetry` (reactive — successor freed up, predecessor retries). Keeping them distinct preserves scheduling vs. reactive semantics.
 
 **Visualization** (`src/visualization/`):
-- `topology.rs` — `print_network_topology` (console) and `render_network_topology` (string for renderer).
-- `state.rs` — `StateSnapshot`/`StateRow` structs; in-place ANSI redraw via `Simulator::live_inplace`.
+- `mod.rs` — the `RunView` trait and `advance_with_view`, which advances a run and shows each result to a view.
+- `terminal.rs` — `render_table` and the in-place `InPlaceTerminalView`.
+- `topology.rs` — ASCII topology text. Still downcasts by type, and is meant to be replaced by the UI.
 
-**External renderer**: a second binary (`crabsim-renderer`) that connects via TCP and receives newline-delimited JSON (`{"kind":"topology",...}` then `{"kind":"snapshot",...}`). Launched automatically when `CRABSIM_RENDERER=1`.
+**Demo** (`src/demo.rs`): the example model behind `--inplace` and the default run.
+
+**Tests** (`tests/`): `simulation_run.rs` tests behaviour at the run's interface: Init, advance, Reset, then read occurrences and state. `views.rs` tests the view adapters.
 
 ## Key Conventions
 
-- All shared mutable objects use `Rc<RefCell<T>>`. When wiring the topology, both `succ` and `pred` vecs must be set to match — the simulation uses predecessors for `BlockedRetry` routing.
-- `register_material_flow` must be called for every object (including the `Source`); `add_drain` must additionally be called for each `Drain` so exit stats are tracked.
-- `EventController::seq` tiebreaking is load-bearing for deterministic tests — preserve it when changing scheduling logic.
-- `blockedlist` is deduped (`add_blocked` checks before inserting). Tests assert this; don't change to a plain `Vec` push.
+- All shared mutable objects use `Rc<RefCell<T>>`, so a run and its objects stay on one thread. When wiring the topology, set `succ`. `pred` is currently never read: `BlockedRetry` routing uses the ids in `blockedlist`.
+- `add_object` must be called for every object. Ids given to constructors are replaced.
+- `seq` tiebreaking is load-bearing for deterministic tests — preserve it when changing scheduling logic.
+- `blockedlist`: the inherent `add_blocked` on `SingleStation` and `Drain` dedupes, but the trait version used at runtime does not yet, and retries run newest-first. Both are known gaps: the agreed rule is longest-waiting first, each predecessor listed once.
+- Every object must implement `reset`, returning it to its default state, including configured starting MUs. When adding a field, reset it and extend the reset tests in `tests/simulation_run.rs`. A replay alone can't catch leftover events, because they land on the replay's own event times.
 - `FailureProfile` is the failure/availability model for stations. Availability is a fraction in `(0.0, 1.0)` where `1.0` = 100% available (inactive). The demo uses `availability=0.9` with an Erlang repair time (mean 60s, k=2); tests use `availability=1.0` unless they exercise failures.
 - `MUExit` carries an `ExitTicket` naming its MU and the object's `stop_count` when it was scheduled. The event heap can't cancel events, so a stop bumps `stop_count` and the queued exit is ignored as stale when it fires. Resuming schedules a new exit for the remaining process time.
 
@@ -88,9 +95,9 @@ Deep-context pages live in `wiki/`. Pull these in with `@` when working on a spe
 
 ## Adding a New Material-Flow Type
 
-1. Implement `EventInterface` + `MaterialFlow` for the new type.
+1. Implement `EventInterface` (including `reset` and `report`) + `StopCtrl` + `MaterialFlow` for the new type, plus `SuccessorContainer` if it has successors.
 2. Expose it in `src/materialflow_objects/mod.rs`.
-3. Register instances with `simulator.register_material_flow(obj.clone())`.
+3. Add instances with `run.add_object(obj.clone())`.
 4. Wire `succ`/`pred` vecs using `Rc<RefCell<dyn MaterialFlow>>` references.
 
 ## Agent skills

@@ -1,22 +1,22 @@
 use crate::error::{InitError, MaterialflowError, RunTimeError};
-use crate::event::{EventTemplate, EventType, ExitTicket};
+use crate::event::{EventContext, EventTemplate, EventType, ExitTicket};
+use crate::observation::{ObjectKind, ObjectState, OccurrenceKind};
 use std::time::Duration;
 use crate::flows::{
 	EventInterface, InterruptionState, MaterialFlow, MoveableUnit, ProcessState, StopCtrl, SuccessorContainer, try_to_move_to_successor,
 };
-use crate::simulator::Simulator;
 use std::{cell::RefCell, rc::Rc};
 use super::flows::BaseObject;
 
 pub fn handle_source_mu_exit(
 	source: &mut Source,
-	_simulator: &Simulator,
+	context: &mut EventContext,
 ) -> Result<Option<Vec<EventTemplate>>, RunTimeError> {
-	let event_template_result = try_to_move_to_successor(source, _simulator);
+	let event_template_result = try_to_move_to_successor(source, context);
 	match event_template_result {
 		Ok(opt_evt) => {
 			if source.content.is_none() {
-				let next_mu_event = match source.create_mu() {
+				let next_mu_event = match source.create_mu(context) {
 					Ok(v) => v,
 					Err(_) => return Err(RunTimeError {}),
 				};
@@ -29,7 +29,7 @@ pub fn handle_source_mu_exit(
 			if let Some(ev) = opt_evt {
 				Ok(Some(vec![ev]))
 			} else {
-				source.state = ProcessState::Blocked;
+				source.become_blocked(context);
 				Ok(None)
 			}
 		}
@@ -41,12 +41,11 @@ pub struct Source {
 	pub base: BaseObject,
 	pub content: Option<MoveableUnit>,
 	pub proc_time: Duration,
-	pub remain_proc_time: Duration,
+	pub completion_time: Option<Duration>,
 	pub succ: Vec<Rc<RefCell<dyn MaterialFlow>>>,
 	pub succ_pointer: usize,
 	pub state: ProcessState,
 	pub interruption: InterruptionState,
-	pub mu_id: u32,
 }
 impl Source {
 	pub fn new(
@@ -58,60 +57,69 @@ impl Source {
 			base: BaseObject { object_id, random_seed: 0 },
 			content: None,
 			proc_time,
-			remain_proc_time: Duration::from_millis(0),
+			completion_time: None,
 			succ,
 			succ_pointer: 0,
 			state: ProcessState::Idle,
 			interruption: InterruptionState::None,
-			mu_id: 0,
 		}
 	}
-	pub fn create_mu(&mut self) -> Result<EventTemplate, MaterialflowError> {
-		self.mu_id += 1;
-		if self.content.is_none() {
-			self.content = Some(MoveableUnit {
-				id: self.mu_id,
-				location_id: self.base.object_id,
-			});
-			log::info!("Source {} created MU {}", self.base.object_id, self.mu_id);
-			self.state = ProcessState::Processing;
-			// set remaining processing time when a new MU is created
-			self.remain_proc_time = self.proc_time;
-			return Ok(EventTemplate {
-				eventtype: EventType::MUExit(ExitTicket::new(self.mu_id)),
-				exec_time: self.proc_time,
-				object_id: self.base.object_id,
-				seq: 0,
-			});
+	pub fn create_mu(&mut self, context: &mut EventContext) -> Result<EventTemplate, MaterialflowError> {
+		if self.content.is_some() {
+			return Err(MaterialflowError::NoMU);
 		}
-		Err(MaterialflowError::NoMU)
+		let mu_id = context.new_mu_id();
+		self.content = Some(MoveableUnit {
+			id: mu_id,
+			location_id: self.base.object_id,
+		});
+		log::info!("Source {} created MU {}", self.base.object_id, mu_id);
+		context.record(OccurrenceKind::MuCreated { mu_id, at: self.base.object_id });
+		if self.state == ProcessState::Blocked {
+			context.record(OccurrenceKind::Unblocked { object_id: self.base.object_id });
+		}
+		self.state = ProcessState::Processing;
+		self.completion_time = Some(context.time + self.proc_time);
+		Ok(EventTemplate {
+			eventtype: EventType::MUExit(ExitTicket::new(mu_id)),
+			exec_time: self.proc_time,
+			object_id: self.base.object_id,
+			seq: 0,
+		})
+	}
+	fn become_blocked(&mut self, context: &mut EventContext) {
+		if self.state != ProcessState::Blocked {
+			context.record(OccurrenceKind::Blocked { object_id: self.base.object_id });
+		}
+		self.state = ProcessState::Blocked;
+		self.completion_time = None;
 	}
 }
 
 impl EventInterface for Source {
-	fn init(&mut self) -> Result<Vec<EventTemplate>, InitError> {
-		match self.create_mu() {
+	fn init(&mut self, context: &mut EventContext) -> Result<Vec<EventTemplate>, InitError> {
+		match self.create_mu(context) {
 			Ok(e) => Ok(vec![e]),
 			Err(_) => Err(InitError {}),
 		}
 	}
 	fn execute_event(
 		&mut self,
-		_simulator: &mut Simulator,
+		context: &mut EventContext,
 		eventtype: &EventType,
 	) -> Result<Option<Vec<EventTemplate>>, RunTimeError> {
 		match eventtype {
-			&EventType::MUExit(_) => handle_source_mu_exit(self, _simulator),
+			&EventType::MUExit(_) => handle_source_mu_exit(self, context),
 			&EventType::BlockedRetry => {
 				// successor notified that it became available; attempt to move
 				if !self.is_exit_allowed() {
 					return Ok(None);
 				}
-				match try_to_move_to_successor(self, _simulator) {
+				match try_to_move_to_successor(self, context) {
 					Ok(Some(ev)) => {
 						// If the MU was moved and the source is now empty, create the next MU
 						if self.content.is_none() {
-							match self.create_mu() {
+							match self.create_mu(context) {
 								Ok(next_ev) => return Ok(Some(vec![next_ev, ev])),
 								Err(_) => return Ok(Some(vec![ev])),
 							}
@@ -121,7 +129,7 @@ impl EventInterface for Source {
 					Ok(None) => {
 						// No immediate event from successor. If the source became empty, create next MU
 						if self.content.is_none() {
-							match self.create_mu() {
+							match self.create_mu(context) {
 								Ok(next_ev) => return Ok(Some(vec![next_ev])),
 								Err(_) => return Ok(None),
 							}
@@ -132,6 +140,26 @@ impl EventInterface for Source {
 				}
 			}
 			_ => Err(RunTimeError {}),
+		}
+	}
+	fn reset(&mut self) {
+		self.content = None;
+		self.completion_time = None;
+		self.succ_pointer = 0;
+		self.state = ProcessState::Idle;
+		self.interruption = InterruptionState::None;
+	}
+	fn report(&self, now: Duration) -> ObjectState {
+		ObjectState {
+			id: self.base.object_id,
+			kind: ObjectKind::Source,
+			contents: self.content.iter().map(|mu| mu.id).collect(),
+			process: self.state.clone(),
+			stop: self.interruption.cause(),
+			remaining: self.completion_time.map(|completion| completion.saturating_sub(now)),
+			blocked_predecessors: Vec::new(),
+			successors: self.succ.iter().map(|s| *s.borrow().get_object_id()).collect(),
+			mus_left: 0,
 		}
 	}
 	fn get_object_id(&self) -> &u32 {
@@ -166,23 +194,12 @@ impl MaterialFlow for Source {
 	fn process_mu_entrance(
 		&mut self,
 		_mu: MoveableUnit,
+		_context: &mut EventContext,
 	) -> Result<Option<EventTemplate>, MaterialflowError> {
 		panic!("Source should not be processing MU entrance")
 	}
-	fn process_mu_exit(&mut self) -> Result<Option<EventTemplate>, MaterialflowError> {
-		match self.interruption {
-			InterruptionState::None => Ok(None),
-			_ => {
-				self.state = ProcessState::Blocked;
-				Ok(None)
-			}
-		}
-	}
 	fn add_blocked(&mut self, _id_blocked: u32) {
 		panic!("Source cannot receive blocked objects")
-	}
-	fn as_any(&mut self) -> &mut dyn std::any::Any {
-		self
 	}
 	fn notify_blocked_predecessors(&mut self) -> Result<Option<Vec<EventTemplate>>, MaterialflowError> {
 		//source has no predecessors

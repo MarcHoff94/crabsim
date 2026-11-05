@@ -5,6 +5,8 @@ use std::{
     time::Duration,
 };
 
+use crate::observation::{Occurrence, OccurrenceKind};
+
 // EcTime removed: use std::time::Duration everywhere
 
 /// Names the MU an `MUExit` is for and how many times its object had been stopped
@@ -19,6 +21,36 @@ pub struct ExitTicket {
 impl ExitTicket {
     pub fn new(mu_id: u32) -> ExitTicket {
         ExitTicket { mu_id, stop_count: 0 }
+    }
+}
+
+/// What a material-flow object gets while handling an event: the current simulation
+/// time, a place to record occurrences, and new MU identities.
+pub struct EventContext {
+    pub time: Duration,
+    pub seq: u64,
+    next_mu_id: u32,
+    occurrences: Vec<Occurrence>,
+}
+
+impl EventContext {
+    pub fn new(first_mu_id: u32) -> EventContext {
+        EventContext { time: Duration::ZERO, seq: 0, next_mu_id: first_mu_id, occurrences: Vec::new() }
+    }
+
+    pub fn record(&mut self, kind: OccurrenceKind) {
+        self.occurrences.push(Occurrence { time: self.time, kind });
+    }
+
+    /// Hands out an MU id that is unique across the whole model.
+    pub fn new_mu_id(&mut self) -> u32 {
+        let id = self.next_mu_id;
+        self.next_mu_id += 1;
+        id
+    }
+
+    pub fn take_occurrences(&mut self) -> Vec<Occurrence> {
+        std::mem::take(&mut self.occurrences)
     }
 }
 

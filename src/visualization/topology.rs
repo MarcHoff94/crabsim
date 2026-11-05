@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 use std::cell::RefCell;
 use crate::flows::MaterialFlow;
@@ -8,7 +8,7 @@ pub struct TopologyVisualizer;
 
 impl TopologyVisualizer {
     pub fn render_network_topology(
-        material_flows: &HashMap<u32, Rc<RefCell<dyn MaterialFlow>>>,
+        material_flows: &BTreeMap<u32, Rc<RefCell<dyn MaterialFlow>>>,
     ) -> String {
         let mut buf = String::new();
         buf.push_str("\n╔═════════════════════════════════════════════════════════════════════════════════╗\n");
@@ -264,7 +264,7 @@ impl TopologyVisualizer {
         buf.push('\n');
     }
     pub fn print_network_topology(
-        material_flows: &HashMap<u32, Rc<RefCell<dyn MaterialFlow>>>,
+        material_flows: &BTreeMap<u32, Rc<RefCell<dyn MaterialFlow>>>,
     ) {
         // Avoid printing topology during tests to keep outputs clean
         if cfg!(test) { return; }

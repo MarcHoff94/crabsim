@@ -1,22 +1,22 @@
 use crate::error::{InitError, MaterialflowError, RunTimeError};
-use crate::event::{EventTemplate, EventType, ExitTicket};
+use crate::event::{EventContext, EventTemplate, EventType, ExitTicket};
+use crate::observation::{ObjectKind, ObjectState, OccurrenceKind, StopCause};
 use std::time::Duration;
 use super::flows::BaseObject;
 use crate::flows::{
 	EventInterface, StopCtrl, FailureProfile, InterruptionState, MaterialFlow, MoveableUnit, ProcessState, SuccessorContainer, try_to_move_to_successor
 };
-use crate::simulator::Simulator;
 use std::{cell::RefCell, rc::Rc};
 
 #[derive(Clone)]
 pub struct SingleStation {
 	pub base: BaseObject,
 	pub proc_time: Duration,
-	pub remain_proc_time: Duration,
+	pub completion_time: Option<Duration>,
 	pub interrupted_remain_proc_time: Option<Duration>,
 	pub stop_count: u32,
-	pub start_proc_time: Duration,
 	pub failure_profile: FailureProfile,
+	pub starting_content: Option<MoveableUnit>,
 	pub content: Option<MoveableUnit>,
 	pub succ: Vec<Rc<RefCell<dyn MaterialFlow>>>,
 	pub succ_pointer: usize,
@@ -29,6 +29,7 @@ pub struct SingleStation {
 }
 
 impl SingleStation {
+	/// `content` is the station's starting MU: part of its default state, worked on from Init.
 	pub fn new(
 		object_id: u32,
 		proc_time: Duration,
@@ -40,11 +41,11 @@ impl SingleStation {
 		SingleStation {
 			base: BaseObject { object_id, random_seed: 0 },
 			proc_time,
-			remain_proc_time: Duration::from_millis(0),
+			completion_time: None,
 			interrupted_remain_proc_time: None,
 			stop_count: 0,
-			start_proc_time: Duration::from_millis(0),
 			failure_profile,
+			starting_content: content.clone(),
 			content,
 			succ,
 			succ_pointer: 0,
@@ -69,6 +70,25 @@ impl SingleStation {
 	fn is_stale_exit(&self, ticket: ExitTicket) -> bool {
 		ticket.stop_count != self.stop_count
 			|| self.content.as_ref().is_some_and(|mu| mu.id != ticket.mu_id)
+	}
+	/// Begins work on the MU now in the station and returns the exit for its completion time.
+	fn start_work(&mut self, mu_id: u32, context: &mut EventContext) -> EventTemplate {
+		self.completion_time = Some(context.time + self.proc_time);
+		self.interrupted_remain_proc_time = None;
+		self.entrancelocked = true;
+		self.state = ProcessState::Processing;
+		context.record(OccurrenceKind::WorkStarted { mu_id, at: self.base.object_id });
+		self.exit_event(mu_id, self.proc_time)
+	}
+	/// Changes the process state, reporting when blocking begins or ends.
+	fn set_state(&mut self, state: ProcessState, context: &mut EventContext) {
+		let object_id = self.base.object_id;
+		match (self.state == ProcessState::Blocked, state == ProcessState::Blocked) {
+			(false, true) => context.record(OccurrenceKind::Blocked { object_id }),
+			(true, false) => context.record(OccurrenceKind::Unblocked { object_id }),
+			_ => {}
+		}
+		self.state = state;
 	}
 	pub fn add_blocked(&mut self, blocked_id: u32) {
 		if !self.blockedlist.contains(&blocked_id) {
@@ -114,30 +134,15 @@ impl MaterialFlow for SingleStation {
 	fn process_mu_entrance(
 		&mut self,
 		mu: MoveableUnit,
+		context: &mut EventContext,
 	) -> Result<Option<EventTemplate>, MaterialflowError> {
 		log::info!("MU {} entered SingleStation {}", mu.id, self.base.object_id);
 		let mu_id = mu.id;
 		self.content = Some(mu);
-		self.remain_proc_time = self.proc_time;
-		self.interrupted_remain_proc_time = None;
-		self.entrancelocked = true;
-		self.state = ProcessState::Processing;
-		Ok(Some(self.exit_event(mu_id, self.proc_time)))
-	}
-	fn process_mu_exit(&mut self) -> Result<Option<EventTemplate>, MaterialflowError> {
-		match self.interruption {
-			InterruptionState::None => Ok(None),
-			InterruptionState::Failed | InterruptionState::Paused => {
-				self.state = ProcessState::Blocked;
-				Ok(None)
-			}
-		}
+		Ok(Some(self.start_work(mu_id, context)))
 	}
 	fn add_blocked(&mut self, id_blocked: u32) {
 		self.blockedlist.push(id_blocked);
-	}
-	fn as_any(&mut self) -> &mut dyn std::any::Any {
-		self
 	}
 	fn notify_blocked_predecessors(&mut self) -> Result<Option<Vec<EventTemplate>>, MaterialflowError> {
 		let mut blocked_events = Vec::new();
@@ -158,22 +163,26 @@ impl MaterialFlow for SingleStation {
 }
 
 impl EventInterface for SingleStation {
-	fn init(&mut self) -> Result<Vec<EventTemplate>, InitError> {
+	fn init(&mut self, context: &mut EventContext) -> Result<Vec<EventTemplate>, InitError> {
+		let mut events = Vec::new();
 		if self.failure_profile.active {
 			if let Ok(Some(ttf)) = self.failure_profile.get_time_to_next_failure() {
-				return Ok(vec![EventTemplate {
+				events.push(EventTemplate {
 					eventtype: EventType::StartFailure,
 					exec_time: ttf,
 					object_id: self.base.object_id,
 					seq: 0,
-				}]);
+				});
 			}
 		}
-		Ok(Vec::new())
+		if let Some(mu_id) = self.content.as_ref().map(|mu| mu.id) {
+			events.push(self.start_work(mu_id, context));
+		}
+		Ok(events)
 	}
 	fn execute_event(
 		&mut self,
-		_simulator: &mut Simulator,
+		context: &mut EventContext,
 		eventtype: &EventType,
 	) -> Result<Option<Vec<EventTemplate>>, RunTimeError> {
 		match eventtype {
@@ -181,10 +190,14 @@ impl EventInterface for SingleStation {
 				if !matches!(self.interruption, InterruptionState::None) || self.is_stale_exit(ticket) {
 					return Ok(None);
 				}
-				match try_to_move_to_successor(self, _simulator) {
+				self.completion_time = None;
+				if let Some(mu_id) = self.content.as_ref().map(|mu| mu.id) {
+					context.record(OccurrenceKind::WorkFinished { mu_id, at: self.base.object_id });
+				}
+				match try_to_move_to_successor(self, context) {
 					Ok(Some(event_template)) => {
 						self.entrancelocked = false;
-						self.state = ProcessState::Idle;
+						self.set_state(ProcessState::Idle, context);
 						let blocked_events = self.notify_blocked_predecessors();
 						match blocked_events {
 							Ok(Some(mut be)) => {
@@ -198,7 +211,7 @@ impl EventInterface for SingleStation {
 					Ok(None) => {
 						if self.content.is_none() {
 							self.entrancelocked = false;
-							self.state = ProcessState::Idle;
+							self.set_state(ProcessState::Idle, context);
 							let blocked_events = self.notify_blocked_predecessors();
 							match blocked_events {
 								Ok(Some(be)) => Ok(Some(be)),
@@ -206,7 +219,7 @@ impl EventInterface for SingleStation {
 								Err(_e) => Err(RunTimeError {}),
 							}
 						} else {
-							self.state = ProcessState::Blocked;
+							self.set_state(ProcessState::Blocked, context);
 							self.entrancelocked = true;
 							Ok(None)
 						}
@@ -218,11 +231,11 @@ impl EventInterface for SingleStation {
 				if !self.is_exit_allowed() {
 					return Ok(None);
 				}
-				match try_to_move_to_successor(self, _simulator) {
+				match try_to_move_to_successor(self, context) {
 					Ok(Some(event_template)) => {
 						if self.content.is_none() {
 							self.entrancelocked = false;
-							self.state = ProcessState::Idle;
+							self.set_state(ProcessState::Idle, context);
 							let blocked_events = self.notify_blocked_predecessors();
 							match blocked_events {
 								Ok(Some(mut be)) => {
@@ -239,7 +252,7 @@ impl EventInterface for SingleStation {
 					Ok(None) => {
 						if self.content.is_none() {
 							self.entrancelocked = false;
-							self.state = ProcessState::Idle;
+							self.set_state(ProcessState::Idle, context);
 							let blocked_events = self.notify_blocked_predecessors();
 							match blocked_events {
 								Ok(Some(be)) => Ok(Some(be)),
@@ -247,7 +260,7 @@ impl EventInterface for SingleStation {
 								Err(_e) => Err(RunTimeError {}),
 							}
 						} else {
-							self.state = ProcessState::Blocked;
+							self.set_state(ProcessState::Blocked, context);
 							Ok(None)
 						}
 					}
@@ -259,8 +272,10 @@ impl EventInterface for SingleStation {
 					return Ok(None);
 				}
 				self.interruption = InterruptionState::Failed;
+				context.record(OccurrenceKind::StopBegan { object_id: self.base.object_id, cause: StopCause::Failure });
 				if matches!(self.state, ProcessState::Processing) {
-					self.interrupted_remain_proc_time = Some(self.remain_proc_time);
+					let remaining = self.completion_time.take().unwrap_or(Duration::ZERO).saturating_sub(context.time);
+					self.interrupted_remain_proc_time = Some(remaining);
 					self.stop_count += 1;
 				}
 				let mttr = Duration::from_millis(
@@ -275,6 +290,7 @@ impl EventInterface for SingleStation {
 			}
 			&EventType::EndFailure => {
 				self.interruption = InterruptionState::None;
+				context.record(OccurrenceKind::StopEnded { object_id: self.base.object_id, cause: StopCause::Failure });
 				let mut events: Vec<EventTemplate> = Vec::new();
 				// Schedule next failure
 				if let Ok(Some(ttf)) = self.failure_profile.get_time_to_next_failure() {
@@ -287,17 +303,17 @@ impl EventInterface for SingleStation {
 				}
 				if let Some(remain) = self.interrupted_remain_proc_time.take() {
 					// Resume interrupted processing
-					self.remain_proc_time = remain;
+					self.completion_time = Some(context.time + remain);
 					self.state = ProcessState::Processing;
 					if let Some(mu_id) = self.content.as_ref().map(|mu| mu.id) {
 						events.push(self.exit_event(mu_id, remain));
 					}
 				} else if self.content.is_some() {
 					// Blocked when failure hit (MU done, waiting to exit) — retry move
-					match try_to_move_to_successor(self, _simulator) {
+					match try_to_move_to_successor(self, context) {
 						Ok(Some(evt)) => {
 							self.entrancelocked = false;
-							self.state = ProcessState::Idle;
+							self.set_state(ProcessState::Idle, context);
 							events.push(evt);
 							if let Ok(Some(be)) = self.notify_blocked_predecessors() {
 								events.extend(be);
@@ -306,19 +322,19 @@ impl EventInterface for SingleStation {
 						Ok(None) => {
 							if self.content.is_none() {
 								self.entrancelocked = false;
-								self.state = ProcessState::Idle;
+								self.set_state(ProcessState::Idle, context);
 								if let Ok(Some(be)) = self.notify_blocked_predecessors() {
 									events.extend(be);
 								}
 							} else {
-								self.state = ProcessState::Blocked;
+								self.set_state(ProcessState::Blocked, context);
 							}
 						}
 						Err(_) => return Err(RunTimeError {}),
 					}
 				} else {
 					// Idle when failure hit — notify predecessors we're available again
-					self.state = ProcessState::Idle;
+					self.set_state(ProcessState::Idle, context);
 					if let Ok(Some(be)) = self.notify_blocked_predecessors() {
 						events.extend(be);
 					}
@@ -326,6 +342,33 @@ impl EventInterface for SingleStation {
 				if events.is_empty() { Ok(None) } else { Ok(Some(events)) }
 			}
 			_ => Err(RunTimeError {}),
+		}
+	}
+	fn reset(&mut self) {
+		self.content = self.starting_content.clone();
+		self.completion_time = None;
+		self.interrupted_remain_proc_time = None;
+		self.stop_count = 0;
+		self.succ_pointer = 0;
+		self.blockedlist.clear();
+		self.entrancelocked = false;
+		self.exitlocked = false;
+		self.state = ProcessState::Idle;
+		self.interruption = InterruptionState::None;
+	}
+	fn report(&self, now: Duration) -> ObjectState {
+		let remaining = self.interrupted_remain_proc_time
+			.or_else(|| self.completion_time.map(|completion| completion.saturating_sub(now)));
+		ObjectState {
+			id: self.base.object_id,
+			kind: ObjectKind::Station,
+			contents: self.content.iter().map(|mu| mu.id).collect(),
+			process: self.state.clone(),
+			stop: self.interruption.cause(),
+			remaining,
+			blocked_predecessors: self.blockedlist.clone(),
+			successors: self.succ.iter().map(|s| *s.borrow().get_object_id()).collect(),
+			mus_left: 0,
 		}
 	}
 	fn get_object_id(&self) -> &u32 {
@@ -343,9 +386,9 @@ impl EventInterface for SingleStation {
 	}
 }
 impl StopCtrl for SingleStation{
-	fn set_stop(&mut self, failure_start: &Duration, reason: InterruptionState) -> Result<Option<EventTemplate>, MaterialflowError> {
+	fn set_stop(&mut self, _failure_start: &Duration, reason: InterruptionState) -> Result<Option<EventTemplate>, MaterialflowError> {
 		self.interruption = reason;
-		
+
 		todo!("not fully implemented yet")
 	}
 	fn remove_stop(&mut self) -> Result<Option<EventTemplate>, MaterialflowError> {
@@ -371,4 +414,3 @@ impl SuccessorContainer for SingleStation {
 		self.content.take()
 	}
 }
-

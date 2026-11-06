@@ -184,6 +184,114 @@ fn an_event_cannot_be_scheduled_in_the_past() {
     );
 }
 
+// ---------- Bounded advancing ----------
+
+/// Source (one MU every 10s) -> Drain.
+fn source_into_drain() -> SimulationRun {
+    let src = source(10);
+    let dr = drain();
+    src.borrow_mut().succ = vec![dr.clone()];
+    let mut run = SimulationRun::new(0);
+    run.add_object(src);
+    run.add_object(dr);
+    run.init().unwrap();
+    run
+}
+
+#[test]
+fn a_bounded_advance_stops_at_its_last_event_when_more_are_due() {
+    let mut run = source_into_drain();
+    let advance = run.advance_bounded(secs(100), 2).unwrap();
+    assert!(!advance.reached);
+    assert_eq!(run.time(), secs(20), "the clock stays at the last event it processed");
+    assert_eq!(run.next_event_time(), Some(secs(30)));
+    assert_eq!(moves_from(&advance.occurrences, 0), vec![10.0, 20.0]);
+}
+
+#[test]
+fn a_bounded_advance_with_room_to_spare_leaves_the_clock_at_the_target() {
+    let mut run = source_into_drain();
+    let advance = run.advance_bounded(secs(25), 1_000).unwrap();
+    assert!(advance.reached);
+    assert_eq!(run.time(), secs(25));
+    assert_eq!(moves_from(&advance.occurrences, 0), vec![10.0, 20.0]);
+}
+
+#[test]
+fn a_bounded_advance_includes_events_at_the_target() {
+    let mut run = source_into_drain();
+    let advance = run.advance_bounded(secs(20), 2).unwrap();
+    assert!(advance.reached, "using up the limit on the last due event still reaches the target");
+    assert_eq!(moves_from(&advance.occurrences, 0), vec![10.0, 20.0]);
+
+    let mut run = source_into_drain();
+    let advance = run.advance_bounded(secs(20), 1).unwrap();
+    assert!(!advance.reached, "the event at the target is still due");
+    assert_eq!(run.time(), secs(10));
+}
+
+#[test]
+fn a_bounded_advance_of_no_events_only_moves_the_clock_if_nothing_is_due() {
+    let mut run = source_into_drain();
+    assert!(run.advance_bounded(secs(5), 0).unwrap().reached);
+    assert_eq!(run.time(), secs(5));
+    assert!(!run.advance_bounded(secs(15), 0).unwrap().reached);
+    assert_eq!(run.time(), secs(5));
+}
+
+#[test]
+fn bounded_advances_give_the_same_occurrences_in_the_same_order_as_advance_to() {
+    // Blocking and retries put several events on one time, so this also covers `seq` order.
+    let model = || {
+        let (mut run, st_id, _) = line(5_000.0);
+        run.init().unwrap();
+        fail_at(&mut run, 15, st_id);
+        fail_at(&mut run, 95, st_id);
+        run
+    };
+    let expected = model().advance_to(secs(400)).unwrap();
+    assert!(expected.len() > 30, "the model should do something");
+
+    for max_events in [1, 2, 3, 7] {
+        let mut run = model();
+        let mut occurrences = Vec::new();
+        for _ in 0..expected.len() + 1 {
+            let advance = run.advance_bounded(secs(400), max_events).unwrap();
+            occurrences.extend(advance.occurrences);
+            if advance.reached {
+                break;
+            }
+        }
+        assert_eq!(run.time(), secs(400));
+        assert_eq!(occurrences, expected, "{max_events} events at a time");
+    }
+}
+
+#[test]
+fn a_bounded_advance_before_init_is_an_error() {
+    let (mut run, _, _) = line(0.0);
+    assert_eq!(run.advance_bounded(secs(10), 1).unwrap_err().error, RunError::NotInitialised);
+}
+
+#[test]
+fn an_error_from_a_bounded_advance_carries_the_occurrences_before_it() {
+    let mut run = source_into_drain();
+    run.schedule_event(secs(25), EventType::StartFailure, 0).unwrap();
+    let failure = run.advance_bounded(secs(30), 100).unwrap_err();
+    assert_eq!(failure.error, RunError::ObjectFailed { object_id: 0, time: secs(25) });
+    assert_eq!(moves_from(&failure.occurrences, 0), vec![10.0, 20.0]);
+}
+
+#[test]
+fn a_run_says_whether_it_is_initialised() {
+    let (mut run, _, _) = line(0.0);
+    assert!(!run.is_initialised());
+    run.init().unwrap();
+    assert!(run.is_initialised());
+    run.reset();
+    assert!(!run.is_initialised());
+}
+
 // ---------- Reset ----------
 
 fn assert_reset_replays_the_run(mut run: SimulationRun, until: u64) {

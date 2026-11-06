@@ -19,4 +19,4 @@ pub use crate::event::{EventContext, EventTemplate, EventType, ExitTicket};
 pub use crate::live_session::{Clock, LiveSession, Observation, SessionError, WallClock};
 pub use crate::materialflow_objects::{Buffer, Drain, SingleStation, Source};
 pub use crate::observation::{ObjectKind, ObjectState, Occurrence, OccurrenceKind, RunState, StopCause};
-pub use crate::simulation_run::{SimulationRun, ZERO_TIME_EVENT_LIMIT};
+pub use crate::simulation_run::{BoundedAdvance, SimulationRun, ZERO_TIME_EVENT_LIMIT};

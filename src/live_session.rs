@@ -296,7 +296,7 @@ impl<C: Clock> SessionThread<C> {
         if self.pace.is_some() {
             return;
         }
-        if !self.run.state().initialised {
+        if !self.run.is_initialised() {
             match self.run.init() {
                 Ok(occurrences) => self.report(occurrences),
                 Err(error) => {
@@ -341,43 +341,19 @@ impl<C: Clock> SessionThread<C> {
         self.pace.map(|pace| pace.target(self.clock.elapsed(), self.speed))
     }
 
-    /// Advances towards the clock's time, by at most `EVENTS_PER_SLICE` events. It steps
-    /// rather than calling `advance_to`, which has no limit on how long it takes.
+    /// Advances towards the clock's time, by at most `EVENTS_PER_SLICE` events.
     fn advance_one_slice(&mut self) {
         let Some(target) = self.target() else { return };
         let time_before = self.run.time();
-        let mut occurrences = Vec::new();
-        self.catching_up = false;
-        for _ in 0..EVENTS_PER_SLICE {
-            if !self.has_event_by(target) {
-                break;
-            }
-            match self.run.step() {
-                Ok(new) => occurrences.extend(new),
-                Err(failure) => {
-                    occurrences.extend(failure.occurrences);
-                    return self.report_failure(occurrences, failure.error);
+        match self.run.advance_bounded(target, EVENTS_PER_SLICE) {
+            Ok(advance) => {
+                self.catching_up = !advance.reached;
+                if !advance.occurrences.is_empty() || self.run.time() != time_before {
+                    self.report(advance.occurrences);
                 }
             }
+            Err(failure) => self.report_failure(failure.occurrences, failure.error),
         }
-        if self.has_event_by(target) {
-            self.catching_up = true;
-        } else {
-            match self.run.advance_to(target) {
-                Ok(new) => occurrences.extend(new),
-                Err(failure) => {
-                    occurrences.extend(failure.occurrences);
-                    return self.report_failure(occurrences, failure.error);
-                }
-            }
-        }
-        if !occurrences.is_empty() || self.run.time() != time_before {
-            self.report(occurrences);
-        }
-    }
-
-    fn has_event_by(&self, time: Duration) -> bool {
-        self.run.next_event_time().is_some_and(|next| next <= time)
     }
 
     fn release_waiters(&mut self) {

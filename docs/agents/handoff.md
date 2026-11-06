@@ -13,7 +13,7 @@ The project owner returned to this project after about six months away and didn'
 
 ## Current state
 
-Checked on 2026-11-06: the step 4 branch passes all 186 tests, with 1 long-run test ignored (`cargo test --all-targets`). The demo ran to the end in both modes on the same source code before it was merged.
+Checked on 2026-11-06: `master` passes all 186 tests, with 1 long-run test ignored (`cargo test --all-targets`). The demo ran to the end in both modes on the same source code before it was merged.
 
 | Branch | Where | State |
 |---|---|---|
@@ -50,7 +50,7 @@ Performance is the first thing to weigh in design trade-offs. It is a guideline 
   - **Buffer:** limited by a maximum number of instants, with no limit on how far ahead in time the run gets. When it's full the run waits and still handles commands.
   - **Time:** Halt, errors and everything else the user experiences follow shown time. Reset throws the buffer away.
   - **What the UI gets:** one full state at Init, after Reset and after a jump back, and occurrences in between. The UI builds its picture from them, so occurrences must carry everything needed to rebuild the state, such as how long newly started work will take.
-- **Checkpoints:** kept up to a memory budget the user configures, oldest dropped first. Every object implements save and restore, and a test checks that restoring and replaying gives occurrences identical to the original run.
+- **Checkpoints:** kept up to a memory budget the user configures, oldest dropped first. A checkpoint is a clone of the run, plus how much of the intervention log is in it, and a test checks that restoring and replaying gives occurrences identical to the original run.
 - **Interventions:** take effect immediately at shown time, without a Halt, and discard the computed future. Only Pause on and off for now. Same seed plus same intervention log gives the same result. There are no branching timelines.
 - **Object storage (built):** one `Vec` indexed by id, successors stored as ids, an `enum` for the object type. See ADR 0005.
 - **Threads:** each run executes on one thread at a time, and can move between threads. Cores are used through distributed simulation, which means many replications at once. One `ModelDescription` can already build many runs, but nothing else is built for this yet.
@@ -122,8 +122,8 @@ Agreed on 2026-11-06, replacing the original repair plan, whose first two steps 
 2. ✅ Add the benchmark, a tuned release profile and a first profile. `panic = "abort"` is out, because `LiveSession` relies on `catch_unwind`. See `docs/design/first-profile.md`.
 3. ✅ Make the object storage change and add the millisecond time type. Tests build their models through a minimal model description, so storage details stay out of them. See ADR 0005.
 4. ✅ Headless run without recording, with statistics for what today's model has. Memory is now flat with simulated length.
-5. ⬜ Throwaway prototype of restore and replay, for real cost figures.
-6. ⬜ Read-ahead `LiveSession`, if the prototype holds up. If it doesn't, reconsider the design with the owner.
+5. ✅ Throwaway prototype of restore and replay, for real cost figures. It held up: see `docs/design/restore-replay-prototype.md`. The code is on the branch `prototype/restore-replay`, never to be merged.
+6. ⬜ Read-ahead `LiveSession`.
 7. ⬜ The earlier domain work, in this order. The UI work also builds on step 6, and the owner may want it sooner, so ask.
    - Finish `StopCtrl` on all four object types, including overlapping interruptions and failure profiles.
    - Fix `Buffer`, test it, and add dwelling time.
@@ -203,7 +203,7 @@ What each stage needs:
 
 ## Possible next steps
 
-1. Follow the build order, starting with step 5, a throwaway prototype of restore and replay. GitHub issue #3 holds the full spec.
+1. Follow the build order, starting with step 6, the read-ahead `LiveSession`. GitHub issue #3 holds the full spec.
 2. Run `/update-wiki` when convenient, so the docs stop describing removed code.
 
 Candidate 7 should still be decided before `StopCtrl` gets written, and the UI technology is still undecided. Ask the owner rather than assume if the UI should come sooner.

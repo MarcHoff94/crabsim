@@ -1,5 +1,5 @@
 ---
-status: accepted, not built. Step 5 of the build order in `docs/agents/handoff.md` tests it with a throwaway prototype before step 6 rewrites `LiveSession`. Reconsider this decision if the prototype fails.
+status: accepted, not built. The prototype in step 5 of the build order held up, as set out in `docs/design/restore-replay-prototype.md`. Step 6 builds it.
 ---
 
 # Read-ahead live session, with checkpoints and replay
@@ -15,6 +15,6 @@ A live session lets its simulation run compute ahead as fast as it can, into a b
 ## Consequences
 
 - `run.state()` describes computed time, so it can't draw the current picture. The UI builds its picture from occurrences, which must therefore carry everything needed to rebuild the state. It gets a full state only at Init, after Reset and after a jump back.
-- Every material-flow object must implement save and restore, as it must implement `reset`, and user code must fit in a checkpoint too.
-- A seed alone no longer identifies a run with interventions, so a run keeps an intervention log. Going back behind an intervention removes it from the log, and abandoned futures are gone: there are no branching timelines.
-- Costs so far are estimates: about 10–20 KB per checkpoint for the demo model, and about 0.2 ms to replay 1,000 events at today's speed.
+- A checkpoint is a clone of the run, so every material-flow object has to be cloneable, and user code has to fit in a checkpoint too.
+- A seed alone no longer identifies a run with interventions, so a run keeps an intervention log. A checkpoint records how much of the log is in it, and replay applies the logged actions it passes. Going back behind an intervention removes it from the log, and abandoned futures are gone, along with their checkpoints: there are no branching timelines.
+- Measured costs: 17 KB per checkpoint for the demo model and 3.4 MB for 2,800 objects. Going back with a replay of 100,000 events takes 7 to 13 ms, within a frame. Taking a checkpoint every 100,000 events slows a run at full speed by up to 6.5%. A headless run takes none and pays nothing.

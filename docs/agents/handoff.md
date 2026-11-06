@@ -103,6 +103,9 @@ Performance is the first thing to weigh in design trade-offs. It is a guideline 
 - **Occurrences** are returned by each advance today. Views get no callbacks. A run can also be asked for its full typed state. "We might add more states later." *Agreed change, not built: a run records occurrences only when asked.*
 - **MU ids** are unique across the model.
 
+### Statistics (not built)
+See `docs/design/statistics.md`, ADR 0002 and ADR 0003. Objects keep fixed-size, always-on statistics at two levels: machine state and MU time. Warm-up is a `clear_statistics()` call, and per-MU data exists only through recording occurrences.
+
 ### User code (not built)
 The owner wants users to add their own source code later. The decisions so far:
 - Each object has fixed init and reset parts that **users can't change**. For example, Reset always deletes all MUs.

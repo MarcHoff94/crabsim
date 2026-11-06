@@ -1,6 +1,6 @@
 # Statistics of material-flow objects
 
-Agreed with the owner on 2026-11-06. **Not built.** Terms are defined in `GLOSSARY.md`. The reasoning behind the two hardest decisions is in ADR 0002 and ADR 0003.
+Agreed with the owner on 2026-11-06. **Not built.** Terms are defined in `GLOSSARY.md`. The reasoning behind the two hardest decisions is in ADR 0003 and ADR 0004.
 
 ## Principles
 
@@ -117,7 +117,7 @@ There's no warm-up setting inside the engine. The caller does `advance_to(warm_u
 
 `exits` and `exit_ids` are removed from the Drain. The run gets a setting for which occurrence kinds to record: none, all or chosen kinds. A live session records everything, and a headless run records nothing by default. `MuLeft` gains `lead_time`.
 
-Recorded occurrences come back from each advance, and `AdvanceFailure` carries them through an error. See ADR 0003.
+Recorded occurrences come back from each advance, and `AdvanceFailure` carries them through an error. See ADR 0004.
 
 The uses of `exits` and `exit_ids` in `tests/simulation_run.rs` and `src/demo.rs` move to a helper that reads `MuLeft`.
 

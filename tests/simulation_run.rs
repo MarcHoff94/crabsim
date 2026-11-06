@@ -4,7 +4,7 @@
 use crabsim::random_numbers::Distribution;
 use crabsim::{
     Buffer, Drain, EventType, FailureProfile, MoveableUnit, Occurrence, OccurrenceKind, ProcessState,
-    RunError, RunState, SimulationRun, SingleStation, Source, StopCause,
+    RunError, RunState, SimulationRun, SingleStation, Source, StopCause, ZERO_TIME_EVENT_LIMIT,
 };
 use std::{cell::RefCell, rc::Rc, time::Duration};
 
@@ -865,4 +865,130 @@ fn every_object_gets_its_own_random_seed_at_init() {
     seeds.sort_unstable();
     seeds.dedup();
     assert_eq!(seeds.len(), 4);
+}
+
+// ---------- Zero-time loops ----------
+
+/// A Source that creates its next MU in no time, into a Drain: simulation time never moves.
+fn zero_time_loop() -> SimulationRun {
+    let src = source(0);
+    let dr = drain();
+    src.borrow_mut().succ = vec![dr.clone()];
+    let mut run = SimulationRun::new(0);
+    run.add_object(src);
+    run.add_object(dr);
+    run
+}
+
+/// Steps until the run refuses, returning everything it reported and the error.
+fn step_until_error(run: &mut SimulationRun) -> (Vec<Occurrence>, u64, RunError) {
+    let mut occurrences = Vec::new();
+    let mut steps = 0;
+    loop {
+        match run.step() {
+            Ok(new) => {
+                occurrences.extend(new);
+                steps += 1;
+            }
+            Err(error) => return (occurrences, steps, error),
+        }
+    }
+}
+
+#[test]
+fn a_zero_time_loop_is_an_error_when_advancing_to_a_time() {
+    let mut run = zero_time_loop();
+    run.init().unwrap();
+    assert_eq!(
+        run.advance_to(secs(10)).unwrap_err(),
+        RunError::ZeroTimeLoop { time: Duration::ZERO }
+    );
+    assert_eq!(run.time(), Duration::ZERO, "the clock stays where the loop is");
+}
+
+#[test]
+fn a_zero_time_loop_is_an_error_when_stepping() {
+    let mut run = zero_time_loop();
+    run.init().unwrap();
+    let (_, steps, error) = step_until_error(&mut run);
+    assert_eq!(steps, ZERO_TIME_EVENT_LIMIT);
+    assert_eq!(error, RunError::ZeroTimeLoop { time: Duration::ZERO });
+}
+
+#[test]
+fn zero_length_failures_are_a_zero_time_loop() {
+    let zero_length = FailureProfile::new(0.5, Distribution::CONSTANT { value: 0.0 }, 0);
+    let mut run = SimulationRun::new(0);
+    run.add_object(station_with_failures(10, zero_length));
+    run.init().unwrap();
+    assert_eq!(
+        run.advance_to(secs(10)).unwrap_err(),
+        RunError::ZeroTimeLoop { time: Duration::ZERO }
+    );
+}
+
+#[test]
+fn a_run_stuck_in_a_zero_time_loop_keeps_refusing() {
+    let mut run = zero_time_loop();
+    run.init().unwrap();
+    run.advance_to(secs(10)).unwrap_err();
+    let state = run.state();
+    let error = RunError::ZeroTimeLoop { time: Duration::ZERO };
+    assert_eq!(run.step().unwrap_err(), error);
+    assert_eq!(run.advance_to(secs(10)).unwrap_err(), error);
+    assert_eq!(run.state(), state, "refusing processes nothing");
+}
+
+#[test]
+fn only_events_at_one_time_count_towards_a_zero_time_loop() {
+    // More events in total than the limit allows at one time, but time moves between them.
+    let src = source(1);
+    let dr = drain();
+    src.borrow_mut().succ = vec![dr.clone()];
+    let mut run = SimulationRun::new(0);
+    run.add_object(src);
+    run.add_object(dr.clone());
+    run.init().unwrap();
+    run.advance_to(secs(ZERO_TIME_EVENT_LIMIT + 10)).unwrap();
+    assert_eq!(dr.borrow().exit_ids.len() as u64, ZERO_TIME_EVENT_LIMIT + 10);
+}
+
+#[test]
+fn a_zero_time_loop_is_found_at_the_same_event_however_the_run_is_advanced() {
+    let mut stepped = zero_time_loop();
+    stepped.init().unwrap();
+    let (step_by_step, _, _) = step_until_error(&mut stepped);
+
+    let mut advanced = zero_time_loop();
+    advanced.init().unwrap();
+    advanced.advance_to(secs(10)).unwrap_err();
+    assert_eq!(advanced.take_occurrences(), step_by_step);
+}
+
+#[test]
+fn reset_clears_the_zero_time_count() {
+    let mut run = zero_time_loop();
+    run.init().unwrap();
+    let (first, _, _) = step_until_error(&mut run);
+    run.reset();
+    run.init().unwrap();
+    let (second, _, _) = step_until_error(&mut run);
+    assert_eq!(first, second, "a replay gets the full allowance again");
+}
+
+#[test]
+fn occurrences_before_a_run_error_can_still_be_collected() {
+    let src = source(10);
+    let mut run = SimulationRun::new(0);
+    let src_id = run.add_object(src);
+    run.init().unwrap();
+    fail_at(&mut run, 25, src_id);
+    run.advance_to(secs(30)).unwrap_err();
+    let left_over = run.take_occurrences();
+    assert_eq!(
+        left_over,
+        vec![Occurrence { time: secs(10), kind: OccurrenceKind::Blocked { object_id: src_id } }],
+        "the Source has no successor, so it blocks at t=10 and then the failure is refused"
+    );
+    assert!(run.take_occurrences().is_empty(), "collecting empties them");
 }

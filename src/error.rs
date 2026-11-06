@@ -20,6 +20,8 @@ pub enum RunError {
     EventInThePast,
     UnknownObject(u32),
     ObjectFailed { object_id: u32, time: Duration },
+    /// Too many events in a row happened without simulation time moving.
+    ZeroTimeLoop { time: Duration },
 }
 
 impl fmt::Display for RunError {
@@ -31,6 +33,9 @@ impl fmt::Display for RunError {
             RunError::UnknownObject(id) => write!(f, "an event names object {id}, which is not in the model"),
             RunError::ObjectFailed { object_id, time } => {
                 write!(f, "object {object_id} could not handle an event at {:.3}s", time.as_secs_f64())
+            }
+            RunError::ZeroTimeLoop { time } => {
+                write!(f, "simulation time is stuck at {:.3}s: events keep happening without it advancing", time.as_secs_f64())
             }
         }
     }

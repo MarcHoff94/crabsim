@@ -9,6 +9,10 @@ use std::{
     time::Duration,
 };
 
+/// How many events a run processes at one simulation time before it reports a zero-time
+/// loop. Far more than a legitimate model has happening at one instant, however large.
+pub const ZERO_TIME_EVENT_LIMIT: u64 = 1_000_000;
+
 /// One execution of a model, from its Init until it is reset or discarded.
 ///
 /// A run only advances when asked, so how fast it goes is up to the caller. Every
@@ -20,6 +24,7 @@ pub struct SimulationRun {
     queue: BinaryHeap<ScheduledEvent>,
     time: Duration,
     next_seq: u64,
+    events_at_this_time: u64,
     seed: u64,
     initialised: bool,
     context: EventContext,
@@ -33,6 +38,7 @@ impl SimulationRun {
             queue: BinaryHeap::new(),
             time: Duration::ZERO,
             next_seq: 0,
+            events_at_this_time: 0,
             seed,
             initialised: false,
             context: EventContext::new(1),
@@ -81,9 +87,7 @@ impl SimulationRun {
     /// Processes the next event, if there is one.
     pub fn step(&mut self) -> Result<Vec<Occurrence>, RunError> {
         self.require_initialised()?;
-        if let Some(scheduled) = self.queue.pop() {
-            self.process(scheduled)?;
-        }
+        self.process_next()?;
         Ok(self.context.take_occurrences())
     }
 
@@ -91,14 +95,18 @@ impl SimulationRun {
     pub fn advance_to(&mut self, until: Duration) -> Result<Vec<Occurrence>, RunError> {
         self.require_initialised()?;
         while self.next_event_time().is_some_and(|time| time <= until) {
-            if let Some(scheduled) = self.queue.pop() {
-                self.process(scheduled)?;
-            }
+            self.process_next()?;
         }
         if until > self.time {
             self.time = until;
         }
         Ok(self.context.take_occurrences())
+    }
+
+    /// Hands over occurrences an advance recorded before it returned an error. A successful
+    /// advance returns its own, so this only ever has something after an error.
+    pub fn take_occurrences(&mut self) -> Vec<Occurrence> {
+        self.context.take_occurrences()
     }
 
     /// Returns every object to its default state, ready for a new run. Objects stay in the model.
@@ -109,6 +117,7 @@ impl SimulationRun {
         self.queue.clear();
         self.time = Duration::ZERO;
         self.next_seq = 0;
+        self.events_at_this_time = 0;
         self.initialised = false;
         self.context = EventContext::new(1);
     }
@@ -156,6 +165,25 @@ impl SimulationRun {
         self.next_seq = self.next_seq.wrapping_add(1);
         event.seq = seq;
         self.queue.push(ScheduledEvent { time, template: event, seq });
+    }
+
+    /// Processes the next event, unless that would be too many without time moving. The
+    /// event then stays queued, so a run in a zero-time loop keeps refusing until Reset.
+    fn process_next(&mut self) -> Result<(), RunError> {
+        let Some(time) = self.next_event_time() else {
+            return Ok(());
+        };
+        if time > self.time {
+            self.events_at_this_time = 0;
+        }
+        if self.events_at_this_time >= ZERO_TIME_EVENT_LIMIT {
+            return Err(RunError::ZeroTimeLoop { time });
+        }
+        self.events_at_this_time += 1;
+        match self.queue.pop() {
+            Some(scheduled) => self.process(scheduled),
+            None => Ok(()),
+        }
     }
 
     fn process(&mut self, scheduled: ScheduledEvent) -> Result<(), RunError> {

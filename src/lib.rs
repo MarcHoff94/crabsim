@@ -17,4 +17,4 @@ pub use crate::error::{InitError, MaterialflowError, RunError, RunTimeError};
 pub use crate::event::{EventContext, EventTemplate, EventType, ExitTicket};
 pub use crate::materialflow_objects::{Buffer, Drain, SingleStation, Source};
 pub use crate::observation::{ObjectKind, ObjectState, Occurrence, OccurrenceKind, RunState, StopCause};
-pub use crate::simulation_run::SimulationRun;
+pub use crate::simulation_run::{SimulationRun, ZERO_TIME_EVENT_LIMIT};

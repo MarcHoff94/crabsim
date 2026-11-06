@@ -2,7 +2,7 @@
 //! out. This knows nothing about any UI technology, and takes its clock from outside.
 
 use crate::error::RunError;
-use crate::observation::{Occurrence, RunState};
+use crate::observation::{Occurrence, Recording, RunState};
 use crate::simulation_run::SimulationRun;
 use crate::time::SimTime;
 use std::{
@@ -131,7 +131,8 @@ pub struct LiveSession {
 
 impl LiveSession {
     /// Creates the session's thread and builds the whole run on it. The session starts out
-    /// halted, at speed 1.
+    /// halted, at speed 1, and records everything, because its observers rebuild what they show
+    /// from occurrences.
     pub fn new<B, C>(build: B, clock: C) -> LiveSession
     where
         B: FnOnce() -> SimulationRun + Send + 'static,
@@ -301,7 +302,8 @@ struct SessionThread<'a, C> {
 }
 
 impl<'a, C: Clock> SessionThread<'a, C> {
-    fn new(run: SimulationRun, clock: C, commands: Receiver<Command>, outbox: &'a mut Outbox) -> Self {
+    fn new(mut run: SimulationRun, clock: C, commands: Receiver<Command>, outbox: &'a mut Outbox) -> Self {
+        run.set_recording(Recording::ALL);
         SessionThread {
             run,
             clock,

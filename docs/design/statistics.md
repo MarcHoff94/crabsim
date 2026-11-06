@@ -1,6 +1,6 @@
 # Statistics of material-flow objects
 
-Agreed with the owner on 2026-11-06. **Not built.** Terms are defined in `GLOSSARY.md`. The reasoning behind the two hardest decisions is in ADR 0003 and ADR 0004.
+Agreed with the owner on 2026-11-06. **Built in step 4 for what today's model has:** see "Building it". Terms are defined in `GLOSSARY.md`. The reasoning behind the two hardest decisions is in ADR 0003 and ADR 0004.
 
 ## Principles
 
@@ -168,9 +168,11 @@ The struct is `Copy` and needs no allocation. Methods that depend on the run's t
 
 ## Building it
 
-State changes are currently scattered: some go through `set_state`, others assign `self.state` directly. All of them need to go through one place that closes the time interval, or the buckets will drift.
+State changes are scattered through the objects' event handling, so nothing tries to catch them where they happen. Each object tells its `StatisticsKeeper` what it ended up doing, at the end of everything it handles. Time doesn't move within an event, so this catches every change, and all time goes through one place. A new object has to do the same.
 
-Failure statistics can be built now. Pause, overlapping interruptions, capacity, dwelling time and the other time bases aren't built, so their numbers arrive with the domain work in step 7 of the build order.
+Pause, overlapping interruptions, capacity above 1, dwelling time and the other time bases aren't built, so their numbers arrive with the domain work in step 7 of the build order. MU time follows from the machine state and the contents, which is exact at capacity 1 and has to change when one object can hold MUs in different states.
+
+**Cost:** about 7 to 12% of a headless run's time, and 264 bytes per object. See `docs/design/first-profile.md`.
 
 ## Fit with the rest of the agreed design
 

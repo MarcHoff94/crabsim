@@ -10,12 +10,13 @@
 //! running. If `events` or `MUs left` differ too, the change altered behaviour, not only speed.
 //!
 //! `cargo test --all-targets` runs this file without `--bench`, and then it only checks that the
-//! reference model still matches the demo model, with no timing.
+//! reference model still matches the demo model and that a headless run's memory stays flat.
 
 use crabsim::demo::build_model;
 use crabsim::event::ScheduledEvent;
 use crabsim::flows::FailureProfile;
 use crabsim::model::ModelDescription;
+use crabsim::observation::{ObjectKind, Recording};
 use crabsim::random_numbers::Distribution;
 use crabsim::simulation_run::SimulationRun;
 use crabsim::time::SimTime;
@@ -139,11 +140,12 @@ fn reference_model(lines: usize, seed: u64) -> SimulationRun {
 
 #[derive(Clone, Copy)]
 enum Occurrences {
-    /// One advance over the whole length, which returns every occurrence. What a run does today.
+    /// One advance over the whole length, recording and returning every occurrence.
     Kept,
-    /// Advances an hour at a time and drops what each returns. The nearest thing today to a
-    /// headless run, though the occurrences are still recorded and the Drain still lists exits.
+    /// Advances an hour at a time, recording every occurrence and dropping what each returns.
     Dropped,
+    /// A headless run: one advance over the whole length, recording nothing.
+    Headless,
 }
 
 struct Scenario {
@@ -154,7 +156,17 @@ struct Scenario {
     occurrences: Occurrences,
 }
 
-const SCENARIOS: [Scenario; 3] = [
+const SCENARIOS: [Scenario; 6] = [
+    Scenario { name: "demo-headless", lines: 1, length: YEAR, length_label: "1 year", occurrences: Occurrences::Headless },
+    // The same run over ten times the length: peak memory should stay where it is.
+    Scenario { name: "demo-headless-10y", lines: 1, length: YEAR.times(10), length_label: "10 years", occurrences: Occurrences::Headless },
+    Scenario {
+        name: "large-headless",
+        lines: LARGE_MODEL_LINES,
+        length: SimTime::from_secs(2 * 86_400),
+        length_label: "2 days",
+        occurrences: Occurrences::Headless,
+    },
     Scenario { name: "demo-kept", lines: 1, length: YEAR, length_label: "1 year", occurrences: Occurrences::Kept },
     Scenario { name: "demo-dropped", lines: 1, length: YEAR, length_label: "1 year", occurrences: Occurrences::Dropped },
     Scenario {
@@ -173,7 +185,7 @@ struct Measurement {
     allocations: u64,
     events: u64,
     occurrences: u64,
-    mus_left: usize,
+    mus_left: u64,
 }
 
 fn advance(run: &mut SimulationRun, scenario: &Scenario) -> u64 {
@@ -185,6 +197,10 @@ fn advance(run: &mut SimulationRun, scenario: &Scenario) -> u64 {
             // Part of the cost is giving that memory back, and it would be paid by any caller.
             drop(occurrences);
             count
+        }
+        Occurrences::Headless => {
+            run.advance_to(scenario.length).map_err(|failure| failure.error).unwrap();
+            0
         }
         Occurrences::Dropped => {
             let mut count = 0;
@@ -207,6 +223,9 @@ fn measure(scenario: &Scenario, seed: u64) -> Measurement {
     PEAK_BYTES.store(bytes_before_model, Relaxed);
 
     let mut run = reference_model(scenario.lines, seed);
+    if !matches!(scenario.occurrences, Occurrences::Headless) {
+        run.set_recording(Recording::ALL);
+    }
     run.init().map_err(|error| format!("{error:?}")).unwrap();
 
     let allocations_before = ALLOCATIONS.load(Relaxed);
@@ -216,7 +235,8 @@ fn measure(scenario: &Scenario, seed: u64) -> Measurement {
     let allocations = ALLOCATIONS.load(Relaxed) - allocations_before;
     let peak_heap_bytes = PEAK_BYTES.load(Relaxed) - bytes_before_model;
 
-    let mus_left = run.state().objects.iter().map(|object| object.mus_left).sum();
+    let drains = run.state().objects.into_iter().filter(|object| object.kind == ObjectKind::Drain);
+    let mus_left = drains.map(|drain| drain.statistics.mus_in).sum();
     Measurement { wall, peak_heap_bytes, allocations, events: run.events_processed(), occurrences, mus_left }
 }
 
@@ -254,11 +274,33 @@ fn run_scenario(scenario: &Scenario, seed: u64, reps: usize) {
     );
 }
 
+/// Peak heap of a headless run of the demo model, from before it is built until `length`.
+fn headless_peak_heap(length: SimTime) -> u64 {
+    let bytes_before_model = LIVE_BYTES.load(Relaxed);
+    PEAK_BYTES.store(bytes_before_model, Relaxed);
+    let mut run = reference_model(1, 0);
+    run.init().map_err(|error| format!("{error:?}")).unwrap();
+    run.advance_to(length).map_err(|failure| failure.error).unwrap();
+    black_box(&run);
+    PEAK_BYTES.load(Relaxed) - bytes_before_model
+}
+
+/// Memory stays flat as simulated length grows, unless the user asked for recording. Only the
+/// event queue and the blocked lists can grow at all, and the model limits both.
+fn check_memory_stays_flat() {
+    let short = headless_peak_heap(DAY.times(5));
+    let long = headless_peak_heap(DAY.times(20));
+    assert!(long <= short + short / 10, "a headless run grew from {short} to {long} bytes over four times the length");
+    println!("a headless run's memory stays flat: {short} bytes over 5 days, {long} over 20");
+}
+
 /// The reference model must stay the demo model unless someone decides otherwise.
 fn check_model_matches_demo() {
     for seed in 0..3 {
-        let (mut demo, _) = build_model(seed);
+        let mut demo = build_model(seed);
         let mut reference = reference_model(1, seed);
+        demo.set_recording(Recording::ALL);
+        reference.set_recording(Recording::ALL);
         assert_eq!(demo.init().unwrap(), reference.init().unwrap());
         let demo_occurrences = demo.advance_to(DAY).map_err(|failure| failure.error).unwrap();
         let reference_occurrences = reference.advance_to(DAY).map_err(|failure| failure.error).unwrap();
@@ -272,6 +314,7 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if !args.iter().any(|arg| arg == "--bench") {
         check_model_matches_demo();
+        check_memory_stays_flat();
         return;
     }
 

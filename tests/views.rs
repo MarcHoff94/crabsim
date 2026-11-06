@@ -2,7 +2,7 @@
 
 use crabsim::visualization::terminal::render_table;
 use crabsim::visualization::{advance_with_view, RunView};
-use crabsim::{FailureProfile, ModelDescription, Occurrence, RunError, RunState, SimTime, SimulationRun};
+use crabsim::{FailureProfile, ModelDescription, Occurrence, Recording, RunError, RunState, SimTime, SimulationRun};
 use crabsim::random_numbers::Distribution;
 
 fn line() -> SimulationRun {
@@ -13,7 +13,9 @@ fn line() -> SimulationRun {
     let dr = model.add_drain();
     model.connect(src, st);
     model.connect(st, dr);
-    model.build(0)
+    let mut run = model.build(0);
+    run.set_recording(Recording::ALL);
+    run
 }
 
 #[derive(Default)]

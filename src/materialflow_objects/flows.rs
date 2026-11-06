@@ -5,12 +5,16 @@ use crate::event::{EventContext, EventTemplate, EventType};
 use crate::observation::{ObjectState, OccurrenceKind, StopCause};
 use crate::materialflow_objects::OtherObjects;
 use crate::random_numbers::{Distribution, DistributionSampler};
+use crate::statistics::StatisticsKeeper;
 
 // Moveable unit
 #[derive(Debug, Clone)]
 pub struct MoveableUnit {
 	pub id: u32,
 	pub location_id: u32,
+	/// When it left its Source, which is where its lead time starts. A starting MU counts from
+	/// Init, and a Source sets this as the MU leaves.
+	pub left_source: SimTime,
 }
 
 #[derive(Debug, Clone)]
@@ -112,6 +116,8 @@ pub trait EventInterface {
 	fn reset(&mut self);
 	/// Reports the object's current state at simulation time `now`.
 	fn report(&self, now: SimTime) -> ObjectState;
+	/// Starts the object's statistics afresh from `now`, changing nothing else.
+	fn clear_statistics(&mut self, now: SimTime);
 	fn get_object_id(&self) -> &u32;
 	fn set_object_id(&mut self, id: u32);
 	fn set_random_seed(&mut self, seed: u64);
@@ -161,7 +167,9 @@ pub trait SuccessorContainer {
 	fn succ_pointer(&self) -> usize;
 	fn succ_pointer_mut(&mut self) -> &mut usize;
 	fn clear_content_and_idle(&mut self);
-	fn take_content(&mut self) -> Option<MoveableUnit>;
+	/// Hands over the next MU to leave, at time `now`.
+	fn take_content(&mut self, now: SimTime) -> Option<MoveableUnit>;
+	fn statistics_mut(&mut self) -> &mut StatisticsKeeper;
 }
 
 // Note: Do not re-export concrete sibling types here to avoid
@@ -205,7 +213,8 @@ pub fn try_to_move_to_successor_with_strategy<
 		if others.get(succ_id).is_entrance_allowed() {
 			// We selected a successor that appears able to accept an MU.
 			// Now take the MU from the predecessor and attempt the transfer.
-			if let Some(mu) = obj.take_content() {
+			if let Some(mu) = obj.take_content(context.time) {
+				obj.statistics_mut().count_mu_out();
 				let mu_id = mu.id;
 				let seq = context.seq;
 				// It is no longer waiting, so it gives up its place wherever it was refused.

@@ -31,7 +31,7 @@ impl ModelDescription {
     /// A Station whose default state holds an MU, which it works on from Init.
     pub fn add_station_holding(&mut self, process_time: SimTime, failures: FailureProfile, mu_id: u32) -> u32 {
         let id = self.next_id();
-        let mu = MoveableUnit { id: mu_id, location_id: id };
+        let mu = MoveableUnit { id: mu_id, location_id: id, left_source: SimTime::ZERO };
         self.add(ModelObject::Station(SingleStation::new(id, process_time, failures, Some(mu), Vec::new())))
     }
 

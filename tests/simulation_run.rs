@@ -5,8 +5,9 @@ use crabsim::demo::build_model;
 use crabsim::flows::MaterialFlow;
 use crabsim::random_numbers::Distribution;
 use crabsim::{
-    Drain, EventType, FailureProfile, ModelDescription, Occurrence, OccurrenceKind, ProcessState,
-    RunError, RunState, SimTime, SimulationRun, SingleStation, StopCause, ZERO_TIME_EVENT_LIMIT,
+    Drain, EventType, FailureProfile, ModelDescription, ObjectStatistics, Occurrence, OccurrenceKind, OccurrenceType,
+    ProcessState, Recording, RunError, RunState, SimTime, SimulationRun, SingleStation, StopCause,
+    ZERO_TIME_EVENT_LIMIT,
 };
 
 fn secs(s: u64) -> SimTime {
@@ -38,20 +39,36 @@ fn drain(model: &mut ModelDescription) -> u32 {
     model.add_drain()
 }
 
-fn drain_in(run: &SimulationRun, id: u32) -> &Drain {
-    run.object(id).and_then(|object| object.as_drain()).expect("a drain")
+/// A run that keeps every occurrence, which most of these tests read. A run keeps none by default.
+fn recorded(mut run: SimulationRun) -> SimulationRun {
+    run.set_recording(Recording::ALL);
+    run
 }
 
 fn station_in(run: &SimulationRun, id: u32) -> &SingleStation {
     run.object(id).and_then(|object| object.as_station()).expect("a station")
 }
 
-fn exit_times(run: &SimulationRun, drain: u32) -> Vec<f64> {
-    drain_in(run, drain).exits.iter().map(|d| d.as_secs_f64()).collect()
+fn exit_times(occurrences: &[Occurrence]) -> Vec<f64> {
+    occurrences
+        .iter()
+        .filter(|o| matches!(o.kind, OccurrenceKind::MuLeft { .. }))
+        .map(|o| o.time.as_secs_f64())
+        .collect()
 }
 
-fn exit_ids(run: &SimulationRun, drain: u32) -> Vec<u32> {
-    drain_in(run, drain).exit_ids.clone()
+fn exit_ids(occurrences: &[Occurrence]) -> Vec<u32> {
+    occurrences
+        .iter()
+        .filter_map(|o| match o.kind {
+            OccurrenceKind::MuLeft { mu_id, .. } => Some(mu_id),
+            _ => None,
+        })
+        .collect()
+}
+
+fn statistics_of(run: &SimulationRun, id: u32) -> ObjectStatistics {
+    object(&run.state(), id).statistics
 }
 
 fn fail_at(run: &mut SimulationRun, at: u64, object_id: u32) {
@@ -79,7 +96,7 @@ fn line(repair_ms: f64) -> (SimulationRun, u32, u32) {
     let dr = drain(&mut model);
     model.connect(src, st);
     model.connect(st, dr);
-    (model.build(0), st, dr)
+    (recorded(model.build(0)), st, dr)
 }
 
 // ---------- Controlling a run ----------
@@ -91,12 +108,12 @@ fn init_sets_time_zero_and_queues_first_events_without_processing_them() {
     let src = source(&mut model, 0);
     let dr = drain(&mut model);
     model.connect(src, dr);
-    let mut run = model.build(0);
+    let mut run = recorded(model.build(0));
 
     let occurrences = run.init().unwrap();
 
     assert_eq!(run.time(), SimTime::ZERO);
-    assert!(exit_times(&run, dr).is_empty());
+    assert_eq!(statistics_of(&run, dr).mus_in, 0);
     assert_eq!(object(&run.state(), src).contents, vec![1]);
     assert_eq!(occurrences[0].kind, OccurrenceKind::RunInitialised);
     assert!(occurrences.iter().any(|o| o.kind == OccurrenceKind::MuCreated { mu_id: 1, at: src }));
@@ -108,7 +125,7 @@ fn a_run_counts_the_events_it_has_processed() {
     let src = source(&mut model, 10);
     let dr = drain(&mut model);
     model.connect(src, dr);
-    let mut run = model.build(0);
+    let mut run = recorded(model.build(0));
 
     run.init().unwrap();
     assert_eq!(run.events_processed(), 0, "Init queues events without processing them");
@@ -144,10 +161,10 @@ fn step_processes_one_event() {
 
 #[test]
 fn advance_to_includes_events_at_that_time_and_leaves_the_clock_there() {
-    let (mut run, st_id, dr) = line(0.0);
+    let (mut run, st_id, _) = line(0.0);
     run.init().unwrap();
-    run.advance_to(secs(70)).unwrap();
-    assert_eq!(exit_times(&run, dr), vec![70.0]);
+    let occurrences = run.advance_to(secs(70)).unwrap();
+    assert_eq!(exit_times(&occurrences), vec![70.0]);
     assert_eq!(run.time(), secs(70));
     run.advance_to(secs(75)).unwrap();
     assert_eq!(run.time(), secs(75));
@@ -173,7 +190,7 @@ fn advancing_in_pieces_gives_the_same_result_as_advancing_at_once() {
 fn an_event_error_is_reported_instead_of_swallowed() {
     let mut model = ModelDescription::new();
     let src = source(&mut model, 10);
-    let mut run = model.build(0);
+    let mut run = recorded(model.build(0));
     run.init().unwrap();
     fail_at(&mut run, 1, src);
     assert_eq!(
@@ -209,7 +226,7 @@ fn source_into_drain() -> SimulationRun {
     let src = source(&mut model, 10);
     let dr = drain(&mut model);
     model.connect(src, dr);
-    let mut run = model.build(0);
+    let mut run = recorded(model.build(0));
     run.init().unwrap();
     run
 }
@@ -327,7 +344,7 @@ fn reset_replays_a_source_and_drain() {
     let src = source(&mut model, 10);
     let dr = drain(&mut model);
     model.connect(src, dr);
-    let run = model.build(3);
+    let run = recorded(model.build(3));
     assert_reset_replays_the_run(run, 500);
 }
 
@@ -340,7 +357,7 @@ fn reset_replays_a_station_with_random_failures() {
     let dr = drain(&mut model);
     model.connect(src, st);
     model.connect(st, dr);
-    let run = model.build(7);
+    let run = recorded(model.build(7));
     assert_reset_replays_the_run(run, 5_000);
 }
 
@@ -352,7 +369,7 @@ fn reset_replays_a_preloaded_station() {
     let dr = drain(&mut model);
     model.connect(st, blocked_behind);
     model.connect(blocked_behind, dr);
-    let run = model.build(0);
+    let run = recorded(model.build(0));
     assert_reset_replays_the_run(run, 200);
 }
 
@@ -364,7 +381,7 @@ fn reset_replays_a_buffer() {
     let dr = drain(&mut model);
     model.connect(src, buf);
     model.connect(buf, dr);
-    let run = model.build(0);
+    let run = recorded(model.build(0));
     assert_reset_replays_the_run(run, 200);
 }
 
@@ -378,7 +395,7 @@ fn reset_mid_run_behaves_like_a_fresh_model() {
         let dr = drain(&mut model);
         model.connect(src, st);
         model.connect(st, dr);
-        let run = model.build(11);
+        let run = recorded(model.build(11));
         run
     };
     let mut fresh = build();
@@ -401,10 +418,10 @@ fn reset_deletes_run_mus_and_restores_the_configured_starting_mu() {
     let dr = drain(&mut model);
     model.connect(src, st);
     model.connect(st, dr);
-    let mut run = model.build(0);
+    let mut run = recorded(model.build(0));
     run.init().unwrap();
     run.advance_to(secs(100)).unwrap();
-    assert!(!exit_times(&run, dr).is_empty());
+    assert!(statistics_of(&run, dr).mus_in > 0);
 
     run.reset();
 
@@ -412,8 +429,7 @@ fn reset_deletes_run_mus_and_restores_the_configured_starting_mu() {
     assert_eq!(object(&state, st).contents, vec![50]);
     assert_eq!(object(&state, st).process, ProcessState::Idle);
     assert!(object(&state, src).contents.is_empty());
-    assert_eq!(object(&state, dr).mus_left, 0);
-    assert!(exit_times(&run, dr).is_empty());
+    assert_eq!(object(&state, dr).statistics.mus_in, 0);
     assert_eq!(run.step().unwrap_err().error, RunError::NotInitialised);
 }
 
@@ -438,7 +454,7 @@ fn reset_returns_the_exact_state_from_before_init() {
     let waiting = preloaded_station(&mut model, 10, 200);
     let busy = preloaded_station(&mut model, 1_000, 201);
     model.connect(waiting, busy);
-    let mut run = model.build(0);
+    let mut run = recorded(model.build(0));
     let default_state = run.state();
 
     run.init().unwrap();
@@ -460,7 +476,7 @@ fn reset_starts_round_robin_over() {
     model.connect(src, a);
     model.connect(a, b);
     model.connect(a, c);
-    let run = model.build(0);
+    let run = recorded(model.build(0));
     assert_reset_replays_the_run(run, 15);
 }
 
@@ -477,7 +493,7 @@ fn mu_ids_are_unique_across_sources_and_starting_mus() {
     model.connect(st, dr_a);
     model.connect(first, dr_a);
     model.connect(second, dr_b);
-    let mut run = model.build(0);
+    let mut run = recorded(model.build(0));
     let mut occurrences = run.init().unwrap();
     occurrences.extend(run.advance_to(secs(100)).unwrap());
 
@@ -527,7 +543,7 @@ fn an_mu_passing_through_a_line_reports_each_step_in_order() {
             (10.0, OccurrenceKind::WorkStarted { mu_id: 1, at: st_id }),
             (70.0, OccurrenceKind::WorkFinished { mu_id: 1, at: st_id }),
             (70.0, OccurrenceKind::MuMoved { mu_id: 1, from: st_id, to: dr_id }),
-            (70.0, OccurrenceKind::MuLeft { mu_id: 1, at: dr_id }),
+            (70.0, OccurrenceKind::MuLeft { mu_id: 1, at: dr_id, lead_time: secs(60) }),
         ]
     );
 }
@@ -550,7 +566,7 @@ fn blocking_is_reported_once_and_unblocking_when_it_ends() {
     let dr = drain(&mut model);
     model.connect(st, busy_successor);
     model.connect(busy_successor, dr);
-    let mut run = model.build(0);
+    let mut run = recorded(model.build(0));
     run.init().unwrap();
 
     let occurrences = run.advance_to(secs(100)).unwrap();
@@ -610,7 +626,7 @@ fn a_buffer_is_reported_like_any_other_object() {
     let src = source(&mut model, 10);
     let buf = model.add_buffer(3);
     model.connect(src, buf);
-    let mut run = model.build(0);
+    let mut run = recorded(model.build(0));
     run.init().unwrap();
     assert_eq!(object(&run.state(), buf).kind, crabsim::ObjectKind::Buffer);
 }
@@ -647,13 +663,12 @@ fn remaining_time_is_frozen_during_a_stop() {
 // ---------- Completion time ----------
 
 fn exits_with_failures(failures_at: &[u64], repair_ms: f64) -> Vec<f64> {
-    let (mut run, st_id, dr) = line(repair_ms);
+    let (mut run, st_id, _) = line(repair_ms);
     run.init().unwrap();
     for &at in failures_at {
         fail_at(&mut run, at, st_id);
     }
-    run.advance_to(secs(200)).unwrap();
-    exit_times(&run, dr)
+    exit_times(&run.advance_to(secs(200)).unwrap())
 }
 
 #[test]
@@ -687,7 +702,7 @@ fn a_failed_station_keeps_its_mu_past_the_original_completion_time() {
     fail_at(&mut run, 20, st_id);
     run.advance_to(secs(75)).unwrap();
     assert_eq!(object(&run.state(), st_id).contents, vec![1]);
-    assert!(exit_times(&run, dr).is_empty());
+    assert_eq!(statistics_of(&run, dr).mus_in, 0);
 }
 
 #[test]
@@ -706,7 +721,7 @@ fn an_active_failure_profile_keeps_producing_failures() {
     let mut model = ModelDescription::new();
     // Availability 0.5 with a 30s repair means a failure 30s after each repair.
     let st = station_with_failures(&mut model, 10, profile);
-    let mut run = model.build(0);
+    let mut run = recorded(model.build(0));
     run.init().unwrap();
     let occurrences = run.advance_to(secs(200)).unwrap();
     let began: Vec<f64> = occurrences
@@ -725,11 +740,11 @@ fn starting_mu_is_worked_on_from_init_and_then_leaves() {
     let st = preloaded_station(&mut model, 75, 9999);
     let dr = drain(&mut model);
     model.connect(st, dr);
-    let mut run = model.build(0);
+    let mut run = recorded(model.build(0));
     run.init().unwrap();
-    run.advance_to(secs(100)).unwrap();
-    assert_eq!(exit_times(&run, dr), vec![75.0]);
-    assert_eq!(exit_ids(&run, dr), vec![9999]);
+    let occurrences = run.advance_to(secs(100)).unwrap();
+    assert_eq!(exit_times(&occurrences), vec![75.0]);
+    assert_eq!(exit_ids(&occurrences), vec![9999]);
 }
 
 #[test]
@@ -742,12 +757,12 @@ fn a_blocked_station_retries_when_its_successor_frees_up() {
     model.connect(src, a);
     model.connect(a, b);
     model.connect(b, dr);
-    let mut run = model.build(0);
+    let mut run = recorded(model.build(0));
     run.init().unwrap();
     let occurrences = run.advance_to(secs(250)).unwrap();
     // A finishes MU 1 at t=90 but B is busy until t=100, when A's MU moves across.
     assert_eq!(moves_from(&occurrences, a)[0], 100.0);
-    assert_eq!(exit_times(&run, dr)[0], 100.0);
+    assert_eq!(exit_times(&occurrences)[0], 100.0);
 }
 
 #[test]
@@ -758,7 +773,7 @@ fn a_blocked_station_falls_back_to_a_free_successor() {
     let free = station(&mut model, 10);
     model.connect(pred, busy);
     model.connect(pred, free);
-    let mut run = model.build(0);
+    let mut run = recorded(model.build(0));
     run.init().unwrap();
     let occurrences = run.advance_to(secs(10)).unwrap();
 
@@ -778,7 +793,7 @@ fn round_robin_starts_at_the_first_successor() {
     let second = station(&mut model, 10);
     model.connect(pred, first);
     model.connect(pred, second);
-    let mut run = model.build(0);
+    let mut run = recorded(model.build(0));
     run.init().unwrap();
     let occurrences = run.advance_to(secs(10)).unwrap();
     assert!(occurrences.iter().any(|o| o.kind == OccurrenceKind::MuMoved { mu_id: 1, from: pred, to: first }));
@@ -791,7 +806,7 @@ fn a_station_blocks_when_no_successor_accepts() {
     let pred = preloaded_station(&mut model, 10, 200);
     let succ = preloaded_station(&mut model, 1_000, 201);
     model.connect(pred, succ);
-    let mut run = model.build(0);
+    let mut run = recorded(model.build(0));
     run.init().unwrap();
     run.advance_to(secs(20)).unwrap();
     let state = run.state();
@@ -814,7 +829,7 @@ fn a_retry_while_the_predecessor_is_working_does_not_move_its_mu() {
     model.connect(st1, st3);
     model.connect(st2, dr);
     model.connect(st3, dr);
-    let mut run = model.build(0);
+    let mut run = recorded(model.build(0));
     run.init().unwrap();
     let occurrences = run.advance_to(secs(30)).unwrap();
     // St1's first MU finishes at t=15, while st2 is busy, and goes to st3. St1 then works on
@@ -835,7 +850,7 @@ fn the_source_keeps_producing_after_being_blocked() {
     model.connect(a, c);
     model.connect(b, dr);
     model.connect(c, dr);
-    let mut run = model.build(0);
+    let mut run = recorded(model.build(0));
     let mut occurrences = run.init().unwrap();
     occurrences.extend(run.advance_to(secs(1_000)).unwrap());
     let created = occurrences.iter().filter(|o| matches!(o.kind, OccurrenceKind::MuCreated { .. })).count();
@@ -867,7 +882,7 @@ fn the_longest_waiting_predecessor_retries_first() {
         model.connect(waiting, contested);
     }
     model.connect(contested, dr);
-    let mut run = model.build(0);
+    let mut run = recorded(model.build(0));
     run.init().unwrap();
 
     let mut occurrences = run.advance_to(secs(50)).unwrap();
@@ -897,7 +912,7 @@ fn a_predecessor_refused_on_every_retry_is_listed_once() {
     model.connect(both, always_busy);
     model.connect(both, contested);
     model.connect(contested, dr);
-    let mut run = model.build(0);
+    let mut run = recorded(model.build(0));
     run.init().unwrap();
 
     // Contested frees up at t=50. The earliest takes it, and the retries of the other two are
@@ -922,7 +937,7 @@ fn a_predecessor_that_moved_on_loses_its_place_in_the_queue() {
     model.connect(moves_on, elsewhere);
     model.connect(waits_longer, contested);
     model.connect(contested, dr);
-    let mut run = model.build(0);
+    let mut run = recorded(model.build(0));
     run.init().unwrap();
 
     // At t=30 its first MU is refused by contested and goes elsewhere, so it isn't waiting.
@@ -950,7 +965,7 @@ fn a_station_with_nothing_left_to_move_is_not_listed_as_waiting() {
     model.connect(pred, frees_second);
     model.connect(frees_first, dr);
     model.connect(frees_second, dr);
-    let mut run = model.build(0);
+    let mut run = recorded(model.build(0));
     run.init().unwrap();
 
     // Two successors free up at t=20 and each sends a retry. The first retry moves the MU, so
@@ -970,7 +985,7 @@ fn an_mu_finishing_as_a_successor_frees_up_goes_behind_those_already_waiting() {
     model.connect(contested, dr);
     model.connect(waiting, contested);
     model.connect(finishes_then, contested);
-    let mut run = model.build(0);
+    let mut run = recorded(model.build(0));
     run.init().unwrap();
 
     let occurrences = run.advance_to(secs(100)).unwrap();
@@ -992,7 +1007,7 @@ fn a_retry_only_offers_the_successor_that_sent_it() {
     model.connect(waits_longer, frees_second);
     model.connect(has_both, frees_second);
     model.connect(has_both, frees_first);
-    let mut run = model.build(0);
+    let mut run = recorded(model.build(0));
     run.init().unwrap();
 
     // At t=100 the first frees up and sends retries to its two waiters. The second moves
@@ -1006,7 +1021,7 @@ fn a_retry_only_offers_the_successor_that_sent_it() {
 #[test]
 fn a_seed_gives_identical_results_every_time() {
     let week = || {
-        let (mut run, _) = build_model(7);
+        let mut run = recorded(build_model(7));
         let mut occurrences = run.init().unwrap();
         occurrences.extend(run.advance_to(secs(7 * 86_400)).unwrap());
         occurrences
@@ -1016,9 +1031,8 @@ fn a_seed_gives_identical_results_every_time() {
 
 // ---------- Long runs ----------
 
-/// On demand, in release, because it takes minutes. Occurrences are dropped slice by slice, and
-/// the Drain's lists are the only thing that still grows, at about 20 MB per simulated year. Only
-/// the error of a failure is kept: the `Debug` output of `AdvanceFailure` includes every occurrence
+/// On demand, in release, because it takes minutes. It runs headless, so nothing grows with
+/// simulated length. Only the error of a failure is kept, in case something does get recorded: the `Debug` output of `AdvanceFailure` includes every occurrence
 /// and can reach gigabytes.
 ///
 /// `cargo test --release --test simulation_run -- --ignored --nocapture the_demo_model`
@@ -1032,7 +1046,7 @@ fn the_demo_model_runs_far_past_fifteen_simulated_years() {
 
     let mut failures = Vec::new();
     for seed in 0..5 {
-        let (mut run, _) = build_model(seed);
+        let mut run = build_model(seed);
         run.init().unwrap();
         let mut longest_list = 0;
         for day in 1..=YEARS * 365 {
@@ -1060,10 +1074,9 @@ fn a_source_feeds_a_drain_in_order() {
     let src = source(&mut model, 10);
     let dr = drain(&mut model);
     model.connect(src, dr);
-    let mut run = model.build(0);
+    let mut run = recorded(model.build(0));
     run.init().unwrap();
-    run.advance_to(secs(200)).unwrap();
-    let ids = exit_ids(&run, dr);
+    let ids = exit_ids(&run.advance_to(secs(200)).unwrap());
     assert_eq!(ids, (1..=20).collect::<Vec<u32>>());
 }
 
@@ -1077,11 +1090,10 @@ fn order_is_preserved_across_stations() {
     model.connect(src, a);
     model.connect(a, b);
     model.connect(b, dr);
-    let mut run = model.build(0);
+    let mut run = recorded(model.build(0));
     run.init().unwrap();
-    run.advance_to(secs(500)).unwrap();
+    let ids = exit_ids(&run.advance_to(secs(500)).unwrap());
     // First exit at 0 + 10 + 30 = 40, then one every 30s (the slowest station) up to t=490.
-    let ids = exit_ids(&run, dr);
     assert_eq!(ids, (1..=16).collect::<Vec<u32>>());
 }
 
@@ -1098,11 +1110,10 @@ fn order_is_preserved_across_identical_parallel_stations() {
     model.connect(a, b2);
     model.connect(b1, dr);
     model.connect(b2, dr);
-    let mut run = model.build(0);
+    let mut run = recorded(model.build(0));
     run.init().unwrap();
-    run.advance_to(secs(500)).unwrap();
+    let ids = exit_ids(&run.advance_to(secs(500)).unwrap());
     // First exit at 20 + 10 + 20 = 50, then one every 20s (the Source's interval) up to t=490.
-    let ids = exit_ids(&run, dr);
     assert_eq!(ids, (1..=23).collect::<Vec<u32>>());
 }
 
@@ -1119,11 +1130,11 @@ fn unbalanced_parallel_stations_stay_within_the_best_case_throughput() {
     model.connect(a, b2);
     model.connect(b1, dr);
     model.connect(b2, dr);
-    let mut run = model.build(0);
+    let mut run = recorded(model.build(0));
     run.init().unwrap();
     run.advance_to(secs(500)).unwrap();
     // First possible exit at 20 + 10 + 10 = 40, and the Source limits flow to one MU per 20s.
-    let drained = exit_ids(&run, dr).len();
+    let drained = statistics_of(&run, dr).mus_in;
     assert!(drained > 0);
     assert!(drained <= 24, "drained {drained}, above the best case");
 }
@@ -1135,7 +1146,7 @@ fn every_object_gets_its_own_random_seed_at_init() {
     station(&mut model, 10);
     station(&mut model, 10);
     drain(&mut model);
-    let mut run = model.build(0);
+    let mut run = recorded(model.build(0));
     run.init().unwrap();
     let mut seeds: Vec<u64> = run.objects().iter().map(|object| object.base().random_seed).collect();
     seeds.sort_unstable();
@@ -1151,7 +1162,7 @@ fn zero_time_loop() -> SimulationRun {
     let src = source(&mut model, 0);
     let dr = drain(&mut model);
     model.connect(src, dr);
-    let run = model.build(0);
+    let run = recorded(model.build(0));
     run
 }
 
@@ -1198,7 +1209,7 @@ fn zero_length_failures_are_a_zero_time_loop() {
     let zero_length = FailureProfile::new(0.5, Distribution::CONSTANT { value: 0.0 }, 0);
     let mut model = ModelDescription::new();
     station_with_failures(&mut model, 10, zero_length);
-    let mut run = model.build(0);
+    let mut run = recorded(model.build(0));
     run.init().unwrap();
     assert_eq!(
         run.advance_to(secs(10)).unwrap_err().error,
@@ -1225,10 +1236,10 @@ fn only_events_at_one_time_count_towards_a_zero_time_loop() {
     let src = source(&mut model, 1);
     let dr = drain(&mut model);
     model.connect(src, dr);
-    let mut run = model.build(0);
+    let mut run = recorded(model.build(0));
     run.init().unwrap();
     run.advance_to(secs(ZERO_TIME_EVENT_LIMIT + 10)).unwrap();
-    assert_eq!(exit_ids(&run, dr).len() as u64, ZERO_TIME_EVENT_LIMIT + 10);
+    assert_eq!(statistics_of(&run, dr).mus_in, ZERO_TIME_EVENT_LIMIT + 10);
 }
 
 #[test]
@@ -1237,7 +1248,7 @@ fn events_counted_at_an_earlier_time_do_not_count_at_the_time_the_clock_was_move
     // A repeated failure on an already failed Station does nothing, so these are harmless
     // events that all land on one time. The repair is far away, past everything here.
     let st = station_with_failures(&mut model, 10, no_failures(1_000_000_000.0));
-    let mut run = model.build(0);
+    let mut run = recorded(model.build(0));
     run.init().unwrap();
     for _ in 0..ZERO_TIME_EVENT_LIMIT {
         fail_at(&mut run, 5, st);
@@ -1277,7 +1288,7 @@ fn reset_clears_the_zero_time_count() {
 fn an_error_from_advancing_to_a_time_carries_the_occurrences_before_it() {
     let mut model = ModelDescription::new();
     let src = source(&mut model, 10);
-    let mut run = model.build(0);
+    let mut run = recorded(model.build(0));
     run.init().unwrap();
     fail_at(&mut run, 25, src);
     let failure = run.advance_to(secs(30)).unwrap_err();
@@ -1297,7 +1308,7 @@ fn sampled_times_are_rounded_to_the_nearest_millisecond() {
     let profile = FailureProfile::new(0.5, Distribution::CONSTANT { value: 1_500.6 }, 0);
     let mut model = ModelDescription::new();
     let st = station_with_failures(&mut model, 10, profile);
-    let mut run = model.build(0);
+    let mut run = recorded(model.build(0));
     run.init().unwrap();
     let occurrences = run.advance_to(secs(4)).unwrap();
     let stops: Vec<(u64, OccurrenceKind)> = occurrences.iter().map(|o| (o.time.as_millis(), o.kind.clone())).collect();
@@ -1332,20 +1343,20 @@ fn occurrences_until(mut run: SimulationRun, until: u64) -> Vec<Occurrence> {
 #[test]
 fn one_description_builds_independent_runs() {
     let model = line_with_random_failures();
-    let mut first = model.build(1);
+    let mut first = recorded(model.build(1));
     first.init().unwrap();
     first.advance_to(secs(3_000)).unwrap();
 
-    let second = model.build(1);
+    let second = recorded(model.build(1));
     assert!(!second.is_initialised(), "advancing one run must not touch another");
-    assert_eq!(occurrences_until(second, 5_000), occurrences_until(model.build(1), 5_000));
+    assert_eq!(occurrences_until(second, 5_000), occurrences_until(recorded(model.build(1)), 5_000));
 }
 
 #[test]
 fn replications_differ_only_through_their_seed() {
     let model = line_with_random_failures();
-    assert_eq!(occurrences_until(model.build(1), 5_000), occurrences_until(model.build(1), 5_000));
-    assert_ne!(occurrences_until(model.build(1), 5_000), occurrences_until(model.build(2), 5_000));
+    assert_eq!(occurrences_until(recorded(model.build(1)), 5_000), occurrences_until(recorded(model.build(1)), 5_000));
+    assert_ne!(occurrences_until(recorded(model.build(1)), 5_000), occurrences_until(recorded(model.build(2)), 5_000));
 }
 
 #[test]
@@ -1356,7 +1367,7 @@ fn successors_are_tried_in_the_order_they_were_connected() {
     let earlier_id = station(&mut model, 10);
     model.connect(pred, earlier_id);
     model.connect(pred, later_id);
-    let mut run = model.build(0);
+    let mut run = recorded(model.build(0));
     run.init().unwrap();
     let occurrences = run.advance_to(secs(10)).unwrap();
     assert!(occurrences.iter().any(|o| o.kind == OccurrenceKind::MuMoved { mu_id: 1, from: pred, to: earlier_id }));
@@ -1385,7 +1396,7 @@ fn a_connection_from_an_object_to_itself_panics_when_used() {
     let mut model = ModelDescription::new();
     let st = preloaded_station(&mut model, 10, 1);
     model.connect(st, st);
-    let mut run = model.build(0);
+    let mut run = recorded(model.build(0));
     run.init().unwrap();
     let _ = run.advance_to(secs(10));
 }
@@ -1395,12 +1406,518 @@ fn a_connection_from_an_object_to_itself_panics_when_used() {
 #[test]
 fn a_run_can_move_to_another_thread_part_way_through() {
     let model = line_with_random_failures();
-    let expected = occurrences_until(model.build(3), 6_000);
+    let expected = occurrences_until(recorded(model.build(3)), 6_000);
 
-    let mut run = model.build(3);
+    let mut run = recorded(model.build(3));
     let mut occurrences = run.init().unwrap();
     occurrences.extend(run.advance_to(secs(2_000)).unwrap());
     let rest = std::thread::spawn(move || run.advance_to(secs(6_000)).unwrap()).join().unwrap();
     occurrences.extend(rest);
     assert_eq!(occurrences, expected);
+}
+
+// ---------- Recording ----------
+
+#[test]
+fn a_run_records_nothing_unless_asked() {
+    let (mut run, _, _) = line(0.0);
+    run.set_recording(Recording::NOTHING);
+    assert!(run.init().unwrap().is_empty());
+    assert!(run.advance_to(secs(200)).unwrap().is_empty());
+    assert!(run.step().unwrap().is_empty());
+    assert!(run.advance_bounded(secs(400), 2).unwrap().occurrences.is_empty());
+}
+
+#[test]
+fn a_new_run_records_nothing() {
+    let mut model = ModelDescription::new();
+    let src = source(&mut model, 10);
+    let dr = drain(&mut model);
+    model.connect(src, dr);
+    let mut run = model.build(0);
+    assert!(run.init().unwrap().is_empty());
+    assert!(run.advance_to(secs(100)).unwrap().is_empty());
+}
+
+#[test]
+fn a_run_can_record_only_chosen_kinds() {
+    let (mut run, _, dr) = line(0.0);
+    run.set_recording(Recording::only(&[OccurrenceType::MuLeft]));
+    assert!(run.init().unwrap().is_empty());
+    let occurrences = run.advance_to(secs(200)).unwrap();
+    assert_eq!(exit_times(&occurrences), vec![70.0, 130.0, 190.0]);
+    assert_eq!(occurrences.len(), 3, "and nothing else");
+    assert_eq!(occurrences[0].kind, OccurrenceKind::MuLeft { mu_id: 1, at: dr, lead_time: secs(60) });
+}
+
+#[test]
+fn recording_can_change_at_any_time_and_changes_only_what_is_kept() {
+    let (mut whole, _, _) = line(5_000.0);
+    whole.init().unwrap();
+    let all = whole.advance_to(secs(300)).unwrap();
+
+    let (mut run, _, _) = line(5_000.0);
+    run.init().unwrap();
+    run.set_recording(Recording::NOTHING);
+    assert!(run.advance_to(secs(100)).unwrap().is_empty());
+    run.set_recording(Recording::ALL);
+    let rest = run.advance_to(secs(300)).unwrap();
+
+    let expected: Vec<Occurrence> = all.into_iter().filter(|o| o.time > secs(100)).collect();
+    assert_eq!(rest, expected);
+}
+
+#[test]
+fn recording_makes_no_difference_to_the_results() {
+    let model = line_with_random_failures();
+    let mut headless = model.build(5);
+    headless.init().unwrap();
+    headless.advance_to(secs(5_000)).unwrap();
+    let mut recording = recorded(model.build(5));
+    recording.init().unwrap();
+    recording.advance_to(secs(5_000)).unwrap();
+    assert_eq!(headless.state(), recording.state());
+    assert_eq!(headless.events_processed(), recording.events_processed());
+}
+
+#[test]
+fn reset_keeps_the_recording_setting() {
+    let mut model = ModelDescription::new();
+    let src = source(&mut model, 10);
+    let dr = drain(&mut model);
+    model.connect(src, dr);
+    let mut run = model.build(0);
+    run.set_recording(Recording::only(&[OccurrenceType::MuLeft]));
+    run.init().unwrap();
+    run.advance_to(secs(20)).unwrap();
+    run.reset();
+    run.init().unwrap();
+    assert_eq!(exit_times(&run.advance_to(secs(20)).unwrap()), vec![10.0, 20.0]);
+}
+
+// ---------- Headless runs ----------
+
+#[test]
+fn a_headless_run_gives_back_its_final_state_with_no_reset() {
+    let mut model = ModelDescription::new();
+    let src = source(&mut model, 10);
+    let st = station(&mut model, 60);
+    let dr = drain(&mut model);
+    model.connect(src, st);
+    model.connect(st, dr);
+    let mut run = model.build(0);
+    run.init().unwrap();
+    assert!(run.advance_to(secs(200)).unwrap().is_empty());
+
+    let state = run.state();
+    assert_eq!(state.time, secs(200));
+    assert!(state.initialised);
+    assert_eq!(object(&state, dr).statistics.mus_in, 3);
+    assert_eq!(object(&state, st).contents, vec![4]);
+}
+
+#[test]
+fn a_headless_run_still_gives_its_state_after_a_run_error() {
+    let mut model = ModelDescription::new();
+    let src = source(&mut model, 10);
+    let dr = drain(&mut model);
+    model.connect(src, dr);
+    let mut run = model.build(0);
+    run.init().unwrap();
+    fail_at(&mut run, 25, src);
+    let failure = run.advance_to(secs(100)).unwrap_err();
+    assert_eq!(failure.error, RunError::ObjectFailed { object_id: src, time: secs(25) });
+    assert!(failure.occurrences.is_empty());
+
+    let state = run.state();
+    assert_eq!(state.time, secs(25));
+    assert_eq!(object(&state, dr).statistics.mus_in, 2);
+    assert_eq!(object(&state, src).statistics.measured_time(), secs(25));
+}
+
+// ---------- Statistics ----------
+
+/// Every object's machine-level times against the time measured.
+fn assert_times_add_up(run: &SimulationRun) {
+    let state = run.state();
+    let measured = state.time.saturating_sub(state.statistics_since);
+    for o in &state.objects {
+        assert_eq!(o.statistics.measured_time(), measured, "object {}", o.id);
+    }
+}
+
+#[test]
+fn everything_is_zero_before_init() {
+    let (run, st, dr) = line(0.0);
+    assert_eq!(statistics_of(&run, st), ObjectStatistics::default());
+    assert_eq!(statistics_of(&run, dr).mus_in, 0);
+    assert_eq!(run.state().statistics_since, SimTime::ZERO);
+}
+
+#[test]
+fn a_line_without_failures_gives_the_expected_numbers() {
+    // MUs enter the station at t=10, 70, 130, 190 and leave it at t=70, 130, 190.
+    let (mut run, st, dr) = line(0.0);
+    let src = st - 1;
+    run.init().unwrap();
+    run.advance_to(secs(200)).unwrap();
+    assert_times_add_up(&run);
+
+    let s = statistics_of(&run, st);
+    assert_eq!((s.mus_in, s.mus_out), (4, 3));
+    assert_eq!(s.time_busy, secs(190));
+    assert_eq!(s.time_idle, secs(10));
+    assert_eq!(s.time_blocked, SimTime::ZERO);
+    assert_eq!(s.mu_time_busy, secs(190));
+    assert_eq!(s.time_full, secs(190));
+    assert_eq!(s.max_contents, 1);
+
+    // The Source waits out its interval, then blocks until the station takes the MU.
+    let s = statistics_of(&run, src);
+    assert_eq!((s.mus_in, s.mus_out), (5, 4));
+    assert_eq!(s.time_busy, secs(50));
+    assert_eq!(s.time_blocked, secs(150));
+    assert_eq!(s.time_idle, SimTime::ZERO);
+    assert_eq!(s.mu_time_busy, SimTime::ZERO, "a Source has no MU-level statistics");
+    assert_eq!(s.time_full, SimTime::ZERO);
+
+    let s = statistics_of(&run, dr);
+    let drain = s.drain.unwrap();
+    assert_eq!((s.mus_in, s.mus_out), (3, 0));
+    assert_eq!(s.time_idle, secs(200));
+    assert_eq!(drain.lead_time_total, secs(180));
+    assert_eq!(drain.lead_time_min, Some(secs(60)));
+    assert_eq!(drain.lead_time_max, Some(secs(60)));
+    assert_eq!(s.lead_time_mean(), Some(secs(60)));
+    assert_eq!((drain.first_exit, drain.last_exit), (Some(secs(70)), Some(secs(190))));
+    assert_eq!(drain.exit_interval_min, Some(secs(60)));
+    assert_eq!(drain.exit_interval_max, Some(secs(60)));
+    assert_eq!(s.mus_per_hour(secs(190)), Some(60.0));
+}
+
+#[test]
+fn only_a_drain_has_drain_statistics() {
+    let (run, st, dr) = line(0.0);
+    assert!(statistics_of(&run, dr).drain.is_some());
+    assert!(statistics_of(&run, st).drain.is_none());
+    assert_eq!(statistics_of(&run, st).mus_per_hour(secs(100)), None);
+    assert_eq!(statistics_of(&run, st).lead_time_mean(), None);
+}
+
+#[test]
+fn state_reports_capacity() {
+    let mut model = ModelDescription::new();
+    let src = source(&mut model, 10);
+    let st = station(&mut model, 10);
+    let buf = model.add_buffer(3);
+    let dr = drain(&mut model);
+    let state = model.build(0).state();
+    assert_eq!(object(&state, src).capacity, 0);
+    assert_eq!(object(&state, st).capacity, 1);
+    assert_eq!(object(&state, buf).capacity, 3);
+    assert_eq!(object(&state, dr).capacity, 0);
+}
+
+#[test]
+fn a_blocked_station_counts_blocked_time_at_both_levels() {
+    let mut model = ModelDescription::new();
+    let blocked = preloaded_station(&mut model, 10, 1);
+    let busy = preloaded_station(&mut model, 100, 2);
+    let dr = drain(&mut model);
+    model.connect(blocked, busy);
+    model.connect(busy, dr);
+    let mut run = model.build(0);
+    run.init().unwrap();
+    run.advance_to(secs(50)).unwrap();
+    let s = statistics_of(&run, blocked);
+    assert_eq!(s.time_busy, secs(10));
+    assert_eq!(s.time_blocked, secs(40));
+    assert_eq!(s.mu_time_blocked, secs(40));
+    assert_eq!(s.mus_in, 1, "a starting MU counts at Init");
+    assert_times_add_up(&run);
+}
+
+#[test]
+fn a_failure_counts_its_time_once_and_failed_beats_everything_else() {
+    // MU 1 enters at t=10. Failed from t=20 to 25, so it finishes at t=75 rather than t=70.
+    let (mut run, st, _) = line(5_000.0);
+    run.init().unwrap();
+    fail_at(&mut run, 20, st);
+    run.advance_to(secs(75)).unwrap();
+    let s = statistics_of(&run, st);
+    assert_eq!(s.time_failed, secs(5));
+    assert_eq!(s.time_busy, secs(60));
+    assert_eq!(s.time_idle, secs(10));
+    assert_eq!(s.mu_time_stopped, secs(5));
+    assert_eq!(s.mu_time_busy, secs(60));
+    assert_eq!((s.failures, s.stops), (1, 1));
+    assert_times_add_up(&run);
+}
+
+#[test]
+fn a_discarded_second_failure_is_not_counted() {
+    let (mut run, st, _) = line(50_000.0);
+    run.init().unwrap();
+    fail_at(&mut run, 20, st);
+    fail_at(&mut run, 30, st);
+    run.advance_to(secs(40)).unwrap();
+    let s = statistics_of(&run, st);
+    assert_eq!((s.failures, s.stops), (1, 1));
+    assert_eq!(s.time_failed, secs(20));
+}
+
+#[test]
+fn a_failure_while_blocked_counts_as_failed_rather_than_blocked() {
+    let mut model = ModelDescription::new();
+    let st = model.add_station_holding(secs(10), no_failures(50_000.0), 1);
+    let busy = preloaded_station(&mut model, 1_000, 2);
+    model.connect(st, busy);
+    let mut run = model.build(0);
+    run.init().unwrap();
+    fail_at(&mut run, 20, st);
+    run.advance_to(secs(40)).unwrap();
+    let s = statistics_of(&run, st);
+    assert_eq!(s.time_blocked, secs(10), "from t=10 to the failure");
+    assert_eq!(s.time_failed, secs(20));
+    assert_eq!(s.mu_time_stopped, secs(20));
+    assert_times_add_up(&run);
+}
+
+#[test]
+fn lead_time_starts_when_an_mu_leaves_its_source() {
+    // The Source blocks from t=20, so MU 2 was created at t=10 and only left at t=70. Its lead
+    // time doesn't include that wait, which is the Source's blocked time instead.
+    let (mut run, _, _) = line(0.0);
+    run.init().unwrap();
+    let occurrences = run.advance_to(secs(130)).unwrap();
+    let lead_times: Vec<SimTime> = occurrences
+        .iter()
+        .filter_map(|o| match o.kind {
+            OccurrenceKind::MuLeft { lead_time, .. } => Some(lead_time),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(lead_times, vec![secs(60), secs(60)]);
+}
+
+#[test]
+fn a_starting_mu_counts_its_lead_time_from_init() {
+    let mut model = ModelDescription::new();
+    let st = preloaded_station(&mut model, 75, 1);
+    let dr = drain(&mut model);
+    model.connect(st, dr);
+    let mut run = model.build(0);
+    run.init().unwrap();
+    run.advance_to(secs(100)).unwrap();
+    assert_eq!(statistics_of(&run, dr).drain.unwrap().lead_time_total, secs(75));
+}
+
+#[test]
+fn lead_times_keep_their_shortest_and_longest() {
+    // A failure holds up one MU only, so one lead time stands out.
+    let (mut run, st, dr) = line(5_000.0);
+    run.init().unwrap();
+    fail_at(&mut run, 20, st);
+    run.advance_to(secs(200)).unwrap();
+    let s = statistics_of(&run, dr);
+    let drain = s.drain.unwrap();
+    assert_eq!(drain.lead_time_min, Some(secs(60)));
+    assert_eq!(drain.lead_time_max, Some(secs(65)));
+    assert_eq!(drain.lead_time_total, secs(185));
+}
+
+#[test]
+fn a_jam_shows_in_the_rate_and_the_longest_exit_interval() {
+    let (mut run, _, dr) = line(0.0);
+    run.init().unwrap();
+    run.advance_to(secs(190)).unwrap();
+    assert_eq!(statistics_of(&run, dr).drain.unwrap().exit_interval_max, Some(secs(60)));
+    assert_eq!(statistics_of(&run, dr).mus_per_hour(secs(190)), Some(60.0));
+    run.advance_to(secs(249)).unwrap();
+    let s = statistics_of(&run, dr);
+    assert_eq!(s.drain.unwrap().exit_interval_max, Some(secs(60)));
+    assert!(s.mus_per_hour(secs(249)).unwrap() < 60.0);
+}
+
+#[test]
+fn a_buffer_counts_its_mus_and_contents() {
+    // A Buffer's movement is known to be broken, so this only covers what it counts on entry.
+    let mut model = ModelDescription::new();
+    let src = source(&mut model, 10);
+    let buf = model.add_buffer(3);
+    model.connect(src, buf);
+    let mut run = model.build(0);
+    run.init().unwrap();
+    run.advance_to(secs(10)).unwrap();
+    let s = statistics_of(&run, buf);
+    assert_eq!(s.mus_in, 1);
+    assert_eq!(s.max_contents, 1);
+    assert_times_add_up(&run);
+}
+
+/// The demo model on one seed, advanced in `slices`, returning the final state.
+fn demo_state_after(seed: u64, slices: &[u64]) -> RunState {
+    let mut run = build_model(seed);
+    run.init().unwrap();
+    for &t in slices {
+        run.advance_to(secs(t)).unwrap();
+    }
+    run.state()
+}
+
+#[test]
+fn the_same_seed_gives_identical_statistics() {
+    assert_eq!(demo_state_after(4, &[100_000]), demo_state_after(4, &[100_000]));
+    assert_ne!(demo_state_after(4, &[100_000]), demo_state_after(5, &[100_000]));
+}
+
+#[test]
+fn statistics_do_not_depend_on_how_an_advance_was_split() {
+    let whole = demo_state_after(4, &[100_000]);
+    assert_eq!(demo_state_after(4, &[1, 777, 30_000, 30_001, 99_999, 100_000]), whole);
+
+    let mut bounded = build_model(4);
+    bounded.init().unwrap();
+    while !bounded.advance_bounded(secs(100_000), 13).unwrap().reached {}
+    assert_eq!(bounded.state(), whole);
+}
+
+#[test]
+fn reading_statistics_changes_nothing() {
+    let mut read_often = build_model(4);
+    read_often.init().unwrap();
+    for t in (1_000..=100_000).step_by(1_000) {
+        read_often.advance_to(secs(t)).unwrap();
+        read_often.state();
+    }
+    assert_eq!(read_often.state(), demo_state_after(4, &[100_000]));
+}
+
+#[test]
+fn machine_level_times_add_up_at_any_time_on_the_demo_model() {
+    let mut run = build_model(2);
+    run.init().unwrap();
+    for t in [1, 59, 3_601, 86_400, 500_000] {
+        run.advance_to(secs(t)).unwrap();
+        assert_times_add_up(&run);
+    }
+}
+
+/// A line whose stations fail at random, running long enough to be at steady state.
+fn long_line(availability: f32) -> (SimulationRun, Vec<u32>, u32) {
+    let failures = FailureProfile::new(availability, Distribution::ERLANG { mean: 60_000.0, k: 2 }, 0);
+    let mut model = ModelDescription::new();
+    let src = source(&mut model, 25);
+    let stations: Vec<u32> = [10, 15, 20].iter().map(|&t| model.add_station(secs(t), failures.clone())).collect();
+    let dr = drain(&mut model);
+    model.connect(src, stations[0]);
+    model.connect(stations[0], stations[1]);
+    model.connect(stations[1], stations[2]);
+    model.connect(stations[2], dr);
+    let mut run = model.build(3);
+    run.init().unwrap();
+    run.advance_to(secs(5_000_000)).unwrap();
+    (run, stations, dr)
+}
+
+#[test]
+fn statistics_agree_with_littles_law() {
+    // The MUs between leaving the Source and entering the Drain: L = throughput x lead time.
+    let (run, stations, dr) = long_line(0.9);
+    let contents: f64 = stations.iter().map(|&id| statistics_of(&run, id).average_contents().unwrap()).sum();
+    let s = statistics_of(&run, dr);
+    let per_second = s.mus_per_hour(run.time()).unwrap() / 3_600.0;
+    let expected = per_second * s.lead_time_mean().unwrap().as_secs_f64();
+    assert!((contents - expected).abs() / expected < 0.01, "contents {contents}, throughput x lead time {expected}");
+}
+
+#[test]
+fn achieved_availability_converges_to_the_configured_value() {
+    let (run, stations, _) = long_line(0.9);
+    for id in stations {
+        let achieved = statistics_of(&run, id).achieved_availability().unwrap();
+        assert!((achieved - 0.9).abs() < 0.01, "station {id} achieved {achieved}");
+    }
+}
+
+// ---------- Clearing statistics ----------
+
+#[test]
+fn clearing_statistics_starts_measuring_afresh_from_now() {
+    let (mut run, st, dr) = line(5_000.0);
+    run.init().unwrap();
+    run.advance_to(secs(100)).unwrap();
+    run.clear_statistics();
+    assert_eq!(run.state().statistics_since, secs(100));
+    assert_eq!(statistics_of(&run, st).measured_time(), SimTime::ZERO);
+    assert_eq!(statistics_of(&run, dr).mus_in, 0);
+    assert_eq!(statistics_of(&run, dr).drain, Some(Default::default()));
+    assert_eq!(statistics_of(&run, st).max_contents, 1, "the MU it holds is still there");
+
+    run.advance_to(secs(250)).unwrap();
+    assert_times_add_up(&run);
+    assert_eq!(statistics_of(&run, st).measured_time(), secs(150));
+}
+
+#[test]
+fn clearing_statistics_changes_nothing_else() {
+    let model = line_with_random_failures();
+    let mut plain = recorded(model.build(5));
+    plain.init().unwrap();
+    plain.advance_to(secs(1_000)).unwrap();
+    let expected = plain.advance_to(secs(5_000)).unwrap();
+
+    let mut cleared = recorded(model.build(5));
+    cleared.init().unwrap();
+    cleared.advance_to(secs(1_000)).unwrap();
+    cleared.clear_statistics();
+    assert_eq!(cleared.advance_to(secs(5_000)).unwrap(), expected);
+    assert_eq!(cleared.events_processed(), plain.events_processed());
+}
+
+#[test]
+fn an_mu_already_inside_when_cleared_counts_out_and_for_lead_time_but_not_in() {
+    // MU 1 entered the station at t=10 and leaves at t=70.
+    let (mut run, st, dr) = line(0.0);
+    run.init().unwrap();
+    run.advance_to(secs(30)).unwrap();
+    run.clear_statistics();
+    run.advance_to(secs(70)).unwrap();
+    let s = statistics_of(&run, st);
+    assert_eq!((s.mus_in, s.mus_out), (1, 1), "MU 2 came in at t=70, and only MU 1 went out");
+    let s = statistics_of(&run, dr);
+    assert_eq!(s.mus_in, 1);
+    assert_eq!(s.drain.unwrap().lead_time_total, secs(60), "counted in full");
+}
+
+#[test]
+fn no_exit_interval_or_rate_spans_a_clear() {
+    let (mut run, _, dr) = line(0.0);
+    run.init().unwrap();
+    run.advance_to(secs(100)).unwrap();
+    run.clear_statistics();
+    run.advance_to(secs(130)).unwrap();
+    let s = statistics_of(&run, dr);
+    let drain = s.drain.unwrap();
+    assert_eq!(drain.first_exit, Some(secs(130)));
+    assert_eq!(drain.exit_interval_min, None);
+    assert_eq!(s.mus_per_hour(secs(130)), None, "one exit since the clear");
+    run.advance_to(secs(190)).unwrap();
+    assert_eq!(statistics_of(&run, dr).mus_per_hour(secs(190)), Some(60.0));
+}
+
+#[test]
+fn reset_clears_statistics_and_when_they_began() {
+    let (mut run, st, dr) = line(5_000.0);
+    let default_state = run.state();
+    run.init().unwrap();
+    fail_at(&mut run, 20, st);
+    run.advance_to(secs(100)).unwrap();
+    run.clear_statistics();
+    run.advance_to(secs(200)).unwrap();
+    assert!(statistics_of(&run, dr).mus_in > 0);
+
+    run.reset();
+    assert_eq!(run.state(), default_state);
+    assert_eq!(run.state().statistics_since, SimTime::ZERO);
 }

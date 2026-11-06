@@ -12,8 +12,8 @@ use std::time::Instant;
 
 const RUN_LENGTH: SimTime = SimTime::from_secs(3_600);
 
-/// The example model, returned with its Drain's id so a caller can read what has left it.
-pub fn build_model(seed: u64) -> (SimulationRun, u32) {
+/// The example model.
+pub fn build_model(seed: u64) -> SimulationRun {
     // availability=0.9, mttr=60s → mtbf=540s derived automatically
     let failures = FailureProfile::new(0.9, Distribution::ERLANG { mean: 60_000.0, k: 2 }, 0);
     let mut model = ModelDescription::new();
@@ -58,14 +58,14 @@ pub fn build_model(seed: u64) -> (SimulationRun, u32) {
     for (from, to) in connections {
         model.connect(from, to);
     }
-    (model.build(seed), drain)
+    model.build(seed)
 }
 
 /// Runs the example model for an hour of simulation time and prints the result.
 pub fn run_demo(inplace: bool) -> Result<(), crate::error::RunError> {
     let _ = env_logger::try_init();
 
-    let (mut run, drain) = build_model(0);
+    let mut run = build_model(0);
     let topology = TopologyVisualizer::render_network_topology(run.objects());
     run.init()?;
 
@@ -77,6 +77,5 @@ pub fn run_demo(inplace: bool) -> Result<(), crate::error::RunError> {
         println!("{topology}{}", render_table(&run.state()));
     }
     println!("simulation runtime: {:.2} ms", start.elapsed().as_secs_f64() * 1000.0);
-    log::info!("exit times: {:#?}", run.object(drain).and_then(|object| object.as_drain()).map(|drain| &drain.exits));
     Ok(())
 }

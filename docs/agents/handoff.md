@@ -13,7 +13,7 @@ The project owner returned to this project after about six months away and didn'
 
 ## Current state
 
-Checked on 2026-11-06: the step 3 branch passes all 148 tests, with 1 long-run test ignored (`cargo test --all-targets`). The demo ran to the end in both modes on the same source code before it was merged.
+Checked on 2026-11-06: the step 4 branch passes all 186 tests, with 1 long-run test ignored (`cargo test --all-targets`). The demo ran to the end in both modes on the same source code before it was merged.
 
 | Branch | Where | State |
 |---|---|---|
@@ -39,13 +39,13 @@ Merged PRs: [#1 agent skills setup](https://github.com/MarcHoff94/crabsim/pull/1
 
 The owner decided all of this. Don't reopen it without a reason, and flag it if you need to. **Built** means it's in the code now, and **not built** means it's agreed for later.
 
-### Performance (not built, except where noted)
+### Performance (built where noted, otherwise not yet)
 Performance is the first thing to weigh in design trade-offs. It is a guideline rather than a hard rule, and `CLAUDE.md` holds the wording and the measuring rules. The target scale is up to a few thousand objects and tens of simulated years per run, with no fixed speed target.
 
-- **Headless run:** a plain simulation run with no live session or view, not a separate mode. It gives back its final state and the objects' data, with no reset, including after a run error.
-- **Recording** is a runtime setting on the run for which occurrence kinds to keep, changeable at any time, because replay needs it off and then back on. It is off by default in a headless run.
-- **Results** of fixed size come through `run.state()`, with `ObjectState` extended. Recorded occurrences come back from each advance (ADR 0004). A Drain's lists are still read through `run.object(id)` until then.
-- **Statistics** are fixed-size, always on and independent of occurrences. See "Statistics" below.
+- **Headless run (built):** a plain simulation run with no live session or view, not a separate mode. It gives back its final state and the objects' data, with no reset, including after a run error.
+- **Recording (built)** is a runtime setting on the run for which occurrence kinds to keep, changeable at any time, because replay needs it off and then back on. A run records nothing by default, and a live session records everything.
+- **Results (built)** of fixed size come through `run.state()`, with `ObjectState` extended. Recorded occurrences come back from each advance (ADR 0004).
+- **Statistics (built, for what today's model has)** are fixed-size, always on and independent of occurrences. See "Statistics" below.
 - **Live session:** read-ahead with checkpoints and replay. See ADR 0002 for the mechanism and why.
   - **Buffer:** limited by a maximum number of instants, with no limit on how far ahead in time the run gets. When it's full the run waits and still handles commands.
   - **Time:** Halt, errors and everything else the user experiences follow shown time. Reset throws the buffer away.
@@ -100,11 +100,11 @@ Performance is the first thing to weigh in design trade-offs. It is a guideline 
 - **Control order:** Init only from the default state, advancing requires Init, Reset allowed at any time. Violations return errors rather than panicking.
 - **A run advances only when asked** and has no end time of its own. `advance_to(t)` includes events at t. Speed control belongs to the caller.
 - **A run executes on one thread at a time.** A live session still creates its run on its own dedicated thread, though a run can now move.
-- **Occurrences** are returned by each advance today. Views get no callbacks. A run can also be asked for its full typed state. "We might add more states later." *Agreed change, not built: a run records occurrences only when asked.*
+- **Occurrences** are returned by each advance today. Views get no callbacks. A run can also be asked for its full typed state. "We might add more states later." A run records only when asked.
 - **MU ids** are unique across the model.
 
-### Statistics (not built)
-See `docs/design/statistics.md`, ADR 0003 and ADR 0004. Objects keep fixed-size, always-on statistics at two levels: machine state and MU time. Warm-up is a `clear_statistics()` call, and per-MU data exists only through recording occurrences.
+### Statistics (built for what today's model has)
+See `docs/design/statistics.md`, ADR 0003 and ADR 0004. Objects keep fixed-size, always-on statistics at two levels: machine state and MU time. Warm-up is a `clear_statistics()` call, and per-MU data exists only through recording occurrences. Pause, overlapping interruptions, capacity above 1, dwelling time and the other time bases aren't built, so their numbers stay at zero or at today's behaviour until step 7.
 
 ### User code (not built)
 The owner wants users to add their own source code later. The decisions so far:
@@ -121,7 +121,7 @@ Agreed on 2026-11-06, replacing the original repair plan, whose first two steps 
 1. ✅ Fix `blockedlist` (longest waiting first, deduped), with a fast test of the rule and a long-run test of 25 simulated years, marked `#[ignore]` and run on demand in release (PR 6, PR 7). This cured the false `ZeroTimeLoop`.
 2. ✅ Add the benchmark, a tuned release profile and a first profile. `panic = "abort"` is out, because `LiveSession` relies on `catch_unwind`. See `docs/design/first-profile.md`.
 3. ✅ Make the object storage change and add the millisecond time type. Tests build their models through a minimal model description, so storage details stay out of them. See ADR 0005.
-4. ⬜ Headless run without recording.
+4. ✅ Headless run without recording, with statistics for what today's model has. Memory is now flat with simulated length.
 5. ⬜ Throwaway prototype of restore and replay, for real cost figures.
 6. ⬜ Read-ahead `LiveSession`, if the prototype holds up. If it doesn't, reconsider the design with the owner.
 7. ⬜ The earlier domain work, in this order. The UI work also builds on step 6, and the owner may want it sooner, so ask.
@@ -130,7 +130,7 @@ Agreed on 2026-11-06, replacing the original repair plan, whose first two steps 
    - Add the time bases.
    - Add Station capacity and start modes, with the exit strategy seam.
 
-Statistics aren't placed in this order yet. `docs/design/statistics.md` lists what can be built now and what arrives with step 7, and two open questions for step 6.
+The statistics that depend on domain work arrive with step 7, and `docs/design/statistics.md` has two open questions for step 6.
 
 `ExitTicket` was designed with capacity in mind, because a whole Station stops at once, but that's untested until capacity exists.
 
@@ -138,11 +138,11 @@ Statistics aren't placed in this order yet. `docs/design/statistics.md` lists wh
 
 | Scenario | Events/s | One simulated year | Peak heap |
 |---|---|---|---|
-| Demo model, one advance, occurrences kept | 10.20M | 1.52 s | 1,636 MB |
-| Demo model, one-hour slices, occurrences dropped | 12.83M | 1.21 s | 25 MB |
-| 2,800 objects, one-hour slices, occurrences dropped | 7.43M | 2 days in 2.29 s | 67 MB |
+| Demo model, headless | 13.20M | 1.17 s | Under 0.05 MB, also over 10 years |
+| 2,800 objects, headless | 7.52M | 2 days in 2.26 s | 8.1 MB |
+| Demo model, one advance, occurrences kept | 8.97M | 1.73 s | 2,148 MB |
 
-**What's left on the per-event path:** the new-events `Vec`, the likely source of most of the remaining 0.87 allocations per event, and recording, which step 4 makes optional. `docs/design/first-profile.md` has the figures and their limits.
+**What's left on the per-event path:** the new-events `Vec`, the likely source of most of the remaining 0.86 allocations per event, and statistics, which cost about 7 to 12% of a headless run and haven't been tuned. `docs/design/first-profile.md` has the figures and their limits.
 
 ## Architecture review
 
@@ -203,7 +203,7 @@ What each stage needs:
 
 ## Possible next steps
 
-1. Follow the build order, starting with step 4, a headless run without recording. GitHub issue #3 holds the full spec.
+1. Follow the build order, starting with step 5, a throwaway prototype of restore and replay. GitHub issue #3 holds the full spec.
 2. Run `/update-wiki` when convenient, so the docs stop describing removed code.
 
 Candidate 7 should still be decided before `StopCtrl` gets written, and the UI technology is still undecided. Ask the owner rather than assume if the UI should come sooner.

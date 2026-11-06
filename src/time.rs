@@ -1,6 +1,9 @@
 //! Simulation time, as a count of whole milliseconds.
 
-use std::{fmt, ops::Add};
+use std::{
+    fmt,
+    ops::{Add, AddAssign},
+};
 
 /// A point in simulation time, or a length of it. Wall time stays a `std::time::Duration`, so the
 /// compiler keeps the two apart. 64 bits of milliseconds cover over 500 million years, and a
@@ -46,6 +49,11 @@ impl SimTime {
         self.0 as f64 / 1_000.0
     }
 
+    /// This length of time, `count` times over.
+    pub const fn times(self, count: u64) -> SimTime {
+        SimTime(self.0 * count)
+    }
+
     pub const fn saturating_add(self, other: SimTime) -> SimTime {
         SimTime(self.0.saturating_add(other.0))
     }
@@ -60,6 +68,12 @@ impl Add for SimTime {
 
     fn add(self, other: SimTime) -> SimTime {
         SimTime(self.0 + other.0)
+    }
+}
+
+impl AddAssign for SimTime {
+    fn add_assign(&mut self, other: SimTime) {
+        self.0 += other.0;
     }
 }
 

@@ -43,9 +43,9 @@ The owner decided all of this. Don't reopen it without a reason, and flag it if 
 Performance is the first thing to weigh in design trade-offs. It is a guideline rather than a hard rule, and `CLAUDE.md` holds the wording and the measuring rules. The target scale is up to a few thousand objects and tens of simulated years per run, with no fixed speed target.
 
 - **Headless run:** a plain simulation run with no live session or view, not a separate mode. It gives back its final state and the objects' data, with no reset, including after a run error.
-- **Recording** is a runtime switch on the run, changeable at any time, because replay needs it off and then on again. It is off by default in a headless run.
-- **Results** all come through `run.state()`, with `ObjectState` extended. Keeping an `Rc` to read a Drain, as the demo does, goes away.
-- **Statistics** are fixed-size, always on and independent of occurrences. Per-MU lists, including the Drain's `exits` and `exit_ids`, become opt-in. The details belong to the separate Statistics session (branch `claude/friendly-lehmann-fabe7f`).
+- **Recording** is a runtime setting on the run for which occurrence kinds to keep, changeable at any time, because replay needs it off and then back on. It is off by default in a headless run.
+- **Results** of fixed size come through `run.state()`, with `ObjectState` extended. Recorded occurrences come back from each advance (ADR 0004). Keeping an `Rc` to read a Drain, as the demo does, goes away.
+- **Statistics** are fixed-size, always on and independent of occurrences. See "Statistics" below.
 - **Live session:** read-ahead with checkpoints and replay. See ADR 0002 for the mechanism and why.
   - **Buffer:** limited by a maximum number of instants, with no limit on how far ahead in time the run gets. When it's full the run waits and still handles commands.
   - **Time:** Halt, errors and everything else the user experiences follow shown time. Reset throws the buffer away.
@@ -130,7 +130,7 @@ Agreed on 2026-11-06, replacing the original repair plan, whose first two steps 
    - Add the time bases.
    - Add Station capacity and start modes, with the exit strategy seam.
 
-The Statistics session decides where statistics fit in this order.
+Statistics aren't placed in this order yet. `docs/design/statistics.md` lists what can be built now and what arrives with step 7, and two open questions for step 6.
 
 `ExitTicket` was designed with capacity in mind, because a whole Station stops at once, but that's untested until capacity exists.
 

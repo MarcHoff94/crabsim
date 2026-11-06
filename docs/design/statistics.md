@@ -170,7 +170,21 @@ The struct is `Copy` and needs no allocation. Methods that depend on the run's t
 
 State changes are currently scattered: some go through `set_state`, others assign `self.state` directly. All of them need to go through one place that closes the time interval, or the buckets will drift.
 
-Failure statistics can be built now. Pause, overlapping interruptions, capacity, dwelling time and the other time bases aren't built, so their numbers arrive with build order steps 3 to 6.
+Failure statistics can be built now. Pause, overlapping interruptions, capacity, dwelling time and the other time bases aren't built, so their numbers arrive with the domain work in step 7 of the build order.
+
+## Fit with the rest of the agreed design
+
+This design was written alongside ADR 0002 rather than after it.
+
+- **Time type:** `Duration` above stands for simulation time. It becomes the millisecond time type from step 3 of the build order.
+- **Recording:** the setting has to be changeable at any time, because replay turns it off and then back on.
+- **Checkpoints:** statistics are part of an object's state, so save and restore cover them, and the restore-and-replay test should compare them too.
+- **ADR 0004 after step 6:** a read-ahead live session stops sending state after every slice, which removes one of that ADR's reasons. The decision still stands, because a list on the Drain would also be copied into every checkpoint.
+
+### Open questions for step 6
+
+1. **Live statistics at shown time.** In a read-ahead session `run.state()` describes computed time, so its statistics are ahead of what's on screen. Occurrences must be enough to rebuild the state, but rebuilding statistics from them would duplicate the engine's logic in the UI. How does a UI show statistics for shown time?
+2. **Warm-up and going back.** If a checkpoint from before `clear_statistics()` is restored, replaying past that point wouldn't clear them again unless the call is remembered, as interventions are. How should it be remembered, and what happens when going back behind it?
 
 ## Tests
 

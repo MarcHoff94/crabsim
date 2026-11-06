@@ -24,7 +24,7 @@ The control that returns every object to its default state, ready for a new simu
 _Avoid_: Init, delete, clear
 
 **Live session**:
-A simulation run controlled while it goes, on its own thread. It takes Start, Halt, Reset and a speed, and reports occurrences, state and errors.
+A simulation run controlled while it goes, on its own thread. It takes Start, Halt, Reset and a speed, and reports occurrences, state, its status and errors.
 
 **Speed**:
 How much simulation time passes per unit of wall time in a live session. Changing it never makes simulation time jump.

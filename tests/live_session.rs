@@ -788,18 +788,21 @@ fn a_session_nobody_reads_stops_advancing() {
 
 #[test]
 fn an_idle_running_session_does_not_flood_a_reader_that_is_not_there() {
-    let watched = Watched::new(|| SimulationRun::new(0));
+    let mut watched = Watched::new(|| SimulationRun::new(0));
     watched.session.start().unwrap();
     let limit = OBSERVATION_BACKLOG_LIMIT as u64;
     let stopped_at = tick_until_backlogged(&watched, 2 * limit);
     assert!(stopped_at <= limit, "an advance reports one state, so it stopped too late: {stopped_at}");
 
+    // The clock moves on, but the session has stopped: neither this sync nor Halt advances it.
     watched.clock.set(secs(5 * limit));
     assert_eq!(watched.session.sync(), Err(SessionError::Backlogged));
     watched.session.halt().unwrap();
     assert_eq!(watched.session.sync(), Err(SessionError::Backlogged));
-    let waiting = watched.session.observations().try_iter().count();
-    assert!(waiting <= MOST_UNREAD, "{waiting} observations were waiting");
+
+    let seen = watched.look();
+    assert!(seen.states <= MOST_UNREAD, "{} states were waiting", seen.states);
+    assert_eq!(watched.state.as_ref().unwrap().time, secs(stopped_at), "it went no further while unread");
 }
 
 #[test]

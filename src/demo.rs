@@ -75,7 +75,7 @@ pub fn run_demo(inplace: bool) -> Result<(), crate::error::RunError> {
     if inplace {
         advance_with_view(&mut run, RUN_LENGTH, &mut InPlaceTerminalView::new(topology))?;
     } else {
-        run.advance_to(RUN_LENGTH)?;
+        run.advance_to(RUN_LENGTH).map_err(|failure| failure.error)?;
         println!("{topology}{}", render_table(&run.state()));
     }
     println!("simulation runtime: {:.2} ms", start.elapsed().as_secs_f64() * 1000.0);

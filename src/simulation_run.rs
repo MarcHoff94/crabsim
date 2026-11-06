@@ -1,4 +1,4 @@
-use crate::error::RunError;
+use crate::error::{AdvanceFailure, RunError};
 use crate::event::{EventContext, EventTemplate, EventType, ScheduledEvent};
 use crate::flows::MaterialFlow;
 use crate::observation::{Occurrence, OccurrenceKind, RunState};
@@ -88,28 +88,32 @@ impl SimulationRun {
     }
 
     /// Processes the next event, if there is one.
-    pub fn step(&mut self) -> Result<Vec<Occurrence>, RunError> {
-        self.require_initialised()?;
-        self.process_next()?;
-        Ok(self.context.take_occurrences())
+    pub fn step(&mut self) -> Result<Vec<Occurrence>, AdvanceFailure> {
+        let outcome = self.require_initialised().and_then(|()| self.process_next());
+        self.hand_over(outcome)
     }
 
     /// Processes every event up to and including `until`, and leaves the clock there.
-    pub fn advance_to(&mut self, until: Duration) -> Result<Vec<Occurrence>, RunError> {
-        self.require_initialised()?;
-        while self.next_event_time().is_some_and(|time| time <= until) {
-            self.process_next()?;
-        }
-        if until > self.time {
-            self.time = until;
-        }
-        Ok(self.context.take_occurrences())
+    pub fn advance_to(&mut self, until: Duration) -> Result<Vec<Occurrence>, AdvanceFailure> {
+        let outcome = self.require_initialised().and_then(|()| {
+            while self.next_event_time().is_some_and(|time| time <= until) {
+                self.process_next()?;
+            }
+            if until > self.time {
+                self.time = until;
+            }
+            Ok(())
+        });
+        self.hand_over(outcome)
     }
 
-    /// Hands over occurrences an advance recorded before it returned an error. A successful
-    /// advance returns its own, so this only ever has something after an error.
-    pub fn take_occurrences(&mut self) -> Vec<Occurrence> {
-        self.context.take_occurrences()
+    /// Hands over everything an advance recorded, however it ended.
+    fn hand_over(&mut self, outcome: Result<(), RunError>) -> Result<Vec<Occurrence>, AdvanceFailure> {
+        let occurrences = self.context.take_occurrences();
+        match outcome {
+            Ok(()) => Ok(occurrences),
+            Err(error) => Err(AdvanceFailure { error, occurrences }),
+        }
     }
 
     /// Returns every object to its default state, ready for a new run. Objects stay in the model.

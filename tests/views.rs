@@ -1,8 +1,13 @@
 //! The views that consume what a simulation run reports.
 
+mod common;
+
+use common::RecordsThenFails;
 use crabsim::visualization::terminal::render_table;
 use crabsim::visualization::{advance_with_view, RunView};
-use crabsim::{Drain, FailureProfile, Occurrence, RunState, SimulationRun, SingleStation, Source};
+use crabsim::{
+    Drain, FailureProfile, Occurrence, OccurrenceKind, RunError, RunState, SimulationRun, SingleStation, Source,
+};
 use crabsim::random_numbers::Distribution;
 use std::{cell::RefCell, rc::Rc, time::Duration};
 
@@ -49,6 +54,32 @@ fn a_view_receives_the_same_occurrences_as_a_plain_advance() {
     assert_eq!(run.time(), until);
     assert_eq!(recorder.frames.last(), Some(&until));
     assert!(recorder.frames.windows(2).all(|pair| pair[0] <= pair[1]));
+}
+
+#[test]
+fn a_view_sees_what_an_event_recorded_before_it_failed() {
+    let mut run = SimulationRun::new(0);
+    let id = run.add_object(Rc::new(RefCell::new(RecordsThenFails { id: 0, at: Duration::from_secs(5) })));
+    run.init().unwrap();
+    let mut recorder = Recorder::default();
+
+    let error = advance_with_view(&mut run, Duration::from_secs(10), &mut recorder).unwrap_err();
+
+    assert_eq!(error, RunError::ObjectFailed { object_id: id, time: Duration::from_secs(5) });
+    assert_eq!(
+        recorder.occurrences,
+        vec![Occurrence { time: Duration::from_secs(5), kind: OccurrenceKind::Blocked { object_id: id } }]
+    );
+    assert_eq!(recorder.frames, vec![Duration::from_secs(5)]);
+}
+
+#[test]
+fn a_view_is_shown_nothing_when_nothing_happened_before_the_error() {
+    let mut run = line();
+    let mut recorder = Recorder::default();
+    let error = advance_with_view(&mut run, Duration::from_secs(10), &mut recorder).unwrap_err();
+    assert_eq!(error, RunError::NotInitialised);
+    assert!(recorder.frames.is_empty());
 }
 
 #[test]

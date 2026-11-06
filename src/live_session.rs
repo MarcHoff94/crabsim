@@ -354,7 +354,10 @@ impl<C: Clock> SessionThread<C> {
             }
             match self.run.step() {
                 Ok(new) => occurrences.extend(new),
-                Err(error) => return self.report_failure(occurrences, error),
+                Err(failure) => {
+                    occurrences.extend(failure.occurrences);
+                    return self.report_failure(occurrences, failure.error);
+                }
             }
         }
         if self.has_event_by(target) {
@@ -362,7 +365,10 @@ impl<C: Clock> SessionThread<C> {
         } else {
             match self.run.advance_to(target) {
                 Ok(new) => occurrences.extend(new),
-                Err(error) => return self.report_failure(occurrences, error),
+                Err(failure) => {
+                    occurrences.extend(failure.occurrences);
+                    return self.report_failure(occurrences, failure.error);
+                }
             }
         }
         if !occurrences.is_empty() || self.run.time() != time_before {
@@ -397,8 +403,7 @@ impl<C: Clock> SessionThread<C> {
     }
 
     /// Reports everything that happened before an error, then the error, and halts.
-    fn report_failure(&mut self, mut occurrences: Vec<Occurrence>, error: RunError) {
-        occurrences.extend(self.run.take_occurrences());
+    fn report_failure(&mut self, occurrences: Vec<Occurrence>, error: RunError) {
         self.report(occurrences);
         self.observe(Observation::Error(SessionError::Run(error)));
         self.pace = None;

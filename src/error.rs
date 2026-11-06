@@ -1,3 +1,4 @@
+use crate::observation::Occurrence;
 use std::{fmt, time::Duration};
 
 #[derive(Debug)]
@@ -42,3 +43,23 @@ impl fmt::Display for RunError {
 }
 
 impl std::error::Error for RunError {}
+
+/// An advance that ended in an error, with everything it recorded before the error, so that
+/// no caller loses what happened.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AdvanceFailure {
+    pub error: RunError,
+    pub occurrences: Vec<Occurrence>,
+}
+
+impl fmt::Display for AdvanceFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.error.fmt(f)
+    }
+}
+
+impl std::error::Error for AdvanceFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
+    }
+}

@@ -4,7 +4,7 @@ use crate::observation::{ObjectKind, ObjectState, OccurrenceKind, StopCause};
 use std::time::Duration;
 use super::flows::BaseObject;
 use crate::flows::{
-	EventInterface, StopCtrl, FailureProfile, InterruptionState, MaterialFlow, MoveableUnit, ProcessState, SuccessorContainer, list_blocked, retries_for_blocked, try_to_move_to_successor
+	EventInterface, StopCtrl, FailureProfile, InterruptionState, MaterialFlow, MoveableUnit, ProcessState, SuccessorContainer, list_blocked, retries_for_blocked, retry_move_to_successor, try_to_move_to_successor
 };
 use std::{cell::RefCell, rc::Rc};
 
@@ -132,7 +132,7 @@ impl MaterialFlow for SingleStation {
 		self.blockedlist.retain(|&id| id != id_blocked);
 	}
 	fn notify_blocked_predecessors(&mut self) -> Result<Option<Vec<EventTemplate>>, MaterialflowError> {
-		Ok(retries_for_blocked(&mut self.blockedlist))
+		Ok(retries_for_blocked(&mut self.blockedlist, self.base.object_id))
 	}
 }
 
@@ -201,13 +201,13 @@ impl EventInterface for SingleStation {
 					Err(_) => Err(RunTimeError {}),
 				}
 			}
-			&EventType::BlockedRetry => {
+			&EventType::BlockedRetry { from } => {
 				// An empty station can still get a retry already queued when its MU left. It
 				// has nothing to move, so it must not list itself as waiting.
 				if !self.is_exit_allowed() || self.content.is_none() {
 					return Ok(None);
 				}
-				match try_to_move_to_successor(self, context) {
+				match retry_move_to_successor(self, context, from) {
 					Ok(Some(event_template)) => {
 						if self.content.is_none() {
 							self.entrancelocked = false;

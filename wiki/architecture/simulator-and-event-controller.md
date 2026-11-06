@@ -72,7 +72,7 @@ For each event:
 
 ### FIFO tiebreaking
 
-The `seq` counter is the mechanism that makes same-time events deterministic. `ScheduledEvent::cmp` orders first by time (ascending), then by `seq` (ascending). Because `BinaryHeap` is a max-heap and the comparison is reversed, the event with the smallest time and smallest seq is popped first.
+The `seq` counter is the mechanism that makes same-time events deterministic. `ScheduledEvent::cmp` orders first by time (ascending), then `BlockedRetry` events before all others, then by `seq` (ascending). Because `BinaryHeap` is a max-heap and the time and `seq` comparisons are reversed, the event with the smallest time and smallest seq in its group is popped first.
 
 Preserve `seq` assignment order when refactoring scheduling code — deterministic tests depend on it.
 

@@ -34,7 +34,9 @@ Defined in `src/event.rs` as `pub enum EventType`.
 
 **What happens on dispatch:**
 1. `is_exit_allowed()` is checked first. Returns `false` if `ProcessState::Processing` — the retry is a **no-op**.
-2. If exit allowed: `try_to_move_to_successor` is called. If successful, predecessor goes Idle.
+2. If exit allowed: `retry_move_to_successor` tries only the successor named by `from`. If successful, predecessor goes Idle.
+
+At one simulation time, `BlockedRetry` events run before all other event types.
 
 ### StartFailure
 

@@ -21,7 +21,10 @@ section: concepts
 - A refused retry lists its predecessor again, so those still waiting keep their order
 - `try_to_move_to_successor` removes a predecessor from all its successors' lists when its MU moves (`remove_blocked`)
 - A `BlockedRetry` on an empty station does nothing
-- Known gap: an MU finishing at the instant a successor frees up can take it before the longest-waiting predecessor's retry runs
+- At one simulation time, retries run before all other events (`ScheduledEvent::cmp`)
+- `BlockedRetry { from }`: the predecessor tries only successor `from` (`retry_move_to_successor`)
+- A retry that finds its predecessor stopped is used up; it lists itself again at the back after repair
+- Giving up a place on any move assumes one MU per object: revisit with Station capacity, the Buffer fix and exit strategies
 
 ## Code locations
 - `try_to_move_to_successor` — `src/materialflow_objects/flows.rs`

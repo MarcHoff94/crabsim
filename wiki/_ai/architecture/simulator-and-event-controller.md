@@ -15,6 +15,7 @@ section: architecture
 - Registration order determines object IDs — tests that manually schedule by id depend on this
 - Both `register_material_flow` AND `add_drain` must be called for each `Drain`
 - `seq` is monotonically increasing; do not reset or reuse
+- At one simulation time, `BlockedRetry` events run before all others; `seq` orders within each group
 - `endtime = None` → run until queue empty; `endtime = Some(d)` → stop when `time >= d`
 
 ## Borrow rules

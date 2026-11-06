@@ -31,7 +31,7 @@ cargo test --release --test simulation_run -- --ignored --nocapture the_demo_mod
 
 This is a Rust discrete-event material-flow simulator structured as a library (`src/`) with a demo binary (`src/main.rs`).
 
-**Core engine** (`src/simulation_run.rs`): `SimulationRun` owns the objects (`BTreeMap<u32, Rc<RefCell<dyn MaterialFlow>>>`), clock and event queue (`BinaryHeap<ScheduledEvent>`). A monotonically increasing `seq` breaks ties, preserving FIFO order for same-timestamp events. A run only advances when asked and knows nothing about views or pacing:
+**Core engine** (`src/simulation_run.rs`): `SimulationRun` owns the objects (`BTreeMap<u32, Rc<RefCell<dyn MaterialFlow>>>`), clock and event queue (`BinaryHeap<ScheduledEvent>`). At one simulation time, `BlockedRetry` events run before all others, and a monotonically increasing `seq` preserves FIFO order within each of those two groups. A run only advances when asked and knows nothing about views or pacing:
 - `add_object` — adds an object and assigns its id.
 - `init` — sets t=0, calls each object's `init` in id order and queues the first events without processing them. Only allowed from the default state.
 - `step` — processes one event. `advance_to(t)` — processes events up to and including `t`, then leaves the clock at `t`. `advance_bounded(t, n)` — the same, for at most `n` events; if events are still due, it reports not having reached `t` and the clock stays at the last event.
@@ -53,7 +53,7 @@ This is a Rust discrete-event material-flow simulator structured as a library (`
 
 **Movement semantics**: `try_to_move_to_successor` advances `succ_pointer` (round-robin), skips locked successors, and records the predecessor's `object_id` in each skipped successor's `blockedlist`, removing it from all of them once its MU moves. When all successors are locked, the predecessor goes `Blocked`. When a station frees up, it emits `BlockedRetry` events to everything in its `blockedlist` so they can retry.
 
-**Event types** (`src/event.rs`): `MUExit` (processing complete, try to transfer) and `BlockedRetry` (reactive — successor freed up, predecessor retries). Keeping them distinct preserves scheduling vs. reactive semantics.
+**Event types** (`src/event.rs`): `MUExit` (processing complete, try to transfer) and `BlockedRetry { from }` (reactive — successor `from` freed up, predecessor retries that successor only). Keeping them distinct preserves scheduling vs. reactive semantics.
 
 **Visualization** (`src/visualization/`):
 - `mod.rs` — the `RunView` trait and `advance_with_view`, which advances a run and shows each result to a view.
@@ -68,8 +68,8 @@ This is a Rust discrete-event material-flow simulator structured as a library (`
 
 - All shared mutable objects use `Rc<RefCell<T>>`, so a run and its objects stay on one thread. When wiring the topology, set `succ`. `pred` is currently never read: `BlockedRetry` routing uses the ids in `blockedlist`.
 - `add_object` must be called for every object. Ids given to constructors are replaced.
-- `seq` tiebreaking is load-bearing for deterministic tests — preserve it when changing scheduling logic.
-- `blockedlist` holds the predecessors waiting for an object, longest-waiting first, each listed once. Objects use `list_blocked` and `retries_for_blocked` from `flows.rs` for this. A predecessor gives up its place at every successor as soon as its MU moves, and an empty station doesn't list itself. Known gap: retries are events, so an MU finishing at the same instant a successor frees up can take it before the longest-waiting predecessor's retry runs.
+- `seq` tiebreaking is load-bearing for deterministic tests — preserve it when changing scheduling logic. The same seed on the same version must always give identical results. Results may differ between versions when behaviour changes on purpose.
+- `blockedlist` holds the predecessors waiting for an object, longest-waiting first, each listed once. Objects use `list_blocked` and `retries_for_blocked` from `flows.rs` for this. A predecessor gives up its place at every successor as soon as its MU moves, and an empty station doesn't list itself. Retries run before other events at the same time and offer only the successor that sent them, so nothing can reach a free successor ahead of those waiting for it. A retry that finds its predecessor stopped is used up, so that predecessor lists itself again at the back after its repair. This all serves today's push with one MU per object. Giving up a place on any move assumes the predecessor has no other MU waiting, so revisit it with Station capacity, the Buffer fix and exit strategies.
 - Every object must implement `reset`, returning it to its default state, including configured starting MUs. When adding a field, reset it and extend the reset tests in `tests/simulation_run.rs`. A replay alone can't catch leftover events, because they land on the replay's own event times.
 - `FailureProfile` is the failure/availability model for stations. Availability is a fraction in `(0.0, 1.0)` where `1.0` = 100% available (inactive). The demo uses `availability=0.9` with an Erlang repair time (mean 60s, k=2); tests use `availability=1.0` unless they exercise failures.
 - `MUExit` carries an `ExitTicket` naming its MU and the object's `stop_count` when it was scheduled. The event heap can't cancel events, so a stop bumps `stop_count` and the queued exit is ignored as stale when it fires. Resuming schedules a new exit for the remaining process time.

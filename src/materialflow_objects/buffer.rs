@@ -115,7 +115,7 @@ impl MaterialFlow for Buffer {
         self.blockedlist.retain(|&id| id != id_blocked);
     }
     fn notify_blocked_predecessors(&mut self) -> Result<Option<Vec<EventTemplate>>, crate::error::MaterialflowError> {
-        Ok(retries_for_blocked(&mut self.blockedlist))
+        Ok(retries_for_blocked(&mut self.blockedlist, self.base.object_id))
     }
 }
 
@@ -207,7 +207,7 @@ impl EventInterface for Buffer {
                     Err(_) => Err(crate::error::RunTimeError {}),
                 }
             }
-            EventType::BlockedRetry => {
+            EventType::BlockedRetry { .. } => {
                 if !self.is_exit_allowed() {
                     return Ok(None);
                 }

@@ -58,7 +58,8 @@ impl EventContext {
 pub enum EventType {
     MUEntrance,
     MUExit(ExitTicket),
-    BlockedRetry,
+    /// A successor has room: `from` is that successor, which the predecessor may now try.
+    BlockedRetry { from: u32 },
     Finished,
     StartFailure,
     EndFailure,
@@ -93,12 +94,21 @@ impl PartialOrd for ScheduledEvent {
 }
 
 impl Ord for ScheduledEvent {
+    /// The earliest time comes first. At one time, retries come before everything else, so
+    /// those already waiting get a free successor before anything else can reach it. Within
+    /// each of those two groups, events run in the order they were queued.
     fn cmp(&self, other: &Self) -> Ordering {
-        let tcmp = other.time.cmp(&self.time);
-        if tcmp != Ordering::Equal {
-            return tcmp;
-        }
-        other.seq.cmp(&self.seq)
+        other
+            .time
+            .cmp(&self.time)
+            .then_with(|| self.is_retry().cmp(&other.is_retry()))
+            .then_with(|| other.seq.cmp(&self.seq))
+    }
+}
+
+impl ScheduledEvent {
+    fn is_retry(&self) -> bool {
+        matches!(self.template.eventtype, EventType::BlockedRetry { .. })
     }
 }
 

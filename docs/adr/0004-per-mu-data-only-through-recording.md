@@ -1,0 +1,3 @@
+# Per-MU data only through recording occurrences
+
+Data per MU exists only as recorded occurrences, chosen by kind, and the Drain's `exits` and `exit_ids` lists are removed. A list on the Drain would sit on `ObjectState`, which a live session copies after every slice, so each slice would cost more as the run got longer, and keeping both would give two ways to get the same data that could disagree. This narrows an earlier decision: only results of fixed size are read through `run.state()`, while recorded occurrences come back from each advance, and `AdvanceFailure` carries them through a run error so nothing is lost.

@@ -147,7 +147,10 @@ _Avoid_: Planned failure
 The state of a material-flow object while at least one interruption is active. A whole Station stops at once, whatever its capacity.
 
 **Availability**:
-The share of an object's time basis during which it is not failed. Pauses do not count against it.
+The share of time an object is not failed, counting only time on its time basis plus time failed. Pauses do not count against it.
+
+**Achieved availability**:
+The availability a simulation run actually produced, as opposed to the value configured for the object.
 
 **Time basis**:
 The kind of time that counts down to an object's next failure: simulation time, working time or processing time. Not every object needs all three.
@@ -161,3 +164,45 @@ A time basis where all time counts except while the object is paused, including 
 **Processing time**:
 A time basis where only time spent actively working on at least one MU counts, once however many MUs are in work.
 _Avoid_: Process time (how long one MU takes, not a basis for failures)
+
+### Measuring
+
+**Statistics**:
+The fixed-size numbers every material-flow object keeps about a simulation run. They are always on, and their size does not depend on how long the run is.
+
+**Busy**:
+The state of an object doing what it is there for: a Station working on at least one MU, a Source waiting out its interval, a Buffer holding at least one MU.
+_Avoid_: Processing (a Buffer does no work, and Processing time is a time basis)
+
+**Blocked**:
+The state of an object holding an MU that is ready to leave but that no successor can accept.
+
+**Idle**:
+The state of an object that is not busy, blocked or stopped. A partly filled batch start Station waiting to start is idle.
+
+**MU time**:
+MU count multiplied by time, kept per MU state: busy, blocked, waiting to start or stopped. Unlike an object's state, which is one at a time, it shows what each MU in a multi-MU object is doing. Judge utilisation and bottlenecks from it.
+
+**Bottleneck**:
+The object limiting a material flow: what is upstream of it is mostly blocked, and what is downstream of it is mostly starved.
+
+**Starved**:
+Having empty capacity because no MU has arrived.
+
+**Lead time**:
+How long an MU spends in the model: from leaving its Source until entering a Drain. A starting MU counts from Init.
+_Avoid_: Cycle time, throughput time
+
+**Exit interval**:
+The time between two consecutive MUs entering the same Drain.
+_Avoid_: Takt (a target, not a measurement)
+
+**Throughput**:
+How many MUs per hour a Drain takes, measured from its first exit up to now, so it falls while no MUs arrive.
+
+**Warm-up**:
+The start of a simulation run, left out of the statistics by clearing them when it ends. Clearing statistics changes nothing else in the run.
+_Avoid_: Reset (that returns every object to its default state)
+
+**Recording**:
+Keeping the occurrences of chosen kinds from a simulation run. It is opt-in, and it is the only way to get data per MU.

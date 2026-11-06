@@ -126,7 +126,35 @@ pub trait MaterialFlow: EventInterface + StopCtrl {
 	fn is_exit_allowed(&self) -> bool;
 	fn process_mu_entrance(&mut self, mu: MoveableUnit, context: &mut EventContext) -> Result<Option<EventTemplate>, MaterialflowError>;
 	fn add_blocked(&mut self, id_blocked: u32);
+	fn remove_blocked(&mut self, id_blocked: u32);
 	fn notify_blocked_predecessors(&mut self) -> Result<Option<Vec<EventTemplate>>, MaterialflowError>;
+}
+
+/// Lists a predecessor as waiting. One already listed keeps its place, since it has been
+/// waiting from then on.
+pub fn list_blocked(blockedlist: &mut Vec<u32>, id_blocked: u32) {
+	if !blockedlist.contains(&id_blocked) {
+		blockedlist.push(id_blocked);
+	}
+}
+
+/// Empties the list into one retry for each predecessor, longest-waiting first. A retry that
+/// is refused lists its predecessor again, so those still waiting keep their order.
+pub fn retries_for_blocked(blockedlist: &mut Vec<u32>) -> Option<Vec<EventTemplate>> {
+	if blockedlist.is_empty() {
+		return None;
+	}
+	Some(
+		blockedlist
+			.drain(..)
+			.map(|blocked_id| EventTemplate {
+				eventtype: EventType::BlockedRetry,
+				exec_time: Duration::from_millis(0),
+				object_id: blocked_id,
+				seq: 0,
+			})
+			.collect(),
+	)
 }
 
 pub trait SuccessorContainer {
@@ -190,6 +218,10 @@ pub fn try_to_move_to_successor_with_strategy<
 				let pred_id = *obj.get_object_id();
 				let mu_id = mu.id;
 				let seq = context.seq;
+				// It is no longer waiting, so it gives up its place wherever it was refused.
+				for refused_by in &succ {
+					refused_by.borrow_mut().remove_blocked(pred_id);
+				}
 				let mut succ_mut = succ_obj.borrow_mut();
 				context.record(OccurrenceKind::MuMoved { mu_id, from: pred_id, to: succ_id });
 				log::info!("seq={} MU {} moved from {} to {}", seq, mu_id, pred_id, succ_id);

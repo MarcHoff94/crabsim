@@ -4,6 +4,8 @@
 mod common;
 
 use common::RecordsThenFails;
+use crabsim::demo::build_model;
+use crabsim::flows::MaterialFlow;
 use crabsim::random_numbers::Distribution;
 use crabsim::{
     Buffer, Drain, EventType, FailureProfile, MoveableUnit, Occurrence, OccurrenceKind, ProcessState,
@@ -774,7 +776,10 @@ fn a_blocked_station_falls_back_to_a_free_successor() {
 
     assert!(occurrences.iter().any(|o| o.kind == OccurrenceKind::MuMoved { mu_id: 42, from: pred_id, to: free_id }));
     assert_eq!(pred.borrow().succ_pointer, 0, "the pointer moves past the chosen successor");
-    assert_eq!(object(&run.state(), busy_id).blocked_predecessors, vec![pred_id]);
+    assert!(
+        object(&run.state(), busy_id).blocked_predecessors.is_empty(),
+        "its MU has gone elsewhere, so it isn't waiting for this successor"
+    );
 }
 
 #[test]
@@ -867,6 +872,166 @@ fn blocked_list_holds_each_predecessor_once_through_the_station_interface() {
     d.add_blocked(7);
     d.add_blocked(7);
     assert_eq!(d.blockedlist.len(), 1);
+}
+
+#[test]
+fn the_longest_waiting_predecessor_retries_first() {
+    // Ids run against the waiting order, so neither id order nor reverse id order passes.
+    let waits_last = preloaded_station(30, 3);
+    let waits_first = preloaded_station(10, 1);
+    let waits_second = preloaded_station(20, 2);
+    let contested = preloaded_station(100, 4);
+    let dr = drain();
+    for waiting in [&waits_last, &waits_first, &waits_second] {
+        waiting.borrow_mut().succ = vec![contested.clone()];
+    }
+    contested.borrow_mut().succ = vec![dr.clone()];
+    let mut run = SimulationRun::new(0);
+    let last_id = run.add_object(waits_last);
+    let first_id = run.add_object(waits_first);
+    let second_id = run.add_object(waits_second);
+    let contested_id = run.add_object(contested);
+    run.add_object(dr);
+    run.init().unwrap();
+
+    let mut occurrences = run.advance_to(secs(50)).unwrap();
+    assert_eq!(object(&run.state(), contested_id).blocked_predecessors, vec![first_id, second_id, last_id]);
+
+    // A retry that is refused keeps its turn: those still waiting stay in waiting order.
+    occurrences.extend(run.advance_to(secs(100)).unwrap());
+    assert_eq!(object(&run.state(), contested_id).blocked_predecessors, vec![second_id, last_id]);
+
+    occurrences.extend(run.advance_to(secs(300)).unwrap());
+    assert_eq!(moves_from(&occurrences, first_id), vec![100.0]);
+    assert_eq!(moves_from(&occurrences, second_id), vec![200.0]);
+    assert_eq!(moves_from(&occurrences, last_id), vec![300.0]);
+}
+
+#[test]
+fn a_predecessor_refused_on_every_retry_is_listed_once() {
+    let early = preloaded_station(5, 1);
+    let both = preloaded_station(10, 2);
+    let late = preloaded_station(15, 3);
+    let contested = preloaded_station(50, 4);
+    let always_busy = preloaded_station(1_000, 5);
+    let dr = drain();
+    early.borrow_mut().succ = vec![contested.clone()];
+    late.borrow_mut().succ = vec![contested.clone()];
+    both.borrow_mut().succ = vec![always_busy.clone(), contested.clone()];
+    contested.borrow_mut().succ = vec![dr.clone()];
+    let mut run = SimulationRun::new(0);
+    run.add_object(early);
+    let both_id = run.add_object(both);
+    let late_id = run.add_object(late);
+    let contested_id = run.add_object(contested);
+    let always_busy_id = run.add_object(always_busy);
+    run.add_object(dr);
+    run.init().unwrap();
+
+    // Contested frees up at t=50. The earliest takes it, and the retries of the other two are
+    // refused, which must not list them a second time at anything that already has them.
+    run.advance_to(secs(60)).unwrap();
+    let state = run.state();
+    assert_eq!(object(&state, always_busy_id).blocked_predecessors, vec![both_id]);
+    assert_eq!(object(&state, contested_id).blocked_predecessors, vec![both_id, late_id]);
+}
+
+#[test]
+fn a_predecessor_that_moved_on_loses_its_place_in_the_queue() {
+    let src = source(20);
+    let moves_on = station(10);
+    let contested = preloaded_station(100, 91);
+    let elsewhere = station(1_000);
+    let waits_longer = preloaded_station(40, 92);
+    let dr = drain();
+    src.borrow_mut().succ = vec![moves_on.clone()];
+    moves_on.borrow_mut().succ = vec![contested.clone(), elsewhere.clone()];
+    waits_longer.borrow_mut().succ = vec![contested.clone()];
+    contested.borrow_mut().succ = vec![dr.clone()];
+    let mut run = SimulationRun::new(0);
+    run.add_object(src);
+    let moves_on_id = run.add_object(moves_on);
+    let contested_id = run.add_object(contested);
+    run.add_object(elsewhere);
+    let waits_longer_id = run.add_object(waits_longer);
+    run.add_object(dr);
+    run.init().unwrap();
+
+    // At t=30 its first MU is refused by contested and goes elsewhere, so it isn't waiting.
+    let mut occurrences = run.advance_to(secs(35)).unwrap();
+    assert!(object(&run.state(), contested_id).blocked_predecessors.is_empty());
+
+    // The other starts waiting at t=40. The second MU is refused everywhere at t=50.
+    occurrences.extend(run.advance_to(secs(60)).unwrap());
+    assert_eq!(object(&run.state(), contested_id).blocked_predecessors, vec![waits_longer_id, moves_on_id]);
+
+    occurrences.extend(run.advance_to(secs(100)).unwrap());
+    assert_eq!(moves_from(&occurrences, waits_longer_id), vec![100.0]);
+}
+
+#[test]
+fn a_station_with_nothing_left_to_move_is_not_listed_as_waiting() {
+    let pred = preloaded_station(10, 1);
+    let frees_first = preloaded_station(20, 2);
+    let always_busy = preloaded_station(1_000, 3);
+    let frees_second = preloaded_station(20, 4);
+    let dr = drain();
+    pred.borrow_mut().succ = vec![frees_first.clone(), always_busy.clone(), frees_second.clone()];
+    frees_first.borrow_mut().succ = vec![dr.clone()];
+    frees_second.borrow_mut().succ = vec![dr.clone()];
+    let mut run = SimulationRun::new(0);
+    run.add_object(pred);
+    run.add_object(frees_first);
+    let always_busy_id = run.add_object(always_busy);
+    run.add_object(frees_second);
+    run.add_object(dr);
+    run.init().unwrap();
+
+    // Two successors free up at t=20 and each sends a retry. The first retry moves the MU, so
+    // the second finds the station empty, with nothing to wait for.
+    run.advance_to(secs(20)).unwrap();
+    assert!(object(&run.state(), always_busy_id).blocked_predecessors.is_empty());
+}
+
+// ---------- Long runs ----------
+
+/// On demand, in release, because it takes minutes. Occurrences are dropped slice by slice and
+/// the Drain's lists are emptied, since memory otherwise grows with simulated length. Only the
+/// error of a failure is kept: the `Debug` output of `AdvanceFailure` includes every occurrence
+/// and can reach gigabytes.
+///
+/// `cargo test --release --test simulation_run -- --ignored --nocapture the_demo_model`
+#[test]
+#[ignore = "takes minutes, run on demand in release"]
+fn the_demo_model_runs_far_past_fifteen_simulated_years() {
+    const YEARS: u64 = 25;
+    const DAY: u64 = 86_400;
+    /// The most predecessors any object has in the demo model.
+    const MOST_PREDECESSORS: usize = 3;
+
+    let mut failures = Vec::new();
+    for seed in 0..5 {
+        let (mut run, dr) = build_model(seed);
+        run.init().unwrap();
+        let mut longest_list = 0;
+        for day in 1..=YEARS * 365 {
+            if let Err(failure) = run.advance_to(secs(day * DAY)) {
+                failures.push(format!("seed {seed}: {:?}", failure.error));
+                break;
+            }
+            let state = run.state();
+            longest_list = state.objects.iter().map(|o| o.blocked_predecessors.len()).fold(longest_list, usize::max);
+            let mut dr = dr.borrow_mut();
+            dr.exits.clear();
+            dr.exit_ids.clear();
+        }
+        let years = run.time().as_secs_f64() / (365.0 * DAY as f64);
+        println!("seed {seed}: reached {years:.1} years, longest blocked list seen {longest_list}");
+        if longest_list > MOST_PREDECESSORS {
+            failures.push(format!("seed {seed}: a blocked list held {longest_list} entries"));
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
 }
 
 // ---------- Throughput and ordering ----------

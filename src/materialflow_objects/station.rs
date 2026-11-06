@@ -4,7 +4,7 @@ use crate::observation::{ObjectKind, ObjectState, OccurrenceKind, StopCause};
 use std::time::Duration;
 use super::flows::BaseObject;
 use crate::flows::{
-	EventInterface, StopCtrl, FailureProfile, InterruptionState, MaterialFlow, MoveableUnit, ProcessState, SuccessorContainer, try_to_move_to_successor
+	EventInterface, StopCtrl, FailureProfile, InterruptionState, MaterialFlow, MoveableUnit, ProcessState, SuccessorContainer, list_blocked, retries_for_blocked, try_to_move_to_successor
 };
 use std::{cell::RefCell, rc::Rc};
 
@@ -90,22 +90,6 @@ impl SingleStation {
 		}
 		self.state = state;
 	}
-	pub fn add_blocked(&mut self, blocked_id: u32) {
-		if !self.blockedlist.contains(&blocked_id) {
-			log::debug!(
-				"{}: adding blocked predecessor {}",
-				self.base.object_id,
-				blocked_id
-			);
-			self.blockedlist.push(blocked_id);
-		} else {
-			log::debug!(
-				"{}: predecessor {} already in blockedlist",
-				self.base.object_id,
-				blocked_id
-			);
-		}
-	}
 }
 
 impl MaterialFlow for SingleStation {
@@ -142,23 +126,13 @@ impl MaterialFlow for SingleStation {
 		Ok(Some(self.start_work(mu_id, context)))
 	}
 	fn add_blocked(&mut self, id_blocked: u32) {
-		self.blockedlist.push(id_blocked);
+		list_blocked(&mut self.blockedlist, id_blocked);
+	}
+	fn remove_blocked(&mut self, id_blocked: u32) {
+		self.blockedlist.retain(|&id| id != id_blocked);
 	}
 	fn notify_blocked_predecessors(&mut self) -> Result<Option<Vec<EventTemplate>>, MaterialflowError> {
-		let mut blocked_events = Vec::new();
-		while let Some(blocked_id) = self.blockedlist.pop() {
-			blocked_events.push(EventTemplate {
-				eventtype: EventType::BlockedRetry,
-				exec_time: Duration::from_millis(0),
-				object_id: blocked_id,
-				seq: 0,
-			});
-		}
-		if blocked_events.is_empty() {
-			Ok(None)
-		} else {
-			Ok(Some(blocked_events))
-		}
+		Ok(retries_for_blocked(&mut self.blockedlist))
 	}
 }
 
@@ -228,7 +202,9 @@ impl EventInterface for SingleStation {
 				}
 			}
 			&EventType::BlockedRetry => {
-				if !self.is_exit_allowed() {
+				// An empty station can still get a retry already queued when its MU left. It
+				// has nothing to move, so it must not list itself as waiting.
+				if !self.is_exit_allowed() || self.content.is_none() {
 					return Ok(None);
 				}
 				match try_to_move_to_successor(self, context) {

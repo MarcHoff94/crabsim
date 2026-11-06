@@ -7,7 +7,7 @@ section: guides
 ## Checklist
 1. Struct with `base: BaseObject` + domain fields
 2. `impl EventInterface` — `init`, `execute_event` (handle `MUExit` + `BlockedRetry`), id methods
-3. `impl MaterialFlow` — entrance/exit gates, `process_mu_entrance`, `add_blocked`, `notify_blocked_predecessors`
+3. `impl MaterialFlow` — entrance/exit gates, `process_mu_entrance`, `add_blocked`, `remove_blocked`, `notify_blocked_predecessors`
 4. `impl SuccessorContainer` if object has successors — enables `try_to_move_to_successor`
 5. `pub use` in `src/materialflow_objects/mod.rs`
 6. `simulator.register_material_flow(obj.clone())` — returns assigned id

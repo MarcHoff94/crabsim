@@ -201,6 +201,7 @@ impl MaterialFlow for Source {
 	fn add_blocked(&mut self, _id_blocked: u32) {
 		panic!("Source cannot receive blocked objects")
 	}
+	fn remove_blocked(&mut self, _id_blocked: u32) {}
 	fn notify_blocked_predecessors(&mut self) -> Result<Option<Vec<EventTemplate>>, MaterialflowError> {
 		//source has no predecessors
 		Ok(None)

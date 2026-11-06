@@ -16,11 +16,12 @@ section: concepts
 - Always call `notify_blocked_predecessors()` when a station transitions to Idle
 - Always check `is_exit_allowed()` at the top of the `BlockedRetry` handler
 
-## Known subtlety
-- `MaterialFlow::add_blocked` (trait impl in station.rs) does **not** dedup — pushes unconditionally
-- `SingleStation::add_blocked` (inherent method) **does** dedup
-- `try_to_move_to_successor` calls through the trait (no dedup at runtime)
-- `blockedlist_dedup` test exercises the inherent method path only
+## Retry rule
+- `blockedlist` = predecessors waiting, longest-waiting first, each once (`list_blocked`, `retries_for_blocked` in flows.rs)
+- A refused retry lists its predecessor again, so those still waiting keep their order
+- `try_to_move_to_successor` removes a predecessor from all its successors' lists when its MU moves (`remove_blocked`)
+- A `BlockedRetry` on an empty station does nothing
+- Known gap: an MU finishing at the instant a successor frees up can take it before the longest-waiting predecessor's retry runs
 
 ## Code locations
 - `try_to_move_to_successor` — `src/materialflow_objects/flows.rs`

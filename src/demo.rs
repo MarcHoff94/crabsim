@@ -11,7 +11,8 @@ use std::{cell::RefCell, rc::Rc, time::{Duration, Instant}};
 
 const RUN_LENGTH: Duration = Duration::from_secs(3_600);
 
-fn build_model() -> (SimulationRun, Rc<RefCell<Drain>>) {
+/// The example model, returned with its Drain so a caller can read what has left it.
+pub fn build_model(seed: u64) -> (SimulationRun, Rc<RefCell<Drain>>) {
     // availability=0.9, mttr=60s → mtbf=540s derived automatically
     let failures = FailureProfile::new(0.9, Distribution::ERLANG { mean: 60_000.0, k: 2 }, 0);
     let station = |process_secs: u64| {
@@ -54,7 +55,7 @@ fn build_model() -> (SimulationRun, Rc<RefCell<Drain>>) {
     st5b.borrow_mut().succ = vec![drain.clone()];
     st5c.borrow_mut().succ = vec![drain.clone()];
 
-    let mut run = SimulationRun::new(0);
+    let mut run = SimulationRun::new(seed);
     run.add_object(source);
     for station in [st1, st2, st3, st4, st4a, st4b, st4c, st7, st5, st5a, st5b, st5c] {
         run.add_object(station);
@@ -67,7 +68,7 @@ fn build_model() -> (SimulationRun, Rc<RefCell<Drain>>) {
 pub fn run_demo(inplace: bool) -> Result<(), crate::error::RunError> {
     let _ = env_logger::try_init();
 
-    let (mut run, drain) = build_model();
+    let (mut run, drain) = build_model(0);
     let topology = TopologyVisualizer::render_network_topology(run.objects());
     run.init()?;
 

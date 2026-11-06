@@ -35,7 +35,7 @@ Discrete-event material-flow simulator in Rust. Use this file for full project c
 - `BlockedRetry` handler: check `is_exit_allowed()` first; if false → no-op (station is Processing)
 - `MUExit` = scheduled; `BlockedRetry` = reactive — keep them separate
 - Always call `notify_blocked_predecessors()` when transitioning to Idle
-- **Subtlety**: `MaterialFlow::add_blocked` (trait impl) does NOT dedup; `SingleStation::add_blocked` (inherent) does. Runtime path (`try_to_move_to_successor`) uses trait → no dedup at runtime.
+- **Retry rule**: `blockedlist` holds waiting predecessors, longest-waiting first, each once (`list_blocked`, `retries_for_blocked`). A predecessor is removed from all its successors' lists when its MU moves (`remove_blocked`). Known gap: an MU finishing at the instant a successor frees up can beat the longest-waiting predecessor's retry.
 
 ---
 

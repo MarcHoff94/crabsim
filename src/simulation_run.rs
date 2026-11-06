@@ -24,6 +24,8 @@ pub struct SimulationRun {
     queue: BinaryHeap<ScheduledEvent>,
     time: Duration,
     next_seq: u64,
+    /// The simulation time `events_at_this_time` is counting.
+    counted_time: Duration,
     events_at_this_time: u64,
     seed: u64,
     initialised: bool,
@@ -38,6 +40,7 @@ impl SimulationRun {
             queue: BinaryHeap::new(),
             time: Duration::ZERO,
             next_seq: 0,
+            counted_time: Duration::ZERO,
             events_at_this_time: 0,
             seed,
             initialised: false,
@@ -117,6 +120,7 @@ impl SimulationRun {
         self.queue.clear();
         self.time = Duration::ZERO;
         self.next_seq = 0;
+        self.counted_time = Duration::ZERO;
         self.events_at_this_time = 0;
         self.initialised = false;
         self.context = EventContext::new(1);
@@ -173,7 +177,8 @@ impl SimulationRun {
         let Some(time) = self.next_event_time() else {
             return Ok(());
         };
-        if time > self.time {
+        if time != self.counted_time {
+            self.counted_time = time;
             self.events_at_this_time = 0;
         }
         if self.events_at_this_time >= ZERO_TIME_EVENT_LIMIT {

@@ -954,6 +954,25 @@ fn only_events_at_one_time_count_towards_a_zero_time_loop() {
 }
 
 #[test]
+fn events_counted_at_an_earlier_time_do_not_count_at_the_time_the_clock_was_moved_to() {
+    // A repeated failure on an already failed Station does nothing, so these are harmless
+    // events that all land on one time. The repair is far away, past everything here.
+    let st = station_with_failures(10, no_failures(1_000_000_000.0));
+    let mut run = SimulationRun::new(0);
+    let st_id = run.add_object(st);
+    run.init().unwrap();
+    for _ in 0..ZERO_TIME_EVENT_LIMIT {
+        fail_at(&mut run, 5, st_id);
+    }
+    run.advance_to(secs(10)).unwrap();
+    assert_eq!(run.time(), secs(10), "nothing but the clock has reached t=10");
+
+    fail_at(&mut run, 10, st_id);
+    run.step().unwrap();
+    assert_eq!(run.time(), secs(10));
+}
+
+#[test]
 fn a_zero_time_loop_is_found_at_the_same_event_however_the_run_is_advanced() {
     let mut stepped = zero_time_loop();
     stepped.init().unwrap();

@@ -24,6 +24,7 @@ pub struct BoundedAdvance {
 /// returns the occurrences it was asked to record, which is none by default, and `state` gives
 /// the fixed-size results at any time, including after an error. So a run with nothing else
 /// attached is a headless run. It executes on one thread at a time, and can move between threads.
+#[derive(Clone)] // PROTOTYPE: a checkpoint is a clone of the run.
 pub struct SimulationRun {
     /// Indexed by object id.
     objects: Vec<ModelObject>,

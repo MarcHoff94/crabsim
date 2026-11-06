@@ -22,6 +22,7 @@ impl ExitTicket {
 
 /// What a material-flow object gets while handling an event: the current simulation
 /// time, a place to record occurrences, and new MU identities.
+#[derive(Clone)] // PROTOTYPE
 pub struct EventContext {
     pub time: SimTime,
     pub seq: u64,

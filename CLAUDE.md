@@ -22,6 +22,9 @@ RUST_LOG=info cargo test -- --nocapture
 
 # Run a single test
 cargo test <test_name>
+
+# Run the long-run test (minutes, on demand, in release)
+cargo test --release --test simulation_run -- --ignored --nocapture the_demo_model
 ```
 
 ## Architecture
@@ -48,7 +51,7 @@ This is a Rust discrete-event material-flow simulator structured as a library (`
 - `drain.rs` — consumes MUs, records `exits` (timestamps) and `exit_ids` (in-order).
 - `buffer.rs` — holds MUs up to a capacity. Known to be broken and not yet used by the demo.
 
-**Movement semantics**: `try_to_move_to_successor` advances `succ_pointer` (round-robin), skips locked successors, and records the predecessor's `object_id` in each skipped successor's `blockedlist`. When all successors are locked, the predecessor goes `Blocked`. When a station frees up, it emits `BlockedRetry` events to everything in its `blockedlist` so they can retry.
+**Movement semantics**: `try_to_move_to_successor` advances `succ_pointer` (round-robin), skips locked successors, and records the predecessor's `object_id` in each skipped successor's `blockedlist`, removing it from all of them once its MU moves. When all successors are locked, the predecessor goes `Blocked`. When a station frees up, it emits `BlockedRetry` events to everything in its `blockedlist` so they can retry.
 
 **Event types** (`src/event.rs`): `MUExit` (processing complete, try to transfer) and `BlockedRetry` (reactive — successor freed up, predecessor retries). Keeping them distinct preserves scheduling vs. reactive semantics.
 
@@ -66,7 +69,7 @@ This is a Rust discrete-event material-flow simulator structured as a library (`
 - All shared mutable objects use `Rc<RefCell<T>>`, so a run and its objects stay on one thread. When wiring the topology, set `succ`. `pred` is currently never read: `BlockedRetry` routing uses the ids in `blockedlist`.
 - `add_object` must be called for every object. Ids given to constructors are replaced.
 - `seq` tiebreaking is load-bearing for deterministic tests — preserve it when changing scheduling logic.
-- `blockedlist`: the inherent `add_blocked` on `SingleStation` and `Drain` dedupes, but the trait version used at runtime does not yet, and retries run newest-first. Both are known gaps: the agreed rule is longest-waiting first, each predecessor listed once.
+- `blockedlist` holds the predecessors waiting for an object, longest-waiting first, each listed once. Objects use `list_blocked` and `retries_for_blocked` from `flows.rs` for this. A predecessor gives up its place at every successor as soon as its MU moves, and an empty station doesn't list itself. Known gap: retries are events, so an MU finishing at the same instant a successor frees up can take it before the longest-waiting predecessor's retry runs.
 - Every object must implement `reset`, returning it to its default state, including configured starting MUs. When adding a field, reset it and extend the reset tests in `tests/simulation_run.rs`. A replay alone can't catch leftover events, because they land on the replay's own event times.
 - `FailureProfile` is the failure/availability model for stations. Availability is a fraction in `(0.0, 1.0)` where `1.0` = 100% available (inactive). The demo uses `availability=0.9` with an Erlang repair time (mean 60s, k=2); tests use `availability=1.0` unless they exercise failures.
 - `MUExit` carries an `ExitTicket` naming its MU and the object's `stop_count` when it was scheduled. The event heap can't cancel events, so a stop bumps `stop_count` and the queued exit is ignored as stale when it fires. Resuming schedules a new exit for the remaining process time.

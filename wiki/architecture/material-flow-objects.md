@@ -25,6 +25,7 @@ MaterialFlow : EventInterface
   process_mu_entrance(mu) → Option<EventTemplate>
   process_mu_exit() → Option<EventTemplate>
   add_blocked(id)
+  remove_blocked(id)
   notify_blocked_predecessors() → Option<Vec<EventTemplate>>
 
 SuccessorContainer   (Source and SingleStation only)

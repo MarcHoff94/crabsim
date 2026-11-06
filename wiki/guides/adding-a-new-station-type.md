@@ -78,12 +78,10 @@ impl MaterialFlow for BufferStation {
         Ok(None)
     }
     fn process_mu_exit(&mut self) -> Result<Option<EventTemplate>, MaterialflowError> { Ok(None) }
-    fn add_blocked(&mut self, id: u32) { self.blockedlist.push(id); }
+    fn add_blocked(&mut self, id: u32) { list_blocked(&mut self.blockedlist, id); }
+    fn remove_blocked(&mut self, id: u32) { self.blockedlist.retain(|&listed| listed != id); }
     fn notify_blocked_predecessors(&mut self) -> Result<Option<Vec<EventTemplate>>, MaterialflowError> {
-        let events: Vec<_> = self.blockedlist.drain(..)
-            .map(|id| EventTemplate { eventtype: EventType::BlockedRetry, exec_time: Duration::ZERO, object_id: id, seq: 0 })
-            .collect();
-        Ok(if events.is_empty() { None } else { Some(events) })
+        Ok(retries_for_blocked(&mut self.blockedlist))
     }
     fn as_any(&mut self) -> &mut dyn std::any::Any { self }
 }

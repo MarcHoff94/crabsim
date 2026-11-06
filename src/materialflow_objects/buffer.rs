@@ -1,7 +1,7 @@
 use std::time::Duration;
 use crate::event::{EventContext, EventTemplate, EventType, ExitTicket};
 use crate::observation::{ObjectKind, ObjectState};
-use super::flows::{BaseObject, ProcessState, InterruptionState, MaterialFlow, StopCtrl, SuccessorContainer, MoveableUnit, EventInterface, try_to_move_to_successor};
+use super::flows::{BaseObject, ProcessState, InterruptionState, MaterialFlow, StopCtrl, SuccessorContainer, MoveableUnit, EventInterface, list_blocked, retries_for_blocked, try_to_move_to_successor};
 use std::{cell::RefCell, rc::Rc};
 
 /// A buffer that can hold up to `capacity` moveable units.
@@ -40,13 +40,6 @@ impl Buffer {
             exitlocked: false,
             state: ProcessState::Idle,
             interruption: InterruptionState::None,
-        }
-    }
-
-    fn add_blocked(&mut self, blocked_id: u32) {
-        if !self.blockedlist.contains(&blocked_id) {
-            log::debug!("{}: adding blocked predecessor {}", self.base.object_id, blocked_id);
-            self.blockedlist.push(blocked_id);
         }
     }
 
@@ -116,27 +109,13 @@ impl MaterialFlow for Buffer {
         }
     }
     fn add_blocked(&mut self, id_blocked: u32) {
-        // Avoid recursive call; directly push to blockedlist
-        if !self.blockedlist.contains(&id_blocked) {
-            log::debug!("{}: adding blocked predecessor {}", self.base.object_id, id_blocked);
-            self.blockedlist.push(id_blocked);
-        }
+        list_blocked(&mut self.blockedlist, id_blocked);
+    }
+    fn remove_blocked(&mut self, id_blocked: u32) {
+        self.blockedlist.retain(|&id| id != id_blocked);
     }
     fn notify_blocked_predecessors(&mut self) -> Result<Option<Vec<EventTemplate>>, crate::error::MaterialflowError> {
-        let mut blocked_events = Vec::new();
-        while let Some(blocked_id) = self.blockedlist.pop() {
-            blocked_events.push(EventTemplate {
-                eventtype: EventType::BlockedRetry,
-                exec_time: Duration::from_millis(0),
-                object_id: blocked_id,
-                seq: 0,
-            });
-        }
-        if blocked_events.is_empty() {
-            Ok(None)
-        } else {
-            Ok(Some(blocked_events))
-        }
+        Ok(retries_for_blocked(&mut self.blockedlist))
     }
 }
 

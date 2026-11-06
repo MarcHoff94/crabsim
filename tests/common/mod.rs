@@ -75,6 +75,7 @@ impl MaterialFlow for RecordsThenFails {
         Err(MaterialflowError::EntranceDenied)
     }
     fn add_blocked(&mut self, _id_blocked: u32) {}
+    fn remove_blocked(&mut self, _id_blocked: u32) {}
     fn notify_blocked_predecessors(&mut self) -> Result<Option<Vec<EventTemplate>>, MaterialflowError> {
         Ok(None)
     }

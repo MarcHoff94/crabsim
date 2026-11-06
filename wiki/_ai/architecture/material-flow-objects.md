@@ -6,7 +6,7 @@ section: architecture
 
 ## Trait summary
 - `EventInterface`: `init`, `execute_event`, `get/set_object_id`, `set_random_seed`, `as_any`
-- `MaterialFlow: EventInterface`: entrance/exit gates, `process_mu_entrance/exit`, `add_blocked`, `notify_blocked_predecessors`
+- `MaterialFlow: EventInterface`: entrance/exit gates, `process_mu_entrance/exit`, `add_blocked`, `remove_blocked`, `notify_blocked_predecessors`
 - `SuccessorContainer`: `successors`, `succ_pointer/mut`, `take_content`, `clear_content_and_idle`
 
 ## Source

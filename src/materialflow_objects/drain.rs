@@ -3,7 +3,7 @@ use crate::event::{EventContext, EventTemplate, EventType};
 use crate::observation::{ObjectKind, ObjectState, OccurrenceKind};
 use std::time::Duration;
 use super::flows::BaseObject;
-use crate::flows::{EventInterface, InterruptionState, MaterialFlow, MoveableUnit, ProcessState, StopCtrl};
+use crate::flows::{list_blocked, EventInterface, InterruptionState, MaterialFlow, MoveableUnit, ProcessState, StopCtrl};
 use std::{cell::RefCell, rc::Rc};
 
 pub struct Drain {
@@ -23,22 +23,6 @@ impl Drain {
             exit_ids: Vec::new(),
             entrance_locked: false,
             blockedlist: Vec::new(),
-        }
-    }
-    pub fn add_blocked(&mut self, blocked_id: u32) {
-        if !self.blockedlist.contains(&blocked_id) {
-            log::debug!(
-                "{}: adding blocked predecessor {}",
-                self.base.object_id,
-                blocked_id
-            );
-            self.blockedlist.push(blocked_id);
-        } else {
-            log::debug!(
-                "{}: predecessor {} already in blockedlist",
-                self.base.object_id,
-                blocked_id
-            );
         }
     }
 }
@@ -120,7 +104,10 @@ impl MaterialFlow for Drain {
         Ok(None)
     }
     fn add_blocked(&mut self, id_blocked: u32) {
-        self.blockedlist.push(id_blocked);
+        list_blocked(&mut self.blockedlist, id_blocked);
+    }
+    fn remove_blocked(&mut self, id_blocked: u32) {
+        self.blockedlist.retain(|&id| id != id_blocked);
     }
     fn notify_blocked_predecessors(&mut self) -> Result<Option<Vec<EventTemplate>>, MaterialflowError> {
         //predecessors do not get notified from drain because drain is never blocking them

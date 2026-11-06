@@ -52,14 +52,17 @@ Keeping them separate means a `BlockedRetry` arriving on a busy station is corre
 
 `Drain` never blocks predecessors. Its entrance is always open (`entrance_locked` starts `false`), so predecessors never end up in a Drain's `blockedlist`.
 
-## Known subtlety: dedup vs runtime path
+## The retry rule
 
-`SingleStation` has two `add_blocked` methods with different behaviour:
+A `blockedlist` holds the predecessors waiting for an object, longest-waiting first, each listed once:
 
-- The **inherent method** (`impl SingleStation`) checks for duplicates before inserting.
-- The **trait method** (`impl MaterialFlow for SingleStation`) pushes unconditionally.
+- `list_blocked` leaves a predecessor that is already listed in its place. `retries_for_blocked` empties the list into retries in that order, and a retry that is refused lists its predecessor again.
+- When a predecessor's MU moves, `try_to_move_to_successor` removes it from all its successors' lists, so it can't keep a place from an earlier wait.
+- A station that is empty when a retry arrives does nothing, because it has nothing to wait with.
 
-`try_to_move_to_successor` calls through the `MaterialFlow` trait (dynamic dispatch), so the dedup check does **not** apply in the runtime path. Duplicate predecessors in `blockedlist` result in multiple `BlockedRetry` events to the same object, which is harmless (the retry is a no-op if the station is busy), but the test `blockedlist_dedup` tests the inherent method path, not the runtime path.
+Without the first of these, each refused retry added another entry until one release fired over a million retries at one instant, which tripped `ZERO_TIME_EVENT_LIMIT` in long runs.
+
+**Known gap:** retries are events. An MU finishing at the same instant a successor frees up can take it before the longest-waiting predecessor's retry runs.
 
 ## Code references
 

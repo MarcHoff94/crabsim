@@ -106,6 +106,25 @@ fn init_sets_time_zero_and_queues_first_events_without_processing_them() {
 }
 
 #[test]
+fn a_run_counts_the_events_it_has_processed() {
+    let src = source(10);
+    let dr = drain();
+    src.borrow_mut().succ = vec![dr.clone()];
+    let mut run = SimulationRun::new(0);
+    run.add_object(src);
+    run.add_object(dr);
+
+    run.init().unwrap();
+    assert_eq!(run.events_processed(), 0, "Init queues events without processing them");
+
+    run.advance_to(secs(25)).unwrap();
+    assert_eq!(run.events_processed(), 2, "the Source's exits at t=10 and t=20");
+
+    run.reset();
+    assert_eq!(run.events_processed(), 0);
+}
+
+#[test]
 fn init_twice_is_an_error() {
     let (mut run, _, _) = line(0.0);
     run.init().unwrap();

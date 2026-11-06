@@ -13,7 +13,7 @@ The project owner returned to this project after about six months away and didn'
 
 ## Current state
 
-Checked on 2026-11-06: `master` matches GitHub and passes 129 of 129 tests (`cargo test --all-targets`). The demo ran to the end in both modes on the same source code before it was merged.
+Checked on 2026-11-06: `master` matches GitHub and passes all 137 tests, with 1 long-run test ignored (`cargo test --all-targets`). The demo ran to the end in both modes on the same source code before it was merged.
 
 | Branch | Where | State |
 |---|---|---|
@@ -52,7 +52,7 @@ Performance is the first thing to weigh in design trade-offs. It is a guideline 
   - **What the UI gets:** one full state at Init, after Reset and after a jump back, and occurrences in between. The UI builds its picture from them, so occurrences must carry everything needed to rebuild the state, such as how long newly started work will take.
 - **Checkpoints:** kept up to a memory budget the user configures, oldest dropped first. Every object implements save and restore, and a test checks that restoring and replaying gives occurrences identical to the original run.
 - **Interventions:** take effect immediately at shown time, without a Halt, and discard the computed future. Only Pause on and off for now. Same seed plus same intervention log gives the same result. There are no branching timelines.
-- **Object storage (direction, subject to the profile in step 2):** one `Vec` indexed by id, successors stored as ids, an `enum` for the object type. If the profile shows storage doesn't matter, keep today's structure and only remove the per-event clones and the lookup. Record the outcome in its own ADR.
+- **Object storage (direction, subject to the profile in `docs/design/first-profile.md`):** one `Vec` indexed by id, successors stored as ids, an `enum` for the object type. If the profile shows storage doesn't matter, keep today's structure and only remove the per-event clones and the lookup. Record the outcome in its own ADR.
 - **Threads:** each run executes on one thread. Cores are used through distributed simulation, which means many replications at once. Nothing gets built for this yet.
 - **Time representation:** simulation time becomes a 64-bit count of milliseconds behind its own type. Process times and sampled failure times become whole milliseconds, with sampled times rounded rather than cut off. This changes results slightly from today's for the same seed.
 
@@ -119,7 +119,7 @@ The owner wants users to add their own source code later. The decisions so far:
 Agreed on 2026-11-06, replacing the original repair plan, whose first two steps are done:
 
 1. ✅ Fix `blockedlist` (longest waiting first, deduped), with a fast test of the rule and a long-run test of 25 simulated years, marked `#[ignore]` and run on demand in release (PR 6, PR 7). This cured the false `ZeroTimeLoop`.
-2. ⬜ Add the benchmark, a tuned release profile and a first profile. `panic = "abort"` is out, because `LiveSession` relies on `catch_unwind`.
+2. ✅ Add the benchmark, a tuned release profile and a first profile. `panic = "abort"` is out, because `LiveSession` relies on `catch_unwind`. See `docs/design/first-profile.md`.
 3. ⬜ Decide and make the object storage change, and add the millisecond time type. Both touch most of the code. If storage changes, the tests build their models through a minimal model description, so storage details stay out of them.
 4. ⬜ Headless run without recording.
 5. ⬜ Throwaway prototype of restore and replay, for real cost figures.
@@ -134,9 +134,15 @@ Statistics aren't placed in this order yet. `docs/design/statistics.md` lists wh
 
 `ExitTicket` was designed with capacity in mind, because a whole Station stops at once, but that's untested until capacity exists.
 
-**Baseline, for comparing step 2's benchmark:** the demo model in a release build with no logger and no view, single runs on the owner's PC at `653d3f4`. 5.6M events/s, 19.8M events per simulated year, one simulated year in about 3.3 s. One `advance_to` of a year returns 38M occurrences (1.2 GB of data, a 2.1 GB `Vec`). The same year in one-hour slices with occurrences dropped took 2.9 s, so memory is the main cost of occurrences, and the other 88% of the time hasn't been profiled.
+**Baseline:** `cargo bench --bench reference`, tuned release profile, no logger and no view, median of 7 runs on the owner's PC. The demo model is 15.5M events per simulated year.
 
-**After step 1:** 15.5M events per simulated year, down from 19.3M to 21.3M across seeds 0 to 4, with the same MUs leaving. Speed wasn't measured, so step 2's benchmark should take a new baseline.
+| Scenario | Events/s | One simulated year | Peak heap |
+|---|---|---|---|
+| Demo model, one advance, occurrences kept | 5.68M | 2.73 s | 2,189 MB |
+| Demo model, one-hour slices, occurrences dropped | 6.67M | 2.32 s | 42 MB |
+| 2,800 objects, one-hour slices, occurrences dropped | 3.56M | 2 days in 4.78 s | 102 MB |
+
+**What the profile says for step 3:** removing the lookup, the clones and the per-move and per-event `Vec`s in today's structure gives 1.55 to 1.69 times the speed. With no recording and a smaller queue entry that becomes 2.1 to 2.4 times, and one `Vec` of an enum takes it to 2.5 to 2.7 times. The recommendation is to make the storage change, for the owner to decide in step 3. `docs/design/first-profile.md` has the figures, their limits and the reasoning.
 
 ## Architecture review
 
@@ -198,7 +204,7 @@ What each stage needs:
 
 ## Possible next steps
 
-1. Follow the build order, starting with step 2, the benchmark. GitHub issue #3 holds the full spec.
+1. Follow the build order, starting with step 3, the object storage decision. GitHub issue #3 holds the full spec.
 2. Run `/update-wiki` when convenient, so the docs stop describing removed code.
 
 Candidate 7 should still be decided before `StopCtrl` gets written, and the UI technology is still undecided. Ask the owner rather than assume if the UI should come sooner.

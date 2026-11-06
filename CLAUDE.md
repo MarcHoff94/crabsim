@@ -25,13 +25,19 @@ cargo test <test_name>
 
 # Run the long-run test (minutes, on demand, in release)
 cargo test --release --test simulation_run -- --ignored --nocapture the_demo_model
+
+# Run the benchmark (about a minute)
+cargo bench --bench reference
+
+# Run the benchmark for one scenario, with more repetitions
+cargo bench --bench reference -- --reps 9 --scenario demo-dropped
 ```
 
 ## Design pillars
 
 **Performance** is the first thing to weigh in design trade-offs: crabsim exists to simulate long periods as fast as possible. It is a guideline and doesn't automatically win. Every significant design states its performance cost. Results stay correct, and the same seed gives the same result.
 
-- **Measure:** the benchmark tracks events per second, simulated time per wall second and peak memory. Changes to the per-event path show before and after numbers. Optimise against a measurement, except for decisions that are expensive to undo, which get settled up front.
+- **Measure:** the benchmark (`benches/reference.rs`) tracks events per second, simulated time per wall second and peak memory. Changes to the per-event path show before and after numbers. Optimise against a measurement, except for decisions that are expensive to undo, which get settled up front. The current baseline and profile are in `docs/design/first-profile.md`.
 - **Memory** stays flat as simulated length grows, unless the user asked for recording.
 - **Headless runs** are plain simulation runs. Live sessions, views and animation are optional layers that cost nothing when absent.
 
@@ -73,6 +79,8 @@ This is a Rust discrete-event material-flow simulator structured as a library (`
 **Demo** (`src/demo.rs`): the example model behind `--inplace` and the default run.
 
 **Tests** (`tests/`): `simulation_run.rs` tests behaviour at the run's interface: Init, advance, Reset, then read occurrences and state. `views.rs` tests the view adapters. `live_session.rs` tests commands in and observations out, with a fake clock.
+
+**Benchmark** (`benches/reference.rs`): runs a copy of the demo model, and 200 copies of it side by side, and reports speed and peak memory. `cargo test --all-targets` runs it without `--bench`, and then it only checks that the copy still matches the demo model.
 
 ## Key Conventions
 

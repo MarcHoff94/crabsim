@@ -114,9 +114,9 @@ The owner wants users to add their own source code later. The decisions so far:
 
 Agreed on 2026-11-06, replacing the original repair plan, whose first two steps are done:
 
-1. ⬜ Fix `blockedlist` (longest waiting first, deduped), as its own commit, with a regression test well past 15 simulated years. See "Known problems".
+1. ⬜ Fix `blockedlist` (longest waiting first, deduped), as its own commit. Add a fast test of the rule that always runs, and a long-run test well past 15 simulated years, marked `#[ignore]` and run on demand in release. See "Known problems".
 2. ⬜ Add the benchmark, a tuned release profile and a first profile. `panic = "abort"` is out, because `LiveSession` relies on `catch_unwind`.
-3. ⬜ Decide and make the object storage change, and add the millisecond time type. Both touch most of the code, and all 129 tests are affected to some degree.
+3. ⬜ Decide and make the object storage change, and add the millisecond time type. Both touch most of the code. If storage changes, the 129 tests build their models through a minimal model description, so storage details stay out of them.
 4. ⬜ Headless run without recording.
 5. ⬜ Throwaway prototype of restore and replay, for real cost figures.
 6. ⬜ Read-ahead `LiveSession`, if the prototype holds up. If it doesn't, reconsider the design with the owner.
@@ -191,7 +191,7 @@ What each stage needs:
 
 ## Possible next steps
 
-1. Follow the build order, starting with the `blockedlist` fix.
+1. Follow the build order, starting with the `blockedlist` fix. GitHub issue #3 holds the full spec.
 2. Run `/update-wiki` when convenient, so the docs stop describing removed code.
 
 Candidate 7 should still be decided before `StopCtrl` gets written, and the UI technology is still undecided. Ask the owner rather than assume if the UI should come sooner.

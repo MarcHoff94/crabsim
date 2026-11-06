@@ -3,7 +3,7 @@
 
 use crabsim::{
     Clock, Drain, FailureProfile, LiveSession, Observation, Occurrence, OccurrenceKind, RunState,
-    EventType, RunError, SessionError, SimulationRun, SingleStation, Source, WallClock,
+    EventType, RunError, SessionError, SessionStatus, SimulationRun, SingleStation, Source, WallClock,
     ZERO_TIME_EVENT_LIMIT,
 };
 use crabsim::random_numbers::Distribution;
@@ -45,6 +45,7 @@ struct Watched {
 struct Seen {
     occurrences: Vec<Occurrence>,
     states: usize,
+    statuses: Vec<SessionStatus>,
     errors: Vec<SessionError>,
 }
 
@@ -72,6 +73,7 @@ impl Watched {
                     seen.states += 1;
                     self.state = Some(state);
                 }
+                Observation::Status(status) => seen.statuses.push(status),
                 Observation::Error(error) => seen.errors.push(error),
             }
         }
@@ -485,6 +487,78 @@ fn the_real_clock_advances_a_run_without_anyone_asking() {
     session.set_speed(1_000.0).unwrap();
     session.start().unwrap();
     wait_for_occurrence(&session, |o| matches!(o.kind, OccurrenceKind::MuLeft { .. }));
+}
+
+// ---------- Status ----------
+
+#[test]
+fn a_new_session_reports_no_status_until_it_changes() {
+    let mut watched = Watched::new(source_into_drain);
+    assert_eq!(watched.look().statuses, vec![]);
+}
+
+#[test]
+fn start_and_halt_report_the_status_they_change() {
+    use SessionStatus::{Advancing, Halted};
+    let mut watched = Watched::new(source_into_drain);
+    watched.session.start().unwrap();
+    assert_eq!(watched.look().statuses, vec![Advancing]);
+    watched.session.halt().unwrap();
+    assert_eq!(watched.look().statuses, vec![Halted]);
+    watched.session.start().unwrap();
+    assert_eq!(watched.look().statuses, vec![Advancing]);
+}
+
+#[test]
+fn controls_that_change_nothing_report_no_status() {
+    let mut watched = Watched::new(source_into_drain);
+    watched.session.halt().unwrap();
+    watched.session.reset().unwrap();
+    assert_eq!(watched.look().statuses, vec![], "it was already halted");
+
+    watched.session.start().unwrap();
+    watched.look();
+    watched.session.start().unwrap();
+    watched.session.set_speed(2.0).unwrap();
+    assert_eq!(watched.look().statuses, vec![], "it was already advancing");
+}
+
+#[test]
+fn the_status_comes_after_what_start_reports() {
+    let watched = Watched::new(source_into_drain);
+    watched.session.start().unwrap();
+    watched.session.sync().unwrap();
+    let observations: Vec<Observation> = watched.session.observations().try_iter().collect();
+    assert_eq!(observations.last(), Some(&Observation::Status(SessionStatus::Advancing)));
+}
+
+#[test]
+fn reset_while_advancing_reports_halted() {
+    let mut watched = Watched::new(source_into_drain);
+    watched.session.start().unwrap();
+    watched.at(25);
+    watched.look();
+    watched.session.reset().unwrap();
+    assert_eq!(watched.look().statuses, vec![SessionStatus::Halted]);
+}
+
+#[test]
+fn a_run_error_reports_failed_and_only_reset_changes_that() {
+    use SessionStatus::{Advancing, Failed, Halted};
+    let mut watched = Watched::new(fails_at_25);
+    watched.session.start().unwrap();
+    assert_eq!(watched.look().statuses, vec![Advancing]);
+    watched.at(30);
+    assert_eq!(watched.look().statuses, vec![Failed]);
+
+    watched.session.halt().unwrap();
+    watched.session.start().unwrap();
+    assert_eq!(watched.look().statuses, vec![], "still failed");
+
+    watched.session.reset().unwrap();
+    assert_eq!(watched.look().statuses, vec![Halted]);
+    watched.session.start().unwrap();
+    assert_eq!(watched.look().statuses, vec![Advancing]);
 }
 
 // ---------- Errors ----------

@@ -49,12 +49,23 @@ impl Clock for WallClock {
 }
 
 /// What a session reports. Occurrences arrive in order, and concatenated they are what
-/// advancing the run directly would have returned. A state follows every advance.
+/// advancing the run directly would have returned. A state follows every advance, and a
+/// status follows every change of status.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Observation {
     Occurrences(Vec<Occurrence>),
     State(RunState),
+    Status(SessionStatus),
     Error(SessionError),
+}
+
+/// Whether a session is advancing its run. A new session is `Halted`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionStatus {
+    Advancing,
+    Halted,
+    /// Halted by a run error. Only Reset gets it going again.
+    Failed,
 }
 
 /// Why a session refused a command or could not continue.
@@ -92,7 +103,6 @@ enum Command {
     Reset,
     SetSpeed(f64),
     Sync(Sender<()>),
-    Shutdown,
 }
 
 /// The handle to a simulation run living on its own thread. Dropping it ends the thread.
@@ -169,7 +179,8 @@ impl LiveSession {
 
 impl Drop for LiveSession {
     fn drop(&mut self) {
-        let _ = self.commands.send(Command::Shutdown);
+        // The thread ends when it finds its command channel closed.
+        (self.commands, _) = channel();
         if let Some(thread) = self.thread.take() {
             // A panic has already been reported as an observation.
             let _ = thread.join();
@@ -215,8 +226,7 @@ struct SessionThread<C> {
     pace: Option<Pace>,
     /// The last slice ran out of events before reaching its target.
     catching_up: bool,
-    /// The run reported an error, so it can't continue until Reset.
-    failed: bool,
+    status: SessionStatus,
     waiters: Vec<Waiter>,
 }
 
@@ -230,7 +240,7 @@ impl<C: Clock> SessionThread<C> {
             speed: 1.0,
             pace: None,
             catching_up: false,
-            failed: false,
+            status: SessionStatus::Halted,
             waiters: Vec::new(),
         }
     }
@@ -239,7 +249,7 @@ impl<C: Clock> SessionThread<C> {
         let mut busy = false;
         loop {
             match self.next_command(busy) {
-                NextCommand::Shutdown => return,
+                NextCommand::HandleGone => return,
                 NextCommand::Command(command) => {
                     self.apply(command);
                     busy = true;
@@ -268,10 +278,7 @@ impl<C: Clock> SessionThread<C> {
         } else {
             self.commands.recv().ok()
         };
-        match received {
-            Some(Command::Shutdown) | None => NextCommand::Shutdown,
-            Some(command) => NextCommand::Command(command),
-        }
+        received.map_or(NextCommand::HandleGone, NextCommand::Command)
     }
 
     fn apply(&mut self, command: Command) {
@@ -284,12 +291,11 @@ impl<C: Clock> SessionThread<C> {
                 let goal = self.target().unwrap_or(Duration::ZERO);
                 self.waiters.push(Waiter { goal, done });
             }
-            Command::Shutdown => {}
         }
     }
 
     fn start(&mut self) {
-        if self.failed {
+        if self.status == SessionStatus::Failed {
             self.observe(Observation::Error(SessionError::ResetRequired));
             return;
         }
@@ -306,6 +312,7 @@ impl<C: Clock> SessionThread<C> {
             }
         }
         self.pace = Some(Pace { wall: self.clock.elapsed(), simulation: self.run.time() });
+        self.set_status(SessionStatus::Advancing);
     }
 
     fn halt(&mut self) {
@@ -315,14 +322,18 @@ impl<C: Clock> SessionThread<C> {
         }
         self.pace = None;
         self.catching_up = false;
+        // That last slice may have ended in a run error, and Halt can't clear a failure.
+        if self.status == SessionStatus::Advancing {
+            self.set_status(SessionStatus::Halted);
+        }
     }
 
     fn reset(&mut self) {
         self.run.reset();
         self.pace = None;
         self.catching_up = false;
-        self.failed = false;
         self.observe(Observation::State(self.run.state()));
+        self.set_status(SessionStatus::Halted);
     }
 
     fn set_speed(&mut self, speed: f64) {
@@ -381,10 +392,17 @@ impl<C: Clock> SessionThread<C> {
     /// Reports everything that happened before an error, then the error, and halts.
     fn report_failure(&mut self, occurrences: Vec<Occurrence>, error: RunError) {
         self.report(occurrences);
-        self.observe(Observation::Error(SessionError::Run(error)));
         self.pace = None;
         self.catching_up = false;
-        self.failed = true;
+        self.set_status(SessionStatus::Failed);
+        self.observe(Observation::Error(SessionError::Run(error)));
+    }
+
+    fn set_status(&mut self, status: SessionStatus) {
+        if self.status != status {
+            self.status = status;
+            self.observe(Observation::Status(status));
+        }
     }
 
     fn observe(&self, observation: Observation) {
@@ -396,5 +414,5 @@ impl<C: Clock> SessionThread<C> {
 enum NextCommand {
     Command(Command),
     None,
-    Shutdown,
+    HandleGone,
 }

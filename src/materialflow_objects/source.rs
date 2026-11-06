@@ -81,7 +81,7 @@ impl Source {
 		});
 		self.statistics.count_mu_in();
 		log::info!("Source {} created MU {}", self.base.object_id, mu_id);
-		context.record(OccurrenceKind::MuCreated { mu_id, at: self.base.object_id });
+		context.record(OccurrenceKind::MuCreated { mu_id, at: self.base.object_id, duration: self.proc_time });
 		if self.state == ProcessState::Blocked {
 			context.record(OccurrenceKind::Unblocked { object_id: self.base.object_id });
 		}

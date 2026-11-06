@@ -161,6 +161,14 @@ impl StatisticsKeeper {
 
     pub fn count_failure(&mut self) {
         self.totals.failures += 1;
+    }
+
+    pub fn count_pause(&mut self) {
+        self.totals.pauses += 1;
+    }
+
+    /// A failure overlapping a pause is one stop, so this counts separately from them.
+    pub fn count_stop(&mut self) {
         self.totals.stops += 1;
     }
 

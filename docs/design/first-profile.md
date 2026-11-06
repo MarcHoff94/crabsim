@@ -21,7 +21,7 @@ Measured on 2026-11-06 for step 2 of the build order, on the owner's PC: Ryzen 5
 
 ### After removing the `order` `Vec`
 
-Everything else in this document, apart from the two sections after this one, describes the code before this change. Before and after were each run 7 times in rotation, as a fresh process each time, and the events and MUs left didn't change.
+Everything else in this document, apart from the three sections after this one, describes the code before this change. Before and after were each run 7 times in rotation, as a fresh process each time, and the events and MUs left didn't change.
 
 | Scenario | Events/s before | Events/s after | Faster by | Wall after | Allocations per event |
 |---|---|---|---|---|---|
@@ -49,7 +49,7 @@ Step 3 moved objects into one `Vec` of an enum with successors as ids, removed t
 
 ### After the headless run and statistics
 
-This is the current baseline. Step 4 made recording opt-in, removed the Drain's lists, and added always-on statistics and a `lead_time` on `MuLeft`. Medians of 7 runs in rotation, as a fresh process each time, with the events and MUs left unchanged.
+Step 4 made recording opt-in, removed the Drain's lists, and added always-on statistics and a `lead_time` on `MuLeft`. Medians of 7 runs in rotation, as a fresh process each time, with the events and MUs left unchanged.
 
 | Scenario | Objects | Simulated | Events/s | Simulated/wall | Wall | Peak heap |
 |---|---|---|---|---|---|---|
@@ -76,6 +76,40 @@ This is the current baseline. Step 4 made recording opt-in, removed the Drain's 
 
 - **Statistics** cost about 7 to 12% of a headless run's time, counting against the build without them. No attempt has been made to reduce this yet. They add 264 bytes to each object, taking an entry to 1,168 bytes, and that includes a Drain's fields on every Station, and most events change an object's state and so update its totals.
 - **`lead_time`** costs a headless run nothing. It takes an occurrence from 24 to 32 bytes, so recording everything costs up to 9% more time. The 33% in peak memory is that growth landing on a `Vec` that doubles: 38M occurrences take 1.2 GB where they took 0.9 GB.
+
+### After the read-ahead live session
+
+This is the current baseline. Step 6 rewrote the live session, added Pause on Stations and made a run cloneable. Medians of 7 runs in rotation, as a fresh process each time, with the events and MUs left unchanged.
+
+| Scenario | Before | After | Peak heap |
+|---|---|---|---|
+| `demo-headless` | 1.17 s, 13.28M/s | 1.20 s, 12.93M/s | Under 0.05 MB |
+| `large-headless` | 2.23 s, 7.61M/s | 2.23 s, 7.62M/s | 8.2 MB |
+| `demo-kept` | 1.69 s, 9.17M/s | 1.75 s, 8.85M/s | 2,148 MB |
+
+The headless differences are within the benchmark's noise. None of the session runs without a session. `demo-kept` is about 3.5% slower, just past the noise, and nothing in the engine obviously explains it.
+
+**A live session at full speed.** A throwaway program started a session at a speed too high to matter and read every observation to the end. These are single runs, so treat them as rough.
+
+| Model | Simulated | Before | After | Peak heap after |
+|---|---|---|---|---|
+| Demo | 30 days | 0.21 s | 0.31 s | 1 MB |
+| 2,800 objects | 6 hours | 0.94 s | 0.52 s | 79 MB |
+| 2,800 objects, past the 256 MB budget | 3 days | | 6.40 s | 251 MB |
+
+The large model got faster because a session no longer reports a full state after every slice. The small one got slower, because buffering per instant and taking checkpoints outweigh that there.
+
+**Going back in a real session,** with the default settings. These are single measurements.
+
+| Going back from the end | Demo, 30 days | 2,800 objects, 6 hours | 2,800 objects, 3 days, past the budget |
+|---|---|---|---|
+| A state on request | 7.4 ms | 6.1 ms | 2.0 ms |
+| 1 second | 7.4 ms | 5.7 ms | 1.5 ms |
+| 1 more hour | 7.0 ms | 13.4 ms | 8.9 ms |
+| 1 more day | 3.1 ms | | 139 ms |
+| To near the start | 5.9 ms | 12.5 ms | 386 ms |
+
+So recent history stays within a frame even past the budget, and thinning makes only far jumps slower, as intended.
 
 ## Release profile
 

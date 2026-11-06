@@ -5,6 +5,7 @@ use crate::materialflow_objects::{ModelObject, OtherObjects};
 use crate::observation::{Occurrence, OccurrenceKind, Recording, RunState};
 use crate::time::SimTime;
 use std::collections::BinaryHeap;
+use std::mem::size_of;
 
 /// How many events a run processes at one simulation time before it reports a zero-time
 /// loop. Far more than a legitimate model has happening at one instant, however large.
@@ -24,6 +25,9 @@ pub struct BoundedAdvance {
 /// returns the occurrences it was asked to record, which is none by default, and `state` gives
 /// the fixed-size results at any time, including after an error. So a run with nothing else
 /// attached is a headless run. It executes on one thread at a time, and can move between threads.
+///
+/// A clone is a checkpoint: it continues exactly as the original would have.
+#[derive(Clone)]
 pub struct SimulationRun {
     /// Indexed by object id.
     objects: Vec<ModelObject>,
@@ -118,6 +122,34 @@ impl SimulationRun {
     pub fn advance_bounded(&mut self, until: SimTime, max_events: usize) -> Result<BoundedAdvance, AdvanceFailure> {
         let outcome = self.require_initialised().and_then(|()| self.process_up_to(until, max_events));
         self.hand_over(outcome).map(|(reached, occurrences)| BoundedAdvance { occurrences, reached })
+    }
+
+    /// Processes at most `max_events` events, however far apart in time they are, and leaves the
+    /// clock at the last one. Advancing again continues exactly as if this had not been split up.
+    pub fn advance_events(&mut self, max_events: usize) -> Result<Vec<Occurrence>, AdvanceFailure> {
+        let outcome = self.require_initialised().and_then(|()| {
+            for _ in 0..max_events {
+                if self.queue.is_empty() {
+                    break;
+                }
+                self.process_next()?;
+            }
+            Ok(())
+        });
+        self.hand_over(outcome).map(|((), occurrences)| occurrences)
+    }
+
+    /// Hands over whatever has been recorded and not yet returned. Only an advance cut short by
+    /// a panic leaves anything behind.
+    pub(crate) fn take_recorded(&mut self) -> Vec<Occurrence> {
+        self.context.take_occurrences()
+    }
+
+    /// About how much memory a clone of this run takes.
+    pub(crate) fn checkpoint_bytes(&self) -> u64 {
+        const PER_OBJECT_ON_THE_HEAP: usize = 64;
+        let objects = self.objects.len() * (size_of::<ModelObject>() + PER_OBJECT_ON_THE_HEAP);
+        (size_of::<SimulationRun>() + objects + self.queue.len() * size_of::<ScheduledEvent>()) as u64
     }
 
     /// Hands over everything an advance recorded, however it ended.

@@ -13,7 +13,7 @@ The project owner returned to this project after about six months away and didn'
 
 ## Current state
 
-Checked on 2026-11-06: `master` passes all 186 tests, with 1 long-run test ignored (`cargo test --all-targets`). The demo ran to the end in both modes on the same source code before it was merged.
+Checked on 2026-11-06: the step 6 branch passes all 247 tests, with 1 long-run test ignored (`cargo test --all-targets`). The demo ran to the end in both modes on the same source code before it was merged.
 
 | Branch | Where | State |
 |---|---|---|
@@ -46,12 +46,14 @@ Performance is the first thing to weigh in design trade-offs. It is a guideline 
 - **Recording (built)** is a runtime setting on the run for which occurrence kinds to keep, changeable at any time, because replay needs it off and then back on. A run records nothing by default, and a live session records everything.
 - **Results (built)** of fixed size come through `run.state()`, with `ObjectState` extended. Recorded occurrences come back from each advance (ADR 0004).
 - **Statistics (built, for what today's model has)** are fixed-size, always on and independent of occurrences. See "Statistics" below.
-- **Live session:** read-ahead with checkpoints and replay. See ADR 0002 for the mechanism and why.
+- **Live session (built):** read-ahead with checkpoints and replay, on one thread that alternates between computing a slice and releasing what the clock has reached. See ADR 0002 for the mechanism and why.
   - **Buffer:** limited by a maximum number of instants, with no limit on how far ahead in time the run gets. When it's full the run waits and still handles commands.
-  - **Time:** Halt, errors and everything else the user experiences follow shown time. Reset throws the buffer away.
-  - **What the UI gets:** one full state at Init, after Reset and after a jump back, and occurrences in between. The UI builds its picture from them, so occurrences must carry everything needed to rebuild the state, such as how long newly started work will take.
-- **Checkpoints:** kept up to a memory budget the user configures, oldest dropped first. A checkpoint is a clone of the run, plus how much of the intervention log is in it, and a test checks that restoring and replaying gives occurrences identical to the original run.
-- **Interventions:** take effect immediately at shown time, without a Halt, and discard the computed future. Only Pause on and off for now. Same seed plus same intervention log gives the same result. There are no branching timelines.
+  - **Time:** Halt, errors and everything else the user experiences follow shown time. Reset throws the buffer away. If computing falls behind the clock, shown time waits and carries on from there, with no debt. A panic while computing also waits for shown time to reach it.
+  - **Time modes:** continuous, or skipping, where no gap between instants takes longer than a set wall time (0.25 s to start with). Switchable at any time, and results don't depend on it.
+  - **Going back:** `go_back(to)` reaches any earlier instant, also out of a run error, and leaves the session halted with a full state. `step_forward()` shows one instant while halted.
+  - **What the UI gets:** one full state at Init, after Reset and after a jump back, occurrences and `ShownTime` in between, and a full state on request, from a replay on a copy. The UI rebuilds contents, process state, stop and remaining time from occurrences. Blocked predecessors and statistics come only from a full state.
+- **Checkpoints (built):** kept up to a memory budget the user configures. When it is full, every other checkpoint in the older half goes and the one from Init stays, so the whole run stays reachable. Every 100,000 events, with 256 MB, to start with. A checkpoint is a clone of the run, plus how much of the intervention log is in it, and a test checks that restoring and replaying gives occurrences identical to the original run.
+- **Interventions (built, Pause on Stations only):** take effect immediately at shown time, without a Halt, and discard the computed future. Pause on and off, and clearing statistics for a warm-up. Same seed plus same intervention log gives the same result. There are no branching timelines.
 - **Object storage (built):** one `Vec` indexed by id, successors stored as ids, an `enum` for the object type. See ADR 0005.
 - **Threads:** each run executes on one thread at a time, and can move between threads. Cores are used through distributed simulation, which means many replications at once. One `ModelDescription` can already build many runs, but nothing else is built for this yet.
 - **Time representation (built):** simulation time is a 64-bit count of milliseconds behind its own type, `SimTime`. Process times and sampled failure times are whole milliseconds, with sampled times rounded rather than cut off.
@@ -71,9 +73,9 @@ Performance is the first thing to weigh in design trade-offs. It is a guideline 
 
 ### Stops
 - **Interruption** is the cause (a failure or a pause). **Stop** is the resulting state of the object. A failure from t=20 to 30 plus a pause from t=25 to 35 is two interruptions and one stop from t=20 to 35.
-- **Failure** is unplanned, with random timing. **Pause** is planned and commanded from outside, and doesn't count against availability. They are independent of each other. *Pause isn't built, and overlap isn't built: a second interruption is currently discarded.*
-- **Completion time** = entry + process time + time spent stopped. Overlapping stops count once. *Built for failures, without overlap.*
-- **A stop by type** (*not built, except Station failures*):
+- **Failure** is unplanned, with random timing. **Pause** is planned and commanded from outside, and doesn't count against availability. They are independent of each other. *Built on Stations only, including overlap. A second failure while already failed is still discarded.*
+- **Completion time** = entry + process time + time spent stopped. Overlapping stops count once. *Built on Stations, including overlap.*
+- **A stop by type** (*built only for Stations*):
   - **Station:** takes no MU, releases no MU, work is frozen. A whole Station stops at once, whatever its capacity.
   - **Source:** creates no MUs, and its next creation moves later by the stop's duration.
   - **Buffer:** as above.
@@ -94,7 +96,7 @@ Performance is the first thing to weigh in design trade-offs. It is a guideline 
 
 ### Running a simulation (built, except where noted)
 - **Controls:** Init, Start, Halt, Reset. Halt avoids clashing with Stop and Pause, which happen to objects.
-- **Init is its own step**, the first step of every run: t=0, every object's init in id order, first events queued but not processed, even those due at t=0. Start does Init if needed, then advances. Start and Halt are UI controls, and aren't in the code yet.
+- **Init is its own step**, the first step of every run: t=0, every object's init in id order, first events queued but not processed, even those due at t=0. Start does Init if needed, then advances. Start and Halt are commands on a live session.
 - **Reset** returns objects to their default state and keeps them in the model. Every run MU is deleted, and configured starting MUs come back as fresh copies. The same seed replays the same run.
 - **The default state is what the user configured**, and can be changed. Configuration changes are only allowed after Reset, for now. More mid-run changes can come once their behaviour is defined; a new process time, for example, would apply to the next MU and not the current one.
 - **Control order:** Init only from the default state, advancing requires Init, Reset allowed at any time. Violations return errors rather than panicking.
@@ -123,14 +125,14 @@ Agreed on 2026-11-06, replacing the original repair plan, whose first two steps 
 3. ✅ Make the object storage change and add the millisecond time type. Tests build their models through a minimal model description, so storage details stay out of them. See ADR 0005.
 4. ✅ Headless run without recording, with statistics for what today's model has. Memory is now flat with simulated length.
 5. ✅ Throwaway prototype of restore and replay, for real cost figures. It held up: see `docs/design/restore-replay-prototype.md`. The code is on the branch `prototype/restore-replay`, never to be merged.
-6. ⬜ Read-ahead `LiveSession`.
+6. ✅ Read-ahead `LiveSession`, with Pause on Stations, going back, stepping forward and time modes.
 7. ⬜ The earlier domain work, in this order. The UI work also builds on step 6, and the owner may want it sooner, so ask.
-   - Finish `StopCtrl` on all four object types, including overlapping interruptions and failure profiles.
+   - Finish stops on the other three object types, including failure profiles. Pause and overlap on Stations are done, through `PauseOn` and `PauseOff` events, while `StopCtrl` is still `todo!()`, so decide what becomes of it.
    - Fix `Buffer`, test it, and add dwelling time.
    - Add the time bases.
    - Add Station capacity and start modes, with the exit strategy seam.
 
-The statistics that depend on domain work arrive with step 7, and `docs/design/statistics.md` has two open questions for step 6.
+The statistics that depend on domain work arrive with step 7.
 
 `ExitTicket` was designed with capacity in mind, because a whole Station stops at once, but that's untested until capacity exists.
 
@@ -138,9 +140,9 @@ The statistics that depend on domain work arrive with step 7, and `docs/design/s
 
 | Scenario | Events/s | One simulated year | Peak heap |
 |---|---|---|---|
-| Demo model, headless | 13.20M | 1.17 s | Under 0.05 MB, also over 10 years |
-| 2,800 objects, headless | 7.52M | 2 days in 2.26 s | 8.1 MB |
-| Demo model, one advance, occurrences kept | 8.97M | 1.73 s | 2,148 MB |
+| Demo model, headless | 12.93M | 1.20 s | Under 0.05 MB, also over 10 years |
+| 2,800 objects, headless | 7.62M | 2 days in 2.23 s | 8.2 MB |
+| Demo model, one advance, occurrences kept | 8.85M | 1.75 s | 2,148 MB |
 
 **What's left on the per-event path:** the new-events `Vec`, the likely source of most of the remaining 0.86 allocations per event, and statistics, which cost about 7 to 12% of a headless run and haven't been tuned. `docs/design/first-profile.md` has the figures and their limits.
 
@@ -155,7 +157,7 @@ Candidates from the review. "Strong" and "worth exploring" were the review's own
 | 3 | Model as data, with one module that validates and builds it | Strong | Open. Needed for drag and drop, load and save |
 | 4 | Objects that report themselves | Strong | Partly done: state, connections and no more downcasts. Open: trim traits |
 | 5 | One MU movement module | Strong | Open. The same exit logic exists in about 6 slightly different copies |
-| 6 | Live session seam for the UI | Worth exploring | Built in PR 4. To be redesigned as read-ahead (ADR 0002) |
+| 6 | Live session seam for the UI | Worth exploring | Built as read-ahead (ADR 0002) |
 | 7 | One shared stop module | Worth exploring | Open. Worth deciding before writing step 3 |
 | 8 | Reproducible runs and real errors | Worth exploring | Partly done: init order, event errors, stuck-timestamp guard, time representation |
 
@@ -203,7 +205,7 @@ What each stage needs:
 
 ## Possible next steps
 
-1. Follow the build order, starting with step 6, the read-ahead `LiveSession`. GitHub issue #3 holds the full spec.
+1. Follow the build order with step 7, or start on the UI, which can now build on the live session. Ask the owner which. GitHub issue #3 holds the full spec.
 2. Run `/update-wiki` when convenient, so the docs stop describing removed code.
 
 Candidate 7 should still be decided before `StopCtrl` gets written, and the UI technology is still undecided. Ask the owner rather than assume if the UI should come sooner.

@@ -1,5 +1,5 @@
 ---
-status: accepted, not built. The prototype in step 5 of the build order held up, as set out in `docs/design/restore-replay-prototype.md`. Step 6 builds it.
+status: accepted, built in step 6 of the build order. The prototype in step 5 is in `docs/design/restore-replay-prototype.md`.
 ---
 
 # Read-ahead live session, with checkpoints and replay
@@ -14,7 +14,8 @@ A live session lets its simulation run compute ahead as fast as it can, into a b
 
 ## Consequences
 
-- `run.state()` describes computed time, so it can't draw the current picture. The UI builds its picture from occurrences, which must therefore carry everything needed to rebuild the state. It gets a full state only at Init, after Reset and after a jump back.
+- `run.state()` describes computed time, so it can't draw the current picture. The UI builds its picture from occurrences, which must therefore carry everything needed to rebuild the state. It gets a full state only at Init, after Reset, after a jump back and on request, and a state on request comes from a replay on a copy of the run.
 - A checkpoint is a clone of the run, so every material-flow object has to be cloneable, and user code has to fit in a checkpoint too.
 - A seed alone no longer identifies a run with interventions, so a run keeps an intervention log. A checkpoint records how much of the log is in it, and replay applies the logged actions it passes. Going back behind an intervention removes it from the log, and abandoned futures are gone, along with their checkpoints: there are no branching timelines.
 - Measured costs: 17 KB per checkpoint for the demo model and 3.4 MB for 2,800 objects. Going back with a replay of 100,000 events takes 7 to 13 ms, within a frame. Taking a checkpoint every 100,000 events slows a run at full speed by up to 6.5%. A headless run takes none and pays nothing.
+- When the memory budget is full, every other checkpoint in the older half goes and the one from Init stays. So the whole run stays reachable, recent history stays dense, and only long jumps take longer. Oldest-first was rejected because it made the early part of a run unreachable, and the main use of going back is to debug models.

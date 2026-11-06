@@ -22,6 +22,7 @@ impl ExitTicket {
 
 /// What a material-flow object gets while handling an event: the current simulation
 /// time, a place to record occurrences, and new MU identities.
+#[derive(Clone)]
 pub struct EventContext {
     pub time: SimTime,
     pub seq: u64,
@@ -68,6 +69,8 @@ pub enum EventType {
     Finished,
     StartFailure,
     EndFailure,
+    PauseOn,
+    PauseOff,
 }
 
 /// An event an object wants to happen, `exec_time` from now.

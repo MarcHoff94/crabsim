@@ -49,6 +49,9 @@ How far a simulation run has got. In a live session it can be ahead of shown tim
 **Shown time**:
 How far a live session has released results to the user. Everything the user experiences follows it, including Halt and errors.
 
+**Time mode**:
+How shown time passes between instants: continuously at the session's speed, or skipping, where shown time jumps over the rest of a long gap. It changes nothing in the simulation run.
+
 **Checkpoint**:
 A saved copy of a simulation run's complete state at one instant, from which the run can continue exactly as it would have.
 _Avoid_: Undo, snapshot

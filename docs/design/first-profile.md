@@ -19,6 +19,18 @@ Measured on 2026-11-06 for step 2 of the build order, on the owner's PC: Ryzen 5
 - **Peak heap** comes from a counting allocator and agrees with the OS's peak working set: 2,180 MB, 42 MB and 109 MB. `demo-dropped` still grows with simulated length, because the Drain lists every exit. Step 4 removes that.
 - **Noise:** runs of one build differ by about 2%, with occasional slow stretches of 10 to 30% when something else is running. Compare medians from fresh runs, and be suspicious of a difference under about 3%.
 
+### After removing the `order` `Vec`
+
+This is the current baseline. Everything else in this document describes the code before this change. Before and after were each run 7 times in rotation, as a fresh process each time, and the events and MUs left didn't change.
+
+| Scenario | Events/s before | Events/s after | Faster by | Wall after | Allocations per event |
+|---|---|---|---|---|---|
+| `demo-kept` | 5.70M | 6.43M | 1.13 times | 2.41 s | 2.38 to 1.76 |
+| `demo-dropped` | 6.70M | 7.71M | 1.15 times | 2.01 s | 2.38 to 1.77 |
+| `large-dropped` | 3.62M | 3.89M | 1.07 times | 4.37 s | 2.38 to 1.77 |
+
+Peak heap didn't change.
+
 ## Release profile
 
 Each build was run 12 times in rotation, as a fresh process each time. Clean build time includes dependencies.
@@ -91,7 +103,7 @@ The ADR has to answer one thing this measurement can't: an `enum` closes the set
 
 **In step 3 or next to it, whichever way storage goes:**
 
-- Remove the `order` `Vec`, which needs no storage change and could be its own small PR. On the demo model that's 16% more speed.
+- ~~Remove the `order` `Vec`.~~ Done, and it measured about what the removal above predicted. See "After removing the `order` `Vec`".
 - Replace the new-events `Vec`. An output buffer the run reuses should beat the inline list measured here.
 - Shrink the queue entry when the millisecond time type goes in. A 64-bit time and dropping the duplicate `seq` and `exec_time` fields gets it to 32 bytes.
 - Leave the `log` calls alone.

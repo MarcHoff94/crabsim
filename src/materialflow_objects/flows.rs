@@ -171,29 +171,23 @@ pub trait SuccessorContainer {
 
 // try_to_move_to_successor helper (keeps generic movement logic near traits)
 pub trait DistributionStrategy {
-	/// Return an ordered list of successor indices to try, given the
-	/// number of successors `n` and a starting pointer `start`.
-	fn order(&self, n: usize, start: usize) -> Vec<usize>;
+	/// Return the successor indices to try, in order, given the number of
+	/// successors `n` and a starting pointer `start`. This runs on every move
+	/// attempt, so it returns an iterator to avoid allocating.
+	fn order(&self, n: usize, start: usize) -> impl Iterator<Item = usize>;
 }
 
 pub struct RoundRobinStrategy;
 impl DistributionStrategy for RoundRobinStrategy {
-	fn order(&self, n: usize, start: usize) -> Vec<usize> {
-		if n == 0 {
-			return Vec::new();
-		}
-		let mut out = Vec::with_capacity(n);
-		for i in 0..n {
-			out.push((start + i) % n);
-		}
-		out
+	fn order(&self, n: usize, start: usize) -> impl Iterator<Item = usize> {
+		(0..n).map(move |i| (start + i) % n)
 	}
 }
 
 pub struct LowestIndexStrategy;
 impl DistributionStrategy for LowestIndexStrategy {
-	fn order(&self, n: usize, _start: usize) -> Vec<usize> {
-		(0..n).collect()
+	fn order(&self, n: usize, _start: usize) -> impl Iterator<Item = usize> {
+		0..n
 	}
 }
 
@@ -207,8 +201,7 @@ pub fn try_to_move_to_successor_with_strategy<
 		return Ok(None);
 	}
 	let n = succ.len();
-	let order = strategy.order(n, obj.succ_pointer());
-	for &idx in &order {
+	for idx in strategy.order(n, obj.succ_pointer()) {
 		let succ_obj = &succ[idx];
 		if succ_obj.borrow().is_entrance_allowed() {
 			// We selected a successor that appears able to accept an MU.
@@ -266,8 +259,8 @@ pub fn try_to_move_to_successor_with_strategy<
 /// Tries only one successor, whichever the other rules would have picked.
 struct OnlySuccessor(usize);
 impl DistributionStrategy for OnlySuccessor {
-	fn order(&self, _n: usize, _start: usize) -> Vec<usize> {
-		vec![self.0]
+	fn order(&self, _n: usize, _start: usize) -> impl Iterator<Item = usize> {
+		std::iter::once(self.0)
 	}
 }
 

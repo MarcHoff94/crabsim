@@ -24,6 +24,16 @@ RUST_LOG=info cargo test -- --nocapture
 cargo test <test_name>
 ```
 
+## Design pillars
+
+**Performance** is the first thing to weigh in design trade-offs: crabsim exists to simulate long periods as fast as possible. It is a guideline and doesn't automatically win. Every significant design states its performance cost. Results stay correct, and the same seed gives the same result.
+
+- **Measure:** the benchmark tracks events per second, simulated time per wall second and peak memory. Changes to the per-event path show before and after numbers. Optimise against a measurement, except for decisions that are expensive to undo, which get settled up front.
+- **Memory** stays flat as simulated length grows, unless the user asked for recording.
+- **Headless runs** are plain simulation runs. Live sessions, views and animation are optional layers that cost nothing when absent.
+
+The design already agreed for this, including what isn't built yet, is in `docs/agents/handoff.md` and `docs/adr/0002-read-ahead-live-session-with-checkpoints-and-replay.md`. The sections below describe what is built today.
+
 ## Architecture
 
 This is a Rust discrete-event material-flow simulator structured as a library (`src/`) with a demo binary (`src/main.rs`).

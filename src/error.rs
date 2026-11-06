@@ -1,3 +1,4 @@
+use crate::observation::Occurrence;
 use std::{fmt, time::Duration};
 
 #[derive(Debug)]
@@ -20,6 +21,8 @@ pub enum RunError {
     EventInThePast,
     UnknownObject(u32),
     ObjectFailed { object_id: u32, time: Duration },
+    /// Too many events in a row happened without simulation time moving.
+    ZeroTimeLoop { time: Duration },
 }
 
 impl fmt::Display for RunError {
@@ -32,8 +35,31 @@ impl fmt::Display for RunError {
             RunError::ObjectFailed { object_id, time } => {
                 write!(f, "object {object_id} could not handle an event at {:.3}s", time.as_secs_f64())
             }
+            RunError::ZeroTimeLoop { time } => {
+                write!(f, "simulation time is stuck at {:.3}s: events keep happening without it advancing", time.as_secs_f64())
+            }
         }
     }
 }
 
 impl std::error::Error for RunError {}
+
+/// An advance that ended in an error, with everything it recorded before the error, so that
+/// no caller loses what happened.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AdvanceFailure {
+    pub error: RunError,
+    pub occurrences: Vec<Occurrence>,
+}
+
+impl fmt::Display for AdvanceFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.error.fmt(f)
+    }
+}
+
+impl std::error::Error for AdvanceFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
+    }
+}

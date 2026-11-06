@@ -1,10 +1,13 @@
 //! Behaviour of a simulation run, tested at its seam: Init, advance, Reset,
 //! then read occurrences and state.
 
+mod common;
+
+use common::RecordsThenFails;
 use crabsim::random_numbers::Distribution;
 use crabsim::{
     Buffer, Drain, EventType, FailureProfile, MoveableUnit, Occurrence, OccurrenceKind, ProcessState,
-    RunError, RunState, SimulationRun, SingleStation, Source, StopCause,
+    RunError, RunState, SimulationRun, SingleStation, Source, StopCause, ZERO_TIME_EVENT_LIMIT,
 };
 use std::{cell::RefCell, rc::Rc, time::Duration};
 
@@ -110,8 +113,8 @@ fn init_twice_is_an_error() {
 #[test]
 fn advancing_before_init_is_an_error() {
     let (mut run, _, _) = line(0.0);
-    assert_eq!(run.step().unwrap_err(), RunError::NotInitialised);
-    assert_eq!(run.advance_to(secs(10)).unwrap_err(), RunError::NotInitialised);
+    assert_eq!(run.step().unwrap_err().error, RunError::NotInitialised);
+    assert_eq!(run.advance_to(secs(10)).unwrap_err().error, RunError::NotInitialised);
 }
 
 #[test]
@@ -157,7 +160,7 @@ fn an_event_error_is_reported_instead_of_swallowed() {
     run.init().unwrap();
     fail_at(&mut run, 1, src_id);
     assert_eq!(
-        run.advance_to(secs(5)).unwrap_err(),
+        run.advance_to(secs(5)).unwrap_err().error,
         RunError::ObjectFailed { object_id: src_id, time: secs(1) }
     );
 }
@@ -167,7 +170,7 @@ fn an_event_for_an_unknown_object_is_reported() {
     let (mut run, _, _) = line(0.0);
     run.init().unwrap();
     fail_at(&mut run, 1, 999);
-    assert_eq!(run.advance_to(secs(5)).unwrap_err(), RunError::UnknownObject(999));
+    assert_eq!(run.advance_to(secs(5)).unwrap_err().error, RunError::UnknownObject(999));
 }
 
 #[test]
@@ -179,6 +182,114 @@ fn an_event_cannot_be_scheduled_in_the_past() {
         run.schedule_event(secs(10), EventType::StartFailure, st_id).unwrap_err(),
         RunError::EventInThePast
     );
+}
+
+// ---------- Bounded advancing ----------
+
+/// Source (one MU every 10s) -> Drain.
+fn source_into_drain() -> SimulationRun {
+    let src = source(10);
+    let dr = drain();
+    src.borrow_mut().succ = vec![dr.clone()];
+    let mut run = SimulationRun::new(0);
+    run.add_object(src);
+    run.add_object(dr);
+    run.init().unwrap();
+    run
+}
+
+#[test]
+fn a_bounded_advance_stops_at_its_last_event_when_more_are_due() {
+    let mut run = source_into_drain();
+    let advance = run.advance_bounded(secs(100), 2).unwrap();
+    assert!(!advance.reached);
+    assert_eq!(run.time(), secs(20), "the clock stays at the last event it processed");
+    assert_eq!(run.next_event_time(), Some(secs(30)));
+    assert_eq!(moves_from(&advance.occurrences, 0), vec![10.0, 20.0]);
+}
+
+#[test]
+fn a_bounded_advance_with_room_to_spare_leaves_the_clock_at_the_target() {
+    let mut run = source_into_drain();
+    let advance = run.advance_bounded(secs(25), 1_000).unwrap();
+    assert!(advance.reached);
+    assert_eq!(run.time(), secs(25));
+    assert_eq!(moves_from(&advance.occurrences, 0), vec![10.0, 20.0]);
+}
+
+#[test]
+fn a_bounded_advance_includes_events_at_the_target() {
+    let mut run = source_into_drain();
+    let advance = run.advance_bounded(secs(20), 2).unwrap();
+    assert!(advance.reached, "using up the limit on the last due event still reaches the target");
+    assert_eq!(moves_from(&advance.occurrences, 0), vec![10.0, 20.0]);
+
+    let mut run = source_into_drain();
+    let advance = run.advance_bounded(secs(20), 1).unwrap();
+    assert!(!advance.reached, "the event at the target is still due");
+    assert_eq!(run.time(), secs(10));
+}
+
+#[test]
+fn a_bounded_advance_of_no_events_only_moves_the_clock_if_nothing_is_due() {
+    let mut run = source_into_drain();
+    assert!(run.advance_bounded(secs(5), 0).unwrap().reached);
+    assert_eq!(run.time(), secs(5));
+    assert!(!run.advance_bounded(secs(15), 0).unwrap().reached);
+    assert_eq!(run.time(), secs(5));
+}
+
+#[test]
+fn bounded_advances_give_the_same_occurrences_in_the_same_order_as_advance_to() {
+    // Blocking and retries put several events on one time, so this also covers `seq` order.
+    let model = || {
+        let (mut run, st_id, _) = line(5_000.0);
+        run.init().unwrap();
+        fail_at(&mut run, 15, st_id);
+        fail_at(&mut run, 95, st_id);
+        run
+    };
+    let expected = model().advance_to(secs(400)).unwrap();
+    assert!(expected.len() > 30, "the model should do something");
+
+    for max_events in [1, 2, 3, 7] {
+        let mut run = model();
+        let mut occurrences = Vec::new();
+        for _ in 0..expected.len() + 1 {
+            let advance = run.advance_bounded(secs(400), max_events).unwrap();
+            occurrences.extend(advance.occurrences);
+            if advance.reached {
+                break;
+            }
+        }
+        assert_eq!(run.time(), secs(400));
+        assert_eq!(occurrences, expected, "{max_events} events at a time");
+    }
+}
+
+#[test]
+fn a_bounded_advance_before_init_is_an_error() {
+    let (mut run, _, _) = line(0.0);
+    assert_eq!(run.advance_bounded(secs(10), 1).unwrap_err().error, RunError::NotInitialised);
+}
+
+#[test]
+fn an_error_from_a_bounded_advance_carries_the_occurrences_before_it() {
+    let mut run = source_into_drain();
+    run.schedule_event(secs(25), EventType::StartFailure, 0).unwrap();
+    let failure = run.advance_bounded(secs(30), 100).unwrap_err();
+    assert_eq!(failure.error, RunError::ObjectFailed { object_id: 0, time: secs(25) });
+    assert_eq!(moves_from(&failure.occurrences, 0), vec![10.0, 20.0]);
+}
+
+#[test]
+fn a_run_says_whether_it_is_initialised() {
+    let (mut run, _, _) = line(0.0);
+    assert!(!run.is_initialised());
+    run.init().unwrap();
+    assert!(run.is_initialised());
+    run.reset();
+    assert!(!run.is_initialised());
 }
 
 // ---------- Reset ----------
@@ -298,7 +409,7 @@ fn reset_deletes_run_mus_and_restores_the_configured_starting_mu() {
     assert!(object(&state, src_id).contents.is_empty());
     assert_eq!(object(&state, dr_id).mus_left, 0);
     assert!(exit_times(&dr).is_empty());
-    assert_eq!(run.step().unwrap_err(), RunError::NotInitialised);
+    assert_eq!(run.step().unwrap_err().error, RunError::NotInitialised);
 }
 
 #[test]
@@ -865,4 +976,172 @@ fn every_object_gets_its_own_random_seed_at_init() {
     seeds.sort_unstable();
     seeds.dedup();
     assert_eq!(seeds.len(), 4);
+}
+
+// ---------- Zero-time loops ----------
+
+/// A Source that creates its next MU in no time, into a Drain: simulation time never moves.
+fn zero_time_loop() -> SimulationRun {
+    let src = source(0);
+    let dr = drain();
+    src.borrow_mut().succ = vec![dr.clone()];
+    let mut run = SimulationRun::new(0);
+    run.add_object(src);
+    run.add_object(dr);
+    run
+}
+
+/// Steps until the run refuses, returning everything it reported and the error.
+fn step_until_error(run: &mut SimulationRun) -> (Vec<Occurrence>, u64, RunError) {
+    let mut occurrences = Vec::new();
+    let mut steps = 0;
+    loop {
+        match run.step() {
+            Ok(new) => {
+                occurrences.extend(new);
+                steps += 1;
+            }
+            Err(failure) => {
+                occurrences.extend(failure.occurrences);
+                return (occurrences, steps, failure.error);
+            }
+        }
+    }
+}
+
+#[test]
+fn a_zero_time_loop_is_an_error_when_advancing_to_a_time() {
+    let mut run = zero_time_loop();
+    run.init().unwrap();
+    assert_eq!(
+        run.advance_to(secs(10)).unwrap_err().error,
+        RunError::ZeroTimeLoop { time: Duration::ZERO }
+    );
+    assert_eq!(run.time(), Duration::ZERO, "the clock stays where the loop is");
+}
+
+#[test]
+fn a_zero_time_loop_is_an_error_when_stepping() {
+    let mut run = zero_time_loop();
+    run.init().unwrap();
+    let (_, steps, error) = step_until_error(&mut run);
+    assert_eq!(steps, ZERO_TIME_EVENT_LIMIT);
+    assert_eq!(error, RunError::ZeroTimeLoop { time: Duration::ZERO });
+}
+
+#[test]
+fn zero_length_failures_are_a_zero_time_loop() {
+    let zero_length = FailureProfile::new(0.5, Distribution::CONSTANT { value: 0.0 }, 0);
+    let mut run = SimulationRun::new(0);
+    run.add_object(station_with_failures(10, zero_length));
+    run.init().unwrap();
+    assert_eq!(
+        run.advance_to(secs(10)).unwrap_err().error,
+        RunError::ZeroTimeLoop { time: Duration::ZERO }
+    );
+}
+
+#[test]
+fn a_run_stuck_in_a_zero_time_loop_keeps_refusing() {
+    let mut run = zero_time_loop();
+    run.init().unwrap();
+    run.advance_to(secs(10)).unwrap_err();
+    let state = run.state();
+    let error = RunError::ZeroTimeLoop { time: Duration::ZERO };
+    assert_eq!(run.step().unwrap_err().error, error);
+    assert_eq!(run.advance_to(secs(10)).unwrap_err().error, error);
+    assert_eq!(run.state(), state, "refusing processes nothing");
+}
+
+#[test]
+fn only_events_at_one_time_count_towards_a_zero_time_loop() {
+    // More events in total than the limit allows at one time, but time moves between them.
+    let src = source(1);
+    let dr = drain();
+    src.borrow_mut().succ = vec![dr.clone()];
+    let mut run = SimulationRun::new(0);
+    run.add_object(src);
+    run.add_object(dr.clone());
+    run.init().unwrap();
+    run.advance_to(secs(ZERO_TIME_EVENT_LIMIT + 10)).unwrap();
+    assert_eq!(dr.borrow().exit_ids.len() as u64, ZERO_TIME_EVENT_LIMIT + 10);
+}
+
+#[test]
+fn events_counted_at_an_earlier_time_do_not_count_at_the_time_the_clock_was_moved_to() {
+    // A repeated failure on an already failed Station does nothing, so these are harmless
+    // events that all land on one time. The repair is far away, past everything here.
+    let st = station_with_failures(10, no_failures(1_000_000_000.0));
+    let mut run = SimulationRun::new(0);
+    let st_id = run.add_object(st);
+    run.init().unwrap();
+    for _ in 0..ZERO_TIME_EVENT_LIMIT {
+        fail_at(&mut run, 5, st_id);
+    }
+    run.advance_to(secs(10)).unwrap();
+    assert_eq!(run.time(), secs(10), "nothing but the clock has reached t=10");
+
+    fail_at(&mut run, 10, st_id);
+    run.step().unwrap();
+    assert_eq!(run.time(), secs(10));
+}
+
+#[test]
+fn a_zero_time_loop_is_found_at_the_same_event_however_the_run_is_advanced() {
+    let mut stepped = zero_time_loop();
+    stepped.init().unwrap();
+    let (step_by_step, _, _) = step_until_error(&mut stepped);
+
+    let mut advanced = zero_time_loop();
+    advanced.init().unwrap();
+    let failure = advanced.advance_to(secs(10)).unwrap_err();
+    assert_eq!(failure.occurrences, step_by_step);
+}
+
+#[test]
+fn reset_clears_the_zero_time_count() {
+    let mut run = zero_time_loop();
+    run.init().unwrap();
+    let (first, _, _) = step_until_error(&mut run);
+    run.reset();
+    run.init().unwrap();
+    let (second, _, _) = step_until_error(&mut run);
+    assert_eq!(first, second, "a replay gets the full allowance again");
+}
+
+#[test]
+fn an_error_from_advancing_to_a_time_carries_the_occurrences_before_it() {
+    let src = source(10);
+    let mut run = SimulationRun::new(0);
+    let src_id = run.add_object(src);
+    run.init().unwrap();
+    fail_at(&mut run, 25, src_id);
+    let failure = run.advance_to(secs(30)).unwrap_err();
+    assert_eq!(failure.error, RunError::ObjectFailed { object_id: src_id, time: secs(25) });
+    assert_eq!(
+        failure.occurrences,
+        vec![Occurrence { time: secs(10), kind: OccurrenceKind::Blocked { object_id: src_id } }],
+        "the Source has no successor, so it blocks at t=10 and then the failure is refused"
+    );
+}
+
+#[test]
+fn an_error_from_a_step_carries_what_the_event_recorded_before_it_failed() {
+    let mut run = SimulationRun::new(0);
+    let id = run.add_object(shared(RecordsThenFails { id: 0, at: secs(5) }));
+    run.init().unwrap();
+    let failure = run.step().unwrap_err();
+    assert_eq!(failure.error, RunError::ObjectFailed { object_id: id, time: secs(5) });
+    assert_eq!(failure.occurrences, vec![Occurrence { time: secs(5), kind: OccurrenceKind::Blocked { object_id: id } }]);
+}
+
+#[test]
+fn occurrences_carried_by_an_error_are_not_reported_again() {
+    let mut run = SimulationRun::new(0);
+    let id = run.add_object(shared(RecordsThenFails { id: 0, at: secs(5) }));
+    run.init().unwrap();
+    run.step().unwrap_err();
+    fail_at(&mut run, 6, id);
+    let failure = run.step().unwrap_err();
+    assert_eq!(failure.occurrences, vec![Occurrence { time: secs(6), kind: OccurrenceKind::Blocked { object_id: id } }]);
 }

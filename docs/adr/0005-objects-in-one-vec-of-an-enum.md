@@ -13,5 +13,5 @@ Measured together with the 32-byte queue entry and the removal of the per-move l
 
 - **The set of object types is closed.** How user code gets in is still open. If it ever needs its own object types, one variant can hold a boxed trait object, which costs a dispatch only for those objects.
 - **Models are built through `ModelDescription`,** so ids always match positions and tests hold no storage details. It is deliberately minimal: validating connections is still to come with "model as data".
-- **Each entry is roughly 1 KB,** mostly random number generator state. Moving rarely used state out of the entry hasn't been tried.
+- **Each entry is roughly 1 KB,** mostly random number generator state and statistics. Moving rarely used state out of the entry hasn't been tried.
 - **A test object that fails part way through an event is a `#[cfg(test)]` variant.** No real object does that, so those few tests are unit tests in `src/`, and production code has no extra variant to match.

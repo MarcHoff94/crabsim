@@ -1,6 +1,7 @@
 use crate::error::{InitError, MaterialflowError, RunTimeError};
 use crate::event::{EventContext, EventTemplate, EventType, ExitTicket};
 use crate::observation::{ObjectKind, ObjectState, OccurrenceKind, StopCause};
+use crate::statistics::{MachineState, StatisticsKeeper};
 use crate::time::SimTime;
 use super::flows::BaseObject;
 use crate::materialflow_objects::OtherObjects;
@@ -25,6 +26,7 @@ pub struct SingleStation {
 	pub exitlocked: bool,
 	pub state: ProcessState,
 	pub interruption: InterruptionState,
+	pub statistics: StatisticsKeeper,
 }
 
 impl SingleStation {
@@ -52,6 +54,7 @@ impl SingleStation {
 			exitlocked: false,
 			state: ProcessState::Idle,
 			interruption: InterruptionState::None,
+			statistics: StatisticsKeeper::new(1),
 		}
 	}
 	fn exit_event(&self, mu_id: u32, after: SimTime) -> EventTemplate {
@@ -76,80 +79,7 @@ impl SingleStation {
 		context.record(OccurrenceKind::WorkStarted { mu_id, at: self.base.object_id });
 		self.exit_event(mu_id, self.proc_time)
 	}
-	/// Changes the process state, reporting when blocking begins or ends.
-	fn set_state(&mut self, state: ProcessState, context: &mut EventContext) {
-		let object_id = self.base.object_id;
-		match (self.state == ProcessState::Blocked, state == ProcessState::Blocked) {
-			(false, true) => context.record(OccurrenceKind::Blocked { object_id }),
-			(true, false) => context.record(OccurrenceKind::Unblocked { object_id }),
-			_ => {}
-		}
-		self.state = state;
-	}
-}
-
-impl MaterialFlow for SingleStation {
-	fn is_entrance_allowed(&self) -> bool {
-		if self.entrancelocked {
-			return false;
-		}
-		match self.state {
-			ProcessState::Idle => matches!(self.interruption, InterruptionState::None),
-			ProcessState::Processing | ProcessState::Blocked => false,
-		}
-	}
-	fn is_exit_allowed(&self) -> bool {
-		if self.exitlocked {
-			return false;
-		}
-		match self.state {
-			// Idle: allow exit when not interrupted
-			ProcessState::Idle => matches!(self.interruption, InterruptionState::None),
-			// Processing: actively working on an MU, do not allow exit
-			ProcessState::Processing => false,
-			// Blocked: allow exit when not interrupted
-			ProcessState::Blocked => matches!(self.interruption, InterruptionState::None),
-		}
-	}
-	fn process_mu_entrance(
-		&mut self,
-		mu: MoveableUnit,
-		context: &mut EventContext,
-	) -> Result<Option<EventTemplate>, MaterialflowError> {
-		log::info!("MU {} entered SingleStation {}", mu.id, self.base.object_id);
-		let mu_id = mu.id;
-		self.content = Some(mu);
-		Ok(Some(self.start_work(mu_id, context)))
-	}
-	fn add_blocked(&mut self, id_blocked: u32) {
-		list_blocked(&mut self.blockedlist, id_blocked);
-	}
-	fn remove_blocked(&mut self, id_blocked: u32) {
-		self.blockedlist.retain(|&id| id != id_blocked);
-	}
-	fn notify_blocked_predecessors(&mut self) -> Result<Option<Vec<EventTemplate>>, MaterialflowError> {
-		Ok(retries_for_blocked(&mut self.blockedlist, self.base.object_id))
-	}
-}
-
-impl EventInterface for SingleStation {
-	fn init(&mut self, context: &mut EventContext) -> Result<Vec<EventTemplate>, InitError> {
-		let mut events = Vec::new();
-		if self.failure_profile.active {
-			if let Ok(Some(ttf)) = self.failure_profile.get_time_to_next_failure() {
-				events.push(EventTemplate {
-					eventtype: EventType::StartFailure,
-					exec_time: ttf,
-					object_id: self.base.object_id,
-				});
-			}
-		}
-		if let Some(mu_id) = self.content.as_ref().map(|mu| mu.id) {
-			events.push(self.start_work(mu_id, context));
-		}
-		Ok(events)
-	}
-	fn execute_event(
+	fn handle_event(
 		&mut self,
 		context: &mut EventContext,
 		eventtype: &EventType,
@@ -244,6 +174,7 @@ impl EventInterface for SingleStation {
 					return Ok(None);
 				}
 				self.interruption = InterruptionState::Failed;
+				self.statistics.count_failure();
 				context.record(OccurrenceKind::StopBegan { object_id: self.base.object_id, cause: StopCause::Failure });
 				if matches!(self.state, ProcessState::Processing) {
 					let remaining = self.completion_time.take().unwrap_or(SimTime::ZERO).saturating_sub(context.time);
@@ -312,6 +243,99 @@ impl EventInterface for SingleStation {
 			_ => Err(RunTimeError {}),
 		}
 	}
+	/// Tells the statistics what the station ended up doing.
+	fn update_statistics(&mut self, now: SimTime) {
+		let state = MachineState::of(&self.interruption, &self.state);
+		self.statistics.observe(now, state, self.content.is_some() as u64);
+	}
+	/// Changes the process state, reporting when blocking begins or ends.
+	fn set_state(&mut self, state: ProcessState, context: &mut EventContext) {
+		let object_id = self.base.object_id;
+		match (self.state == ProcessState::Blocked, state == ProcessState::Blocked) {
+			(false, true) => context.record(OccurrenceKind::Blocked { object_id }),
+			(true, false) => context.record(OccurrenceKind::Unblocked { object_id }),
+			_ => {}
+		}
+		self.state = state;
+	}
+}
+
+impl MaterialFlow for SingleStation {
+	fn is_entrance_allowed(&self) -> bool {
+		if self.entrancelocked {
+			return false;
+		}
+		match self.state {
+			ProcessState::Idle => matches!(self.interruption, InterruptionState::None),
+			ProcessState::Processing | ProcessState::Blocked => false,
+		}
+	}
+	fn is_exit_allowed(&self) -> bool {
+		if self.exitlocked {
+			return false;
+		}
+		match self.state {
+			// Idle: allow exit when not interrupted
+			ProcessState::Idle => matches!(self.interruption, InterruptionState::None),
+			// Processing: actively working on an MU, do not allow exit
+			ProcessState::Processing => false,
+			// Blocked: allow exit when not interrupted
+			ProcessState::Blocked => matches!(self.interruption, InterruptionState::None),
+		}
+	}
+	fn process_mu_entrance(
+		&mut self,
+		mu: MoveableUnit,
+		context: &mut EventContext,
+	) -> Result<Option<EventTemplate>, MaterialflowError> {
+		log::info!("MU {} entered SingleStation {}", mu.id, self.base.object_id);
+		let mu_id = mu.id;
+		self.content = Some(mu);
+		self.statistics.count_mu_in();
+		let exit = self.start_work(mu_id, context);
+		self.update_statistics(context.time);
+		Ok(Some(exit))
+	}
+	fn add_blocked(&mut self, id_blocked: u32) {
+		list_blocked(&mut self.blockedlist, id_blocked);
+	}
+	fn remove_blocked(&mut self, id_blocked: u32) {
+		self.blockedlist.retain(|&id| id != id_blocked);
+	}
+	fn notify_blocked_predecessors(&mut self) -> Result<Option<Vec<EventTemplate>>, MaterialflowError> {
+		Ok(retries_for_blocked(&mut self.blockedlist, self.base.object_id))
+	}
+}
+
+impl EventInterface for SingleStation {
+	fn init(&mut self, context: &mut EventContext) -> Result<Vec<EventTemplate>, InitError> {
+		let mut events = Vec::new();
+		if self.failure_profile.active {
+			if let Ok(Some(ttf)) = self.failure_profile.get_time_to_next_failure() {
+				events.push(EventTemplate {
+					eventtype: EventType::StartFailure,
+					exec_time: ttf,
+					object_id: self.base.object_id,
+				});
+			}
+		}
+		if let Some(mu_id) = self.content.as_ref().map(|mu| mu.id) {
+			self.statistics.count_mu_in();
+			events.push(self.start_work(mu_id, context));
+		}
+		self.update_statistics(context.time);
+		Ok(events)
+	}
+	fn execute_event(
+		&mut self,
+		context: &mut EventContext,
+		eventtype: &EventType,
+		others: &mut OtherObjects<'_>,
+	) -> Result<Option<Vec<EventTemplate>>, RunTimeError> {
+		let outcome = self.handle_event(context, eventtype, others);
+		self.update_statistics(context.time);
+		outcome
+	}
 	fn reset(&mut self) {
 		self.content = self.starting_content.clone();
 		self.completion_time = None;
@@ -323,6 +347,10 @@ impl EventInterface for SingleStation {
 		self.exitlocked = false;
 		self.state = ProcessState::Idle;
 		self.interruption = InterruptionState::None;
+		self.statistics.reset();
+	}
+	fn clear_statistics(&mut self, now: SimTime) {
+		self.statistics.clear(now);
 	}
 	fn report(&self, now: SimTime) -> ObjectState {
 		let remaining = self.interrupted_remain_proc_time
@@ -336,7 +364,8 @@ impl EventInterface for SingleStation {
 			remaining,
 			blocked_predecessors: self.blockedlist.clone(),
 			successors: self.succ.clone(),
-			mus_left: 0,
+			capacity: self.statistics.capacity(),
+			statistics: self.statistics.read(now),
 		}
 	}
 	fn get_object_id(&self) -> &u32 {
@@ -375,7 +404,10 @@ impl SuccessorContainer for SingleStation {
 		self.entrancelocked = false;
 		self.state = ProcessState::Idle;
 	}
-	fn take_content(&mut self) -> Option<MoveableUnit> {
+	fn take_content(&mut self, _now: SimTime) -> Option<MoveableUnit> {
 		self.content.take()
+	}
+	fn statistics_mut(&mut self) -> &mut StatisticsKeeper {
+		&mut self.statistics
 	}
 }

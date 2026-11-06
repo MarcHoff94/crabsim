@@ -2,7 +2,7 @@
 
 use std::cmp::Ordering;
 
-use crate::observation::{Occurrence, OccurrenceKind};
+use crate::observation::{Occurrence, OccurrenceKind, Recording};
 use crate::time::SimTime;
 
 /// Names the MU an `MUExit` is for and how many times its object had been stopped
@@ -26,16 +26,25 @@ pub struct EventContext {
     pub time: SimTime,
     pub seq: u64,
     next_mu_id: u32,
+    recording: Recording,
     occurrences: Vec<Occurrence>,
 }
 
 impl EventContext {
-    pub fn new(first_mu_id: u32) -> EventContext {
-        EventContext { time: SimTime::ZERO, seq: 0, next_mu_id: first_mu_id, occurrences: Vec::new() }
+    pub fn new(first_mu_id: u32, recording: Recording) -> EventContext {
+        EventContext { time: SimTime::ZERO, seq: 0, next_mu_id: first_mu_id, recording, occurrences: Vec::new() }
     }
 
+    pub fn set_recording(&mut self, recording: Recording) {
+        self.recording = recording;
+    }
+
+    /// Keeps this occurrence if the run is recording its kind.
+    #[inline]
     pub fn record(&mut self, kind: OccurrenceKind) {
-        self.occurrences.push(Occurrence { time: self.time, kind });
+        if self.recording.includes(&kind) {
+            self.occurrences.push(Occurrence { time: self.time, kind });
+        }
     }
 
     /// Hands out an MU id that is unique across the whole model.

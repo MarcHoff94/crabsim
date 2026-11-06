@@ -1,6 +1,7 @@
 use crate::time::SimTime;
 use crate::event::{EventContext, EventTemplate, EventType, ExitTicket};
 use crate::observation::{ObjectKind, ObjectState};
+use crate::statistics::{MachineState, StatisticsKeeper};
 use crate::materialflow_objects::OtherObjects;
 use super::flows::{BaseObject, ProcessState, InterruptionState, MaterialFlow, StopCtrl, SuccessorContainer, MoveableUnit, EventInterface, list_blocked, retries_for_blocked, try_to_move_to_successor};
 
@@ -18,6 +19,7 @@ pub struct Buffer {
     pub exitlocked: bool,
     pub state: ProcessState,
     pub interruption: InterruptionState,
+    pub statistics: StatisticsKeeper,
 }
 
 impl Buffer {
@@ -37,12 +39,67 @@ impl Buffer {
             exitlocked: false,
             state: ProcessState::Idle,
             interruption: InterruptionState::None,
+            statistics: StatisticsKeeper::new(capacity as u64),
         }
+    }
+
+    fn handle_event(
+        &mut self,
+        context: &mut EventContext,
+        eventtype: &EventType,
+        others: &mut OtherObjects<'_>,
+    ) -> Result<Option<Vec<EventTemplate>>, crate::error::RunTimeError> {
+        match eventtype {
+            EventType::MUExit(_) => {
+                // Attempt to move one MU
+                let res = self.process_mu_exit(context, others);
+                match res {
+                    Ok(Some(event_template)) => {
+                        // schedule next exit if more MU
+                        if !self.content.is_empty() {
+                            Ok(Some(vec![event_template, EventTemplate {
+                                eventtype: EventType::MUExit(ExitTicket::new(self.content[0].id)),
+                                exec_time: SimTime::ZERO,
+                                object_id: self.base.object_id,
+                            }]))
+                        } else {
+                            Ok(Some(vec![event_template]))
+                        }
+                    }
+                    Ok(None) => Ok(None),
+                    Err(_) => Err(crate::error::RunTimeError {}),
+                }
+            }
+            EventType::BlockedRetry { .. } => {
+                if !self.is_exit_allowed() {
+                    return Ok(None);
+                }
+                // Try to move MU again
+                let res = self.process_mu_exit(context, others);
+                match res {
+                    Ok(Some(event_template)) => Ok(Some(vec![event_template])),
+                    Ok(None) => Ok(None),
+                    Err(_) => Err(crate::error::RunTimeError {}),
+                }
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// Tells the statistics what the Buffer ended up doing. A Buffer's blocking outranks its being
+    /// busy, because it holds MUs while they can't leave.
+    fn update_statistics(&mut self, now: SimTime) {
+        let state = match (&self.state, self.content.is_empty()) {
+            (ProcessState::Blocked, _) => ProcessState::Blocked,
+            (_, false) => ProcessState::Processing,
+            (_, true) => ProcessState::Idle,
+        };
+        self.statistics.observe(now, MachineState::of(&self.interruption, &state), self.content.len() as u64);
     }
 
     fn process_mu_exit(&mut self, context: &mut EventContext, others: &mut OtherObjects<'_>) -> Result<Option<EventTemplate>, crate::error::MaterialflowError> {
         // Buffer does not have a processing time; simply attempt to move one MU
-        if let Some(mu) = self.take_content() {
+        if let Some(mu) = self.take_content(context.time) {
             match try_to_move_to_successor(self, context, others) {
                 Ok(Some(event_template)) => {
                     // MU moved; set state to Processing if more MU remain
@@ -88,21 +145,24 @@ impl MaterialFlow for Buffer {
     fn process_mu_entrance(
         &mut self,
         mu: MoveableUnit,
-        _context: &mut EventContext,
+        context: &mut EventContext,
     ) -> Result<Option<EventTemplate>, crate::error::MaterialflowError> {
         log::info!("MU {} entered Buffer {}", mu.id, self.base.object_id);
         self.content.push(mu);
+        self.statistics.count_mu_in();
         // If this is the first MU and we are idle, schedule an exit attempt
-        if self.state == ProcessState::Idle && !self.content.is_empty() {
+        let exit = if self.state == ProcessState::Idle && !self.content.is_empty() {
             self.state = ProcessState::Processing;
-            Ok(Some(EventTemplate {
+            Some(EventTemplate {
                 eventtype: EventType::MUExit(ExitTicket::new(self.content[0].id)),
                 exec_time: SimTime::ZERO,
                 object_id: self.base.object_id,
-            }))
+            })
         } else {
-            Ok(None)
-        }
+            None
+        };
+        self.update_statistics(context.time);
+        Ok(exit)
     }
     fn add_blocked(&mut self, id_blocked: u32) {
         list_blocked(&mut self.blockedlist, id_blocked);
@@ -129,7 +189,10 @@ impl SuccessorContainer for Buffer {
         self.content.clear();
         self.state = ProcessState::Idle;
     }
-    fn take_content(&mut self) -> Option<MoveableUnit> {
+    fn statistics_mut(&mut self) -> &mut StatisticsKeeper {
+        &mut self.statistics
+    }
+    fn take_content(&mut self, _now: SimTime) -> Option<MoveableUnit> {
         if !self.content.is_empty() {
             Some(self.content.remove(0))
         } else {
@@ -150,8 +213,12 @@ impl EventInterface for Buffer {
         self.exitlocked = false;
         self.state = ProcessState::Idle;
         self.interruption = InterruptionState::None;
+        self.statistics.reset();
     }
-    fn report(&self, _now: SimTime) -> ObjectState {
+    fn clear_statistics(&mut self, now: SimTime) {
+        self.statistics.clear(now);
+    }
+    fn report(&self, now: SimTime) -> ObjectState {
         ObjectState {
             id: self.base.object_id,
             kind: ObjectKind::Buffer,
@@ -161,7 +228,8 @@ impl EventInterface for Buffer {
             remaining: None,
             blocked_predecessors: self.blockedlist.clone(),
             successors: self.succ.clone(),
-            mus_left: 0,
+            capacity: self.statistics.capacity(),
+            statistics: self.statistics.read(now),
         }
     }
     fn get_object_id(&self) -> &u32 {
@@ -179,40 +247,8 @@ impl EventInterface for Buffer {
         eventtype: &EventType,
         others: &mut OtherObjects<'_>,
     ) -> Result<Option<Vec<EventTemplate>>, crate::error::RunTimeError> {
-        match eventtype {
-            EventType::MUExit(_) => {
-                // Attempt to move one MU
-                let res = self.process_mu_exit(context, others);
-                match res {
-                    Ok(Some(event_template)) => {
-                        // schedule next exit if more MU
-                        if !self.content.is_empty() {
-                            Ok(Some(vec![event_template, EventTemplate {
-                                eventtype: EventType::MUExit(ExitTicket::new(self.content[0].id)),
-                                exec_time: SimTime::ZERO,
-                                object_id: self.base.object_id,
-                            }]))
-                        } else {
-                            Ok(Some(vec![event_template]))
-                        }
-                    }
-                    Ok(None) => Ok(None),
-                    Err(_) => Err(crate::error::RunTimeError {}),
-                }
-            }
-            EventType::BlockedRetry { .. } => {
-                if !self.is_exit_allowed() {
-                    return Ok(None);
-                }
-                // Try to move MU again
-                let res = self.process_mu_exit(context, others);
-                match res {
-                    Ok(Some(event_template)) => Ok(Some(vec![event_template])),
-                    Ok(None) => Ok(None),
-                    Err(_) => Err(crate::error::RunTimeError {}),
-                }
-            }
-            _ => Ok(None),
-        }
+        let outcome = self.handle_event(context, eventtype, others);
+        self.update_statistics(context.time);
+        outcome
     }
 }

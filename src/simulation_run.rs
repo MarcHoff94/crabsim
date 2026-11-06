@@ -2,7 +2,7 @@ use crate::error::{AdvanceFailure, RunError};
 use crate::event::{EventContext, EventType, ScheduledEvent};
 use crate::flows::EventInterface;
 use crate::materialflow_objects::{ModelObject, OtherObjects};
-use crate::observation::{Occurrence, OccurrenceKind, RunState};
+use crate::observation::{Occurrence, OccurrenceKind, Recording, RunState};
 use crate::time::SimTime;
 use std::collections::BinaryHeap;
 
@@ -20,9 +20,10 @@ pub struct BoundedAdvance {
 
 /// One execution of a model, from its Init until it is reset or discarded.
 ///
-/// A run only advances when asked, so how fast it goes is up to the caller. Every
-/// advance returns the occurrences it produced. A run executes on one thread at a time,
-/// and can move between threads.
+/// A run only advances when asked, so how fast it goes is up to the caller. Every advance
+/// returns the occurrences it was asked to record, which is none by default, and `state` gives
+/// the fixed-size results at any time, including after an error. So a run with nothing else
+/// attached is a headless run. It executes on one thread at a time, and can move between threads.
 pub struct SimulationRun {
     /// Indexed by object id.
     objects: Vec<ModelObject>,
@@ -34,6 +35,8 @@ pub struct SimulationRun {
     events_at_this_time: u64,
     seed: u64,
     initialised: bool,
+    recording: Recording,
+    statistics_since: SimTime,
     context: EventContext,
 }
 
@@ -50,8 +53,26 @@ impl SimulationRun {
             events_at_this_time: 0,
             seed,
             initialised: false,
-            context: EventContext::new(1),
+            recording: Recording::NOTHING,
+            statistics_since: SimTime::ZERO,
+            context: EventContext::new(1, Recording::NOTHING),
         }
+    }
+
+    /// Sets which kinds of occurrence this run keeps, from now on. It is a setting rather than
+    /// part of a run's progress, so Reset leaves it alone.
+    pub fn set_recording(&mut self, recording: Recording) {
+        self.recording = recording;
+        self.context.set_recording(recording);
+    }
+
+    /// Starts every object's statistics afresh from the current time, such as at the end of a
+    /// warm-up. It changes nothing else, so random numbers and event order stay the same.
+    pub fn clear_statistics(&mut self) {
+        for object in &mut self.objects {
+            object.clear_statistics(self.time);
+        }
+        self.statistics_since = self.time;
     }
 
     /// Sets time to 0, calls every object's init in id order and queues the first events.
@@ -61,7 +82,7 @@ impl SimulationRun {
             return Err(RunError::AlreadyInitialised);
         }
         let highest_starting_mu = self.state().objects.iter().flat_map(|o| o.contents.clone()).max().unwrap_or(0);
-        self.context = EventContext::new(highest_starting_mu + 1);
+        self.context = EventContext::new(highest_starting_mu + 1, self.recording);
         self.context.time = SimTime::ZERO;
         self.context.record(OccurrenceKind::RunInitialised);
 
@@ -119,7 +140,8 @@ impl SimulationRun {
         self.counted_time = SimTime::ZERO;
         self.events_at_this_time = 0;
         self.initialised = false;
-        self.context = EventContext::new(1);
+        self.statistics_since = SimTime::ZERO;
+        self.context = EventContext::new(1, self.recording);
     }
 
     /// Queues an event from outside the model at a given simulation time.
@@ -154,6 +176,7 @@ impl SimulationRun {
         RunState {
             time: self.time,
             initialised: self.initialised,
+            statistics_since: self.statistics_since,
             objects: self.objects.iter().map(|object| object.report(self.time)).collect(),
         }
     }
@@ -254,7 +277,9 @@ mod tests {
     }
 
     fn fails_at_five_seconds() -> SimulationRun {
-        SimulationRun::new(vec![ModelObject::RecordsThenFails(RecordsThenFails::new(secs(5)))], 0)
+        let mut run = SimulationRun::new(vec![ModelObject::RecordsThenFails(RecordsThenFails::new(secs(5)))], 0);
+        run.set_recording(Recording::ALL);
+        run
     }
 
     #[test]

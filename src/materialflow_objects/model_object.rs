@@ -74,6 +74,9 @@ impl EventInterface for ModelObject {
     fn report(&self, now: SimTime) -> ObjectState {
         on_the_object!(self, object => object.report(now))
     }
+    fn clear_statistics(&mut self, now: SimTime) {
+        on_the_object!(self, object => object.clear_statistics(now))
+    }
     fn get_object_id(&self) -> &u32 {
         on_the_object!(self, object => object.get_object_id())
     }

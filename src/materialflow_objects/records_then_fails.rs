@@ -44,9 +44,11 @@ impl EventInterface for RecordsThenFails {
             remaining: None,
             blocked_predecessors: Vec::new(),
             successors: Vec::new(),
-            mus_left: 0,
+            capacity: 0,
+            statistics: Default::default(),
         }
     }
+    fn clear_statistics(&mut self, _now: SimTime) {}
     fn get_object_id(&self) -> &u32 {
         &self.base.object_id
     }

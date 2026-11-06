@@ -12,7 +12,8 @@ pub trait RunView {
 }
 
 /// Advances a run up to and including `until`, showing the view each event's result. If that
-/// ends in an error, the view has first been shown whatever happened before it.
+/// ends in an error, the view has first been shown whatever happened before it. A view gets the
+/// occurrences the run is recording, so turn recording on for a view that uses them.
 pub fn advance_with_view(
     run: &mut SimulationRun,
     until: SimTime,
@@ -39,7 +40,7 @@ mod tests {
     use super::*;
     use crate::materialflow_objects::records_then_fails::RecordsThenFails;
     use crate::materialflow_objects::ModelObject;
-    use crate::observation::OccurrenceKind;
+    use crate::observation::{OccurrenceKind, Recording};
 
     #[derive(Default)]
     struct Recorder {
@@ -58,6 +59,7 @@ mod tests {
     fn a_view_sees_what_an_event_recorded_before_it_failed() {
         let at = SimTime::from_secs(5);
         let mut run = SimulationRun::new(vec![ModelObject::RecordsThenFails(RecordsThenFails::new(at))], 0);
+        run.set_recording(Recording::ALL);
         run.init().unwrap();
         let mut recorder = Recorder::default();
 

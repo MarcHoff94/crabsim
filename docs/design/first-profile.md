@@ -21,7 +21,7 @@ Measured on 2026-11-06 for step 2 of the build order, on the owner's PC: Ryzen 5
 
 ### After removing the `order` `Vec`
 
-Everything else in this document, apart from "After the storage change", describes the code before this change. Before and after were each run 7 times in rotation, as a fresh process each time, and the events and MUs left didn't change.
+Everything else in this document, apart from the two sections after this one, describes the code before this change. Before and after were each run 7 times in rotation, as a fresh process each time, and the events and MUs left didn't change.
 
 | Scenario | Events/s before | Events/s after | Faster by | Wall after | Allocations per event |
 |---|---|---|---|---|---|
@@ -33,7 +33,7 @@ Peak heap didn't change.
 
 ### After the storage change
 
-This is the current baseline. Step 3 moved objects into one `Vec` of an enum with successors as ids, removed the per-move list clone, and shrank a queue entry from 64 to 32 bytes. Three builds were each run 7 times in rotation, as a fresh process each time, and these are medians. It is safe code, so this is the real cost of what the prototype behind D only estimated.
+Step 3 moved objects into one `Vec` of an enum with successors as ids, removed the per-move list clone, and shrank a queue entry from 64 to 32 bytes. Three builds were each run 7 times in rotation, as a fresh process each time, and these are medians. It is safe code, so this is the real cost of what the prototype behind D only estimated.
 
 | Scenario | Before | Storage change | With rounded times | Faster by | Peak heap | Allocations per event |
 |---|---|---|---|---|---|---|
@@ -46,6 +46,36 @@ This is the current baseline. Step 3 moved objects into one `Vec` of an enum wit
 - **`large-dropped` before was unsteady:** its runs ranged from 4.39 s to 5.56 s, with a median of 5.53 s, and the earlier baseline was 4.37 s. Hence the range against 2.29 s. The new build stayed within 2.26 to 2.29 s.
 - **Occurrences got smaller,** because a time is now 8 bytes rather than 16. That is the drop in `demo-kept`'s peak.
 - **What's left:** the new-events `Vec` is the likely source of most remaining allocations, and recording is still always on.
+
+### After the headless run and statistics
+
+This is the current baseline. Step 4 made recording opt-in, removed the Drain's lists, and added always-on statistics and a `lead_time` on `MuLeft`. Medians of 7 runs in rotation, as a fresh process each time, with the events and MUs left unchanged.
+
+| Scenario | Objects | Simulated | Events/s | Simulated/wall | Wall | Peak heap |
+|---|---|---|---|---|---|---|
+| `demo-headless` | 14 | 1 year | 13.20M | 26.9M times | 1.17 s | Under 0.05 MB |
+| `demo-headless-10y` | 14 | 10 years | 13.13M | 26.7M times | 11.82 s | Under 0.05 MB |
+| `large-headless` | 2,800 | 2 days | 7.52M | 76,000 times | 2.26 s | 8.1 MB |
+| `demo-dropped` | 14 | 1 year | 11.11M | 22.6M times | 1.40 s | 0.3 MB |
+| `demo-kept` | 14 | 1 year | 8.97M | 18.2M times | 1.73 s | 2,148 MB |
+| `large-dropped` | 2,800 | 2 days | 6.34M | 64,000 times | 2.68 s | 37 MB |
+
+**Memory is flat:** the benchmark reports heap to 0.1 MB, and a headless demo run rounds to zero over both 1 and 10 years. `cargo test --all-targets` checks this more finely over 5 and 20 days, which gave exactly 35,320 bytes each.
+
+**Against the code before step 4:** a headless run is about 1.04 times as fast as the old nearest thing, one-hour slices that recorded and dropped everything (1.22 s to 1.17 s), and its peak heap goes from 25 MB to under 0.05 MB on the demo and from 67 MB to 8 MB on the large model. Turning recording off gained about what the profile predicted, and statistics spent most of it. A run that records all of it got slower: `demo-kept` from 1.54 s to 1.73 s, and `demo-dropped` from 1.22 s to between 1.28 and 1.40 s across two rotations.
+
+**What each of the two additions costs.** Throwaway builds with one thing removed, 7 rounds in rotation:
+
+| Scenario | As built | Without statistics | Without `lead_time` |
+|---|---|---|---|
+| `demo-headless` | 1.19 s | 1.11 s, 7% less | 1.18 s, no difference |
+| `large-headless` | 2.22 s | 1.99 s, 10% less | 2.22 s, no difference |
+| `demo-dropped` | 1.28 s | 1.22 s, 5% less | 1.28 s, no difference |
+| `large-dropped` | 2.64 s | 2.40 s, 9% less | 2.54 s, 4% less |
+| `demo-kept` | 1.73 s, 2,148 MB | 1.65 s, 5% less | 1.59 s, 8% less, 1,611 MB |
+
+- **Statistics** cost about 7 to 12% of a headless run's time, counting against the build without them. No attempt has been made to reduce this yet. They add 264 bytes to each object, taking an entry to 1,168 bytes, and that includes a Drain's fields on every Station, and most events change an object's state and so update its totals.
+- **`lead_time`** costs a headless run nothing. It takes an occurrence from 24 to 32 bytes, so recording everything costs up to 9% more time. The 33% in peak memory is that growth landing on a `Vec` that doubles: 38M occurrences take 1.2 GB where they took 0.9 GB.
 
 ## Release profile
 

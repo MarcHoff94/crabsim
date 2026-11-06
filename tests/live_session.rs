@@ -6,7 +6,7 @@
 //! a hang into a failure, so an extremely overloaded machine could fail a test that is fine.
 
 use crabsim::{
-    Clock, FailureProfile, LiveSession, ModelDescription, Observation, Occurrence, OccurrenceKind, RunState,
+    Clock, FailureProfile, LiveSession, ModelDescription, Observation, Occurrence, OccurrenceKind, Recording, RunState,
     EventType, RunError, SessionError, SessionStatus, SimTime, SimulationRun, WallClock,
     OBSERVATION_BACKLOG_LIMIT, ZERO_TIME_EVENT_LIMIT,
 };
@@ -513,7 +513,7 @@ fn state_arrives_with_the_occurrences_it_reflects() {
     watched.look();
     let state = watched.state.as_ref().unwrap();
     let drain = state.objects.iter().find(|o| o.id == 1).unwrap();
-    assert_eq!(drain.mus_left, 2);
+    assert_eq!(drain.statistics.mus_in, 2);
 }
 
 #[test]
@@ -910,6 +910,7 @@ const COMMON_TIME: u64 = 20_000;
 
 fn expected_occurrences() -> Vec<Occurrence> {
     let mut run = line_with_random_failures();
+    run.set_recording(Recording::ALL);
     let mut occurrences = run.init().unwrap();
     occurrences.extend(run.advance_to(secs(COMMON_TIME)).unwrap());
     let stops = occurrences.iter().filter(|o| matches!(o.kind, OccurrenceKind::StopBegan { .. })).count();

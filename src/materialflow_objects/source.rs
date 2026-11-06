@@ -1,6 +1,7 @@
 use crate::error::{InitError, MaterialflowError, RunTimeError};
 use crate::event::{EventContext, EventTemplate, EventType, ExitTicket};
 use crate::observation::{ObjectKind, ObjectState, OccurrenceKind};
+use crate::statistics::{MachineState, StatisticsKeeper};
 use crate::time::SimTime;
 use crate::materialflow_objects::OtherObjects;
 use crate::flows::{
@@ -48,6 +49,7 @@ pub struct Source {
 	pub succ_pointer: usize,
 	pub state: ProcessState,
 	pub interruption: InterruptionState,
+	pub statistics: StatisticsKeeper,
 }
 impl Source {
 	pub fn new(
@@ -64,6 +66,7 @@ impl Source {
 			succ_pointer: 0,
 			state: ProcessState::Idle,
 			interruption: InterruptionState::None,
+			statistics: StatisticsKeeper::new(0),
 		}
 	}
 	pub fn create_mu(&mut self, context: &mut EventContext) -> Result<EventTemplate, MaterialflowError> {
@@ -74,7 +77,9 @@ impl Source {
 		self.content = Some(MoveableUnit {
 			id: mu_id,
 			location_id: self.base.object_id,
+			left_source: context.time,
 		});
+		self.statistics.count_mu_in();
 		log::info!("Source {} created MU {}", self.base.object_id, mu_id);
 		context.record(OccurrenceKind::MuCreated { mu_id, at: self.base.object_id });
 		if self.state == ProcessState::Blocked {
@@ -88,23 +93,7 @@ impl Source {
 			object_id: self.base.object_id,
 		})
 	}
-	fn become_blocked(&mut self, context: &mut EventContext) {
-		if self.state != ProcessState::Blocked {
-			context.record(OccurrenceKind::Blocked { object_id: self.base.object_id });
-		}
-		self.state = ProcessState::Blocked;
-		self.completion_time = None;
-	}
-}
-
-impl EventInterface for Source {
-	fn init(&mut self, context: &mut EventContext) -> Result<Vec<EventTemplate>, InitError> {
-		match self.create_mu(context) {
-			Ok(e) => Ok(vec![e]),
-			Err(_) => Err(InitError {}),
-		}
-	}
-	fn execute_event(
+	fn handle_event(
 		&mut self,
 		context: &mut EventContext,
 		eventtype: &EventType,
@@ -144,12 +133,48 @@ impl EventInterface for Source {
 			_ => Err(RunTimeError {}),
 		}
 	}
+	/// Tells the statistics what the Source ended up doing. It has no MU-level statistics.
+	fn update_statistics(&mut self, now: SimTime) {
+		self.statistics.observe(now, MachineState::of(&self.interruption, &self.state), 0);
+	}
+	fn become_blocked(&mut self, context: &mut EventContext) {
+		if self.state != ProcessState::Blocked {
+			context.record(OccurrenceKind::Blocked { object_id: self.base.object_id });
+		}
+		self.state = ProcessState::Blocked;
+		self.completion_time = None;
+	}
+}
+
+impl EventInterface for Source {
+	fn init(&mut self, context: &mut EventContext) -> Result<Vec<EventTemplate>, InitError> {
+		let outcome = match self.create_mu(context) {
+			Ok(e) => Ok(vec![e]),
+			Err(_) => Err(InitError {}),
+		};
+		self.update_statistics(context.time);
+		outcome
+	}
+	fn execute_event(
+		&mut self,
+		context: &mut EventContext,
+		eventtype: &EventType,
+		others: &mut OtherObjects<'_>,
+	) -> Result<Option<Vec<EventTemplate>>, RunTimeError> {
+		let outcome = self.handle_event(context, eventtype, others);
+		self.update_statistics(context.time);
+		outcome
+	}
 	fn reset(&mut self) {
 		self.content = None;
 		self.completion_time = None;
 		self.succ_pointer = 0;
 		self.state = ProcessState::Idle;
 		self.interruption = InterruptionState::None;
+		self.statistics.reset();
+	}
+	fn clear_statistics(&mut self, now: SimTime) {
+		self.statistics.clear(now);
 	}
 	fn report(&self, now: SimTime) -> ObjectState {
 		ObjectState {
@@ -161,7 +186,8 @@ impl EventInterface for Source {
 			remaining: self.completion_time.map(|completion| completion.saturating_sub(now)),
 			blocked_predecessors: Vec::new(),
 			successors: self.succ.clone(),
-			mus_left: 0,
+			capacity: self.statistics.capacity(),
+			statistics: self.statistics.read(now),
 		}
 	}
 	fn get_object_id(&self) -> &u32 {
@@ -221,7 +247,14 @@ impl SuccessorContainer for Source {
 		self.content = None;
 		self.state = ProcessState::Idle
 	}
-	fn take_content(&mut self) -> Option<MoveableUnit> {
-		self.content.take()
+	/// An MU created at the start of an interval leaves at the end of it, and its lead time
+	/// starts here. Time spent blocked in the Source is the Source's blocked time.
+	fn take_content(&mut self, now: SimTime) -> Option<MoveableUnit> {
+		let mut mu = self.content.take()?;
+		mu.left_source = now;
+		Some(mu)
+	}
+	fn statistics_mut(&mut self) -> &mut StatisticsKeeper {
+		&mut self.statistics
 	}
 }

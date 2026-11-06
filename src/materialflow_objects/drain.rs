@@ -1,6 +1,7 @@
 use crate::error::MaterialflowError;
 use crate::event::{EventContext, EventTemplate, EventType};
 use crate::observation::{ObjectKind, ObjectState, OccurrenceKind};
+use crate::statistics::StatisticsKeeper;
 use crate::time::SimTime;
 use super::flows::BaseObject;
 use crate::materialflow_objects::OtherObjects;
@@ -9,8 +10,7 @@ use crate::flows::{list_blocked, EventInterface, InterruptionState, MaterialFlow
 #[derive(Clone)]
 pub struct Drain {
     pub base: BaseObject,
-    pub exits: Vec<SimTime>,
-    pub exit_ids: Vec<u32>,
+    pub statistics: StatisticsKeeper,
     pub entrance_locked: bool,
     pub blockedlist: Vec<u32>,
 }
@@ -18,8 +18,7 @@ impl Drain {
     pub fn new(object_id: u32) -> Drain {
         Drain {
             base: BaseObject { object_id, random_seed: 0 },
-            exits: Vec::new(),
-            exit_ids: Vec::new(),
+            statistics: StatisticsKeeper::for_drain(),
             entrance_locked: false,
             blockedlist: Vec::new(),
         }
@@ -39,12 +38,14 @@ impl EventInterface for Drain {
         Err(crate::error::RunTimeError {})
     }
     fn reset(&mut self) {
-        self.exits.clear();
-        self.exit_ids.clear();
+        self.statistics.reset();
         self.entrance_locked = false;
         self.blockedlist.clear();
     }
-    fn report(&self, _now: SimTime) -> ObjectState {
+    fn clear_statistics(&mut self, now: SimTime) {
+        self.statistics.clear(now);
+    }
+    fn report(&self, now: SimTime) -> ObjectState {
         ObjectState {
             id: self.base.object_id,
             kind: ObjectKind::Drain,
@@ -54,7 +55,8 @@ impl EventInterface for Drain {
             remaining: None,
             blocked_predecessors: self.blockedlist.clone(),
             successors: Vec::new(),
-            mus_left: self.exit_ids.len(),
+            capacity: 0,
+            statistics: self.statistics.read(now),
         }
     }
     fn get_object_id(&self) -> &u32 {
@@ -89,9 +91,9 @@ impl MaterialFlow for Drain {
         mu: MoveableUnit,
         context: &mut EventContext,
     ) -> Result<Option<EventTemplate>, MaterialflowError> {
-        self.exits.push(context.time);
-        self.exit_ids.push(mu.id);
-        context.record(OccurrenceKind::MuLeft { mu_id: mu.id, at: self.base.object_id });
+        let lead_time = context.time.saturating_sub(mu.left_source);
+        self.statistics.count_exit(context.time, lead_time);
+        context.record(OccurrenceKind::MuLeft { mu_id: mu.id, at: self.base.object_id, lead_time });
         log::info!(
             "MU {} exited at time {}.{:03}s",
             mu.id,

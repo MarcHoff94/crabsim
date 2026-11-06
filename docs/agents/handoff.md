@@ -13,7 +13,7 @@ The project owner returned to this project after about six months away and didn'
 
 ## Current state
 
-Checked on 2026-11-06: `master` matches GitHub and passes all 137 tests, with 1 long-run test ignored (`cargo test --all-targets`). The demo ran to the end in both modes on the same source code before it was merged.
+Checked on 2026-11-06: the step 3 branch passes all 148 tests, with 1 long-run test ignored (`cargo test --all-targets`). The demo ran to the end in both modes on the same source code before it was merged.
 
 | Branch | Where | State |
 |---|---|---|
@@ -44,7 +44,7 @@ Performance is the first thing to weigh in design trade-offs. It is a guideline 
 
 - **Headless run:** a plain simulation run with no live session or view, not a separate mode. It gives back its final state and the objects' data, with no reset, including after a run error.
 - **Recording** is a runtime setting on the run for which occurrence kinds to keep, changeable at any time, because replay needs it off and then back on. It is off by default in a headless run.
-- **Results** of fixed size come through `run.state()`, with `ObjectState` extended. Recorded occurrences come back from each advance (ADR 0004). Keeping an `Rc` to read a Drain, as the demo does, goes away.
+- **Results** of fixed size come through `run.state()`, with `ObjectState` extended. Recorded occurrences come back from each advance (ADR 0004). A Drain's lists are still read through `run.object(id)` until then.
 - **Statistics** are fixed-size, always on and independent of occurrences. See "Statistics" below.
 - **Live session:** read-ahead with checkpoints and replay. See ADR 0002 for the mechanism and why.
   - **Buffer:** limited by a maximum number of instants, with no limit on how far ahead in time the run gets. When it's full the run waits and still handles commands.
@@ -52,9 +52,9 @@ Performance is the first thing to weigh in design trade-offs. It is a guideline 
   - **What the UI gets:** one full state at Init, after Reset and after a jump back, and occurrences in between. The UI builds its picture from them, so occurrences must carry everything needed to rebuild the state, such as how long newly started work will take.
 - **Checkpoints:** kept up to a memory budget the user configures, oldest dropped first. Every object implements save and restore, and a test checks that restoring and replaying gives occurrences identical to the original run.
 - **Interventions:** take effect immediately at shown time, without a Halt, and discard the computed future. Only Pause on and off for now. Same seed plus same intervention log gives the same result. There are no branching timelines.
-- **Object storage (direction, subject to the profile in `docs/design/first-profile.md`):** one `Vec` indexed by id, successors stored as ids, an `enum` for the object type. If the profile shows storage doesn't matter, keep today's structure and only remove the per-event clones and the lookup. Record the outcome in its own ADR.
-- **Threads:** each run executes on one thread. Cores are used through distributed simulation, which means many replications at once. Nothing gets built for this yet.
-- **Time representation:** simulation time becomes a 64-bit count of milliseconds behind its own type. Process times and sampled failure times become whole milliseconds, with sampled times rounded rather than cut off. This changes results slightly from today's for the same seed.
+- **Object storage (built):** one `Vec` indexed by id, successors stored as ids, an `enum` for the object type. See ADR 0005.
+- **Threads:** each run executes on one thread at a time, and can move between threads. Cores are used through distributed simulation, which means many replications at once. One `ModelDescription` can already build many runs, but nothing else is built for this yet.
+- **Time representation (built):** simulation time is a 64-bit count of milliseconds behind its own type, `SimTime`. Process times and sampled failure times are whole milliseconds, with sampled times rounded rather than cut off.
 
 ### Model
 - **Material-flow objects** are Source, Station, Buffer and Drain. Each handles MUs and represents a real thing. "Station" means only the processing type. This is a general simulator for any material flow, such as a factory line.
@@ -99,7 +99,7 @@ Performance is the first thing to weigh in design trade-offs. It is a guideline 
 - **The default state is what the user configured**, and can be changed. Configuration changes are only allowed after Reset, for now. More mid-run changes can come once their behaviour is defined; a new process time, for example, would apply to the next MU and not the current one.
 - **Control order:** Init only from the default state, advancing requires Init, Reset allowed at any time. Violations return errors rather than panicking.
 - **A run advances only when asked** and has no end time of its own. `advance_to(t)` includes events at t. Speed control belongs to the caller.
-- **A run executes on one thread.** Today it uses `Rc` and is created entirely on one dedicated thread, so commands and observations cross threads and objects don't. The storage direction under "Performance" would let a run move between threads, while it still executes on only one at a time.
+- **A run executes on one thread at a time.** A live session still creates its run on its own dedicated thread, though a run can now move.
 - **Occurrences** are returned by each advance today. Views get no callbacks. A run can also be asked for its full typed state. "We might add more states later." *Agreed change, not built: a run records occurrences only when asked.*
 - **MU ids** are unique across the model.
 
@@ -120,7 +120,7 @@ Agreed on 2026-11-06, replacing the original repair plan, whose first two steps 
 
 1. ✅ Fix `blockedlist` (longest waiting first, deduped), with a fast test of the rule and a long-run test of 25 simulated years, marked `#[ignore]` and run on demand in release (PR 6, PR 7). This cured the false `ZeroTimeLoop`.
 2. ✅ Add the benchmark, a tuned release profile and a first profile. `panic = "abort"` is out, because `LiveSession` relies on `catch_unwind`. See `docs/design/first-profile.md`.
-3. ⬜ Decide and make the object storage change, and add the millisecond time type. Both touch most of the code. If storage changes, the tests build their models through a minimal model description, so storage details stay out of them.
+3. ✅ Make the object storage change and add the millisecond time type. Tests build their models through a minimal model description, so storage details stay out of them. See ADR 0005.
 4. ⬜ Headless run without recording.
 5. ⬜ Throwaway prototype of restore and replay, for real cost figures.
 6. ⬜ Read-ahead `LiveSession`, if the prototype holds up. If it doesn't, reconsider the design with the owner.
@@ -138,11 +138,11 @@ Statistics aren't placed in this order yet. `docs/design/statistics.md` lists wh
 
 | Scenario | Events/s | One simulated year | Peak heap |
 |---|---|---|---|
-| Demo model, one advance, occurrences kept | 6.43M | 2.41 s | 2,189 MB |
-| Demo model, one-hour slices, occurrences dropped | 7.71M | 2.01 s | 42 MB |
-| 2,800 objects, one-hour slices, occurrences dropped | 3.89M | 2 days in 4.37 s | 102 MB |
+| Demo model, one advance, occurrences kept | 10.20M | 1.52 s | 1,636 MB |
+| Demo model, one-hour slices, occurrences dropped | 12.83M | 1.21 s | 25 MB |
+| 2,800 objects, one-hour slices, occurrences dropped | 7.43M | 2 days in 2.29 s | 67 MB |
 
-**What the profile says for step 3:** these factors were measured before the `order` `Vec` was removed, so part of them is already in the baseline above. Removing the lookup, the clones and the per-move and per-event `Vec`s in today's structure gives 1.55 to 1.69 times the speed. With no recording and a smaller queue entry that becomes 2.1 to 2.4 times, and one `Vec` of an enum takes it to 2.5 to 2.7 times. The recommendation is to make the storage change, for the owner to decide in step 3. `docs/design/first-profile.md` has the figures, their limits and the reasoning.
+**What's left on the per-event path:** the new-events `Vec`, the likely source of most of the remaining 0.87 allocations per event, and recording, which step 4 makes optional. `docs/design/first-profile.md` has the figures and their limits.
 
 ## Architecture review
 
@@ -153,11 +153,11 @@ Candidates from the review. "Strong" and "worth exploring" were the review's own
 | 1 | Simulation run you can step, pause and reset | Strong | ✅ Done |
 | 2 | Observation seam, presentation out of the engine | Strong | ✅ Done |
 | 3 | Model as data, with one module that validates and builds it | Strong | Open. Needed for drag and drop, load and save |
-| 4 | Objects that report themselves | Strong | Partly done: state and connections. Open: trim traits, remove the 8 downcasts in `topology.rs` |
+| 4 | Objects that report themselves | Strong | Partly done: state, connections and no more downcasts. Open: trim traits |
 | 5 | One MU movement module | Strong | Open. The same exit logic exists in about 6 slightly different copies |
 | 6 | Live session seam for the UI | Worth exploring | Built in PR 4. To be redesigned as read-ahead (ADR 0002) |
 | 7 | One shared stop module | Worth exploring | Open. Worth deciding before writing step 3 |
-| 8 | Reproducible runs and real errors | Worth exploring | Partly done: init order, event errors, stuck-timestamp guard. The time representation is decided (see "Performance") but not built |
+| 8 | Reproducible runs and real errors | Worth exploring | Partly done: init order, event errors, stuck-timestamp guard, time representation |
 
 ADR 0001 must not be contradicted without flagging it. The review's HTML report was in a temporary folder and may be gone.
 
@@ -180,8 +180,7 @@ What each stage needs:
 - **A predecessor gives up its place when any MU moves:** this assumes one MU per object. Station capacity, the Buffer fix and exit strategies must revisit it.
 - **A stopped predecessor loses its place** (from reading): a retry that finds it stopped is used up, so it lists itself again at the back after its repair. The owner may want it to keep its place. Decide when `StopCtrl` is built.
 - **Source with several successors** (from reading): a `BlockedRetry` can move an MU before its interval ends, because `is_exit_allowed` is always true.
-- **Illegal connections panic** (from reading): an edge into a Source, or a self-loop. There's no validation until candidate 3.
-- **`pred` is never read**, but constructors still take it, and `succ`/`pred` `Rc` cycles leak when a model is dropped.
+- **Illegal connections panic while running:** an edge into a Source, or a self-loop. `ModelDescription` only rejects a successor on a Drain and ids not in the model, and full validation waits for candidate 3.
 - **Dead code** hidden by `#![allow(dead_code)]`: `MUEntrance`, `Finished`, `exitlocked`, `Paused`, `FailureProfile.mtbf`, and much of `topology.rs`, including `print_network_topology` and its helpers.
 
 ## Open housekeeping
@@ -204,7 +203,7 @@ What each stage needs:
 
 ## Possible next steps
 
-1. Follow the build order, starting with step 3, the object storage decision. GitHub issue #3 holds the full spec.
+1. Follow the build order, starting with step 4, a headless run without recording. GitHub issue #3 holds the full spec.
 2. Run `/update-wiki` when convenient, so the docs stop describing removed code.
 
 Candidate 7 should still be decided before `StopCtrl` gets written, and the UI technology is still undecided. Ask the owner rather than assume if the UI should come sooner.

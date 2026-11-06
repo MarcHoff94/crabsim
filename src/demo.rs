@@ -1,30 +1,24 @@
 //! A small example model, run from the command line.
 
 use crate::flows::FailureProfile;
-use crate::materialflow_objects::{Drain, SingleStation, Source};
+use crate::model::ModelDescription;
 use crate::random_numbers::Distribution;
 use crate::simulation_run::SimulationRun;
+use crate::time::SimTime;
 use crate::visualization::terminal::{render_table, InPlaceTerminalView};
 use crate::visualization::topology::TopologyVisualizer;
 use crate::visualization::advance_with_view;
-use std::{cell::RefCell, rc::Rc, time::{Duration, Instant}};
+use std::time::Instant;
 
-const RUN_LENGTH: Duration = Duration::from_secs(3_600);
+const RUN_LENGTH: SimTime = SimTime::from_secs(3_600);
 
-/// The example model, returned with its Drain so a caller can read what has left it.
-pub fn build_model(seed: u64) -> (SimulationRun, Rc<RefCell<Drain>>) {
+/// The example model, returned with its Drain's id so a caller can read what has left it.
+pub fn build_model(seed: u64) -> (SimulationRun, u32) {
     // availability=0.9, mttr=60s → mtbf=540s derived automatically
     let failures = FailureProfile::new(0.9, Distribution::ERLANG { mean: 60_000.0, k: 2 }, 0);
-    let station = |process_secs: u64| {
-        Rc::new(RefCell::new(SingleStation::new(
-            0,
-            Duration::from_secs(process_secs),
-            failures.clone(),
-            None,
-            Vec::new(),
-            Vec::new(),
-        )))
-    };
+    let mut model = ModelDescription::new();
+    let source = model.add_source(SimTime::from_secs(5));
+    let mut station = |process_secs: u64| model.add_station(SimTime::from_secs(process_secs), failures.clone());
     let st1 = station(10);
     let st2 = station(15);
     let st3 = station(20);
@@ -37,31 +31,34 @@ pub fn build_model(seed: u64) -> (SimulationRun, Rc<RefCell<Drain>>) {
     let st5a = station(10);
     let st5b = station(14);
     let st5c = station(16);
-    let source = Rc::new(RefCell::new(Source::new(0, Duration::from_secs(5), vec![st1.clone()])));
-    let drain = Rc::new(RefCell::new(Drain::new(0, Vec::new())));
+    let drain = model.add_drain();
 
-    st1.borrow_mut().succ = vec![st2.clone()];
-    st2.borrow_mut().succ = vec![st3.clone(), st5.clone()];
-    // Branch 1: st3 -> st4 -> 3 parallel -> st7 -> drain
-    st3.borrow_mut().succ = vec![st4.clone()];
-    st4.borrow_mut().succ = vec![st4a.clone(), st4b.clone(), st4c.clone()];
-    st4a.borrow_mut().succ = vec![st7.clone()];
-    st4b.borrow_mut().succ = vec![st7.clone()];
-    st4c.borrow_mut().succ = vec![st7.clone()];
-    st7.borrow_mut().succ = vec![drain.clone()];
-    // Branch 2: st5 -> 3 parallel -> drain
-    st5.borrow_mut().succ = vec![st5a.clone(), st5b.clone(), st5c.clone()];
-    st5a.borrow_mut().succ = vec![drain.clone()];
-    st5b.borrow_mut().succ = vec![drain.clone()];
-    st5c.borrow_mut().succ = vec![drain.clone()];
-
-    let mut run = SimulationRun::new(seed);
-    run.add_object(source);
-    for station in [st1, st2, st3, st4, st4a, st4b, st4c, st7, st5, st5a, st5b, st5c] {
-        run.add_object(station);
+    let connections = [
+        (source, st1),
+        (st1, st2),
+        (st2, st3),
+        (st2, st5),
+        // Branch 1: st3 -> st4 -> 3 parallel -> st7 -> drain
+        (st3, st4),
+        (st4, st4a),
+        (st4, st4b),
+        (st4, st4c),
+        (st4a, st7),
+        (st4b, st7),
+        (st4c, st7),
+        (st7, drain),
+        // Branch 2: st5 -> 3 parallel -> drain
+        (st5, st5a),
+        (st5, st5b),
+        (st5, st5c),
+        (st5a, drain),
+        (st5b, drain),
+        (st5c, drain),
+    ];
+    for (from, to) in connections {
+        model.connect(from, to);
     }
-    run.add_object(drain.clone());
-    (run, drain)
+    (model.build(seed), drain)
 }
 
 /// Runs the example model for an hour of simulation time and prints the result.
@@ -80,6 +77,6 @@ pub fn run_demo(inplace: bool) -> Result<(), crate::error::RunError> {
         println!("{topology}{}", render_table(&run.state()));
     }
     println!("simulation runtime: {:.2} ms", start.elapsed().as_secs_f64() * 1000.0);
-    log::info!("exit times: {:#?}", drain.borrow().exits);
+    log::info!("exit times: {:#?}", run.object(drain).and_then(|object| object.as_drain()).map(|drain| &drain.exits));
     Ok(())
 }

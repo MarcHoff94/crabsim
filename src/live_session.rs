@@ -4,6 +4,7 @@
 use crate::error::RunError;
 use crate::observation::{Occurrence, RunState};
 use crate::simulation_run::SimulationRun;
+use crate::time::SimTime;
 use std::{
     any::Any,
     collections::VecDeque,
@@ -129,8 +130,8 @@ pub struct LiveSession {
 }
 
 impl LiveSession {
-    /// Creates the session's thread and builds the whole run on it, because a run's objects
-    /// can't leave the thread they were created on. The session starts out halted, at speed 1.
+    /// Creates the session's thread and builds the whole run on it. The session starts out
+    /// halted, at speed 1.
     pub fn new<B, C>(build: B, clock: C) -> LiveSession
     where
         B: FnOnce() -> SimulationRun + Send + 'static,
@@ -235,20 +236,20 @@ fn panic_message(panic: Box<dyn Any + Send>) -> String {
 #[derive(Clone, Copy)]
 struct Pace {
     wall: Duration,
-    simulation: Duration,
+    simulation: SimTime,
 }
 
 impl Pace {
     /// The simulation time this pace has reached at wall time `now`.
-    fn target(&self, now: Duration, speed: f64) -> Duration {
+    fn target(&self, now: Duration, speed: f64) -> SimTime {
         let passed = now.saturating_sub(self.wall).as_secs_f64() * speed;
-        self.simulation.saturating_add(Duration::try_from_secs_f64(passed).unwrap_or(Duration::MAX))
+        self.simulation.saturating_add(SimTime::from_secs_f64(passed))
     }
 }
 
 /// A `sync` waiting for the run to reach the simulation time the clock showed when it arrived.
 struct Waiter {
-    goal: Duration,
+    goal: SimTime,
     done: Sender<Result<(), SessionError>>,
 }
 
@@ -359,7 +360,7 @@ impl<'a, C: Clock> SessionThread<'a, C> {
             Command::Reset => self.reset(),
             Command::SetSpeed(speed) => self.set_speed(speed),
             Command::Sync(done) => {
-                let goal = self.target().unwrap_or(Duration::ZERO);
+                let goal = self.target().unwrap_or(SimTime::ZERO);
                 self.waiters.push(Waiter { goal, done });
             }
         }
@@ -419,7 +420,7 @@ impl<'a, C: Clock> SessionThread<'a, C> {
     }
 
     /// The simulation time the clock calls for, if the session is advancing.
-    fn target(&self) -> Option<Duration> {
+    fn target(&self) -> Option<SimTime> {
         self.pace.map(|pace| pace.target(self.clock.elapsed(), self.speed))
     }
 

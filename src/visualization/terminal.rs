@@ -3,11 +3,7 @@ use crate::flows::ProcessState;
 use crate::observation::{ObjectKind, ObjectState, Occurrence, RunState, StopCause};
 use std::fmt::Write as _;
 use std::io::Write as _;
-use std::time::Duration;
-
-fn seconds(time: Duration) -> String {
-    format!("{}.{:03}", time.as_secs(), time.subsec_millis())
-}
+use crate::time::SimTime;
 
 fn row(object: &ObjectState) -> String {
     let kind = match object.kind {
@@ -44,14 +40,14 @@ fn row(object: &ObjectState) -> String {
         contents,
         process,
         stop,
-        seconds(object.remaining.unwrap_or(Duration::ZERO)),
+        object.remaining.unwrap_or(SimTime::ZERO),
         blocked
     )
 }
 
 /// The state of a run as a table of one row per material-flow object.
 pub fn render_table(state: &RunState) -> String {
-    let title = format!("State at time {}", seconds(state.time));
+    let title = format!("State at time {}", state.time);
     let mut table = String::new();
     let _ = writeln!(table, "╔═════════════════════════════════════════════════════════════════════════════════╗");
     let _ = writeln!(table, "║ {:<80}║", title);

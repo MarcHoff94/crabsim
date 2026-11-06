@@ -14,21 +14,20 @@
 
 use crabsim::demo::build_model;
 use crabsim::event::ScheduledEvent;
-use crabsim::flows::{FailureProfile, MaterialFlow};
-use crabsim::materialflow_objects::{Drain, SingleStation, Source};
+use crabsim::flows::FailureProfile;
+use crabsim::model::ModelDescription;
 use crabsim::random_numbers::Distribution;
 use crabsim::simulation_run::SimulationRun;
+use crabsim::time::SimTime;
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::cell::RefCell;
 use std::hint::black_box;
 use std::mem::size_of;
-use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use std::time::{Duration, Instant};
 
-const HOUR: Duration = Duration::from_secs(3_600);
-const DAY: Duration = Duration::from_secs(86_400);
-const YEAR: Duration = Duration::from_secs(365 * 86_400);
+const HOUR: SimTime = SimTime::from_secs(3_600);
+const DAY: SimTime = SimTime::from_secs(86_400);
+const YEAR: SimTime = SimTime::from_secs(365 * 86_400);
 
 /// Copies of the demo line in the large model, which gives 2,800 objects: the target scale is
 /// up to a few thousand objects.
@@ -83,21 +82,13 @@ static ALLOCATOR: CountingAllocator = CountingAllocator;
 
 // ---- The reference model ----
 
-/// Adds one copy of the demo line to a run. This is a copy of `crabsim::demo::build_model` rather
+/// Adds one copy of the demo line to a model. This is a copy of `crabsim::demo::build_model` rather
 /// than a call to it, so a change to the demo can't quietly move the baseline. The check in
 /// `check_model_matches_demo` says when the two part ways, and then it's a choice which to keep.
-fn add_line(run: &mut SimulationRun) {
+fn add_line(model: &mut ModelDescription) {
     let failures = FailureProfile::new(0.9, Distribution::ERLANG { mean: 60_000.0, k: 2 }, 0);
-    let station = |process_secs: u64| {
-        Rc::new(RefCell::new(SingleStation::new(
-            0,
-            Duration::from_secs(process_secs),
-            failures.clone(),
-            None,
-            Vec::new(),
-            Vec::new(),
-        )))
-    };
+    let source = model.add_source(SimTime::from_secs(5));
+    let mut station = |process_secs: u64| model.add_station(SimTime::from_secs(process_secs), failures.clone());
     let st1 = station(10);
     let st2 = station(15);
     let st3 = station(20);
@@ -110,36 +101,38 @@ fn add_line(run: &mut SimulationRun) {
     let st5a = station(10);
     let st5b = station(14);
     let st5c = station(16);
-    let source = Rc::new(RefCell::new(Source::new(0, Duration::from_secs(5), vec![st1.clone()])));
-    let drain = Rc::new(RefCell::new(Drain::new(0, Vec::new())));
-    let drain_as_successor: Rc<RefCell<dyn MaterialFlow>> = drain.clone();
+    let drain = model.add_drain();
 
-    st1.borrow_mut().succ = vec![st2.clone()];
-    st2.borrow_mut().succ = vec![st3.clone(), st5.clone()];
-    st3.borrow_mut().succ = vec![st4.clone()];
-    st4.borrow_mut().succ = vec![st4a.clone(), st4b.clone(), st4c.clone()];
-    st4a.borrow_mut().succ = vec![st7.clone()];
-    st4b.borrow_mut().succ = vec![st7.clone()];
-    st4c.borrow_mut().succ = vec![st7.clone()];
-    st7.borrow_mut().succ = vec![drain_as_successor.clone()];
-    st5.borrow_mut().succ = vec![st5a.clone(), st5b.clone(), st5c.clone()];
-    st5a.borrow_mut().succ = vec![drain_as_successor.clone()];
-    st5b.borrow_mut().succ = vec![drain_as_successor.clone()];
-    st5c.borrow_mut().succ = vec![drain_as_successor];
-
-    run.add_object(source);
-    for station in [st1, st2, st3, st4, st4a, st4b, st4c, st7, st5, st5a, st5b, st5c] {
-        run.add_object(station);
+    for (from, to) in [
+        (source, st1),
+        (st1, st2),
+        (st2, st3),
+        (st2, st5),
+        (st3, st4),
+        (st4, st4a),
+        (st4, st4b),
+        (st4, st4c),
+        (st4a, st7),
+        (st4b, st7),
+        (st4c, st7),
+        (st7, drain),
+        (st5, st5a),
+        (st5, st5b),
+        (st5, st5c),
+        (st5a, drain),
+        (st5b, drain),
+        (st5c, drain),
+    ] {
+        model.connect(from, to);
     }
-    run.add_object(drain);
 }
 
 fn reference_model(lines: usize, seed: u64) -> SimulationRun {
-    let mut run = SimulationRun::new(seed);
+    let mut model = ModelDescription::new();
     for _ in 0..lines {
-        add_line(&mut run);
+        add_line(&mut model);
     }
-    run
+    model.build(seed)
 }
 
 // ---- Scenarios ----
@@ -156,7 +149,7 @@ enum Occurrences {
 struct Scenario {
     name: &'static str,
     lines: usize,
-    length: Duration,
+    length: SimTime,
     length_label: &'static str,
     occurrences: Occurrences,
 }
@@ -167,7 +160,7 @@ const SCENARIOS: [Scenario; 3] = [
     Scenario {
         name: "large-dropped",
         lines: LARGE_MODEL_LINES,
-        length: Duration::from_secs(2 * 86_400),
+        length: SimTime::from_secs(2 * 86_400),
         length_label: "2 days",
         occurrences: Occurrences::Dropped,
     },

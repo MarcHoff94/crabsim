@@ -1,5 +1,6 @@
 use crate::observation::Occurrence;
-use std::{fmt, time::Duration};
+use crate::time::SimTime;
+use std::fmt;
 
 #[derive(Debug)]
 pub struct InitError;
@@ -20,9 +21,9 @@ pub enum RunError {
     NotInitialised,
     EventInThePast,
     UnknownObject(u32),
-    ObjectFailed { object_id: u32, time: Duration },
+    ObjectFailed { object_id: u32, time: SimTime },
     /// Too many events in a row happened without simulation time moving.
-    ZeroTimeLoop { time: Duration },
+    ZeroTimeLoop { time: SimTime },
 }
 
 impl fmt::Display for RunError {

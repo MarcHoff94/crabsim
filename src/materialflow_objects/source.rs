@@ -1,18 +1,19 @@
 use crate::error::{InitError, MaterialflowError, RunTimeError};
 use crate::event::{EventContext, EventTemplate, EventType, ExitTicket};
 use crate::observation::{ObjectKind, ObjectState, OccurrenceKind};
-use std::time::Duration;
+use crate::time::SimTime;
+use crate::materialflow_objects::OtherObjects;
 use crate::flows::{
 	EventInterface, InterruptionState, MaterialFlow, MoveableUnit, ProcessState, StopCtrl, SuccessorContainer, retry_move_to_successor, try_to_move_to_successor,
 };
-use std::{cell::RefCell, rc::Rc};
 use super::flows::BaseObject;
 
 pub fn handle_source_mu_exit(
 	source: &mut Source,
 	context: &mut EventContext,
+	others: &mut OtherObjects<'_>,
 ) -> Result<Option<Vec<EventTemplate>>, RunTimeError> {
-	let event_template_result = try_to_move_to_successor(source, context);
+	let event_template_result = try_to_move_to_successor(source, context, others);
 	match event_template_result {
 		Ok(opt_evt) => {
 			if source.content.is_none() {
@@ -37,12 +38,13 @@ pub fn handle_source_mu_exit(
 	}
 }
 
+#[derive(Clone)]
 pub struct Source {
 	pub base: BaseObject,
 	pub content: Option<MoveableUnit>,
-	pub proc_time: Duration,
-	pub completion_time: Option<Duration>,
-	pub succ: Vec<Rc<RefCell<dyn MaterialFlow>>>,
+	pub proc_time: SimTime,
+	pub completion_time: Option<SimTime>,
+	pub succ: Vec<u32>,
 	pub succ_pointer: usize,
 	pub state: ProcessState,
 	pub interruption: InterruptionState,
@@ -50,8 +52,8 @@ pub struct Source {
 impl Source {
 	pub fn new(
 		object_id: u32,
-		proc_time: Duration,
-		succ: Vec<Rc<RefCell<dyn MaterialFlow>>>,
+		proc_time: SimTime,
+		succ: Vec<u32>,
 	) -> Source {
 		Source {
 			base: BaseObject { object_id, random_seed: 0 },
@@ -84,7 +86,6 @@ impl Source {
 			eventtype: EventType::MUExit(ExitTicket::new(mu_id)),
 			exec_time: self.proc_time,
 			object_id: self.base.object_id,
-			seq: 0,
 		})
 	}
 	fn become_blocked(&mut self, context: &mut EventContext) {
@@ -107,15 +108,16 @@ impl EventInterface for Source {
 		&mut self,
 		context: &mut EventContext,
 		eventtype: &EventType,
+		others: &mut OtherObjects<'_>,
 	) -> Result<Option<Vec<EventTemplate>>, RunTimeError> {
 		match eventtype {
-			&EventType::MUExit(_) => handle_source_mu_exit(self, context),
+			&EventType::MUExit(_) => handle_source_mu_exit(self, context, others),
 			&EventType::BlockedRetry { from } => {
 				// successor notified that it became available; attempt to move
 				if !self.is_exit_allowed() {
 					return Ok(None);
 				}
-				match retry_move_to_successor(self, context, from) {
+				match retry_move_to_successor(self, context, others, from) {
 					Ok(Some(ev)) => {
 						// If the MU was moved and the source is now empty, create the next MU
 						if self.content.is_none() {
@@ -149,7 +151,7 @@ impl EventInterface for Source {
 		self.state = ProcessState::Idle;
 		self.interruption = InterruptionState::None;
 	}
-	fn report(&self, now: Duration) -> ObjectState {
+	fn report(&self, now: SimTime) -> ObjectState {
 		ObjectState {
 			id: self.base.object_id,
 			kind: ObjectKind::Source,
@@ -158,7 +160,7 @@ impl EventInterface for Source {
 			stop: self.interruption.cause(),
 			remaining: self.completion_time.map(|completion| completion.saturating_sub(now)),
 			blocked_predecessors: Vec::new(),
-			successors: self.succ.iter().map(|s| *s.borrow().get_object_id()).collect(),
+			successors: self.succ.clone(),
 			mus_left: 0,
 		}
 	}
@@ -171,12 +173,9 @@ impl EventInterface for Source {
 	fn set_random_seed(&mut self, seed: u64) {
 		self.base.random_seed = seed;
 	}
-	fn as_any(&self) -> &dyn std::any::Any {
-		self
-	}
 }
 impl StopCtrl for Source {
-	fn set_stop(&mut self, _failure_start: &Duration, _reason: InterruptionState) -> Result<Option<EventTemplate>, MaterialflowError> {
+	fn set_stop(&mut self, _failure_start: &SimTime, _reason: InterruptionState) -> Result<Option<EventTemplate>, MaterialflowError> {
 		todo!("StopCtrl is not implemented for Source yet")
 	}
 	fn remove_stop(&mut self) -> Result<Option<EventTemplate>, MaterialflowError> {
@@ -209,7 +208,7 @@ impl MaterialFlow for Source {
 }
 
 impl SuccessorContainer for Source {
-	fn successors(&self) -> &Vec<Rc<RefCell<dyn MaterialFlow>>> {
+	fn successors(&self) -> &[u32] {
 		&self.succ
 	}
 	fn succ_pointer(&self) -> usize {

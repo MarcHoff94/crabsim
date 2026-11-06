@@ -176,7 +176,7 @@ Failure statistics can be built now. Pause, overlapping interruptions, capacity,
 
 This design was written alongside ADR 0002 rather than after it.
 
-- **Time type:** `Duration` above stands for simulation time. It becomes the millisecond time type from step 3 of the build order.
+- **Time type:** `Duration` above stands for simulation time, which is now `SimTime`.
 - **Recording:** the setting has to be changeable at any time, because replay turns it off and then back on.
 - **Checkpoints:** statistics are part of an object's state, so save and restore cover them, and the restore-and-replay test should compare them too.
 - **ADR 0004 after step 6:** a read-ahead live session stops sending state after every slice, which removes one of that ADR's reasons. The decision still stands, because a list on the Drain would also be copied into every checkpoint.

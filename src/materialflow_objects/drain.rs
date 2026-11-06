@@ -1,24 +1,23 @@
 use crate::error::MaterialflowError;
 use crate::event::{EventContext, EventTemplate, EventType};
 use crate::observation::{ObjectKind, ObjectState, OccurrenceKind};
-use std::time::Duration;
+use crate::time::SimTime;
 use super::flows::BaseObject;
+use crate::materialflow_objects::OtherObjects;
 use crate::flows::{list_blocked, EventInterface, InterruptionState, MaterialFlow, MoveableUnit, ProcessState, StopCtrl};
-use std::{cell::RefCell, rc::Rc};
 
+#[derive(Clone)]
 pub struct Drain {
     pub base: BaseObject,
-    pub pred: Vec<Rc<RefCell<dyn MaterialFlow>>>,
-    pub exits: Vec<Duration>,
+    pub exits: Vec<SimTime>,
     pub exit_ids: Vec<u32>,
     pub entrance_locked: bool,
     pub blockedlist: Vec<u32>,
 }
 impl Drain {
-    pub fn new(object_id: u32, pred: Vec<Rc<RefCell<dyn MaterialFlow>>>) -> Drain {
+    pub fn new(object_id: u32) -> Drain {
         Drain {
             base: BaseObject { object_id, random_seed: 0 },
-            pred,
             exits: Vec::new(),
             exit_ids: Vec::new(),
             entrance_locked: false,
@@ -35,6 +34,7 @@ impl EventInterface for Drain {
         &mut self,
         _context: &mut EventContext,
         _eventtype: &EventType,
+        _others: &mut OtherObjects<'_>,
     ) -> Result<Option<Vec<EventTemplate>>, crate::error::RunTimeError> {
         Err(crate::error::RunTimeError {})
     }
@@ -44,7 +44,7 @@ impl EventInterface for Drain {
         self.entrance_locked = false;
         self.blockedlist.clear();
     }
-    fn report(&self, _now: Duration) -> ObjectState {
+    fn report(&self, _now: SimTime) -> ObjectState {
         ObjectState {
             id: self.base.object_id,
             kind: ObjectKind::Drain,
@@ -66,13 +66,10 @@ impl EventInterface for Drain {
     fn set_random_seed(&mut self, seed: u64) {
         self.base.random_seed = seed;
     }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
 }
 
 impl StopCtrl for Drain {
-    fn set_stop(&mut self, _failure_start: &Duration, _reason: InterruptionState) -> Result<Option<EventTemplate>, MaterialflowError> {
+    fn set_stop(&mut self, _failure_start: &SimTime, _reason: InterruptionState) -> Result<Option<EventTemplate>, MaterialflowError> {
         todo!("StopCtrl is not implemented for Drain yet")
     }
     fn remove_stop(&mut self) -> Result<Option<EventTemplate>, MaterialflowError> {

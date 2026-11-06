@@ -1,6 +1,5 @@
 use rand::{Rng, SeedableRng};
 use rand::rngs::StdRng;
-use std::rc::Rc;
 
 #[derive(Debug, Clone)]
 pub enum Distribution {
@@ -35,72 +34,40 @@ pub struct DistributionSampler {
     pub params: Distribution,
     pub seed: u64,
     prng: StdRng,
-    sample_func: Rc<dyn Fn(&Distribution, &mut StdRng) -> Result<f64,()>>,
 }
 impl DistributionSampler {
     pub fn new(distribution: Distribution, seed: u64) -> DistributionSampler{
-        let sample_func: Rc<dyn Fn(&Distribution, &mut StdRng) -> Result<f64, ()>> = match distribution {
-            Distribution::CONSTANT {value} => Rc::new(sample_constant),
-            Distribution::UNIFORM {min,max} => Rc::new(sample_uniform),
-            Distribution::NORMAL {mean,std} => Rc::new(sample_normal),
-            Distribution::ERLANG {mean,k} => Rc::new(sample_erlang),
-        };
         DistributionSampler {
             params: distribution,
             seed,
             prng: StdRng::seed_from_u64(seed),
-            sample_func,
         }
     }
     pub fn sample(&mut self) -> f64 {
-        match (self.sample_func)(&self.params, &mut self.prng) {
-            Ok(v) => v,
-            Err(_) => panic!("DistributionSampler: sampling failed for params: {:?}", self.params),
-        }
-    }
-
-}
-fn sample_constant(params: &Distribution, _prng: &mut StdRng) -> Result<f64, ()> {
-    match params {
-        Distribution::CONSTANT { value } => Ok(*value),
-        _ => Err(())
-    }
-}
-fn sample_uniform(params: &Distribution, prng: &mut StdRng) -> Result<f64, ()> {
-    match params {
-        Distribution::UNIFORM { min, max } => {
-            Ok(prng.random_range(*min..*max))
-        }
-        _ => Err(())
-    }
-}
-fn sample_normal(params: &Distribution, prng: &mut StdRng) -> Result<f64, ()> {
-    match params {
-        Distribution::NORMAL { mean, std } => {
-            // Box-Muller
-            let u1: f64 = prng.random::<f64>().max(f64::MIN_POSITIVE);
-            let u2: f64 = prng.random::<f64>();
-            let z0: f64 = (-2.0f64 * u1.ln()).sqrt() * (2.0f64 * std::f64::consts::PI * u2).cos();
-            Ok(mean + std * z0)
-        }
-        _ => Err(())
-    }
-}
-fn sample_erlang(params: &Distribution, prng: &mut StdRng) -> Result<f64, ()> {
-    match params {
-        Distribution::ERLANG { mean, k } => {
-            let mut product: f64 = 1.0;
-            let lambda = *k as f64 / *mean;
-            for _ in 0..*k{
-                let u: f64 = prng.random::<f64>().max(f64::MIN_POSITIVE);
-                product *= u;
+        let prng = &mut self.prng;
+        match self.params {
+            Distribution::CONSTANT { value } => value,
+            Distribution::UNIFORM { min, max } => prng.random_range(min..max),
+            Distribution::NORMAL { mean, std } => {
+                // Box-Muller
+                let u1: f64 = prng.random::<f64>().max(f64::MIN_POSITIVE);
+                let u2: f64 = prng.random::<f64>();
+                let z0: f64 = (-2.0f64 * u1.ln()).sqrt() * (2.0f64 * std::f64::consts::PI * u2).cos();
+                mean + std * z0
             }
-            Ok(-1.0 / lambda * product.ln())
+            Distribution::ERLANG { mean, k } => {
+                let mut product: f64 = 1.0;
+                let lambda = k as f64 / mean;
+                for _ in 0..k {
+                    let u: f64 = prng.random::<f64>().max(f64::MIN_POSITIVE);
+                    product *= u;
+                }
+                -1.0 / lambda * product.ln()
+            }
         }
-        _ => Err(())
     }
-}
 
+}
 #[cfg(test)]
 mod tests {
     use super::*;

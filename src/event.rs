@@ -1,13 +1,9 @@
 #![allow(dead_code)]
 
-use std::{
-    cmp::Ordering,
-    time::Duration,
-};
+use std::cmp::Ordering;
 
 use crate::observation::{Occurrence, OccurrenceKind};
-
-// EcTime removed: use std::time::Duration everywhere
+use crate::time::SimTime;
 
 /// Names the MU an `MUExit` is for and how many times its object had been stopped
 /// when that exit was scheduled. The event heap can't cancel events, so an exit
@@ -27,7 +23,7 @@ impl ExitTicket {
 /// What a material-flow object gets while handling an event: the current simulation
 /// time, a place to record occurrences, and new MU identities.
 pub struct EventContext {
-    pub time: Duration,
+    pub time: SimTime,
     pub seq: u64,
     next_mu_id: u32,
     occurrences: Vec<Occurrence>,
@@ -35,7 +31,7 @@ pub struct EventContext {
 
 impl EventContext {
     pub fn new(first_mu_id: u32) -> EventContext {
-        EventContext { time: Duration::ZERO, seq: 0, next_mu_id: first_mu_id, occurrences: Vec::new() }
+        EventContext { time: SimTime::ZERO, seq: 0, next_mu_id: first_mu_id, occurrences: Vec::new() }
     }
 
     pub fn record(&mut self, kind: OccurrenceKind) {
@@ -65,19 +61,21 @@ pub enum EventType {
     EndFailure,
 }
 
+/// An event an object wants to happen, `exec_time` from now.
 #[derive(Debug, Clone)]
 pub struct EventTemplate {
     pub eventtype: EventType,
-    pub exec_time: Duration,
+    pub exec_time: SimTime,
     pub object_id: u32,
-    pub seq: u64,
 }
 
+/// An event in the queue. It is on the per-event path, so it stays at 32 bytes.
 #[derive(Clone, Debug)]
 pub struct ScheduledEvent {
-    pub time: Duration,
-    pub template: EventTemplate,
+    pub time: SimTime,
     pub seq: u64,
+    pub object_id: u32,
+    pub eventtype: EventType,
 }
 
 impl PartialEq for ScheduledEvent {
@@ -108,7 +106,7 @@ impl Ord for ScheduledEvent {
 
 impl ScheduledEvent {
     fn is_retry(&self) -> bool {
-        matches!(self.template.eventtype, EventType::BlockedRetry { .. })
+        matches!(self.eventtype, EventType::BlockedRetry { .. })
     }
 }
 

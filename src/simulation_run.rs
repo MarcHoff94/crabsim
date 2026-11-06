@@ -1,13 +1,10 @@
 use crate::error::{AdvanceFailure, RunError};
-use crate::event::{EventContext, EventTemplate, EventType, ScheduledEvent};
-use crate::flows::MaterialFlow;
+use crate::event::{EventContext, EventType, ScheduledEvent};
+use crate::flows::EventInterface;
+use crate::materialflow_objects::{ModelObject, OtherObjects};
 use crate::observation::{Occurrence, OccurrenceKind, RunState};
-use std::{
-    cell::RefCell,
-    collections::{BTreeMap, BinaryHeap},
-    rc::Rc,
-    time::Duration,
-};
+use crate::time::SimTime;
+use std::collections::BinaryHeap;
 
 /// How many events a run processes at one simulation time before it reports a zero-time
 /// loop. Far more than a legitimate model has happening at one instant, however large.
@@ -24,16 +21,16 @@ pub struct BoundedAdvance {
 /// One execution of a model, from its Init until it is reset or discarded.
 ///
 /// A run only advances when asked, so how fast it goes is up to the caller. Every
-/// advance returns the occurrences it produced. All of a run's objects live on one
-/// thread.
+/// advance returns the occurrences it produced. A run executes on one thread at a time,
+/// and can move between threads.
 pub struct SimulationRun {
-    objects: BTreeMap<u32, Rc<RefCell<dyn MaterialFlow>>>,
-    next_object_id: u32,
+    /// Indexed by object id.
+    objects: Vec<ModelObject>,
     queue: BinaryHeap<ScheduledEvent>,
-    time: Duration,
+    time: SimTime,
     next_seq: u64,
     /// The simulation time `events_at_this_time` is counting.
-    counted_time: Duration,
+    counted_time: SimTime,
     events_at_this_time: u64,
     seed: u64,
     initialised: bool,
@@ -41,31 +38,20 @@ pub struct SimulationRun {
 }
 
 impl SimulationRun {
-    pub fn new(seed: u64) -> SimulationRun {
+    /// A run of these objects, whose ids must match their positions. `ModelDescription` builds
+    /// them that way.
+    pub(crate) fn new(objects: Vec<ModelObject>, seed: u64) -> SimulationRun {
         SimulationRun {
-            objects: BTreeMap::new(),
-            next_object_id: 0,
+            objects,
             queue: BinaryHeap::new(),
-            time: Duration::ZERO,
+            time: SimTime::ZERO,
             next_seq: 0,
-            counted_time: Duration::ZERO,
+            counted_time: SimTime::ZERO,
             events_at_this_time: 0,
             seed,
             initialised: false,
             context: EventContext::new(1),
         }
-    }
-
-    /// Adds an object to the model and returns its id, which replaces any id it was built with.
-    pub fn add_object<T>(&mut self, object: Rc<RefCell<T>>) -> u32
-    where
-        T: MaterialFlow + 'static,
-    {
-        let id = self.next_object_id;
-        self.next_object_id += 1;
-        object.borrow_mut().set_object_id(id);
-        self.objects.insert(id, object);
-        id
     }
 
     /// Sets time to 0, calls every object's init in id order and queues the first events.
@@ -76,19 +62,18 @@ impl SimulationRun {
         }
         let highest_starting_mu = self.state().objects.iter().flat_map(|o| o.contents.clone()).max().unwrap_or(0);
         self.context = EventContext::new(highest_starting_mu + 1);
-        self.context.time = Duration::ZERO;
+        self.context.time = SimTime::ZERO;
         self.context.record(OccurrenceKind::RunInitialised);
 
-        let objects: Vec<(u32, Rc<RefCell<dyn MaterialFlow>>)> =
-            self.objects.iter().map(|(id, object)| (*id, object.clone())).collect();
-        for (id, object) in objects {
-            let mut object = object.borrow_mut();
+        for index in 0..self.objects.len() {
+            let id = index as u32;
+            let object = &mut self.objects[index];
             object.set_random_seed(self.seed ^ (id as u64).wrapping_mul(0x9E3779B97F4A7C15));
             let events = object
                 .init(&mut self.context)
-                .map_err(|_| RunError::ObjectFailed { object_id: id, time: Duration::ZERO })?;
+                .map_err(|_| RunError::ObjectFailed { object_id: id, time: SimTime::ZERO })?;
             for event in events {
-                self.push_event(event.exec_time, event);
+                self.push_event(event.exec_time, event.eventtype, event.object_id);
             }
         }
         self.initialised = true;
@@ -102,14 +87,14 @@ impl SimulationRun {
     }
 
     /// Processes every event up to and including `until`, and leaves the clock there.
-    pub fn advance_to(&mut self, until: Duration) -> Result<Vec<Occurrence>, AdvanceFailure> {
+    pub fn advance_to(&mut self, until: SimTime) -> Result<Vec<Occurrence>, AdvanceFailure> {
         self.advance_bounded(until, usize::MAX).map(|advance| advance.occurrences)
     }
 
     /// Does what `advance_to` does, but processes at most `max_events` events. If that leaves
     /// events due by `until`, the clock stays at the last one processed, and advancing again
     /// continues exactly as if this had not been split up.
-    pub fn advance_bounded(&mut self, until: Duration, max_events: usize) -> Result<BoundedAdvance, AdvanceFailure> {
+    pub fn advance_bounded(&mut self, until: SimTime, max_events: usize) -> Result<BoundedAdvance, AdvanceFailure> {
         let outcome = self.require_initialised().and_then(|()| self.process_up_to(until, max_events));
         self.hand_over(outcome).map(|(reached, occurrences)| BoundedAdvance { occurrences, reached })
     }
@@ -125,29 +110,29 @@ impl SimulationRun {
 
     /// Returns every object to its default state, ready for a new run. Objects stay in the model.
     pub fn reset(&mut self) {
-        for object in self.objects.values() {
-            object.borrow_mut().reset();
+        for object in &mut self.objects {
+            object.reset();
         }
         self.queue.clear();
-        self.time = Duration::ZERO;
+        self.time = SimTime::ZERO;
         self.next_seq = 0;
-        self.counted_time = Duration::ZERO;
+        self.counted_time = SimTime::ZERO;
         self.events_at_this_time = 0;
         self.initialised = false;
         self.context = EventContext::new(1);
     }
 
     /// Queues an event from outside the model at a given simulation time.
-    pub fn schedule_event(&mut self, at: Duration, eventtype: EventType, object_id: u32) -> Result<(), RunError> {
+    pub fn schedule_event(&mut self, at: SimTime, eventtype: EventType, object_id: u32) -> Result<(), RunError> {
         self.require_initialised()?;
         if at < self.time {
             return Err(RunError::EventInThePast);
         }
-        self.push_event(at, EventTemplate { eventtype, exec_time: Duration::ZERO, object_id, seq: 0 });
+        self.push_event(at, eventtype, object_id);
         Ok(())
     }
 
-    pub fn time(&self) -> Duration {
+    pub fn time(&self) -> SimTime {
         self.time
     }
 
@@ -161,7 +146,7 @@ impl SimulationRun {
         self.next_seq - self.queue.len() as u64
     }
 
-    pub fn next_event_time(&self) -> Option<Duration> {
+    pub fn next_event_time(&self) -> Option<SimTime> {
         self.queue.peek().map(|scheduled| scheduled.time)
     }
 
@@ -169,12 +154,16 @@ impl SimulationRun {
         RunState {
             time: self.time,
             initialised: self.initialised,
-            objects: self.objects.values().map(|object| object.borrow().report(self.time)).collect(),
+            objects: self.objects.iter().map(|object| object.report(self.time)).collect(),
         }
     }
 
-    pub fn objects(&self) -> &BTreeMap<u32, Rc<RefCell<dyn MaterialFlow>>> {
+    pub fn objects(&self) -> &[ModelObject] {
         &self.objects
+    }
+
+    pub fn object(&self, id: u32) -> Option<&ModelObject> {
+        self.objects.get(id as usize)
     }
 
     fn require_initialised(&self) -> Result<(), RunError> {
@@ -185,15 +174,14 @@ impl SimulationRun {
         }
     }
 
-    fn push_event(&mut self, time: Duration, mut event: EventTemplate) {
+    fn push_event(&mut self, time: SimTime, eventtype: EventType, object_id: u32) {
         let seq = self.next_seq;
         self.next_seq = self.next_seq.wrapping_add(1);
-        event.seq = seq;
-        self.queue.push(ScheduledEvent { time, template: event, seq });
+        self.queue.push(ScheduledEvent { time, seq, object_id, eventtype });
     }
 
     /// Returns whether the clock reached `until`, which it does once no event is due by then.
-    fn process_up_to(&mut self, until: Duration, max_events: usize) -> Result<bool, RunError> {
+    fn process_up_to(&mut self, until: SimTime, max_events: usize) -> Result<bool, RunError> {
         for _ in 0..max_events {
             if !self.has_event_by(until) {
                 break;
@@ -209,7 +197,7 @@ impl SimulationRun {
         Ok(true)
     }
 
-    fn has_event_by(&self, time: Duration) -> bool {
+    fn has_event_by(&self, time: SimTime) -> bool {
         self.next_event_time().is_some_and(|next| next <= time)
     }
 
@@ -233,31 +221,58 @@ impl SimulationRun {
         }
     }
 
-    fn process(&mut self, scheduled: ScheduledEvent) -> Result<(), RunError> {
-        let event = scheduled.template;
-        self.time = scheduled.time;
+    fn process(&mut self, event: ScheduledEvent) -> Result<(), RunError> {
+        self.time = event.time;
         self.context.time = self.time;
         self.context.seq = event.seq;
-        let object = self
-            .objects
-            .get(&event.object_id)
-            .cloned()
-            .ok_or(RunError::UnknownObject(event.object_id))?;
-        log::info!(
-            "At {}.{:03}s: seq={} obj={} event={:?}",
-            self.time.as_secs(),
-            self.time.subsec_millis(),
-            event.seq,
-            event.object_id,
-            event.eventtype
-        );
-        let new_events = object
-            .borrow_mut()
-            .execute_event(&mut self.context, &event.eventtype)
+        log::info!("At {}s: seq={} obj={} event={:?}", self.time, event.seq, event.object_id, event.eventtype);
+
+        let index = event.object_id as usize;
+        if index >= self.objects.len() {
+            return Err(RunError::UnknownObject(event.object_id));
+        }
+        let (before, from_object) = self.objects.split_at_mut(index);
+        let (object, after) = from_object.split_at_mut(1);
+        let mut others = OtherObjects::new(before, after);
+        let new_events = object[0]
+            .execute_event(&mut self.context, &event.eventtype, &mut others)
             .map_err(|_| RunError::ObjectFailed { object_id: event.object_id, time: self.time })?;
         for new_event in new_events.unwrap_or_default() {
-            self.push_event(self.time + new_event.exec_time, new_event);
+            self.push_event(self.time + new_event.exec_time, new_event.eventtype, new_event.object_id);
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::materialflow_objects::records_then_fails::RecordsThenFails;
+
+    fn secs(s: u64) -> SimTime {
+        SimTime::from_secs(s)
+    }
+
+    fn fails_at_five_seconds() -> SimulationRun {
+        SimulationRun::new(vec![ModelObject::RecordsThenFails(RecordsThenFails::new(secs(5)))], 0)
+    }
+
+    #[test]
+    fn an_error_from_a_step_carries_what_the_event_recorded_before_it_failed() {
+        let mut run = fails_at_five_seconds();
+        run.init().unwrap();
+        let failure = run.step().unwrap_err();
+        assert_eq!(failure.error, RunError::ObjectFailed { object_id: 0, time: secs(5) });
+        assert_eq!(failure.occurrences, vec![Occurrence { time: secs(5), kind: OccurrenceKind::Blocked { object_id: 0 } }]);
+    }
+
+    #[test]
+    fn occurrences_carried_by_an_error_are_not_reported_again() {
+        let mut run = fails_at_five_seconds();
+        run.init().unwrap();
+        run.step().unwrap_err();
+        run.schedule_event(secs(6), EventType::StartFailure, 0).unwrap();
+        let failure = run.step().unwrap_err();
+        assert_eq!(failure.occurrences, vec![Occurrence { time: secs(6), kind: OccurrenceKind::Blocked { object_id: 0 } }]);
     }
 }

@@ -1,34 +1,25 @@
 //! The views that consume what a simulation run reports.
 
-mod common;
-
-use common::RecordsThenFails;
 use crabsim::visualization::terminal::render_table;
 use crabsim::visualization::{advance_with_view, RunView};
-use crabsim::{
-    Drain, FailureProfile, Occurrence, OccurrenceKind, RunError, RunState, SimulationRun, SingleStation, Source,
-};
+use crabsim::{FailureProfile, ModelDescription, Occurrence, RunError, RunState, SimTime, SimulationRun};
 use crabsim::random_numbers::Distribution;
-use std::{cell::RefCell, rc::Rc, time::Duration};
 
 fn line() -> SimulationRun {
     let fp = FailureProfile::new(1.0, Distribution::CONSTANT { value: 0.0 }, 0);
-    let st = Rc::new(RefCell::new(SingleStation::new(0, Duration::from_secs(60), fp, None, Vec::new(), Vec::new())));
-    let src = Rc::new(RefCell::new(Source::new(0, Duration::from_secs(10), Vec::new())));
-    let dr = Rc::new(RefCell::new(Drain::new(0, Vec::new())));
-    src.borrow_mut().succ = vec![st.clone()];
-    st.borrow_mut().succ = vec![dr.clone()];
-    let mut run = SimulationRun::new(0);
-    run.add_object(src);
-    run.add_object(st);
-    run.add_object(dr);
-    run
+    let mut model = ModelDescription::new();
+    let src = model.add_source(SimTime::from_secs(10));
+    let st = model.add_station(SimTime::from_secs(60), fp);
+    let dr = model.add_drain();
+    model.connect(src, st);
+    model.connect(st, dr);
+    model.build(0)
 }
 
 #[derive(Default)]
 struct Recorder {
     occurrences: Vec<Occurrence>,
-    frames: Vec<Duration>,
+    frames: Vec<SimTime>,
 }
 
 impl RunView for Recorder {
@@ -40,7 +31,7 @@ impl RunView for Recorder {
 
 #[test]
 fn a_view_receives_the_same_occurrences_as_a_plain_advance() {
-    let until = Duration::from_secs(200);
+    let until = SimTime::from_secs(200);
     let mut plain = line();
     plain.init().unwrap();
     let expected = plain.advance_to(until).unwrap();
@@ -57,27 +48,10 @@ fn a_view_receives_the_same_occurrences_as_a_plain_advance() {
 }
 
 #[test]
-fn a_view_sees_what_an_event_recorded_before_it_failed() {
-    let mut run = SimulationRun::new(0);
-    let id = run.add_object(Rc::new(RefCell::new(RecordsThenFails { id: 0, at: Duration::from_secs(5) })));
-    run.init().unwrap();
-    let mut recorder = Recorder::default();
-
-    let error = advance_with_view(&mut run, Duration::from_secs(10), &mut recorder).unwrap_err();
-
-    assert_eq!(error, RunError::ObjectFailed { object_id: id, time: Duration::from_secs(5) });
-    assert_eq!(
-        recorder.occurrences,
-        vec![Occurrence { time: Duration::from_secs(5), kind: OccurrenceKind::Blocked { object_id: id } }]
-    );
-    assert_eq!(recorder.frames, vec![Duration::from_secs(5)]);
-}
-
-#[test]
 fn a_view_is_shown_nothing_when_nothing_happened_before_the_error() {
     let mut run = line();
     let mut recorder = Recorder::default();
-    let error = advance_with_view(&mut run, Duration::from_secs(10), &mut recorder).unwrap_err();
+    let error = advance_with_view(&mut run, SimTime::from_secs(10), &mut recorder).unwrap_err();
     assert_eq!(error, RunError::NotInitialised);
     assert!(recorder.frames.is_empty());
 }
@@ -86,7 +60,7 @@ fn a_view_is_shown_nothing_when_nothing_happened_before_the_error() {
 fn the_terminal_table_shows_one_row_per_object_with_its_state() {
     let mut run = line();
     run.init().unwrap();
-    run.advance_to(Duration::from_secs(30)).unwrap();
+    run.advance_to(SimTime::from_secs(30)).unwrap();
     let table = render_table(&run.state());
 
     assert!(table.contains("State at time 30.000"), "{table}");

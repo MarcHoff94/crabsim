@@ -1,8 +1,8 @@
-use std::time::Duration;
+use crate::time::SimTime;
 use crate::event::{EventContext, EventTemplate, EventType, ExitTicket};
 use crate::observation::{ObjectKind, ObjectState};
+use crate::materialflow_objects::OtherObjects;
 use super::flows::{BaseObject, ProcessState, InterruptionState, MaterialFlow, StopCtrl, SuccessorContainer, MoveableUnit, EventInterface, list_blocked, retries_for_blocked, try_to_move_to_successor};
-use std::{cell::RefCell, rc::Rc};
 
 /// A buffer that can hold up to `capacity` moveable units.
 /// It forwards units to successors when they become available.
@@ -11,9 +11,8 @@ pub struct Buffer {
     pub base: BaseObject,
     pub capacity: usize,
     pub content: Vec<MoveableUnit>,
-    pub succ: Vec<Rc<RefCell<dyn MaterialFlow>>>,
+    pub succ: Vec<u32>,
     pub succ_pointer: usize,
-    pub pred: Vec<Rc<RefCell<dyn MaterialFlow>>>,
     pub blockedlist: Vec<u32>,
     pub entrancelocked: bool,
     pub exitlocked: bool,
@@ -25,8 +24,7 @@ impl Buffer {
     pub fn new(
         object_id: u32,
         capacity: usize,
-        succ: Vec<Rc<RefCell<dyn MaterialFlow>>>,
-        pred: Vec<Rc<RefCell<dyn MaterialFlow>>>,
+        succ: Vec<u32>,
     ) -> Buffer {
         Buffer {
             base: BaseObject { object_id, random_seed: 0 },
@@ -34,7 +32,6 @@ impl Buffer {
             content: Vec::new(),
             succ,
             succ_pointer: 0,
-            pred,
             blockedlist: Vec::new(),
             entrancelocked: false,
             exitlocked: false,
@@ -43,10 +40,10 @@ impl Buffer {
         }
     }
 
-    fn process_mu_exit(&mut self, context: &mut EventContext) -> Result<Option<EventTemplate>, crate::error::MaterialflowError> {
+    fn process_mu_exit(&mut self, context: &mut EventContext, others: &mut OtherObjects<'_>) -> Result<Option<EventTemplate>, crate::error::MaterialflowError> {
         // Buffer does not have a processing time; simply attempt to move one MU
         if let Some(mu) = self.take_content() {
-            match try_to_move_to_successor(self, context) {
+            match try_to_move_to_successor(self, context, others) {
                 Ok(Some(event_template)) => {
                     // MU moved; set state to Processing if more MU remain
                     if !self.content.is_empty() {
@@ -73,7 +70,7 @@ impl Buffer {
 }
 
 impl StopCtrl for Buffer {
-    fn set_stop(&mut self, _failure_start: &Duration, _reason: InterruptionState) -> Result<Option<EventTemplate>, crate::error::MaterialflowError> {
+    fn set_stop(&mut self, _failure_start: &SimTime, _reason: InterruptionState) -> Result<Option<EventTemplate>, crate::error::MaterialflowError> {
         todo!("StopCtrl is not implemented for Buffer yet")
     }
     fn remove_stop(&mut self) -> Result<Option<EventTemplate>, crate::error::MaterialflowError> {
@@ -100,9 +97,8 @@ impl MaterialFlow for Buffer {
             self.state = ProcessState::Processing;
             Ok(Some(EventTemplate {
                 eventtype: EventType::MUExit(ExitTicket::new(self.content[0].id)),
-                exec_time: Duration::from_millis(0),
+                exec_time: SimTime::ZERO,
                 object_id: self.base.object_id,
-                seq: 0,
             }))
         } else {
             Ok(None)
@@ -120,7 +116,7 @@ impl MaterialFlow for Buffer {
 }
 
 impl SuccessorContainer for Buffer {
-    fn successors(&self) -> &Vec<Rc<RefCell<dyn MaterialFlow>>> {
+    fn successors(&self) -> &[u32] {
         &self.succ
     }
     fn succ_pointer(&self) -> usize {
@@ -155,7 +151,7 @@ impl EventInterface for Buffer {
         self.state = ProcessState::Idle;
         self.interruption = InterruptionState::None;
     }
-    fn report(&self, _now: Duration) -> ObjectState {
+    fn report(&self, _now: SimTime) -> ObjectState {
         ObjectState {
             id: self.base.object_id,
             kind: ObjectKind::Buffer,
@@ -164,12 +160,9 @@ impl EventInterface for Buffer {
             stop: self.interruption.cause(),
             remaining: None,
             blocked_predecessors: self.blockedlist.clone(),
-            successors: self.succ.iter().map(|s| *s.borrow().get_object_id()).collect(),
+            successors: self.succ.clone(),
             mus_left: 0,
         }
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
     }
     fn get_object_id(&self) -> &u32 {
         &self.base.object_id
@@ -184,20 +177,20 @@ impl EventInterface for Buffer {
         &mut self,
         context: &mut EventContext,
         eventtype: &EventType,
+        others: &mut OtherObjects<'_>,
     ) -> Result<Option<Vec<EventTemplate>>, crate::error::RunTimeError> {
         match eventtype {
             EventType::MUExit(_) => {
                 // Attempt to move one MU
-                let res = self.process_mu_exit(context);
+                let res = self.process_mu_exit(context, others);
                 match res {
                     Ok(Some(event_template)) => {
                         // schedule next exit if more MU
                         if !self.content.is_empty() {
                             Ok(Some(vec![event_template, EventTemplate {
                                 eventtype: EventType::MUExit(ExitTicket::new(self.content[0].id)),
-                                exec_time: Duration::from_millis(0),
+                                exec_time: SimTime::ZERO,
                                 object_id: self.base.object_id,
-                                seq: 0,
                             }]))
                         } else {
                             Ok(Some(vec![event_template]))
@@ -212,7 +205,7 @@ impl EventInterface for Buffer {
                     return Ok(None);
                 }
                 // Try to move MU again
-                let res = self.process_mu_exit(context);
+                let res = self.process_mu_exit(context, others);
                 match res {
                     Ok(Some(event_template)) => Ok(Some(vec![event_template])),
                     Ok(None) => Ok(None),

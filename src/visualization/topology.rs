@@ -1,14 +1,12 @@
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
-use std::rc::Rc;
-use std::cell::RefCell;
-use crate::flows::MaterialFlow;
-use crate::materialflow_objects::Drain;
+use std::collections::{HashMap, HashSet, VecDeque};
+use crate::flows::EventInterface;
+use crate::materialflow_objects::ModelObject;
 
 pub struct TopologyVisualizer;
 
 impl TopologyVisualizer {
     pub fn render_network_topology(
-        material_flows: &BTreeMap<u32, Rc<RefCell<dyn MaterialFlow>>>,
+        material_flows: &[ModelObject],
     ) -> String {
         let mut buf = String::new();
         buf.push_str("\n╔═════════════════════════════════════════════════════════════════════════════════╗\n");
@@ -19,23 +17,19 @@ impl TopologyVisualizer {
         let mut successors_map: HashMap<u32, Vec<u32>> = HashMap::new();
         let mut source_id: Option<u32> = None;
 
-        for (id, obj) in material_flows {
-            let obj_borrow = obj.borrow();
-            let any = obj_borrow.as_any();
-            let (obj_type, successors) = if let Some(st) = any.downcast_ref::<crate::materialflow_objects::SingleStation>() {
-                let succ_ids: Vec<u32> = st.succ.iter().map(|s| *s.borrow().get_object_id()).collect();
-                ("St", succ_ids)
-            } else if let Some(src) = any.downcast_ref::<crate::materialflow_objects::Source>() {
-                source_id = Some(*id);
-                let succ_ids: Vec<u32> = src.succ.iter().map(|s| *s.borrow().get_object_id()).collect();
-                ("So", succ_ids)
-            } else if any.downcast_ref::<Drain>().is_some() {
-                ("Dr", vec![])
-            } else {
-                ("??", vec![])
+        for obj in material_flows {
+            let id = *obj.get_object_id();
+            let (obj_type, successors) = match obj {
+                ModelObject::Station(st) => ("St", st.succ.clone()),
+                ModelObject::Source(src) => {
+                    source_id = Some(id);
+                    ("So", src.succ.clone())
+                }
+                ModelObject::Drain(_) => ("Dr", vec![]),
+                _ => ("??", vec![]),
             };
-            type_map.insert(*id, obj_type.to_string());
-            successors_map.insert(*id, successors);
+            type_map.insert(id, obj_type.to_string());
+            successors_map.insert(id, successors);
         }
 
         if let Some(src_id) = source_id {
@@ -45,11 +39,8 @@ impl TopologyVisualizer {
             queue.push_back((src_id, 0));
 
             let mut drain_ids = Vec::new();
-            for id in material_flows.keys() {
-                let obj = material_flows.get(id).unwrap();
-                let borrowed = obj.borrow();
-                let any = borrowed.as_any();
-                if any.downcast_ref::<Drain>().is_some() { drain_ids.push(*id); }
+            for obj in material_flows {
+                if obj.as_drain().is_some() { drain_ids.push(*obj.get_object_id()); }
             }
 
             while let Some((id, col)) = queue.pop_front() {
@@ -264,7 +255,7 @@ impl TopologyVisualizer {
         buf.push('\n');
     }
     pub fn print_network_topology(
-        material_flows: &BTreeMap<u32, Rc<RefCell<dyn MaterialFlow>>>,
+        material_flows: &[ModelObject],
     ) {
         // Avoid printing topology during tests to keep outputs clean
         if cfg!(test) { return; }
@@ -277,29 +268,19 @@ impl TopologyVisualizer {
         let mut source_id: Option<u32> = None;
 
         // Collect topology information
-        for (id, obj) in material_flows {
-            let obj_borrow = obj.borrow();
-            let any = obj_borrow.as_any();
-            
-            let (obj_type, successors) = if let Some(st) = any.downcast_ref::<crate::materialflow_objects::SingleStation>() {
-                let succ_ids: Vec<u32> = st.succ.iter()
-                    .map(|s| *s.borrow().get_object_id())
-                    .collect();
-                ("St", succ_ids)
-            } else if let Some(src) = any.downcast_ref::<crate::materialflow_objects::Source>() {
-                source_id = Some(*id);
-                let succ_ids: Vec<u32> = src.succ.iter()
-                    .map(|s| *s.borrow().get_object_id())
-                    .collect();
-                ("So", succ_ids)
-            } else if any.downcast_ref::<Drain>().is_some() {
-                ("Dr", vec![])
-            } else {
-                ("??", vec![])
+        for obj in material_flows {
+            let id = *obj.get_object_id();
+            let (obj_type, successors) = match obj {
+                ModelObject::Station(st) => ("St", st.succ.clone()),
+                ModelObject::Source(src) => {
+                    source_id = Some(id);
+                    ("So", src.succ.clone())
+                }
+                ModelObject::Drain(_) => ("Dr", vec![]),
+                _ => ("??", vec![]),
             };
-            
-            type_map.insert(*id, obj_type.to_string());
-            successors_map.insert(*id, successors);
+            type_map.insert(id, obj_type.to_string());
+            successors_map.insert(id, successors);
         }
 
         // Assign columns by computing distance from source
@@ -311,13 +292,8 @@ impl TopologyVisualizer {
             
             // Identify drain nodes
             let mut drain_ids = Vec::new();
-            for id in material_flows.keys() {
-                let obj = material_flows.get(id).unwrap();
-                let borrowed = obj.borrow();
-                let any = borrowed.as_any();
-                if any.downcast_ref::<Drain>().is_some() {
-                    drain_ids.push(*id);
-                }
+            for obj in material_flows {
+                if obj.as_drain().is_some() { drain_ids.push(*obj.get_object_id()); }
             }
             
             while let Some((id, col)) = queue.pop_front() {

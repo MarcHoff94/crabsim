@@ -27,6 +27,9 @@ _Avoid_: Init, delete, clear
 A simulation run advanced as fast as the machine allows, with no live session or view attached. It is not a separate mode: live sessions and views are optional layers on top of a simulation run.
 _Avoid_: Fast mode, batch mode
 
+**Model description**:
+The objects of a model and how they connect. One description can build any number of simulation runs.
+
 **Replication**:
 One simulation run of a model that differs from the model's other runs only in its seed.
 

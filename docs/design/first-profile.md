@@ -21,7 +21,7 @@ Measured on 2026-11-06 for step 2 of the build order, on the owner's PC: Ryzen 5
 
 ### After removing the `order` `Vec`
 
-This is the current baseline. Everything else in this document describes the code before this change. Before and after were each run 7 times in rotation, as a fresh process each time, and the events and MUs left didn't change.
+Everything else in this document, apart from "After the storage change", describes the code before this change. Before and after were each run 7 times in rotation, as a fresh process each time, and the events and MUs left didn't change.
 
 | Scenario | Events/s before | Events/s after | Faster by | Wall after | Allocations per event |
 |---|---|---|---|---|---|
@@ -30,6 +30,22 @@ This is the current baseline. Everything else in this document describes the cod
 | `large-dropped` | 3.62M | 3.89M | 1.07 times | 4.37 s | 2.38 to 1.77 |
 
 Peak heap didn't change.
+
+### After the storage change
+
+This is the current baseline. Step 3 moved objects into one `Vec` of an enum with successors as ids, removed the per-move list clone, and shrank a queue entry from 64 to 32 bytes. Three builds were each run 7 times in rotation, as a fresh process each time, and these are medians. It is safe code, so this is the real cost of what the prototype behind D only estimated.
+
+| Scenario | Before | Storage change | With rounded times | Faster by | Peak heap | Allocations per event |
+|---|---|---|---|---|---|---|
+| `demo-kept` | 2.40 s, 6.46M/s | 1.54 s, 10.06M/s | 1.52 s, 10.20M/s | 1.58 times | 2,189 to 1,636 MB | 1.76 to 0.86 |
+| `demo-dropped` | 2.11 s, 7.36M/s | 1.21 s, 12.85M/s | 1.21 s, 12.83M/s | 1.74 times | 42 to 25 MB | 1.77 to 0.87 |
+| `large-dropped` | 5.53 s, 3.07M/s | 2.29 s, 7.41M/s | 2.29 s, 7.43M/s | 1.9 to 2.4 times | 102 to 67 MB | 1.77 to 0.86 |
+
+- **Same behaviour:** the storage change alone gives the same events and MUs left as before. A fingerprint of every occurrence and the final state also matched `master` on 5 demo seeds over 60 days, a Buffer model and a model with starting MUs and heavy blocking.
+- **Rounded times change results slightly, as agreed:** `demo-dropped` goes from 15,501,648 to 15,501,859 events and from 1,598,620 to 1,598,659 MUs left. They make no measurable difference to speed.
+- **`large-dropped` before was unsteady:** its runs ranged from 4.39 s to 5.56 s, with a median of 5.53 s, and the earlier baseline was 4.37 s. Hence the range against 2.29 s. The new build stayed within 2.26 to 2.29 s.
+- **Occurrences got smaller,** because a time is now 8 bytes rather than 16. That is the drop in `demo-kept`'s peak.
+- **What's left:** the new-events `Vec` is the likely source of most remaining allocations, and recording is still always on.
 
 ## Release profile
 
@@ -92,7 +108,7 @@ The two methods agree on the main points. Heap work is the largest cost, the loo
 
 ## Recommendation for step 3
 
-**Make the storage change: one `Vec` indexed by id, an `enum` for the object type, successors as ids.** Storage does matter, though less than the rest of the path:
+**Make the storage change: one `Vec` indexed by id, an `enum` for the object type, successors as ids.** The owner agreed, and it is done: see "After the storage change" and ADR 0005. Storage does matter, though less than the rest of the path:
 
 1. **Speed:** from C to D is 1.20 times on the demo model and 1.14 times on the large one, with everything else already gone. That's real, but most of the gain doesn't depend on storage.
 2. **It removes the costs anyway:** with successors as ids, the lookup and the list clone have nothing left to do. Keeping today's structure means working around the borrow checker to avoid that clone.
@@ -105,7 +121,7 @@ The ADR has to answer one thing this measurement can't: an `enum` closes the set
 
 - ~~Remove the `order` `Vec`.~~ Done, and it measured about what the removal above predicted. See "After removing the `order` `Vec`".
 - Replace the new-events `Vec`. An output buffer the run reuses should beat the inline list measured here.
-- Shrink the queue entry when the millisecond time type goes in. A 64-bit time and dropping the duplicate `seq` and `exec_time` fields gets it to 32 bytes.
+- ~~Shrink the queue entry when the millisecond time type goes in.~~ Done: it is 32 bytes.
 - Leave the `log` calls alone.
 - Step 4's switch for recording is worth 6 to 8% of speed, and far more in memory.
 

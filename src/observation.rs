@@ -2,12 +2,12 @@
 //! these instead of reaching into material-flow objects or engine events.
 
 use crate::flows::ProcessState;
-use std::time::Duration;
+use crate::time::SimTime;
 
 /// Something that happened in the model at a point in simulation time.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Occurrence {
-    pub time: Duration,
+    pub time: SimTime,
     pub kind: OccurrenceKind,
 }
 
@@ -50,7 +50,7 @@ pub struct ObjectState {
     pub process: ProcessState,
     pub stop: Option<StopCause>,
     /// Time left until the object's current work completes, frozen during a stop.
-    pub remaining: Option<Duration>,
+    pub remaining: Option<SimTime>,
     pub blocked_predecessors: Vec<u32>,
     pub successors: Vec<u32>,
     /// How many MUs have left the model through this object.
@@ -60,7 +60,7 @@ pub struct ObjectState {
 /// The full current state of a simulation run.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RunState {
-    pub time: Duration,
+    pub time: SimTime,
     pub initialised: bool,
     pub objects: Vec<ObjectState>,
 }

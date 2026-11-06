@@ -155,6 +155,12 @@ impl SimulationRun {
         self.initialised
     }
 
+    /// How many events this run has processed since Init, stale ones included. Worked out from
+    /// the sequence counter, so counting costs the per-event path nothing.
+    pub fn events_processed(&self) -> u64 {
+        self.next_seq - self.queue.len() as u64
+    }
+
     pub fn next_event_time(&self) -> Option<Duration> {
         self.queue.peek().map(|scheduled| scheduled.time)
     }

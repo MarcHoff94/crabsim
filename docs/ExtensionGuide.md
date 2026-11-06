@@ -10,13 +10,13 @@ use std::vec::Vec;
 
 pub struct RandomStrategy;
 impl DistributionStrategy for RandomStrategy {
-    fn order(&self, n: usize, start: usize) -> Vec<usize> {
+    fn order(&self, n: usize, start: usize) -> impl Iterator<Item = usize> {
         // Simple round‑robin but shuffled each call.
         let mut indices: Vec<usize> = (0..n).collect();
         use rand::seq::SliceRandom;
         let mut rng = rand::thread_rng();
         indices.shuffle(&mut rng);
-        indices
+        indices.into_iter()
     }
 }
 ```

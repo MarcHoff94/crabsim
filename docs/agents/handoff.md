@@ -138,11 +138,11 @@ Statistics aren't placed in this order yet. `docs/design/statistics.md` lists wh
 
 | Scenario | Events/s | One simulated year | Peak heap |
 |---|---|---|---|
-| Demo model, one advance, occurrences kept | 5.68M | 2.73 s | 2,189 MB |
-| Demo model, one-hour slices, occurrences dropped | 6.67M | 2.32 s | 42 MB |
-| 2,800 objects, one-hour slices, occurrences dropped | 3.56M | 2 days in 4.78 s | 102 MB |
+| Demo model, one advance, occurrences kept | 6.43M | 2.41 s | 2,189 MB |
+| Demo model, one-hour slices, occurrences dropped | 7.71M | 2.01 s | 42 MB |
+| 2,800 objects, one-hour slices, occurrences dropped | 3.89M | 2 days in 4.37 s | 102 MB |
 
-**What the profile says for step 3:** removing the lookup, the clones and the per-move and per-event `Vec`s in today's structure gives 1.55 to 1.69 times the speed. With no recording and a smaller queue entry that becomes 2.1 to 2.4 times, and one `Vec` of an enum takes it to 2.5 to 2.7 times. The recommendation is to make the storage change, for the owner to decide in step 3. `docs/design/first-profile.md` has the figures, their limits and the reasoning.
+**What the profile says for step 3:** these factors were measured before the `order` `Vec` was removed, so part of them is already in the baseline above. Removing the lookup, the clones and the per-move and per-event `Vec`s in today's structure gives 1.55 to 1.69 times the speed. With no recording and a smaller queue entry that becomes 2.1 to 2.4 times, and one `Vec` of an enum takes it to 2.5 to 2.7 times. The recommendation is to make the storage change, for the owner to decide in step 3. `docs/design/first-profile.md` has the figures, their limits and the reasoning.
 
 ## Architecture review
 

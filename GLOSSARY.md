@@ -16,18 +16,45 @@ The first step of every simulation run: time is set to 0, every object's init is
 The control that begins or continues advancing time, doing Init first if it has not happened yet.
 
 **Halt**:
-The control that stops time advancing while everything stays exactly as it is. Start continues from there.
+The control that stops shown time advancing while everything the user sees stays exactly as it is. Start continues from there.
 _Avoid_: Pause, Stop (those happen to a material-flow object)
 
 **Reset**:
 The control that returns every object to its default state, ready for a new simulation run. The objects stay in the model. This fixed part cannot be changed, and users may later add their own behaviour after it.
 _Avoid_: Init, delete, clear
 
+**Headless run**:
+A simulation run advanced as fast as the machine allows, with no live session or view attached. It is not a separate mode: live sessions and views are optional layers on top of a simulation run.
+_Avoid_: Fast mode, batch mode
+
+**Replication**:
+One simulation run of a model that differs from the model's other runs only in its seed.
+
+**Distributed simulation**:
+Running many replications at the same time across CPU cores. Each simulation run stays on one thread; a single run is never split up.
+
 **Live session**:
 A simulation run controlled while it goes, on its own thread. It takes Start, Halt, Reset and a speed, and reports occurrences, state, its status and errors.
 
+**Instant**:
+One point in simulation time and everything that happens at it. Instants are as far apart as the events make them.
+_Avoid_: Time step, tick
+
+**Computed time**:
+How far a simulation run has got. In a live session it can be ahead of shown time.
+
+**Shown time**:
+How far a live session has released results to the user. Everything the user experiences follows it, including Halt and errors.
+
+**Checkpoint**:
+A saved copy of a simulation run's complete state at one instant, from which the run can continue exactly as it would have.
+_Avoid_: Undo, snapshot
+
+**Intervention**:
+A change made from outside to a simulation run in progress, such as switching a Pause on or off. It takes effect at shown time and discards any future already computed. The same seed and the same interventions give the same result.
+
 **Speed**:
-How much simulation time passes per unit of wall time in a live session. Changing it never makes simulation time jump.
+How much shown time passes per unit of wall time in a live session. Changing it never makes shown time jump.
 
 **Zero-time loop**:
 Events that keep happening without simulation time advancing. A simulation run reports it as an error rather than looping forever.

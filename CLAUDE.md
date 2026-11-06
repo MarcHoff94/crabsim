@@ -34,6 +34,9 @@ This is a Rust discrete-event material-flow simulator structured as a library (`
 - `step` — processes one event. `advance_to(t)` — processes events up to and including `t`, then leaves the clock at `t`.
 - `reset` — returns every object to its default state. Objects stay in the model.
 - `state` — the full typed `RunState`. `schedule_event` — queues an event from outside the model.
+- Too many events at one simulation time (`ZERO_TIME_EVENT_LIMIT`) return `RunError::ZeroTimeLoop` rather than looping forever. `take_occurrences` hands over what an advance recorded before an error.
+
+**Live session** (`src/live_session.rs`): `LiveSession` owns a thread on which a builder closure creates the whole run, since a run is `!Send`. Commands go in (`start`, `halt`, `reset`, `set_speed`) and `Observation`s come out (occurrences, state, errors). It takes wall time from a `Clock` and advances in bounded slices so commands stay responsive. Tests use a fake clock with `sync`, which blocks until the session has handled earlier commands and caught up with the clock. It knows nothing about any UI technology.
 
 **Observation** (`src/observation.rs`): every advance returns `Occurrence`s (MU created/moved/left, work started/finished, blocked/unblocked, stop began/ended). Scheduling events are engine internals and are never shown to views. Objects record occurrences through the `EventContext` they receive with each event, which also gives them the time and new MU ids.
 
@@ -55,7 +58,7 @@ This is a Rust discrete-event material-flow simulator structured as a library (`
 
 **Demo** (`src/demo.rs`): the example model behind `--inplace` and the default run.
 
-**Tests** (`tests/`): `simulation_run.rs` tests behaviour at the run's interface: Init, advance, Reset, then read occurrences and state. `views.rs` tests the view adapters.
+**Tests** (`tests/`): `simulation_run.rs` tests behaviour at the run's interface: Init, advance, Reset, then read occurrences and state. `views.rs` tests the view adapters. `live_session.rs` tests commands in and observations out, with a fake clock.
 
 ## Key Conventions
 

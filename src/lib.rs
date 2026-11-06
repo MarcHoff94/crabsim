@@ -3,6 +3,7 @@
 pub mod demo;
 pub mod error;
 pub mod event;
+pub mod live_session;
 pub mod materialflow_objects;
 pub mod observation;
 pub mod random_numbers;
@@ -15,6 +16,7 @@ pub use crate::materialflow_objects::flows::{BaseObject, FailureProfile, Moveabl
 pub use crate::demo::run_demo;
 pub use crate::error::{InitError, MaterialflowError, RunError, RunTimeError};
 pub use crate::event::{EventContext, EventTemplate, EventType, ExitTicket};
+pub use crate::live_session::{Clock, LiveSession, Observation, SessionError, WallClock};
 pub use crate::materialflow_objects::{Buffer, Drain, SingleStation, Source};
 pub use crate::observation::{ObjectKind, ObjectState, Occurrence, OccurrenceKind, RunState, StopCause};
 pub use crate::simulation_run::{SimulationRun, ZERO_TIME_EVENT_LIMIT};

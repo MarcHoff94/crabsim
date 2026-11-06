@@ -23,6 +23,15 @@ _Avoid_: Pause, Stop (those happen to a material-flow object)
 The control that returns every object to its default state, ready for a new simulation run. The objects stay in the model. This fixed part cannot be changed, and users may later add their own behaviour after it.
 _Avoid_: Init, delete, clear
 
+**Live session**:
+A simulation run controlled while it goes, on its own thread. It takes Start, Halt, Reset and a speed, and reports occurrences, state and errors.
+
+**Speed**:
+How much simulation time passes per unit of wall time in a live session. Changing it never makes simulation time jump.
+
+**Zero-time loop**:
+Events that keep happening without simulation time advancing. A simulation run reports it as an error rather than looping forever.
+
 **Default state**:
 The state a material-flow object is in before a simulation run's Init, as configured by the user, including any starting MUs.
 

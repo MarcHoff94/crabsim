@@ -1,7 +1,14 @@
 //! A simulation run on its own thread, controlled live: commands go in, observations come
 //! out. This knows nothing about any UI technology, and takes its clock from outside.
+//!
+//! The run computes ahead as fast as it can, into a bounded buffer, and the clock releases what
+//! it computed. So what the user experiences follows shown time, while the run is at a later
+//! computed time. To reach an earlier instant, the session restores the nearest earlier
+//! checkpoint and replays. See ADR 0002.
 
 use crate::error::RunError;
+use crate::event::EventType;
+use crate::materialflow_objects::ModelObject;
 use crate::observation::{Occurrence, Recording, RunState};
 use crate::simulation_run::SimulationRun;
 use crate::time::SimTime;
@@ -9,7 +16,7 @@ use std::{
     any::Any,
     collections::VecDeque,
     fmt,
-    panic::{catch_unwind, AssertUnwindSafe},
+    panic::{catch_unwind, resume_unwind, AssertUnwindSafe},
     sync::mpsc::{channel, sync_channel, Receiver, RecvTimeoutError, Sender, SyncSender, TryRecvError, TrySendError},
     thread::{self, JoinHandle},
     time::{Duration, Instant},
@@ -18,12 +25,18 @@ use std::{
 /// How long a running session waits for a command before it looks at the clock again.
 const TICK: Duration = Duration::from_millis(16);
 
-/// How many events a session processes before it checks for commands again, so a long
-/// catch-up can't keep a command waiting.
+/// How many events a session computes before it checks for commands again.
 const EVENTS_PER_SLICE: usize = 1_000;
 
-/// How many unread observations a session lets build up before it stops advancing until
-/// they are read. It keeps handling commands meanwhile, and no observation is ever dropped.
+/// How many instants a session releases before it checks for commands again.
+const INSTANTS_PER_RELEASE: usize = 1_000;
+
+/// How many events a replay processes before it checks for commands again. A replay is faster
+/// than computing, because it records nothing.
+const EVENTS_PER_REPLAY_SLICE: usize = 10_000;
+
+/// How many unread observations a session lets build up before it stops releasing until they are
+/// read. It keeps handling commands meanwhile, and no observation is ever dropped.
 pub const OBSERVATION_BACKLOG_LIMIT: usize = 256;
 
 /// How long `sync` waits before it gives up. Far longer than a session needs to reach the
@@ -58,35 +71,83 @@ impl Clock for WallClock {
     }
 }
 
+/// How shown time passes between instants. Neither changes what happens in the run.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TimeMode {
+    /// Shown time passes at the session's speed throughout.
+    Continuous,
+    /// As Continuous, but no gap between instants takes longer than `longest_gap` of wall time.
+    /// Shown time jumps over the rest of a longer gap.
+    Skipping { longest_gap: Duration },
+}
+
+impl TimeMode {
+    /// Skipping with the longest gap to start with.
+    pub const SKIPPING: TimeMode = TimeMode::Skipping { longest_gap: Duration::from_millis(250) };
+}
+
+/// A session's settings, fixed when it is created except for the time mode.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SessionSettings {
+    /// How many instants the run may compute ahead of what has been released. It can pass this
+    /// by up to one slice of events, because it checks between slices.
+    pub buffer_instants: usize,
+    /// How many events apart checkpoints are taken.
+    pub checkpoint_spacing: u64,
+    /// How much memory checkpoints may take. Past this, every other checkpoint in the older half
+    /// goes, so the whole run stays reachable and only long jumps take longer.
+    pub checkpoint_budget_bytes: u64,
+    pub time_mode: TimeMode,
+}
+
+impl Default for SessionSettings {
+    fn default() -> SessionSettings {
+        SessionSettings {
+            buffer_instants: 100_000,
+            checkpoint_spacing: 100_000,
+            checkpoint_budget_bytes: 256_000_000,
+            time_mode: TimeMode::Continuous,
+        }
+    }
+}
+
 /// What a session reports. Occurrences arrive in order, and concatenated they are what
-/// advancing the run directly would have returned. A state follows every advance, and a
-/// status follows every change of status.
+/// advancing the run directly would have returned, up to any going back. A full state comes only
+/// at Init, after Reset, after going back and on request, and a status follows every change of
+/// status.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Observation {
     Occurrences(Vec<Occurrence>),
+    /// Long stretches can pass with no occurrences, and shown time still moves.
+    ShownTime(SimTime),
     State(RunState),
     Status(SessionStatus),
     Error(SessionError),
 }
 
-/// Whether a session is advancing its run. A new session is `Halted`.
+/// Whether a session is advancing shown time. A new session is `Halted`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionStatus {
     Advancing,
     Halted,
-    /// Halted by a run error. Only Reset gets it going again.
+    /// Halted by a run error. Reset or going back gets it going again.
     Failed,
 }
 
 /// Why a session refused a command or could not continue.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SessionError {
-    /// The run reported an error. The session has halted, and only Reset gets it going again.
+    /// The run reported an error, at shown time. The session has halted, and Reset or going back
+    /// gets it going again.
     Run(RunError),
-    /// Start was refused, because the run has reported an error and hasn't been reset since.
+    /// Refused, because the run has reported an error at shown time. Reset or go back first.
     ResetRequired,
     /// A speed has to be positive and finite.
     InvalidSpeed(f64),
+    /// Only a Station can be paused so far.
+    CannotPause(u32),
+    /// Going back goes to shown time or earlier.
+    NotInThePast { to: SimTime, shown: SimTime },
     /// The session thread panicked and has ended. Only a new session can continue.
     Panicked(String),
     /// `sync` stopped waiting because too many observations are unread, so the session won't
@@ -102,8 +163,10 @@ impl fmt::Display for SessionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             SessionError::Run(error) => write!(f, "{error}"),
-            SessionError::ResetRequired => write!(f, "the simulation run reported an error; reset it first"),
+            SessionError::ResetRequired => write!(f, "the simulation run reported an error; reset it or go back first"),
             SessionError::InvalidSpeed(speed) => write!(f, "{speed} is not a speed: it has to be positive and finite"),
+            SessionError::CannotPause(id) => write!(f, "object {id} can't be paused: only a Station can so far"),
+            SessionError::NotInThePast { to, shown } => write!(f, "can't go back to {to}s: shown time is {shown}s"),
             SessionError::Panicked(message) => write!(f, "the live session panicked: {message}"),
             SessionError::Backlogged => write!(f, "too many observations are unread; read them first"),
             SessionError::SyncTimedOut => write!(f, "the live session did not catch up in time"),
@@ -114,11 +177,24 @@ impl fmt::Display for SessionError {
 
 impl std::error::Error for SessionError {}
 
+/// Something done to a run from outside, at shown time, which replay has to do again.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Action {
+    Pause(u32),
+    Resume(u32),
+    ClearStatistics,
+}
+
 enum Command {
     Start,
     Halt,
     Reset,
     SetSpeed(f64),
+    SetTimeMode(TimeMode),
+    GoBack(SimTime),
+    StepForward,
+    RequestState,
+    Intervene(Action),
     Sync(Sender<Result<(), SessionError>>),
 }
 
@@ -130,10 +206,19 @@ pub struct LiveSession {
 }
 
 impl LiveSession {
+    /// A session with the default settings. See `with_settings`.
+    pub fn new<B, C>(build: B, clock: C) -> LiveSession
+    where
+        B: FnOnce() -> SimulationRun + Send + 'static,
+        C: Clock,
+    {
+        LiveSession::with_settings(build, clock, SessionSettings::default())
+    }
+
     /// Creates the session's thread and builds the whole run on it. The session starts out
     /// halted, at speed 1, and records everything, because its observers rebuild what they show
     /// from occurrences.
-    pub fn new<B, C>(build: B, clock: C) -> LiveSession
+    pub fn with_settings<B, C>(build: B, clock: C, settings: SessionSettings) -> LiveSession
     where
         B: FnOnce() -> SimulationRun + Send + 'static,
         C: Clock,
@@ -143,7 +228,7 @@ impl LiveSession {
         let thread = thread::spawn(move || {
             let mut outbox = Outbox { observer, unsent: VecDeque::new() };
             let outcome = catch_unwind(AssertUnwindSafe(|| {
-                SessionThread::new(build(), clock, command_inbox, &mut outbox).run();
+                SessionThread::new(build(), clock, command_inbox, &mut outbox, settings).run();
             }));
             if let Err(panic) = outcome {
                 // By now the command channel is closed, so commands find the session has ended.
@@ -157,13 +242,13 @@ impl LiveSession {
         LiveSession { commands, observations, thread: Some(thread) }
     }
 
-    /// Starts or continues advancing, doing Init first if the run needs it. Does nothing if
-    /// the session is already advancing.
+    /// Starts or continues advancing shown time, doing Init first if the run needs it. Does
+    /// nothing if the session is already advancing.
     pub fn start(&self) -> Result<(), SessionError> {
         self.send(Command::Start)
     }
 
-    /// Stops time advancing and keeps everything exactly as it is. Wall time doesn't count
+    /// Stops shown time advancing and keeps everything exactly as it is. Wall time doesn't count
     /// until Start. Does nothing if the session is already halted.
     pub fn halt(&self) -> Result<(), SessionError> {
         self.send(Command::Halt)
@@ -181,6 +266,47 @@ impl LiveSession {
             return Err(SessionError::InvalidSpeed(speed));
         }
         self.send(Command::SetSpeed(speed))
+    }
+
+    /// Sets how shown time passes between instants, from now on. Results don't depend on it.
+    pub fn set_time_mode(&self, mode: TimeMode) -> Result<(), SessionError> {
+        self.send(Command::SetTimeMode(mode))
+    }
+
+    /// Goes to simulation time `to`, at shown time or earlier, after everything at that instant.
+    /// The session halts there and reports a full state, also out of a run error. The computed
+    /// future is gone, and so is anything done from outside after `to`.
+    pub fn go_back(&self, to: SimTime) -> Result<(), SessionError> {
+        self.send(Command::GoBack(to))
+    }
+
+    /// While halted, shows the next instant and stays halted. Does nothing while advancing, or if
+    /// there is no next instant.
+    pub fn step_forward(&self) -> Result<(), SessionError> {
+        self.send(Command::StepForward)
+    }
+
+    /// Asks for a full state at shown time, statistics included. It comes from a copy of the run,
+    /// which takes one replay, so ask a few times a second rather than every frame.
+    pub fn request_state(&self) -> Result<(), SessionError> {
+        self.send(Command::RequestState)
+    }
+
+    /// Pauses a Station at shown time, without a Halt. The computed future is gone, and Reset or
+    /// going back behind it undoes it. Pausing what is already paused does nothing.
+    pub fn pause(&self, object_id: u32) -> Result<(), SessionError> {
+        self.send(Command::Intervene(Action::Pause(object_id)))
+    }
+
+    /// Ends a pause at shown time, on the same terms as `pause`.
+    pub fn resume(&self, object_id: u32) -> Result<(), SessionError> {
+        self.send(Command::Intervene(Action::Resume(object_id)))
+    }
+
+    /// Starts statistics afresh at shown time, such as at the end of a warm-up. Going back behind
+    /// it undoes it.
+    pub fn clear_statistics(&self) -> Result<(), SessionError> {
+        self.send(Command::Intervene(Action::ClearStatistics))
     }
 
     /// Blocks until the session has handled every earlier command and advanced to the
@@ -248,7 +374,7 @@ impl Pace {
     }
 }
 
-/// A `sync` waiting for the run to reach the simulation time the clock showed when it arrived.
+/// A `sync` waiting for shown time to reach what the clock showed when it arrived.
 struct Waiter {
     goal: SimTime,
     done: Sender<Result<(), SessionError>>,
@@ -256,7 +382,7 @@ struct Waiter {
 
 /// Observations on their way out. Sending never blocks the session thread, so it can always
 /// handle commands. What the channel has no room for waits here, in order, and a session
-/// doesn't advance while anything is waiting, so only commands can add more.
+/// doesn't release while anything is waiting, so only commands can add more.
 struct Outbox {
     observer: SyncSender<Observation>,
     unsent: VecDeque<Observation>,
@@ -287,33 +413,130 @@ impl Outbox {
     }
 }
 
+/// Everything computed at one instant, waiting for shown time to reach it.
+struct BufferedInstant {
+    time: SimTime,
+    occurrences: Vec<Occurrence>,
+}
+
+/// How computing ended. Nothing is computed after this, and it waits for shown time to reach it.
+enum Stopped {
+    RunError { at: SimTime, error: RunError },
+    Panic { at: SimTime, panic: Box<dyn Any + Send> },
+    /// Shown time got there and the error has been reported.
+    Reported,
+}
+
+impl Stopped {
+    /// When this is due, if it still is.
+    fn due_at(&self) -> Option<SimTime> {
+        match self {
+            Stopped::RunError { at, .. } | Stopped::Panic { at, .. } => Some(*at),
+            Stopped::Reported => None,
+        }
+    }
+}
+
+/// A clone of the run, plus how much of the log is in it. Time alone can't say, because a
+/// checkpoint can land at the very time of an action, on either side of it.
+struct Checkpoint {
+    run: SimulationRun,
+    log_len: usize,
+}
+
+/// A replay in progress, in slices so that commands still get through.
+struct Replay {
+    run: SimulationRun,
+    target: SimTime,
+    /// The next entry of the log to apply.
+    log_index: usize,
+    then: AfterReplay,
+}
+
+impl Replay {
+    fn from(checkpoint: &Checkpoint, target: SimTime, then: AfterReplay) -> Replay {
+        let mut run = checkpoint.run.clone();
+        run.set_recording(Recording::NOTHING);
+        Replay { run, target, log_index: checkpoint.log_len, then }
+    }
+}
+
+enum AfterReplay {
+    /// The session halts at the target and reports the state there.
+    GoBack,
+    /// Does this at the target, and the session carries on from there.
+    Intervene(Action),
+    /// Reports the copy's state and throws it away. The computed run carries on.
+    ReportState,
+}
+
+fn apply_action(run: &mut SimulationRun, action: Action) {
+    let at = run.time();
+    match action {
+        Action::Pause(id) => run.schedule_event(at, EventType::PauseOn, id).expect("the run has been initialised"),
+        Action::Resume(id) => run.schedule_event(at, EventType::PauseOff, id).expect("the run has been initialised"),
+        Action::ClearStatistics => run.clear_statistics(),
+    }
+}
+
 struct SessionThread<'a, C> {
+    /// Ahead of shown time, by what is in the buffer.
     run: SimulationRun,
     clock: C,
     commands: Receiver<Command>,
     outbox: &'a mut Outbox,
+    settings: SessionSettings,
     speed: f64,
     /// Present while the session is advancing, and absent while it is halted.
     pace: Option<Pace>,
-    /// The last slice ran out of events before reaching its target.
-    catching_up: bool,
+    /// When shown time began waiting for computing. That wait doesn't count once it is over.
+    waiting_since: Option<Duration>,
     status: SessionStatus,
     waiters: Vec<Waiter>,
+    shown: SimTime,
+    shown_reported: SimTime,
+    buffer: VecDeque<BufferedInstant>,
+    stopped: Option<Stopped>,
+    /// The first is from Init and always stays.
+    checkpoints: Vec<Checkpoint>,
+    events_at_last_checkpoint: u64,
+    log: Vec<(SimTime, Action)>,
+    replay: Option<Replay>,
+    /// Commands that arrived during a replay, in order.
+    deferred: VecDeque<Command>,
+    steps_wanted: u32,
 }
 
 impl<'a, C: Clock> SessionThread<'a, C> {
-    fn new(mut run: SimulationRun, clock: C, commands: Receiver<Command>, outbox: &'a mut Outbox) -> Self {
+    fn new(
+        mut run: SimulationRun,
+        clock: C,
+        commands: Receiver<Command>,
+        outbox: &'a mut Outbox,
+        settings: SessionSettings,
+    ) -> Self {
         run.set_recording(Recording::ALL);
         SessionThread {
+            shown: run.time(),
+            shown_reported: run.time(),
             run,
             clock,
             commands,
             outbox,
+            settings,
             speed: 1.0,
             pace: None,
-            catching_up: false,
+            waiting_since: None,
             status: SessionStatus::Halted,
             waiters: Vec::new(),
+            buffer: VecDeque::new(),
+            stopped: None,
+            checkpoints: Vec::new(),
+            events_at_last_checkpoint: 0,
+            log: Vec::new(),
+            replay: None,
+            deferred: VecDeque::new(),
+            steps_wanted: 0,
         }
     }
 
@@ -324,11 +547,11 @@ impl<'a, C: Clock> SessionThread<'a, C> {
             match self.next_command(busy) {
                 NextCommand::HandleGone => return,
                 NextCommand::Command(command) => {
-                    self.apply(command);
+                    self.accept(command);
                     busy = true;
                 }
                 NextCommand::None => {
-                    self.advance_one_slice();
+                    self.do_some_work();
                     self.release_waiters();
                     busy = false;
                 }
@@ -339,7 +562,7 @@ impl<'a, C: Clock> SessionThread<'a, C> {
     /// Waits for a command only as long as there is nothing else to do.
     fn next_command(&self, busy: bool) -> NextCommand {
         let backlogged = self.outbox.is_backlogged();
-        let received = if busy || (self.catching_up && !backlogged) || !self.waiters.is_empty() {
+        let received = if busy || self.has_work() || !self.waiters.is_empty() {
             match self.commands.try_recv() {
                 Err(TryRecvError::Empty) => return NextCommand::None,
                 other => other.ok(),
@@ -355,14 +578,57 @@ impl<'a, C: Clock> SessionThread<'a, C> {
         received.map_or(NextCommand::HandleGone, NextCommand::Command)
     }
 
+    fn has_work(&self) -> bool {
+        self.replay.is_some() || !self.deferred.is_empty() || self.can_compute() || self.steps_wanted > 0
+    }
+
+    fn do_some_work(&mut self) {
+        if self.replay.is_some() {
+            self.replay_some();
+        } else if let Some(command) = self.deferred.pop_front() {
+            self.apply(command);
+        } else {
+            self.compute_some();
+            self.release();
+            self.take_steps();
+        }
+    }
+
+    /// A replay holds other commands back until it is done, except Reset, which makes it pointless.
+    fn accept(&mut self, command: Command) {
+        let replaying = self.replay.is_some() || !self.deferred.is_empty();
+        match command {
+            Command::Reset if replaying => {
+                let held_back = std::mem::take(&mut self.deferred);
+                self.reset();
+                for command in held_back {
+                    if let Command::Sync(_) = command {
+                        self.apply(command);
+                    }
+                }
+            }
+            command if replaying => self.deferred.push_back(command),
+            command => self.apply(command),
+        }
+    }
+
     fn apply(&mut self, command: Command) {
         match command {
             Command::Start => self.start(),
             Command::Halt => self.halt(),
             Command::Reset => self.reset(),
             Command::SetSpeed(speed) => self.set_speed(speed),
+            Command::SetTimeMode(mode) => self.settings.time_mode = mode,
+            Command::GoBack(to) => self.go_back(to),
+            Command::StepForward => {
+                if self.pace.is_none() && self.status != SessionStatus::Failed {
+                    self.steps_wanted += 1;
+                }
+            }
+            Command::RequestState => self.request_state(),
+            Command::Intervene(action) => self.intervene(action),
             Command::Sync(done) => {
-                let goal = self.target().unwrap_or(SimTime::ZERO);
+                let goal = self.target().unwrap_or(self.shown);
                 self.waiters.push(Waiter { goal, done });
             }
         }
@@ -376,27 +642,41 @@ impl<'a, C: Clock> SessionThread<'a, C> {
         if self.pace.is_some() {
             return;
         }
+        if !self.ensure_initialised() {
+            return;
+        }
+        self.pace = Some(Pace { wall: self.clock.elapsed(), simulation: self.shown });
+        self.waiting_since = None;
+        self.set_status(SessionStatus::Advancing);
+        self.compute_some();
+    }
+
+    /// Does Init if the run needs it, reporting it, and takes the first checkpoint.
+    fn ensure_initialised(&mut self) -> bool {
         if !self.run.is_initialised() {
             match self.run.init() {
-                Ok(occurrences) => self.report(occurrences),
+                Ok(occurrences) => {
+                    self.observe(Observation::Occurrences(occurrences));
+                    self.observe(Observation::State(self.run.state()));
+                }
                 Err(error) => {
-                    self.report_failure(Vec::new(), error);
-                    return;
+                    self.fail(error);
+                    return false;
                 }
             }
         }
-        self.pace = Some(Pace { wall: self.clock.elapsed(), simulation: self.run.time() });
-        self.set_status(SessionStatus::Advancing);
+        if self.checkpoints.is_empty() {
+            self.take_checkpoint();
+        }
+        true
     }
 
     fn halt(&mut self) {
-        // Wall time up to now still counts, but Halt won't wait for a catch-up to finish.
-        if !self.catching_up {
-            self.advance_one_slice();
-        }
+        // Wall time up to now still counts, as far as the run has got.
+        self.release();
         self.pace = None;
-        self.catching_up = false;
-        // That last slice may have ended in a run error, and Halt can't clear a failure.
+        self.waiting_since = None;
+        // That may have ended in a run error, and Halt can't clear a failure.
         if self.status == SessionStatus::Advancing {
             self.set_status(SessionStatus::Halted);
         }
@@ -405,20 +685,228 @@ impl<'a, C: Clock> SessionThread<'a, C> {
     fn reset(&mut self) {
         self.run.reset();
         self.pace = None;
-        self.catching_up = false;
+        self.waiting_since = None;
+        self.shown = SimTime::ZERO;
+        self.shown_reported = SimTime::ZERO;
+        self.buffer.clear();
+        self.stopped = None;
+        self.checkpoints.clear();
+        self.events_at_last_checkpoint = 0;
+        self.log.clear();
+        self.replay = None;
+        self.steps_wanted = 0;
         self.observe(Observation::State(self.run.state()));
         self.set_status(SessionStatus::Halted);
     }
 
     fn set_speed(&mut self, speed: f64) {
-        if let Some(target) = self.target() {
-            // Wall time up to now counts at the old speed. A catch-up in progress is dropped,
-            // or slowing down to watch closely would first mean waiting for it to finish.
-            let simulation = if self.catching_up { self.run.time() } else { target };
-            self.pace = Some(Pace { wall: self.clock.elapsed(), simulation });
-            self.catching_up = false;
+        if self.pace.is_some() {
+            // Wall time up to now counts at the old speed, as far as the run has got. Anything
+            // beyond that is dropped, or slowing down would first mean waiting for it to pass.
+            self.release();
+            if self.pace.is_some() {
+                self.pace = Some(Pace { wall: self.clock.elapsed(), simulation: self.shown });
+                self.waiting_since = None;
+            }
         }
         self.speed = speed;
+    }
+
+    fn go_back(&mut self, to: SimTime) {
+        if !self.run.is_initialised() {
+            self.observe(Observation::Error(SessionError::Run(RunError::NotInitialised)));
+        } else if to > self.shown {
+            self.observe(Observation::Error(SessionError::NotInThePast { to, shown: self.shown }));
+        } else {
+            self.abandon_future_and_replay_to(to, AfterReplay::GoBack);
+        }
+    }
+
+    fn intervene(&mut self, action: Action) {
+        if !self.run.is_initialised() {
+            self.observe(Observation::Error(SessionError::Run(RunError::NotInitialised)));
+            return;
+        }
+        if self.status == SessionStatus::Failed {
+            self.observe(Observation::Error(SessionError::ResetRequired));
+            return;
+        }
+        if let Action::Pause(id) | Action::Resume(id) = action {
+            match self.run.object(id) {
+                Some(ModelObject::Station(_)) => {}
+                Some(_) => {
+                    self.observe(Observation::Error(SessionError::CannotPause(id)));
+                    return;
+                }
+                None => {
+                    self.observe(Observation::Error(SessionError::Run(RunError::UnknownObject(id))));
+                    return;
+                }
+            }
+            if self.is_paused_in_log(id) == matches!(action, Action::Pause(_)) {
+                return;
+            }
+        }
+        self.abandon_future_and_replay_to(self.shown, AfterReplay::Intervene(action));
+    }
+
+    /// The log holds nothing after shown time, so its last word on an object is the current one.
+    fn is_paused_in_log(&self, id: u32) -> bool {
+        self.log.iter().rev().find_map(|&(_, action)| match action {
+            Action::Pause(paused) if paused == id => Some(true),
+            Action::Resume(resumed) if resumed == id => Some(false),
+            _ => None,
+        }) == Some(true)
+    }
+
+    /// Drops what going back abandons, and starts replaying from the nearest earlier checkpoint.
+    fn abandon_future_and_replay_to(&mut self, to: SimTime, then: AfterReplay) {
+        self.log.retain(|&(at, _)| at <= to);
+        let log_len = self.log.len();
+        self.checkpoints.retain(|c| c.run.time() <= to && c.log_len <= log_len);
+        self.buffer.clear();
+        self.stopped = None;
+        self.steps_wanted = 0;
+        self.waiting_since = None;
+        let nearest = self.checkpoints.last().expect("the checkpoint from Init always stays");
+        self.events_at_last_checkpoint = nearest.run.events_processed();
+        self.replay = Some(Replay::from(nearest, to, then));
+    }
+
+    fn request_state(&mut self) {
+        if !self.run.is_initialised() || (self.buffer.is_empty() && self.stopped.is_none() && self.run.time() == self.shown) {
+            self.observe(Observation::State(self.run.state()));
+            return;
+        }
+        let shown = self.shown;
+        let nearest = self.checkpoints.iter().rev().find(|c| c.run.time() <= shown).expect("the checkpoint from Init always stays");
+        self.replay = Some(Replay::from(nearest, shown, AfterReplay::ReportState));
+    }
+
+    fn replay_some(&mut self) {
+        let mut replay = self.replay.take().expect("only called during a replay");
+        let next_action = self.log.get(replay.log_index).copied();
+        let stop = next_action.map_or(replay.target, |(at, _)| at.min(replay.target));
+        match replay.run.advance_bounded(stop, EVENTS_PER_REPLAY_SLICE) {
+            Ok(advance) if !advance.reached => self.replay = Some(replay),
+            Ok(_) => match next_action {
+                Some((at, action)) if at <= replay.target => {
+                    apply_action(&mut replay.run, action);
+                    replay.log_index += 1;
+                    self.replay = Some(replay);
+                }
+                _ => self.finish_replay(replay, None),
+            },
+            Err(failure) => self.finish_replay(replay, Some(failure.error)),
+        }
+    }
+
+    fn finish_replay(&mut self, replay: Replay, error: Option<RunError>) {
+        let Replay { mut run, target, then, .. } = replay;
+        if let AfterReplay::ReportState = then {
+            self.observe(Observation::State(run.state()));
+            return;
+        }
+        run.set_recording(Recording::ALL);
+        self.run = run;
+        self.shown = target;
+        self.shown_reported = target;
+        if let Some(error) = error {
+            self.stopped = Some(Stopped::RunError { at: self.run.time(), error });
+        }
+        match then {
+            AfterReplay::GoBack => {
+                self.pace = None;
+                self.observe(Observation::State(self.run.state()));
+                self.set_status(SessionStatus::Halted);
+            }
+            AfterReplay::Intervene(action) => {
+                apply_action(&mut self.run, action);
+                self.log.push((target, action));
+                if self.pace.is_some() {
+                    self.pace = Some(Pace { wall: self.clock.elapsed(), simulation: target });
+                }
+            }
+            AfterReplay::ReportState => unreachable!("handled above"),
+        }
+    }
+
+    /// How many instants at the front of the buffer are finished. The last may still be growing.
+    fn complete_instants(&self) -> usize {
+        let growing = self.stopped.is_none()
+            && self.buffer.back().is_some_and(|last| self.run.next_event_time() == Some(last.time));
+        self.buffer.len() - growing as usize
+    }
+
+    fn can_compute(&self) -> bool {
+        self.run.is_initialised()
+            && self.stopped.is_none()
+            && self.run.next_event_time().is_some()
+            && self.complete_instants() < self.settings.buffer_instants
+    }
+
+    /// Computes one slice ahead into the buffer, if there is room. A panic waits for shown time
+    /// to reach it, like an error, so that everything before it still arrives.
+    fn compute_some(&mut self) {
+        if !self.can_compute() {
+            return;
+        }
+        match catch_unwind(AssertUnwindSafe(|| self.run.advance_events(EVENTS_PER_SLICE))) {
+            Ok(Ok(occurrences)) => self.buffer_occurrences(occurrences),
+            Ok(Err(failure)) => {
+                self.buffer_occurrences(failure.occurrences);
+                self.stopped = Some(Stopped::RunError { at: self.run.time(), error: failure.error });
+            }
+            Err(panic) => {
+                let occurrences = self.run.take_recorded();
+                self.buffer_occurrences(occurrences);
+                self.stopped = Some(Stopped::Panic { at: self.run.time(), panic });
+            }
+        }
+        if self.stopped.is_none() && self.run.events_processed() - self.events_at_last_checkpoint >= self.settings.checkpoint_spacing {
+            self.take_checkpoint();
+        }
+    }
+
+    fn buffer_occurrences(&mut self, occurrences: Vec<Occurrence>) {
+        for occurrence in occurrences {
+            match self.buffer.back_mut() {
+                Some(last) if last.time == occurrence.time => last.occurrences.push(occurrence),
+                _ => self.buffer.push_back(BufferedInstant { time: occurrence.time, occurrences: vec![occurrence] }),
+            }
+        }
+    }
+
+    fn take_checkpoint(&mut self) {
+        self.events_at_last_checkpoint = self.run.events_processed();
+        self.checkpoints.push(Checkpoint { run: self.run.clone(), log_len: self.log.len() });
+        let each = self.run.checkpoint_bytes();
+        while self.checkpoints.len() > 2 && self.checkpoints.len() as u64 * each > self.settings.checkpoint_budget_bytes {
+            self.thin_out_older_checkpoints();
+        }
+    }
+
+    /// Removes every other checkpoint from the older half. The one from Init stays, so the whole
+    /// run stays reachable, and recent history stays dense for stepping back through.
+    fn thin_out_older_checkpoints(&mut self) {
+        let older_half = self.checkpoints.len().div_ceil(2);
+        let mut index = 0;
+        self.checkpoints.retain(|_| {
+            let keep = index >= older_half || index % 2 == 0;
+            index += 1;
+            keep
+        });
+    }
+
+    /// The earliest thing not yet released, if anything is known to be coming.
+    fn next_unreleased(&self) -> Option<SimTime> {
+        if let Some(front) = self.buffer.front() {
+            return Some(front.time);
+        }
+        match &self.stopped {
+            Some(stopped) => stopped.due_at(),
+            None => self.run.next_event_time(),
+        }
     }
 
     /// The simulation time the clock calls for, if the session is advancing.
@@ -426,59 +914,140 @@ impl<'a, C: Clock> SessionThread<'a, C> {
         self.pace.map(|pace| pace.target(self.clock.elapsed(), self.speed))
     }
 
-    /// Advances towards the clock's time, by at most `EVENTS_PER_SLICE` events, unless too many
-    /// observations are unread. The pace stays as it is, so the time spent waiting for a reader
-    /// counts and is caught up on afterwards. The run's outcome doesn't depend on where the
-    /// slices fall.
-    fn advance_one_slice(&mut self) {
+    /// Takes away the rest of a long gap, in the mode that does, so shown time jumps over it. It
+    /// looks only at the gap ahead, so asking again changes nothing.
+    fn skip_long_gap(&mut self) {
+        let TimeMode::Skipping { longest_gap } = self.settings.time_mode else { return };
+        let Some(next) = self.next_unreleased() else { return };
+        let Some(target) = self.target() else { return };
+        let allowed = SimTime::from_secs_f64(longest_gap.as_secs_f64() * self.speed);
+        let gap = next.saturating_sub(target);
+        if gap > allowed {
+            if let Some(pace) = &mut self.pace {
+                pace.simulation = pace.simulation.saturating_add(gap.saturating_sub(allowed));
+            }
+        }
+    }
+
+    /// Releases what the clock has reached, unless too many observations are unread. Time spent
+    /// waiting for a reader counts and is caught up on afterwards. Time spent waiting for the run
+    /// to compute doesn't, so shown time carries on from where it waited. Results depend on none
+    /// of this.
+    fn release(&mut self) {
         if self.outbox.is_backlogged() {
             return;
         }
-        let Some(target) = self.target() else { return };
-        let time_before = self.run.time();
-        match self.run.advance_bounded(target, EVENTS_PER_SLICE) {
-            Ok(advance) => {
-                self.catching_up = !advance.reached;
-                if !advance.occurrences.is_empty() || self.run.time() != time_before {
-                    self.report(advance.occurrences);
-                }
+        let now = self.clock.elapsed();
+        let complete = self.complete_instants();
+        if complete > 0 || self.stopped.is_some() || self.run.next_event_time().is_none() {
+            if let (Some(since), Some(pace)) = (self.waiting_since.take(), &mut self.pace) {
+                pace.wall += now.saturating_sub(since);
             }
-            Err(failure) => self.report_failure(failure.occurrences, failure.error),
+        }
+        self.skip_long_gap();
+        // While halted, only what was done at shown time from outside can be due.
+        let limit = self.target().unwrap_or(self.shown);
+
+        let mut released = Vec::new();
+        let mut instants = 0;
+        while instants < INSTANTS_PER_RELEASE && instants < complete && self.buffer.front().is_some_and(|i| i.time <= limit) {
+            let instant = self.buffer.pop_front().expect("checked above");
+            self.shown = self.shown.max(instant.time);
+            released.extend(instant.occurrences);
+            instants += 1;
+        }
+        if self.pace.is_some() && instants < INSTANTS_PER_RELEASE {
+            // Releasing opened the next gap, so shown time jumps over it now rather than later.
+            self.skip_long_gap();
+            let limit = self.target().unwrap_or(limit);
+            let reached = self.next_unreleased().map_or(limit, |next| next.min(limit));
+            self.shown = self.shown.max(reached);
+            if reached < limit && self.stopped.is_none() {
+                self.waiting_since.get_or_insert(now);
+            }
+        }
+        if !released.is_empty() {
+            self.observe(Observation::Occurrences(released));
+        }
+        self.report_shown_time();
+        let stop_is_due = self.stopped.as_ref().and_then(Stopped::due_at).is_some_and(|at| at <= limit);
+        if self.buffer.is_empty() && stop_is_due {
+            self.stop_here();
+        }
+    }
+
+    fn report_shown_time(&mut self) {
+        if self.shown != self.shown_reported {
+            self.shown_reported = self.shown;
+            self.observe(Observation::ShownTime(self.shown));
+        }
+    }
+
+    /// Shown time has reached how computing ended.
+    fn stop_here(&mut self) {
+        match self.stopped.take() {
+            Some(Stopped::RunError { at, error }) => {
+                self.shown = self.shown.max(at);
+                self.report_shown_time();
+                self.stopped = Some(Stopped::Reported);
+                self.fail(error);
+            }
+            // The thread ends here, reporting it, as any other panic on this thread does.
+            Some(Stopped::Panic { panic, .. }) => resume_unwind(panic),
+            other => self.stopped = other,
+        }
+    }
+
+    fn take_steps(&mut self) {
+        while self.steps_wanted > 0 && !self.outbox.is_backlogged() {
+            if self.pace.is_some() || self.status == SessionStatus::Failed {
+                self.steps_wanted = 0;
+            } else if !self.run.is_initialised() {
+                self.steps_wanted -= 1;
+                self.ensure_initialised();
+            } else if self.complete_instants() > 0 {
+                self.steps_wanted -= 1;
+                let instant = self.buffer.pop_front().expect("checked above");
+                self.shown = instant.time;
+                self.observe(Observation::Occurrences(instant.occurrences));
+                self.report_shown_time();
+            } else if self.stopped.is_some() {
+                self.steps_wanted = 0;
+                self.stop_here();
+            } else if self.can_compute() {
+                return;
+            } else {
+                // No instant is coming.
+                self.steps_wanted = 0;
+            }
         }
     }
 
     fn release_waiters(&mut self) {
-        // Not catching up means the run has reached the clock's time, which is at or past
-        // every waiter's goal, and a halted run isn't going any further.
-        let everyone = !self.catching_up || self.pace.is_none();
-        let time = self.run.time();
-        let next_event = self.run.next_event_time();
+        let settled = self.replay.is_none() && self.deferred.is_empty() && self.steps_wanted == 0;
+        let halted = self.pace.is_none();
+        let shown = self.shown;
+        let next = self.next_unreleased();
         // A backlogged session can't promise everything is waiting in `observations`, and
         // nobody can read while a sync is waiting, so no waiter would ever be released.
         let backlogged = self.outbox.is_backlogged();
         self.waiters.retain(|waiter| {
-            let reached = time >= waiter.goal && next_event.is_none_or(|next| next > waiter.goal);
+            // A halted session goes no further than shown time, once what is due there is out.
+            let goal = if halted { shown } else { waiter.goal };
+            let reached = settled && shown >= goal && next.is_none_or(|next| next > goal);
             if backlogged {
                 let _ = waiter.done.send(Err(SessionError::Backlogged));
-            } else if everyone || reached {
+            } else if reached {
                 let _ = waiter.done.send(Ok(()));
             }
-            !(backlogged || everyone || reached)
+            !(backlogged || reached)
         });
     }
 
-    fn report(&mut self, occurrences: Vec<Occurrence>) {
-        if !occurrences.is_empty() {
-            self.observe(Observation::Occurrences(occurrences));
-        }
-        self.observe(Observation::State(self.run.state()));
-    }
-
-    /// Reports everything that happened before an error, then the error, and halts.
-    fn report_failure(&mut self, occurrences: Vec<Occurrence>, error: RunError) {
-        self.report(occurrences);
+    /// Reports a run error at shown time, and halts.
+    fn fail(&mut self, error: RunError) {
         self.pace = None;
-        self.catching_up = false;
+        self.waiting_since = None;
         self.set_status(SessionStatus::Failed);
         self.observe(Observation::Error(SessionError::Run(error)));
     }
@@ -499,4 +1068,184 @@ enum NextCommand {
     Command(Command),
     None,
     HandleGone,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::flows::FailureProfile;
+    use crate::model::ModelDescription;
+    use crate::random_numbers::Distribution;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone, Default)]
+    struct FakeClock(Arc<Mutex<Duration>>);
+
+    impl Clock for FakeClock {
+        fn elapsed(&self) -> Duration {
+            *self.0.lock().unwrap()
+        }
+    }
+
+    fn secs(s: u64) -> SimTime {
+        SimTime::from_secs(s)
+    }
+
+    /// Source (one MU every second) -> Station with failures -> Drain.
+    fn busy_line() -> SimulationRun {
+        let failures = FailureProfile::new(0.8, Distribution::ERLANG { mean: 20_000.0, k: 2 }, 0);
+        let mut model = ModelDescription::new();
+        let src = model.add_source(secs(1));
+        let st = model.add_station(secs(1), failures);
+        let dr = model.add_drain();
+        model.connect(src, st);
+        model.connect(st, dr);
+        model.build(3)
+    }
+
+    /// Drives a session thread by hand, for what can't be seen from outside.
+    fn with_session(settings: SessionSettings, check: impl FnOnce(&mut SessionThread<'_, FakeClock>, &FakeClock)) {
+        with_session_on(busy_line(), settings, check);
+    }
+
+    fn with_session_on(run: SimulationRun, settings: SessionSettings, check: impl FnOnce(&mut SessionThread<'_, FakeClock>, &FakeClock)) {
+        let (_commands, inbox) = channel();
+        let (observer, observations) = sync_channel(1_000_000);
+        let mut outbox = Outbox { observer, unsent: VecDeque::new() };
+        let clock = FakeClock::default();
+        let mut session = SessionThread::new(run, clock.clone(), inbox, &mut outbox, settings);
+        session.start();
+        check(&mut session, &clock);
+        drop(observations);
+    }
+
+    fn finish_replay_by_hand(session: &mut SessionThread<'_, FakeClock>) {
+        while session.replay.is_some() {
+            session.replay_some();
+        }
+    }
+
+    #[test]
+    fn pausing_what_is_already_paused_is_not_logged() {
+        with_session(SessionSettings::default(), |session, _| {
+            session.intervene(Action::Pause(1));
+            finish_replay_by_hand(session);
+            assert_eq!(session.log.len(), 1);
+            session.intervene(Action::Pause(1));
+            assert!(session.replay.is_none(), "and the computed future stays");
+            assert_eq!(session.log.len(), 1);
+            session.intervene(Action::Resume(1));
+            finish_replay_by_hand(session);
+            session.intervene(Action::Resume(1));
+            assert_eq!(session.log.len(), 2);
+        });
+    }
+
+    #[test]
+    fn shown_time_jumps_over_the_next_gap_as_soon_as_an_instant_is_out() {
+        let mut model = ModelDescription::new();
+        let src = model.add_source(secs(1_000));
+        let dr = model.add_drain();
+        model.connect(src, dr);
+        let settings = SessionSettings { time_mode: TimeMode::Skipping { longest_gap: Duration::from_secs(1) }, ..SessionSettings::default() };
+        with_session_on(model.build(0), settings, |session, clock| {
+            session.release();
+            assert_eq!(session.shown, secs(999));
+            *clock.0.lock().unwrap() = Duration::from_secs(1);
+            session.release();
+            assert_eq!(session.shown, secs(1_999), "in that one pass");
+        });
+    }
+
+    #[test]
+    fn computing_stops_at_the_buffer_limit() {
+        let settings = SessionSettings { buffer_instants: 5_000, ..SessionSettings::default() };
+        with_session(settings, |session, _| {
+            for _ in 0..100 {
+                session.compute_some();
+            }
+            // It checks between slices, so it can pass the limit by up to one slice.
+            let held = session.buffer.len();
+            assert!((5_000..=5_000 + EVENTS_PER_SLICE + 1).contains(&held), "had {held}");
+            assert!(!session.can_compute());
+            assert_eq!(session.shown, SimTime::ZERO, "computing ahead shows nothing");
+        });
+    }
+
+    #[test]
+    fn checkpoints_come_at_the_spacing_and_the_first_is_from_init() {
+        let settings = SessionSettings { checkpoint_spacing: 2_000, ..SessionSettings::default() };
+        with_session(settings, |session, _| {
+            assert_eq!(session.checkpoints.len(), 1);
+            assert_eq!(session.checkpoints[0].run.time(), SimTime::ZERO);
+            for _ in 0..10 {
+                session.compute_some();
+            }
+            assert_eq!(session.checkpoints.len(), 6, "after 11 slices of 1,000 events");
+        });
+    }
+
+    #[test]
+    fn past_the_budget_the_older_half_thins_out_and_init_stays() {
+        let each = busy_line().checkpoint_bytes();
+        let settings = SessionSettings {
+            checkpoint_spacing: 1_000,
+            checkpoint_budget_bytes: 16 * each,
+            buffer_instants: usize::MAX,
+            ..SessionSettings::default()
+        };
+        with_session(settings, |session, _| {
+            for _ in 0..200 {
+                session.compute_some();
+            }
+            assert!(session.checkpoints.len() <= 16, "had {}", session.checkpoints.len());
+            assert_eq!(session.checkpoints[0].run.time(), SimTime::ZERO, "Init always stays");
+
+            let events: Vec<u64> = session.checkpoints.iter().map(|c| c.run.events_processed()).collect();
+            assert!(events.windows(2).all(|pair| pair[0] < pair[1]));
+            let (first, last) = (events[1] - events[0], events[events.len() - 1] - events[events.len() - 2]);
+            assert_eq!(last, 1_000, "the most recent are still dense");
+            assert!(first > last, "the older ones are sparser: {events:?}");
+        });
+    }
+
+    #[test]
+    fn a_budget_too_small_for_anything_keeps_init_and_the_latest() {
+        let settings = SessionSettings { checkpoint_spacing: 1_000, checkpoint_budget_bytes: 1, ..SessionSettings::default() };
+        with_session(settings, |session, _| {
+            for _ in 0..50 {
+                session.compute_some();
+            }
+            assert_eq!(session.checkpoints.len(), 2);
+            assert_eq!(session.checkpoints[0].run.time(), SimTime::ZERO);
+        });
+    }
+
+    #[test]
+    fn time_spent_waiting_for_computing_does_not_count() {
+        let settings = SessionSettings { buffer_instants: 2, ..SessionSettings::default() };
+        with_session(settings, |session, clock| {
+            // Empty the buffer, then let the clock run with nothing computed.
+            session.buffer.clear();
+            while session.run.next_event_time().is_none() {
+                session.compute_some();
+            }
+            let next = session.run.next_event_time().unwrap();
+            *clock.0.lock().unwrap() = Duration::from_secs(next.as_secs() + 10);
+            session.release();
+            assert_eq!(session.shown, next, "shown time waits at what is known");
+            assert!(session.waiting_since.is_some());
+
+            // The clock moves on by 100s while it waits, and then computing delivers.
+            *clock.0.lock().unwrap() = Duration::from_secs(next.as_secs() + 110);
+            session.compute_some();
+            session.release();
+            assert!(session.waiting_since.is_none());
+            let target = session.target().unwrap();
+            assert!(
+                target <= next + secs(11),
+                "the 100s of waiting must not count: target {target:?}, waited at {next:?}"
+            );
+        });
+    }
 }

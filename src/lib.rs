@@ -20,7 +20,8 @@ pub use crate::demo::run_demo;
 pub use crate::error::{AdvanceFailure, InitError, MaterialflowError, RunError, RunTimeError};
 pub use crate::event::{EventContext, EventTemplate, EventType, ExitTicket};
 pub use crate::live_session::{
-    Clock, LiveSession, Observation, SessionError, SessionStatus, WallClock, OBSERVATION_BACKLOG_LIMIT,
+    Clock, LiveSession, Observation, SessionError, SessionSettings, SessionStatus, TimeMode, WallClock,
+    OBSERVATION_BACKLOG_LIMIT,
 };
 pub use crate::materialflow_objects::{Buffer, Drain, ModelObject, OtherObjects, SingleStation, Source};
 pub use crate::model::ModelDescription;

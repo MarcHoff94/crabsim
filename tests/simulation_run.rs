@@ -116,7 +116,7 @@ fn init_sets_time_zero_and_queues_first_events_without_processing_them() {
     assert_eq!(statistics_of(&run, dr).mus_in, 0);
     assert_eq!(object(&run.state(), src).contents, vec![1]);
     assert_eq!(occurrences[0].kind, OccurrenceKind::RunInitialised);
-    assert!(occurrences.iter().any(|o| o.kind == OccurrenceKind::MuCreated { mu_id: 1, at: src }));
+    assert!(occurrences.iter().any(|o| o.kind == OccurrenceKind::MuCreated { mu_id: 1, at: src, duration: SimTime::ZERO }));
 }
 
 #[test]
@@ -445,7 +445,7 @@ fn reset_discards_everything_still_scheduled() {
     assert_eq!(run.next_event_time(), None);
     run.init().unwrap();
     let occurrences = run.advance_to(secs(200)).unwrap();
-    assert!(!occurrences.iter().any(|o| matches!(o.kind, OccurrenceKind::StopBegan { .. })));
+    assert!(!occurrences.iter().any(|o| matches!(o.kind, OccurrenceKind::InterruptionBegan { .. })));
 }
 
 #[test]
@@ -538,9 +538,9 @@ fn an_mu_passing_through_a_line_reports_each_step_in_order() {
     assert_eq!(
         of_mu_1,
         vec![
-            (0.0, OccurrenceKind::MuCreated { mu_id: 1, at: src_id }),
+            (0.0, OccurrenceKind::MuCreated { mu_id: 1, at: src_id, duration: secs(10) }),
             (10.0, OccurrenceKind::MuMoved { mu_id: 1, from: src_id, to: st_id }),
-            (10.0, OccurrenceKind::WorkStarted { mu_id: 1, at: st_id }),
+            (10.0, OccurrenceKind::WorkStarted { mu_id: 1, at: st_id, duration: secs(60) }),
             (70.0, OccurrenceKind::WorkFinished { mu_id: 1, at: st_id }),
             (70.0, OccurrenceKind::MuMoved { mu_id: 1, from: st_id, to: dr_id }),
             (70.0, OccurrenceKind::MuLeft { mu_id: 1, at: dr_id, lead_time: secs(60) }),
@@ -587,14 +587,14 @@ fn a_failure_reports_its_stop_beginning_and_ending_with_its_cause() {
     let occurrences = run.advance_to(secs(30)).unwrap();
     let stops: Vec<(f64, OccurrenceKind)> = occurrences
         .iter()
-        .filter(|o| matches!(o.kind, OccurrenceKind::StopBegan { .. } | OccurrenceKind::StopEnded { .. }))
+        .filter(|o| matches!(o.kind, OccurrenceKind::InterruptionBegan { .. } | OccurrenceKind::InterruptionEnded { .. }))
         .map(|o| (o.time.as_secs_f64(), o.kind.clone()))
         .collect();
     assert_eq!(
         stops,
         vec![
-            (20.0, OccurrenceKind::StopBegan { object_id: st_id, cause: StopCause::Failure }),
-            (25.0, OccurrenceKind::StopEnded { object_id: st_id, cause: StopCause::Failure }),
+            (20.0, OccurrenceKind::InterruptionBegan { object_id: st_id, cause: StopCause::Failure }),
+            (25.0, OccurrenceKind::InterruptionEnded { object_id: st_id, cause: StopCause::Failure }),
         ]
     );
 }
@@ -726,7 +726,7 @@ fn an_active_failure_profile_keeps_producing_failures() {
     let occurrences = run.advance_to(secs(200)).unwrap();
     let began: Vec<f64> = occurrences
         .iter()
-        .filter(|o| o.kind == OccurrenceKind::StopBegan { object_id: st, cause: StopCause::Failure })
+        .filter(|o| o.kind == OccurrenceKind::InterruptionBegan { object_id: st, cause: StopCause::Failure })
         .map(|o| o.time.as_secs_f64())
         .collect();
     assert_eq!(began, vec![30.0, 90.0, 150.0]);
@@ -1315,8 +1315,8 @@ fn sampled_times_are_rounded_to_the_nearest_millisecond() {
     assert_eq!(
         stops,
         vec![
-            (1_501, OccurrenceKind::StopBegan { object_id: st, cause: StopCause::Failure }),
-            (3_002, OccurrenceKind::StopEnded { object_id: st, cause: StopCause::Failure }),
+            (1_501, OccurrenceKind::InterruptionBegan { object_id: st, cause: StopCause::Failure }),
+            (3_002, OccurrenceKind::InterruptionEnded { object_id: st, cause: StopCause::Failure }),
         ]
     );
 }
@@ -1920,4 +1920,235 @@ fn reset_clears_statistics_and_when_they_began() {
     run.reset();
     assert_eq!(run.state(), default_state);
     assert_eq!(run.state().statistics_since, SimTime::ZERO);
+}
+
+// ---------- Pause ----------
+
+fn pause_at(run: &mut SimulationRun, at: u64, object_id: u32) {
+    run.schedule_event(secs(at), EventType::PauseOn, object_id).unwrap();
+}
+
+fn resume_at(run: &mut SimulationRun, at: u64, object_id: u32) {
+    run.schedule_event(secs(at), EventType::PauseOff, object_id).unwrap();
+}
+
+#[test]
+fn a_pause_moves_completion_time_later_and_freezes_remaining_time() {
+    // MU 1 enters at t=10. Paused from t=20 to t=50: 10 + 60 + 30 = 100.
+    let (mut run, st, _) = line(0.0);
+    run.init().unwrap();
+    pause_at(&mut run, 20, st);
+    resume_at(&mut run, 50, st);
+    run.advance_to(secs(30)).unwrap();
+    let state = run.state();
+    assert_eq!(object(&state, st).remaining, Some(secs(50)));
+    assert_eq!(object(&state, st).stop, Some(StopCause::Pause));
+    assert_eq!(exit_times(&run.advance_to(secs(100)).unwrap()), vec![100.0]);
+}
+
+#[test]
+fn a_paused_station_takes_no_mu_and_releases_no_mu() {
+    // Paused while empty, from t=5 to t=40: the Source's first MU, ready at t=10, waits.
+    let (mut run, st, _) = line(0.0);
+    run.init().unwrap();
+    pause_at(&mut run, 5, st);
+    resume_at(&mut run, 40, st);
+    let occurrences = run.advance_to(secs(50)).unwrap();
+    assert_eq!(moves_from(&occurrences, st - 1), vec![40.0]);
+}
+
+#[test]
+fn a_pause_is_not_a_failure_and_counts_as_paused_time() {
+    let (mut run, st, _) = line(0.0);
+    run.init().unwrap();
+    pause_at(&mut run, 20, st);
+    resume_at(&mut run, 50, st);
+    run.advance_to(secs(60)).unwrap();
+    let s = statistics_of(&run, st);
+    assert_eq!(s.time_paused, secs(30));
+    assert_eq!(s.time_failed, SimTime::ZERO);
+    assert_eq!((s.pauses, s.failures, s.stops), (1, 0, 1));
+    assert_eq!(s.mu_time_stopped, secs(30));
+    assert_eq!(s.achieved_availability(), Some(1.0), "a pause doesn't count against availability");
+    assert_times_add_up(&run);
+}
+
+#[test]
+fn a_failure_overlapping_a_pause_is_two_interruptions_and_one_stop() {
+    // The design's example: a failure from t=20 to 30 and a pause from t=25 to 35.
+    let (mut run, st, _) = line(10_000.0);
+    run.init().unwrap();
+    fail_at(&mut run, 20, st);
+    pause_at(&mut run, 25, st);
+    resume_at(&mut run, 35, st);
+    let occurrences = run.advance_to(secs(40)).unwrap();
+
+    let s = statistics_of(&run, st);
+    assert_eq!(s.time_failed, secs(10));
+    assert_eq!(s.time_paused, secs(5));
+    assert_eq!((s.failures, s.pauses, s.stops), (1, 1, 1));
+    assert_times_add_up(&run);
+
+    let interruptions: Vec<(f64, OccurrenceKind)> = occurrences
+        .iter()
+        .filter(|o| matches!(o.kind, OccurrenceKind::InterruptionBegan { .. } | OccurrenceKind::InterruptionEnded { .. }))
+        .map(|o| (o.time.as_secs_f64(), o.kind.clone()))
+        .collect();
+    assert_eq!(
+        interruptions,
+        vec![
+            (20.0, OccurrenceKind::InterruptionBegan { object_id: st, cause: StopCause::Failure }),
+            (25.0, OccurrenceKind::InterruptionBegan { object_id: st, cause: StopCause::Pause }),
+            (30.0, OccurrenceKind::InterruptionEnded { object_id: st, cause: StopCause::Failure }),
+            (35.0, OccurrenceKind::InterruptionEnded { object_id: st, cause: StopCause::Pause }),
+        ]
+    );
+
+    // Overlapping stops count once: 10 + 60 + 15 = 85.
+    assert_eq!(exit_times(&run.advance_to(secs(90)).unwrap()), vec![85.0]);
+}
+
+#[test]
+fn state_reports_a_failure_over_a_pause_and_the_pause_once_it_ends() {
+    let (mut run, st, _) = line(10_000.0);
+    run.init().unwrap();
+    pause_at(&mut run, 20, st);
+    fail_at(&mut run, 25, st);
+    run.advance_to(secs(22)).unwrap();
+    assert_eq!(object(&run.state(), st).stop, Some(StopCause::Pause));
+    run.advance_to(secs(30)).unwrap();
+    assert_eq!(object(&run.state(), st).stop, Some(StopCause::Failure));
+    run.advance_to(secs(40)).unwrap();
+    assert_eq!(object(&run.state(), st).stop, Some(StopCause::Pause));
+    assert_eq!(statistics_of(&run, st).stops, 1);
+}
+
+#[test]
+fn work_stays_frozen_until_the_last_interruption_ends() {
+    // A pause inside a failure, and a failure inside a pause.
+    for (first_at, second_at, resume) in [(20, 25, 28), (20, 22, 60)] {
+        let (mut run, st, _) = line(10_000.0);
+        run.init().unwrap();
+        fail_at(&mut run, first_at, st);
+        pause_at(&mut run, second_at, st);
+        resume_at(&mut run, resume, st);
+        run.advance_to(secs(70)).unwrap();
+        let stop_end = resume.max(30);
+        // 10 + 60, moved later by the time from the failure until the stop ended.
+        let expected = 70 + stop_end - first_at;
+        let state = run.state();
+        if expected > 70 {
+            assert_eq!(object(&state, st).remaining, Some(secs(expected - 70)), "stop ending at t={stop_end}");
+        }
+    }
+}
+
+#[test]
+fn a_pause_on_an_already_paused_station_or_a_resume_on_a_running_one_does_nothing() {
+    let (mut run, st, _) = line(0.0);
+    run.init().unwrap();
+    resume_at(&mut run, 15, st);
+    pause_at(&mut run, 20, st);
+    pause_at(&mut run, 25, st);
+    let occurrences = run.advance_to(secs(30)).unwrap();
+    let began = occurrences.iter().filter(|o| matches!(o.kind, OccurrenceKind::InterruptionBegan { .. })).count();
+    assert_eq!(began, 1);
+    assert_eq!(statistics_of(&run, st).pauses, 1);
+}
+
+#[test]
+fn a_blocked_station_paused_and_resumed_tries_its_move_again() {
+    let mut model = ModelDescription::new();
+    let st = preloaded_station(&mut model, 10, 1);
+    let dr = drain(&mut model);
+    let busy = preloaded_station(&mut model, 30, 2);
+    model.connect(st, busy);
+    model.connect(busy, dr);
+    let mut run = recorded(model.build(0));
+    run.init().unwrap();
+    pause_at(&mut run, 20, st);
+    resume_at(&mut run, 50, st);
+    let occurrences = run.advance_to(secs(60)).unwrap();
+    // The successor frees up at t=30 while this one is paused, so its move waits for t=50.
+    assert_eq!(moves_from(&occurrences, st), vec![50.0]);
+}
+
+#[test]
+fn reset_clears_a_pause() {
+    let (mut run, st, _) = line(0.0);
+    let default_state = run.state();
+    run.init().unwrap();
+    pause_at(&mut run, 20, st);
+    run.advance_to(secs(30)).unwrap();
+    run.reset();
+    assert_eq!(run.state(), default_state);
+    run.init().unwrap();
+    assert_eq!(exit_times(&run.advance_to(secs(70)).unwrap()), vec![70.0]);
+}
+
+#[test]
+fn a_pause_draws_no_random_numbers() {
+    // Pausing an idle station for no time leaves the rest of the run exactly as it was.
+    let model = line_with_random_failures();
+    let mut plain = recorded(model.build(5));
+    plain.init().unwrap();
+    let st = 1;
+    plain.advance_to(secs(1_000)).unwrap();
+    let expected = plain.advance_to(secs(5_000)).unwrap();
+
+    let mut paused = recorded(model.build(5));
+    paused.init().unwrap();
+    paused.advance_to(secs(1_000)).unwrap();
+    paused.schedule_event(secs(1_000), EventType::PauseOn, st).unwrap();
+    paused.schedule_event(secs(1_000), EventType::PauseOff, st).unwrap();
+    let occurrences: Vec<Occurrence> = paused
+        .advance_to(secs(5_000))
+        .unwrap()
+        .into_iter()
+        .filter(|o| !matches!(o.kind, OccurrenceKind::InterruptionBegan { cause: StopCause::Pause, .. } | OccurrenceKind::InterruptionEnded { cause: StopCause::Pause, .. }))
+        .collect();
+    let failures = |list: &[Occurrence]| list.iter().filter(|o| matches!(o.kind, OccurrenceKind::InterruptionBegan { cause: StopCause::Failure, .. })).map(|o| o.time).collect::<Vec<_>>();
+    assert_eq!(failures(&occurrences), failures(&expected));
+}
+
+// ---------- Advancing by events, and clones ----------
+
+#[test]
+fn advancing_by_events_leaves_the_clock_at_the_last_one() {
+    let mut run = source_into_drain();
+    let occurrences = run.advance_events(2).unwrap();
+    assert_eq!(run.time(), secs(20));
+    assert_eq!(moves_from(&occurrences, 0), vec![10.0, 20.0]);
+    assert_eq!(run.next_event_time(), Some(secs(30)));
+}
+
+#[test]
+fn advancing_by_events_with_none_left_leaves_the_clock_where_it_is() {
+    let mut model = ModelDescription::new();
+    let st = preloaded_station(&mut model, 10, 1);
+    let dr = drain(&mut model);
+    model.connect(st, dr);
+    let mut run = model.build(0);
+    run.init().unwrap();
+    run.advance_events(100).unwrap();
+    assert_eq!(run.time(), secs(10), "only one event existed");
+}
+
+#[test]
+fn advancing_by_events_before_init_is_an_error() {
+    let (mut run, _, _) = line(0.0);
+    assert_eq!(run.advance_events(1).unwrap_err().error, RunError::NotInitialised);
+}
+
+#[test]
+fn a_clone_of_a_run_continues_exactly_as_the_original_would() {
+    let model = line_with_random_failures();
+    let mut run = recorded(model.build(5));
+    run.init().unwrap();
+    run.advance_to(secs(1_234)).unwrap();
+    let mut copy = run.clone();
+    let from_original = run.advance_to(secs(5_000)).unwrap();
+    let from_copy = copy.advance_to(secs(5_000)).unwrap();
+    assert_eq!(from_copy, from_original);
+    assert_eq!(copy.state(), run.state());
 }

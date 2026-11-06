@@ -41,7 +41,7 @@ cargo bench --bench reference -- --reps 9 --scenario demo-dropped
 - **Memory** stays flat as simulated length grows, unless the user asked for recording.
 - **Headless runs** are plain simulation runs. Live sessions, views and animation are optional layers that cost nothing when absent.
 
-The design already agreed for this, including what isn't built yet, is in `docs/agents/handoff.md` and `docs/adr/0002-read-ahead-live-session-with-checkpoints-and-replay.md`. The sections below describe what is built today.
+The design already agreed for this, including what isn't built yet, is in `docs/agents/handoff.md`. The sections below describe what is built today.
 
 ## Architecture
 
@@ -49,7 +49,7 @@ This is a Rust discrete-event material-flow simulator structured as a library (`
 
 **Core engine** (`src/simulation_run.rs`): `SimulationRun` owns the objects (one `Vec<ModelObject>`, indexed by id), clock and event queue (`BinaryHeap<ScheduledEvent>`, 32 bytes per entry). At one simulation time, `BlockedRetry` events run before all others, and a monotonically increasing `seq` preserves FIFO order within each of those two groups. A run only advances when asked and knows nothing about views or pacing:
 - `init` — sets t=0, calls each object's `init` in id order and queues the first events without processing them. Only allowed from the default state.
-- `step` — processes one event. `advance_to(t)` — processes events up to and including `t`, then leaves the clock at `t`. `advance_bounded(t, n)` — the same, for at most `n` events; if events are still due, it reports not having reached `t` and the clock stays at the last event.
+- `step` — processes one event. `advance_events(n)` — at most `n` events, leaving the clock at the last. `advance_to(t)` — processes events up to and including `t`, then leaves the clock at `t`. `advance_bounded(t, n)` — the same, for at most `n` events; if events are still due, it reports not having reached `t` and the clock stays at the last event.
 - `reset` — returns every object to its default state. Objects stay in the model.
 - `state` — the full typed `RunState`. `schedule_event` — queues an event from outside the model.
 - Too many events at one simulation time (`ZERO_TIME_EVENT_LIMIT`) return `RunError::ZeroTimeLoop` rather than looping forever.
@@ -59,7 +59,9 @@ This is a Rust discrete-event material-flow simulator structured as a library (`
 
 **Simulation time** (`src/time.rs`): `SimTime` is a 64-bit count of whole milliseconds, for both points in time and lengths of it. Sampled times are rounded to the nearest millisecond. Wall time stays a `std::time::Duration`, so the compiler keeps the two apart.
 
-**Live session** (`src/live_session.rs`): `LiveSession` owns a thread on which a builder closure creates the whole run. Commands go in (`start`, `halt`, `reset`, `set_speed`) and `Observation`s come out (occurrences, state, status changes, errors). It takes wall time from a `Clock` and advances in bounded slices so commands stay responsive. Sending never blocks the session thread: past `OBSERVATION_BACKLOG_LIMIT` unread observations the session stops advancing until they are read, keeps handling commands and drops nothing. Tests use a fake clock with `sync`, which blocks until the session has handled earlier commands and caught up with the clock. It returns `Backlogged` instead when observations need reading first, and `SyncTimedOut` at its deadline. It knows nothing about any UI technology.
+**Live session** (`src/live_session.rs`): `LiveSession` owns a thread on which a builder closure creates the whole run. The run computes ahead as fast as it can into a bounded buffer, and the clock releases what it computed, so everything the user sees follows shown time while the run is at a later computed time. One thread alternates between computing a slice and releasing. Commands go in (`start`, `halt`, `reset`, `set_speed`, `set_time_mode`, `go_back`, `step_forward`, `request_state`, `pause`, `resume`, `clear_statistics`) and `Observation`s come out (occurrences, shown time, state, status changes, errors). A full state comes only at Init, after Reset, after going back and on request. It takes wall time from a `Clock`. Sending never blocks the session thread: past `OBSERVATION_BACKLOG_LIMIT` unread observations the session stops releasing until they are read, keeps handling commands and drops nothing. Tests use a fake clock with `sync`, which blocks until the session has handled earlier commands and shown time has reached the clock. It returns `Backlogged` instead when observations need reading first, and `SyncTimedOut` at its deadline. It knows nothing about any UI technology.
+
+**Checkpoints and replay** (ADR 0002): a checkpoint is a clone of the run plus how much of the intervention log is in it. To reach an earlier instant, the session restores the nearest earlier checkpoint and replays with recording off, applying the logged actions it passes. Going back drops the computed future, later log entries and their checkpoints. Past the memory budget, every other checkpoint in the older half goes, and the one from Init always stays.
 
 **Headless run**: a `SimulationRun` with nothing attached is one: `model.build(seed)`, `init`, `advance_to`, then read `state`. It records nothing by default, and memory stays flat as simulated length grows.
 
@@ -71,7 +73,7 @@ This is a Rust discrete-event material-flow simulator structured as a library (`
 - `model_object.rs` — the `ModelObject` enum over the object types, which dispatches the traits with a `match`, and `OtherObjects`, which is how an object handling an event reaches the others by id. The run splits its `Vec` around the object in hand, so this takes no `unsafe` and no shared ownership. See ADR 0005.
 - `flows.rs` — `MaterialFlow` and `EventInterface` traits; `MoveableUnit`; `ProcessState` enum (Processing/Blocked/Idle); `try_to_move_to_successor` (round-robin via `succ_pointer`, records blocked predecessors in `blockedlist`).
 - `source.rs` — creates MUs at `proc_time` intervals and pushes them to successors.
-- `station.rs` (`SingleStation`) — processes one MU at a time; tracks `entrancelocked`, `exitlocked`, `blockedlist` and `succ`. Emits `BlockedRetry` events to blocked predecessors when it frees up.
+- `station.rs` (`SingleStation`) — processes one MU at a time; tracks `entrancelocked`, `exitlocked`, `blockedlist` and `succ`, and is stopped while `failed` or `paused`. Only the first interruption of a stop freezes the work, and only the last to end resumes it. Emits `BlockedRetry` events to blocked predecessors when it frees up.
 - `drain.rs` — consumes MUs. Per-MU data exists only through recording `MuLeft` occurrences (ADR 0004).
 - `buffer.rs` — holds MUs up to a capacity. Known to be broken and not yet used by the demo.
 
@@ -86,7 +88,7 @@ This is a Rust discrete-event material-flow simulator structured as a library (`
 
 **Demo** (`src/demo.rs`): the example model behind `--inplace` and the default run.
 
-**Tests** (`tests/`): `simulation_run.rs` tests behaviour at the run's interface: Init, advance, Reset, then read occurrences and state. `views.rs` tests the view adapters. `live_session.rs` tests commands in and observations out, with a fake clock. Tests build models through `ModelDescription`. A failure part way through an event can't happen in a real object, so the few tests of it are unit tests in `src/`, using `RecordsThenFails`, a `#[cfg(test)]` variant of `ModelObject`.
+**Tests** (`tests/`): `simulation_run.rs` tests behaviour at the run's interface: Init, advance, Reset, then read occurrences and state. `views.rs` tests the view adapters. `live_session.rs` tests commands in and observations out, with a fake clock, and includes rebuilding the picture from occurrences. Tests build models through `ModelDescription`. A failure part way through an event can't happen in a real object, so the few tests of it are unit tests in `src/`, using `RecordsThenFails`, a `#[cfg(test)]` variant of `ModelObject`. What can't be seen from outside a session, such as the buffer limit and thinning, is unit tested in `src/live_session.rs`.
 
 **Benchmark** (`benches/reference.rs`): runs a copy of the demo model, and 200 copies of it side by side, and reports speed and peak memory. `cargo test --all-targets` runs it without `--bench`, and then it only checks that the copy still matches the demo model.
 
@@ -98,6 +100,7 @@ This is a Rust discrete-event material-flow simulator structured as a library (`
 - `blockedlist` holds the predecessors waiting for an object, longest-waiting first, each listed once. Objects use `list_blocked` and `retries_for_blocked` from `flows.rs` for this. A predecessor gives up its place at every successor as soon as its MU moves, and an empty station doesn't list itself. Retries run before other events at the same time and offer only the successor that sent them, so nothing can reach a free successor ahead of those waiting for it. A retry that finds its predecessor stopped is used up, so that predecessor lists itself again at the back after its repair. This all serves today's push with one MU per object. Giving up a place on any move assumes the predecessor has no other MU waiting, so revisit it with Station capacity, the Buffer fix and exit strategies.
 - Every object must tell its `StatisticsKeeper` what it ended up doing, at the end of everything it handles (`update_statistics`). Time doesn't move within an event, so this catches every change of state, and it keeps the time buckets from drifting.
 - Every object must implement `reset`, returning it to its default state, including configured starting MUs. When adding a field, reset it and extend the reset tests in `tests/simulation_run.rs`. A replay alone can't catch leftover events, because they land on the replay's own event times.
+- Interruptions are reported separately (`InterruptionBegan`, `InterruptionEnded`), so overlapping ones are one stop. `state` reports a failure over a pause. Pause arrives as `PauseOn` and `PauseOff` events, on Stations only so far.
 - `FailureProfile` is the failure/availability model for stations. Availability is a fraction in `(0.0, 1.0)` where `1.0` = 100% available (inactive). The demo uses `availability=0.9` with an Erlang repair time (mean 60s, k=2); tests use `availability=1.0` unless they exercise failures.
 - `MUExit` carries an `ExitTicket` naming its MU and the object's `stop_count` when it was scheduled. The event heap can't cancel events, so a stop bumps `stop_count` and the queued exit is ignored as stale when it fires. Resuming schedules a new exit for the remaining process time.
 

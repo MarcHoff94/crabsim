@@ -170,7 +170,7 @@ The struct is `Copy` and needs no allocation. Methods that depend on the run's t
 
 State changes are scattered through the objects' event handling, so nothing tries to catch them where they happen. Each object tells its `StatisticsKeeper` what it ended up doing, at the end of everything it handles. Time doesn't move within an event, so this catches every change, and all time goes through one place. A new object has to do the same.
 
-Pause, overlapping interruptions, capacity above 1, dwelling time and the other time bases aren't built, so their numbers arrive with the domain work in step 7 of the build order. MU time follows from the machine state and the contents, which is exact at capacity 1 and has to change when one object can hold MUs in different states.
+Pause and overlap are built on Stations only. Capacity above 1, dwelling time and the other time bases aren't built, so their numbers arrive with the domain work in step 7 of the build order. MU time follows from the machine state and the contents, which is exact at capacity 1 and has to change when one object can hold MUs in different states.
 
 **Cost:** about 7 to 12% of a headless run's time, and 264 bytes per object. See `docs/design/first-profile.md`.
 
@@ -183,10 +183,10 @@ This design was written alongside ADR 0002 rather than after it.
 - **Checkpoints:** statistics are part of an object's state, so a checkpoint covers them, and the restore-and-replay test should compare them too.
 - **ADR 0004 after step 6:** a read-ahead live session stops sending state after every slice, which removes one of that ADR's reasons. The decision still stands, because a list on the Drain would also be copied into every checkpoint.
 
-### Open questions for step 6
+### Settled in step 6
 
-1. **Live statistics at shown time.** In a read-ahead session `run.state()` describes computed time, so its statistics are ahead of what's on screen. Occurrences must be enough to rebuild the state, but rebuilding statistics from them would duplicate the engine's logic in the UI. How does a UI show statistics for shown time?
-2. **Warm-up and going back.** The prototype in step 5 logged `clear_statistics()` like an intervention, which stayed exact, including when going back behind it. See `docs/design/restore-replay-prototype.md`. To be confirmed when step 6 is designed.
+1. **Live statistics at shown time.** On request, the session replays a copy of the run to shown time and reports its full state. So the numbers are exact for the instant on screen, nothing is added to the per-event path, and no engine logic is duplicated in a UI. It takes a few milliseconds, so ask a few times a second rather than every frame.
+2. **Warm-up and going back.** In a live session, `clear_statistics` is logged like an intervention, so replay does it again, and going back behind it removes it.
 
 ## Tests
 

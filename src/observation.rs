@@ -15,16 +15,20 @@ pub struct Occurrence {
 #[derive(Debug, Clone, PartialEq)]
 pub enum OccurrenceKind {
     RunInitialised,
-    MuCreated { mu_id: u32, at: u32 },
+    /// `duration` is how long until the MU is ready to leave the Source.
+    MuCreated { mu_id: u32, at: u32, duration: SimTime },
     MuMoved { mu_id: u32, from: u32, to: u32 },
     /// `lead_time` runs from the MU leaving its Source until it entered this Drain.
     MuLeft { mu_id: u32, at: u32, lead_time: SimTime },
-    WorkStarted { mu_id: u32, at: u32 },
+    /// `duration` is the process time, not counting any stop.
+    WorkStarted { mu_id: u32, at: u32, duration: SimTime },
     WorkFinished { mu_id: u32, at: u32 },
     Blocked { object_id: u32 },
     Unblocked { object_id: u32 },
-    StopBegan { object_id: u32, cause: StopCause },
-    StopEnded { object_id: u32, cause: StopCause },
+    /// A failure or pause began. The object is stopped while any interruption is active, so
+    /// overlapping ones are one stop.
+    InterruptionBegan { object_id: u32, cause: StopCause },
+    InterruptionEnded { object_id: u32, cause: StopCause },
 }
 
 /// The kinds of occurrence, for choosing which to record.
@@ -38,8 +42,8 @@ pub enum OccurrenceType {
     WorkFinished,
     Blocked,
     Unblocked,
-    StopBegan,
-    StopEnded,
+    InterruptionBegan,
+    InterruptionEnded,
 }
 
 impl OccurrenceKind {
@@ -53,8 +57,8 @@ impl OccurrenceKind {
             OccurrenceKind::WorkFinished { .. } => OccurrenceType::WorkFinished,
             OccurrenceKind::Blocked { .. } => OccurrenceType::Blocked,
             OccurrenceKind::Unblocked { .. } => OccurrenceType::Unblocked,
-            OccurrenceKind::StopBegan { .. } => OccurrenceType::StopBegan,
-            OccurrenceKind::StopEnded { .. } => OccurrenceType::StopEnded,
+            OccurrenceKind::InterruptionBegan { .. } => OccurrenceType::InterruptionBegan,
+            OccurrenceKind::InterruptionEnded { .. } => OccurrenceType::InterruptionEnded,
         }
     }
 }

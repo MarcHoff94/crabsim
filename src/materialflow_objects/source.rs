@@ -3,7 +3,7 @@ use crate::event::{EventContext, EventTemplate, EventType, ExitTicket};
 use crate::observation::{ObjectKind, ObjectState, OccurrenceKind};
 use std::time::Duration;
 use crate::flows::{
-	EventInterface, InterruptionState, MaterialFlow, MoveableUnit, ProcessState, StopCtrl, SuccessorContainer, try_to_move_to_successor,
+	EventInterface, InterruptionState, MaterialFlow, MoveableUnit, ProcessState, StopCtrl, SuccessorContainer, retry_move_to_successor, try_to_move_to_successor,
 };
 use std::{cell::RefCell, rc::Rc};
 use super::flows::BaseObject;
@@ -110,12 +110,12 @@ impl EventInterface for Source {
 	) -> Result<Option<Vec<EventTemplate>>, RunTimeError> {
 		match eventtype {
 			&EventType::MUExit(_) => handle_source_mu_exit(self, context),
-			&EventType::BlockedRetry => {
+			&EventType::BlockedRetry { from } => {
 				// successor notified that it became available; attempt to move
 				if !self.is_exit_allowed() {
 					return Ok(None);
 				}
-				match try_to_move_to_successor(self, context) {
+				match retry_move_to_successor(self, context, from) {
 					Ok(Some(ev)) => {
 						// If the MU was moved and the source is now empty, create the next MU
 						if self.content.is_none() {

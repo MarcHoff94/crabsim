@@ -62,7 +62,14 @@ A `blockedlist` holds the predecessors waiting for an object, longest-waiting fi
 
 Without the first of these, each refused retry added another entry until one release fired over a million retries at one instant, which tripped `ZERO_TIME_EVENT_LIMIT` in long runs.
 
-**Known gap:** retries are events. An MU finishing at the same instant a successor frees up can take it before the longest-waiting predecessor's retry runs.
+Two more things stop anything reaching a free successor ahead of those waiting for it:
+
+- At one simulation time, retries run before all other events, so an MU finishing at the instant a successor frees up goes behind those already waiting.
+- A retry names the successor that sent it (`BlockedRetry { from }`), and the predecessor tries only that one. Any other successor with room has sent retries of its own.
+
+A retry that finds its predecessor stopped is used up, so that predecessor lists itself again at the back after its repair.
+
+All this serves today's push with one MU per object. Giving up a place on any move assumes the predecessor has no other MU waiting, so revisit it with Station capacity, the Buffer fix and exit strategies.
 
 ## Code references
 

@@ -993,6 +993,67 @@ fn a_station_with_nothing_left_to_move_is_not_listed_as_waiting() {
     assert!(object(&run.state(), always_busy_id).blocked_predecessors.is_empty());
 }
 
+#[test]
+fn an_mu_finishing_as_a_successor_frees_up_goes_behind_those_already_waiting() {
+    let contested = preloaded_station(100, 1);
+    let waiting = preloaded_station(10, 2);
+    // Added after contested, so its exit at t=100 is queued behind contested's.
+    let finishes_then = preloaded_station(100, 3);
+    let dr = drain();
+    contested.borrow_mut().succ = vec![dr.clone()];
+    waiting.borrow_mut().succ = vec![contested.clone()];
+    finishes_then.borrow_mut().succ = vec![contested.clone()];
+    let mut run = SimulationRun::new(0);
+    let contested_id = run.add_object(contested);
+    let waiting_id = run.add_object(waiting);
+    let finishes_then_id = run.add_object(finishes_then);
+    run.add_object(dr);
+    run.init().unwrap();
+
+    let occurrences = run.advance_to(secs(100)).unwrap();
+    assert_eq!(moves_from(&occurrences, waiting_id), vec![100.0]);
+    assert!(moves_from(&occurrences, finishes_then_id).is_empty());
+    assert_eq!(object(&run.state(), contested_id).blocked_predecessors, vec![finishes_then_id]);
+}
+
+#[test]
+fn a_retry_only_offers_the_successor_that_sent_it() {
+    let frees_first = preloaded_station(100, 1);
+    let frees_second = preloaded_station(5, 2);
+    let waits_longer = preloaded_station(10, 3);
+    let has_both = preloaded_station(20, 4);
+    let dr = drain();
+    frees_first.borrow_mut().succ = vec![dr.clone()];
+    frees_second.borrow_mut().succ = vec![frees_first.clone()];
+    waits_longer.borrow_mut().succ = vec![frees_second.clone()];
+    has_both.borrow_mut().succ = vec![frees_second.clone(), frees_first.clone()];
+    let mut run = SimulationRun::new(0);
+    run.add_object(frees_first);
+    run.add_object(frees_second);
+    let waits_longer_id = run.add_object(waits_longer);
+    let has_both_id = run.add_object(has_both);
+    run.add_object(dr);
+    run.init().unwrap();
+
+    // At t=100 the first frees up and sends retries to its two waiters. The second moves
+    // across, which frees it up while the other retry is still queued. That retry was sent
+    // for the first, so it must not take the second from the one that has waited there longer.
+    let occurrences = run.advance_to(secs(100)).unwrap();
+    assert_eq!(moves_from(&occurrences, waits_longer_id), vec![100.0]);
+    assert!(moves_from(&occurrences, has_both_id).is_empty());
+}
+
+#[test]
+fn a_seed_gives_identical_results_every_time() {
+    let week = || {
+        let (mut run, _) = build_model(7);
+        let mut occurrences = run.init().unwrap();
+        occurrences.extend(run.advance_to(secs(7 * 86_400)).unwrap());
+        occurrences
+    };
+    assert_eq!(week(), week());
+}
+
 // ---------- Long runs ----------
 
 /// On demand, in release, because it takes minutes. Occurrences are dropped slice by slice and

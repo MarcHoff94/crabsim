@@ -88,7 +88,8 @@ Performance is the first thing to weigh in design trade-offs. It is a guideline 
 - **Push** is the current concept. **Pull** is planned, as a setting on the *receiving* object, where the successor chooses which MU it wants from its predecessor. Only build a seam for "which MU leaves" now, not pull itself. Mixed push and pull cases get decided when pull is designed.
 - **Exit strategy** picks which MU leaves, and **distribution strategy** picks which successor gets it. They're two separate rules. The default exit strategy is one at a time, earliest finished first, ties broken by entry order. More strategies may come later. *Not built as a seam.*
 - **Under push, MUs can't overtake within a Station**, because successors belong to the Station rather than to one MU. Only pull could change that.
-- **Blocked predecessors:** the longest-waiting one retries first, and each is listed once. *Not built: retries run newest-first, and the runtime `add_blocked` doesn't dedupe.*
+- **Blocked predecessors:** the longest-waiting one retries first, and each is listed once. Built, including at one instant: retries run before other events at the same time, and offer only the successor that sent them.
+- **Reproducibility:** the same seed on the same version always gives identical results. Results may differ between versions when behaviour changes on purpose.
 - **A move takes no simulation time.** Any gliding is visual only. Real transport time would be a new material-flow object, such as a conveyor.
 
 ### Running a simulation (built, except where noted)
@@ -114,9 +115,9 @@ The owner wants users to add their own source code later. The decisions so far:
 
 Agreed on 2026-11-06, replacing the original repair plan, whose first two steps are done:
 
-1. ⬜ Fix `blockedlist` (longest waiting first, deduped), as its own commit. Add a fast test of the rule that always runs, and a long-run test well past 15 simulated years, marked `#[ignore]` and run on demand in release. See "Known problems".
+1. ✅ Fix `blockedlist` (longest waiting first, deduped), with a fast test of the rule and a long-run test of 25 simulated years, marked `#[ignore]` and run on demand in release (PR 6, PR 7). This cured the false `ZeroTimeLoop`.
 2. ⬜ Add the benchmark, a tuned release profile and a first profile. `panic = "abort"` is out, because `LiveSession` relies on `catch_unwind`.
-3. ⬜ Decide and make the object storage change, and add the millisecond time type. Both touch most of the code. If storage changes, the 129 tests build their models through a minimal model description, so storage details stay out of them.
+3. ⬜ Decide and make the object storage change, and add the millisecond time type. Both touch most of the code. If storage changes, the tests build their models through a minimal model description, so storage details stay out of them.
 4. ⬜ Headless run without recording.
 5. ⬜ Throwaway prototype of restore and replay, for real cost figures.
 6. ⬜ Read-ahead `LiveSession`, if the prototype holds up. If it doesn't, reconsider the design with the owner.
@@ -131,6 +132,8 @@ The Statistics session decides where statistics fit in this order.
 `ExitTicket` was designed with capacity in mind, because a whole Station stops at once, but that's untested until capacity exists.
 
 **Baseline, for comparing step 2's benchmark:** the demo model in a release build with no logger and no view, single runs on the owner's PC at `653d3f4`. 5.6M events/s, 19.8M events per simulated year, one simulated year in about 3.3 s. One `advance_to` of a year returns 38M occurrences (1.2 GB of data, a 2.1 GB `Vec`). The same year in one-hour slices with occurrences dropped took 2.9 s, so memory is the main cost of occurrences, and the other 88% of the time hasn't been profiled.
+
+**After step 1:** 15.5M events per simulated year, down from 19.3M to 21.3M across seeds 0 to 4, with the same MUs leaving. Speed wasn't measured, so step 2's benchmark should take a new baseline.
 
 ## Architecture review
 
@@ -164,8 +167,9 @@ What each stage needs:
 
 ## Known problems
 
-- **Long runs die with a false `ZeroTimeLoop`:** the demo model failed on all 5 seeds tried, after 2.3 to 15.6 simulated years. At the failure on seed 1, Station 7's `blockedlist` held 1,558,189 entries. This looks like the runtime `add_blocked` not deduping, with each retry re-adding the predecessor to every successor that refuses it, until one release fires over a million retries at a single instant. Not yet confirmed by a fix. To check, run the demo model past 15 simulated years on several seeds. Print only the error, because the `Debug` output of `AdvanceFailure` includes every occurrence and can run to gigabytes.
-- **`Buffer` is broken** (from reading, not run): `process_mu_exit` takes an MU and then the move takes another, so a lone MU never leaves, and with two or more, one is lost per move. It also never notifies blocked predecessors. Its test only proves it replays consistently.
+- **`Buffer` is broken** (from reading, not run): `process_mu_exit` takes an MU and then the move takes another, so a lone MU never leaves, and with two or more, one is lost per move. It also never notifies blocked predecessors, and as a predecessor it ignores a retry's `from`. Its test only proves it replays consistently.
+- **A predecessor gives up its place when any MU moves:** this assumes one MU per object. Station capacity, the Buffer fix and exit strategies must revisit it.
+- **A stopped predecessor loses its place** (from reading): a retry that finds it stopped is used up, so it lists itself again at the back after its repair. The owner may want it to keep its place. Decide when `StopCtrl` is built.
 - **Source with several successors** (from reading): a `BlockedRetry` can move an MU before its interval ends, because `is_exit_allowed` is always true.
 - **Illegal connections panic** (from reading): an edge into a Source, or a self-loop. There's no validation until candidate 3.
 - **`pred` is never read**, but constructors still take it, and `succ`/`pred` `Rc` cycles leak when a model is dropped.
@@ -191,7 +195,7 @@ What each stage needs:
 
 ## Possible next steps
 
-1. Follow the build order, starting with the `blockedlist` fix. GitHub issue #3 holds the full spec.
+1. Follow the build order, starting with step 2, the benchmark. GitHub issue #3 holds the full spec.
 2. Run `/update-wiki` when convenient, so the docs stop describing removed code.
 
 Candidate 7 should still be decided before `StopCtrl` gets written, and the UI technology is still undecided. Ask the owner rather than assume if the UI should come sooner.

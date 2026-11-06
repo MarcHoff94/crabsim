@@ -140,7 +140,7 @@ pub fn list_blocked(blockedlist: &mut Vec<u32>, id_blocked: u32) {
 
 /// Empties the list into one retry for each predecessor, longest-waiting first. A retry that
 /// is refused lists its predecessor again, so those still waiting keep their order.
-pub fn retries_for_blocked(blockedlist: &mut Vec<u32>) -> Option<Vec<EventTemplate>> {
+pub fn retries_for_blocked(blockedlist: &mut Vec<u32>, from: u32) -> Option<Vec<EventTemplate>> {
 	if blockedlist.is_empty() {
 		return None;
 	}
@@ -148,7 +148,7 @@ pub fn retries_for_blocked(blockedlist: &mut Vec<u32>) -> Option<Vec<EventTempla
 		blockedlist
 			.drain(..)
 			.map(|blocked_id| EventTemplate {
-				eventtype: EventType::BlockedRetry,
+				eventtype: EventType::BlockedRetry { from },
 				exec_time: Duration::from_millis(0),
 				object_id: blocked_id,
 				seq: 0,
@@ -261,6 +261,28 @@ pub fn try_to_move_to_successor_with_strategy<
 		}
 	}
 	Ok(None)
+}
+
+/// Tries only one successor, whichever the other rules would have picked.
+struct OnlySuccessor(usize);
+impl DistributionStrategy for OnlySuccessor {
+	fn order(&self, _n: usize, _start: usize) -> Vec<usize> {
+		vec![self.0]
+	}
+}
+
+/// Answers a retry by trying only the successor that sent it. Any other successor that has
+/// room has sent retries of its own, to whoever has waited longest for it.
+pub fn retry_move_to_successor<T: SuccessorContainer + EventInterface>(
+	obj: &mut T,
+	context: &mut EventContext,
+	from: u32,
+) -> Result<Option<EventTemplate>, MaterialflowError> {
+	let sender = obj.successors().iter().position(|succ| *succ.borrow().get_object_id() == from);
+	match sender {
+		Some(index) => try_to_move_to_successor_with_strategy(obj, context, &OnlySuccessor(index)),
+		None => Ok(None),
+	}
 }
 
 /// Backwards-compatible default that uses round-robin ordering.

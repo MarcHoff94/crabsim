@@ -81,7 +81,7 @@ impl MaterialFlow for BufferStation {
     fn add_blocked(&mut self, id: u32) { list_blocked(&mut self.blockedlist, id); }
     fn remove_blocked(&mut self, id: u32) { self.blockedlist.retain(|&listed| listed != id); }
     fn notify_blocked_predecessors(&mut self) -> Result<Option<Vec<EventTemplate>>, MaterialflowError> {
-        Ok(retries_for_blocked(&mut self.blockedlist))
+        Ok(retries_for_blocked(&mut self.blockedlist, self.base.object_id))
     }
     fn as_any(&mut self) -> &mut dyn std::any::Any { self }
 }

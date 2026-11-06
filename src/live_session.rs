@@ -6,9 +6,10 @@ use crate::observation::{Occurrence, RunState};
 use crate::simulation_run::SimulationRun;
 use std::{
     any::Any,
+    collections::VecDeque,
     fmt,
     panic::{catch_unwind, AssertUnwindSafe},
-    sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender, TryRecvError},
+    sync::mpsc::{channel, sync_channel, Receiver, RecvTimeoutError, Sender, SyncSender, TryRecvError, TrySendError},
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
@@ -19,6 +20,14 @@ const TICK: Duration = Duration::from_millis(16);
 /// How many events a session processes before it checks for commands again, so a long
 /// catch-up can't keep a command waiting.
 const EVENTS_PER_SLICE: usize = 1_000;
+
+/// How many unread observations a session lets build up before it stops advancing until
+/// they are read. It keeps handling commands meanwhile, and no observation is ever dropped.
+pub const OBSERVATION_BACKLOG_LIMIT: usize = 256;
+
+/// How long `sync` waits before it gives up. Far longer than a session needs to reach the
+/// clock or a backlog, so only a session stuck on something else runs into this.
+const SYNC_DEADLINE: Duration = Duration::from_secs(30);
 
 /// Where a session's wall time comes from. Only differences between readings matter.
 pub trait Clock: Send + 'static {
@@ -79,6 +88,11 @@ pub enum SessionError {
     InvalidSpeed(f64),
     /// The session thread panicked and has ended. Only a new session can continue.
     Panicked(String),
+    /// `sync` stopped waiting because too many observations are unread, so the session won't
+    /// go further until they are read. Earlier commands have been handled.
+    Backlogged,
+    /// `sync` reached its deadline before the session got there.
+    SyncTimedOut,
     /// The session thread is gone.
     Ended,
 }
@@ -90,6 +104,8 @@ impl fmt::Display for SessionError {
             SessionError::ResetRequired => write!(f, "the simulation run reported an error; reset it first"),
             SessionError::InvalidSpeed(speed) => write!(f, "{speed} is not a speed: it has to be positive and finite"),
             SessionError::Panicked(message) => write!(f, "the live session panicked: {message}"),
+            SessionError::Backlogged => write!(f, "too many observations are unread; read them first"),
+            SessionError::SyncTimedOut => write!(f, "the live session did not catch up in time"),
             SessionError::Ended => write!(f, "the live session has ended"),
         }
     }
@@ -102,7 +118,7 @@ enum Command {
     Halt,
     Reset,
     SetSpeed(f64),
-    Sync(Sender<()>),
+    Sync(Sender<Result<(), SessionError>>),
 }
 
 /// The handle to a simulation run living on its own thread. Dropping it ends the thread.
@@ -121,14 +137,19 @@ impl LiveSession {
         C: Clock,
     {
         let (commands, command_inbox) = channel();
-        let (observer, observations) = channel();
+        let (observer, observations) = sync_channel(OBSERVATION_BACKLOG_LIMIT);
         let thread = thread::spawn(move || {
-            let panic_observer = observer.clone();
-            let outcome = catch_unwind(AssertUnwindSafe(move || {
-                SessionThread::new(build(), clock, command_inbox, observer).run();
+            let mut outbox = Outbox { observer, unsent: VecDeque::new() };
+            let outcome = catch_unwind(AssertUnwindSafe(|| {
+                SessionThread::new(build(), clock, command_inbox, &mut outbox).run();
             }));
             if let Err(panic) = outcome {
-                let _ = panic_observer.send(Observation::Error(SessionError::Panicked(panic_message(panic))));
+                // By now the command channel is closed, so commands find the session has ended.
+                outbox.send(Observation::Error(SessionError::Panicked(panic_message(panic))));
+                while outbox.is_backlogged() {
+                    thread::sleep(TICK);
+                    outbox.flush();
+                }
             }
         });
         LiveSession { commands, observations, thread: Some(thread) }
@@ -162,10 +183,23 @@ impl LiveSession {
 
     /// Blocks until the session has handled every earlier command and advanced to the
     /// clock's current time, with everything that produced waiting in `observations`.
+    ///
+    /// It always returns. `Backlogged` means earlier commands are handled but the session
+    /// won't go further until observations are read, so read them and sync again. `SyncTimedOut`
+    /// means neither happened by a generous deadline.
     pub fn sync(&self) -> Result<(), SessionError> {
+        self.sync_within(SYNC_DEADLINE)
+    }
+
+    /// `sync` with a deadline of your choosing.
+    pub fn sync_within(&self, deadline: Duration) -> Result<(), SessionError> {
         let (done, wait) = channel();
         self.send(Command::Sync(done))?;
-        wait.recv().map_err(|_| SessionError::Ended)
+        match wait.recv_timeout(deadline) {
+            Ok(outcome) => outcome,
+            Err(RecvTimeoutError::Timeout) => Err(SessionError::SyncTimedOut),
+            Err(RecvTimeoutError::Disconnected) => Err(SessionError::Ended),
+        }
     }
 
     pub fn observations(&self) -> &Receiver<Observation> {
@@ -181,6 +215,8 @@ impl Drop for LiveSession {
     fn drop(&mut self) {
         // The thread ends when it finds its command channel closed.
         (self.commands, _) = channel();
+        // A thread that panicked stays until its report is out, and nothing else will read it.
+        while self.observations.recv().is_ok() {}
         if let Some(thread) = self.thread.take() {
             // A panic has already been reported as an observation.
             let _ = thread.join();
@@ -213,14 +249,47 @@ impl Pace {
 /// A `sync` waiting for the run to reach the simulation time the clock showed when it arrived.
 struct Waiter {
     goal: Duration,
-    done: Sender<()>,
+    done: Sender<Result<(), SessionError>>,
 }
 
-struct SessionThread<C> {
+/// Observations on their way out. Sending never blocks the session thread, so it can always
+/// handle commands. What the channel has no room for waits here, in order, and a session
+/// doesn't advance while anything is waiting, so only commands can add more.
+struct Outbox {
+    observer: SyncSender<Observation>,
+    unsent: VecDeque<Observation>,
+}
+
+impl Outbox {
+    fn send(&mut self, observation: Observation) {
+        self.unsent.push_back(observation);
+        self.flush();
+    }
+
+    fn flush(&mut self) {
+        while let Some(observation) = self.unsent.pop_front() {
+            match self.observer.try_send(observation) {
+                Ok(()) => {}
+                Err(TrySendError::Full(observation)) => {
+                    self.unsent.push_front(observation);
+                    return;
+                }
+                // Nobody is listening once the handle is gone.
+                Err(TrySendError::Disconnected(_)) => self.unsent.clear(),
+            }
+        }
+    }
+
+    fn is_backlogged(&self) -> bool {
+        !self.unsent.is_empty()
+    }
+}
+
+struct SessionThread<'a, C> {
     run: SimulationRun,
     clock: C,
     commands: Receiver<Command>,
-    observer: Sender<Observation>,
+    outbox: &'a mut Outbox,
     speed: f64,
     /// Present while the session is advancing, and absent while it is halted.
     pace: Option<Pace>,
@@ -230,13 +299,13 @@ struct SessionThread<C> {
     waiters: Vec<Waiter>,
 }
 
-impl<C: Clock> SessionThread<C> {
-    fn new(run: SimulationRun, clock: C, commands: Receiver<Command>, observer: Sender<Observation>) -> Self {
+impl<'a, C: Clock> SessionThread<'a, C> {
+    fn new(run: SimulationRun, clock: C, commands: Receiver<Command>, outbox: &'a mut Outbox) -> Self {
         SessionThread {
             run,
             clock,
             commands,
-            observer,
+            outbox,
             speed: 1.0,
             pace: None,
             catching_up: false,
@@ -248,6 +317,7 @@ impl<C: Clock> SessionThread<C> {
     fn run(mut self) {
         let mut busy = false;
         loop {
+            self.outbox.flush();
             match self.next_command(busy) {
                 NextCommand::HandleGone => return,
                 NextCommand::Command(command) => {
@@ -265,12 +335,13 @@ impl<C: Clock> SessionThread<C> {
 
     /// Waits for a command only as long as there is nothing else to do.
     fn next_command(&self, busy: bool) -> NextCommand {
-        let received = if busy || self.catching_up || !self.waiters.is_empty() {
+        let backlogged = self.outbox.is_backlogged();
+        let received = if busy || (self.catching_up && !backlogged) || !self.waiters.is_empty() {
             match self.commands.try_recv() {
                 Err(TryRecvError::Empty) => return NextCommand::None,
                 other => other.ok(),
             }
-        } else if self.pace.is_some() {
+        } else if self.pace.is_some() || backlogged {
             match self.commands.recv_timeout(TICK) {
                 Err(RecvTimeoutError::Timeout) => return NextCommand::None,
                 other => other.ok(),
@@ -352,8 +423,14 @@ impl<C: Clock> SessionThread<C> {
         self.pace.map(|pace| pace.target(self.clock.elapsed(), self.speed))
     }
 
-    /// Advances towards the clock's time, by at most `EVENTS_PER_SLICE` events.
+    /// Advances towards the clock's time, by at most `EVENTS_PER_SLICE` events, unless too many
+    /// observations are unread. The pace stays as it is, so the time spent waiting for a reader
+    /// counts and is caught up on afterwards. The run's outcome doesn't depend on where the
+    /// slices fall.
     fn advance_one_slice(&mut self) {
+        if self.outbox.is_backlogged() {
+            return;
+        }
         let Some(target) = self.target() else { return };
         let time_before = self.run.time();
         match self.run.advance_bounded(target, EVENTS_PER_SLICE) {
@@ -373,16 +450,21 @@ impl<C: Clock> SessionThread<C> {
         let everyone = !self.catching_up || self.pace.is_none();
         let time = self.run.time();
         let next_event = self.run.next_event_time();
+        // A backlogged session can't promise everything is waiting in `observations`, and
+        // nobody can read while a sync is waiting, so no waiter would ever be released.
+        let backlogged = self.outbox.is_backlogged();
         self.waiters.retain(|waiter| {
             let reached = time >= waiter.goal && next_event.is_none_or(|next| next > waiter.goal);
-            if everyone || reached {
-                let _ = waiter.done.send(());
+            if backlogged {
+                let _ = waiter.done.send(Err(SessionError::Backlogged));
+            } else if everyone || reached {
+                let _ = waiter.done.send(Ok(()));
             }
-            !(everyone || reached)
+            !(backlogged || everyone || reached)
         });
     }
 
-    fn report(&self, occurrences: Vec<Occurrence>) {
+    fn report(&mut self, occurrences: Vec<Occurrence>) {
         if !occurrences.is_empty() {
             self.observe(Observation::Occurrences(occurrences));
         }
@@ -405,9 +487,8 @@ impl<C: Clock> SessionThread<C> {
         }
     }
 
-    fn observe(&self, observation: Observation) {
-        // Nobody is listening once the handle is gone, and the thread is about to end then.
-        let _ = self.observer.send(observation);
+    fn observe(&mut self, observation: Observation) {
+        self.outbox.send(observation);
     }
 }
 

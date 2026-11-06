@@ -1,10 +1,14 @@
-//! Behaviour of a live session, tested at its seam: commands in, observations out,
-//! with a fake clock so nothing here sleeps or depends on timing.
+//! Behaviour of a live session, tested at its seam: commands in, observations out.
+//!
+//! Nearly every test uses a fake clock with `sync`, so what it sees follows from its commands.
+//! Real time still plays a part in a few places. The catch-up tests expect a command to land
+//! before a very large catch-up finishes, and one test runs on the real clock. Deadlines turn
+//! a hang into a failure, so an extremely overloaded machine could fail a test that is fine.
 
 use crabsim::{
     Clock, Drain, FailureProfile, LiveSession, Observation, Occurrence, OccurrenceKind, RunState,
     EventType, RunError, SessionError, SessionStatus, SimulationRun, SingleStation, Source, WallClock,
-    ZERO_TIME_EVENT_LIMIT,
+    OBSERVATION_BACKLOG_LIMIT, ZERO_TIME_EVENT_LIMIT,
 };
 use crabsim::random_numbers::Distribution;
 use std::{
@@ -39,6 +43,7 @@ struct Watched {
     session: LiveSession,
     clock: FakeClock,
     state: Option<RunState>,
+    unread: Seen,
 }
 
 #[derive(Default)]
@@ -52,32 +57,50 @@ struct Seen {
 impl Watched {
     fn new(build: impl FnOnce() -> SimulationRun + Send + 'static) -> Watched {
         let clock = FakeClock::default();
-        Watched { session: session_on(build, clock.clone()), clock, state: None }
+        Watched { session: session_on(build, clock.clone()), clock, state: None, unread: Seen::default() }
     }
 
     /// Moves the clock, once the session has handled every command given so far. A command
     /// reads the clock when the session gets to it, not when it was given.
-    fn at(&self, elapsed_secs: u64) {
-        self.session.sync().unwrap();
+    fn at(&mut self, elapsed_secs: u64) {
+        self.settle();
         self.clock.set(secs(elapsed_secs));
     }
 
-    /// Waits for the session to catch up, then collects what it reported.
-    fn look(&mut self) -> Seen {
-        self.session.sync().unwrap();
-        let mut seen = Seen::default();
-        for observation in self.session.observations().try_iter() {
-            match observation {
-                Observation::Occurrences(new) => seen.occurrences.extend(new),
-                Observation::State(state) => {
-                    seen.states += 1;
-                    self.state = Some(state);
+    /// Waits for the session to catch up, reading whatever it needs read to get there.
+    fn settle(&mut self) {
+        let deadline = Instant::now() + PATIENCE;
+        loop {
+            match self.session.sync() {
+                Ok(()) => return,
+                Err(SessionError::Backlogged) => {
+                    assert!(Instant::now() < deadline, "the session never caught up");
+                    self.collect();
                 }
-                Observation::Status(status) => seen.statuses.push(status),
-                Observation::Error(error) => seen.errors.push(error),
+                Err(error) => panic!("sync failed: {error}"),
             }
         }
-        seen
+    }
+
+    fn collect(&mut self) {
+        for observation in self.session.observations().try_iter() {
+            match observation {
+                Observation::Occurrences(new) => self.unread.occurrences.extend(new),
+                Observation::State(state) => {
+                    self.unread.states += 1;
+                    self.state = Some(state);
+                }
+                Observation::Status(status) => self.unread.statuses.push(status),
+                Observation::Error(error) => self.unread.errors.push(error),
+            }
+        }
+    }
+
+    /// Waits for the session to catch up, then hands over what it reported.
+    fn look(&mut self) -> Seen {
+        self.settle();
+        self.collect();
+        std::mem::take(&mut self.unread)
     }
 
     fn look_without_errors(&mut self) -> Vec<Occurrence> {
@@ -189,6 +212,17 @@ fn fails_at_25() -> SimulationRun {
     let mut run = source_into_drain();
     run.init().unwrap();
     run.schedule_event(secs(25), EventType::StartFailure, 0).unwrap();
+    run
+}
+
+/// Source -> Drain with an MU every second, and an edge into a Source that panics at t=1000.
+fn panics_at_1000() -> SimulationRun {
+    let mut run = busy_source();
+    let first = Rc::new(RefCell::new(Source::new(0, secs(1000), Vec::new())));
+    let second = Rc::new(RefCell::new(Source::new(0, secs(1000), Vec::new())));
+    first.borrow_mut().succ = vec![second.clone()];
+    run.add_object(first);
+    run.add_object(second);
     run
 }
 
@@ -691,6 +725,181 @@ fn halt_interrupts_a_zero_time_loop() {
     assert_eq!(watched.look().errors, vec![], "it halted before reaching the limit");
 }
 
+// ---------- Backpressure ----------
+
+/// The most observations a session can have reported once it refuses to go further: a full
+/// channel, the rest of the slice that filled it, and the status from one command.
+const MOST_UNREAD: usize = OBSERVATION_BACKLOG_LIMIT + 3;
+
+/// Gives a session `ticks` separate advances, without reading anything, until it says it has
+/// stopped. Fails if it never does.
+fn tick_until_backlogged(watched: &Watched, ticks: u64) -> u64 {
+    // Start reads the clock when the session gets to it, so it has to get there first.
+    watched.session.sync().unwrap();
+    for tick in 1..=ticks {
+        watched.clock.set(secs(tick));
+        match watched.session.sync() {
+            Ok(()) => {}
+            Err(SessionError::Backlogged) => return tick,
+            Err(error) => panic!("sync failed: {error}"),
+        }
+    }
+    panic!("{ticks} advances without a reader did not stop the session");
+}
+
+#[test]
+fn sync_returns_at_an_enormous_speed_with_a_recurring_source() {
+    finishes("sync at an enormous speed", || {
+        let session = session_on(busy_source, WallClock::new());
+        session.set_speed(f64::MAX).unwrap();
+        session.start().unwrap();
+        // The goal saturates and is never reached, and nobody can be reading during a sync.
+        assert_eq!(session.sync(), Err(SessionError::Backlogged));
+        assert_eq!(session.sync(), Err(SessionError::Backlogged));
+
+        session.halt().unwrap();
+        let deadline = Instant::now() + PATIENCE;
+        while session.sync() != Ok(()) {
+            assert!(Instant::now() < deadline, "a halted session should settle once read");
+            session.observations().try_iter().for_each(drop);
+        }
+    });
+}
+
+#[test]
+fn a_session_nobody_reads_stops_advancing() {
+    let mut watched = Watched::new(busy_source);
+    watched.session.start().unwrap();
+    watched.at(HEAVY_CATCH_UP);
+    assert_eq!(watched.session.sync(), Err(SessionError::Backlogged));
+    assert_eq!(watched.session.sync(), Err(SessionError::Backlogged), "and it stays that way");
+
+    watched.session.halt().unwrap();
+    assert_eq!(watched.session.sync(), Err(SessionError::Backlogged));
+    let observations: Vec<Observation> = watched.session.observations().try_iter().collect();
+    assert!(observations.len() <= MOST_UNREAD, "{} observations were waiting", observations.len());
+    let last_state = observations
+        .iter()
+        .rev()
+        .find_map(|o| if let Observation::State(state) = o { Some(state) } else { None })
+        .expect("it should have reported state");
+    assert!(last_state.time < secs(HEAVY_CATCH_UP), "it advanced to {:?}", last_state.time);
+}
+
+#[test]
+fn an_idle_running_session_does_not_flood_a_reader_that_is_not_there() {
+    let watched = Watched::new(|| SimulationRun::new(0));
+    watched.session.start().unwrap();
+    let limit = OBSERVATION_BACKLOG_LIMIT as u64;
+    let stopped_at = tick_until_backlogged(&watched, 2 * limit);
+    assert!(stopped_at <= limit, "an advance reports one state, so it stopped too late: {stopped_at}");
+
+    watched.clock.set(secs(5 * limit));
+    assert_eq!(watched.session.sync(), Err(SessionError::Backlogged));
+    watched.session.halt().unwrap();
+    assert_eq!(watched.session.sync(), Err(SessionError::Backlogged));
+    let waiting = watched.session.observations().try_iter().count();
+    assert!(waiting <= MOST_UNREAD, "{waiting} observations were waiting");
+}
+
+#[test]
+fn a_session_continues_towards_the_clock_once_read() {
+    let mut watched = Watched::new(|| SimulationRun::new(0));
+    watched.session.start().unwrap();
+    let stopped_at = tick_until_backlogged(&watched, 2 * OBSERVATION_BACKLOG_LIMIT as u64);
+    watched.clock.set(secs(stopped_at + 100));
+    assert_eq!(watched.time(), secs(stopped_at + 100), "time it spent stopped still counts");
+}
+
+#[test]
+fn commands_are_handled_while_a_session_waits_for_a_reader() {
+    let mut watched = Watched::new(busy_source);
+    watched.session.start().unwrap();
+    watched.at(HEAVY_CATCH_UP);
+    assert_eq!(watched.session.sync(), Err(SessionError::Backlogged));
+
+    assert_eq!(watched.session.set_speed(-1.0), Err(SessionError::InvalidSpeed(-1.0)));
+    watched.session.set_speed(2.0).unwrap();
+    watched.session.reset().unwrap();
+    assert_eq!(watched.session.sync(), Err(SessionError::Backlogged), "reset was handled, nothing got dropped");
+
+    let seen = watched.look();
+    assert_eq!(seen.statuses, vec![SessionStatus::Advancing, SessionStatus::Halted], "in order, after what came before");
+    let state = watched.state.as_ref().unwrap();
+    assert_eq!(state.time, Duration::ZERO);
+    assert!(!state.initialised);
+
+    watched.at(HEAVY_CATCH_UP + 100);
+    watched.session.start().unwrap();
+    watched.at(HEAVY_CATCH_UP + 105);
+    assert_eq!(watched.time(), secs(10), "the speed set during the wait applies");
+}
+
+#[test]
+fn a_panic_with_every_slot_taken_is_still_reported_in_order_after_everything_else() {
+    let watched = Watched::new(panics_at_1000);
+    watched.session.start().unwrap();
+    let stopped_at = tick_until_backlogged(&watched, 2 * OBSERVATION_BACKLOG_LIMIT as u64);
+    assert!(stopped_at < 1000, "the panic should not have come yet");
+    watched.clock.set(secs(1000));
+
+    // Read one at a time, so that the slice which panics finds the channel full again.
+    let mut read = Vec::new();
+    let deadline = Instant::now() + PATIENCE;
+    while watched.session.sync() != Err(SessionError::Ended) {
+        assert!(Instant::now() < deadline, "the session never reached its panic");
+        read.push(watched.session.observations().recv_timeout(PATIENCE).unwrap());
+    }
+    read.extend(watched.session.observations().try_iter());
+    let deadline = Instant::now() + PATIENCE;
+    while !matches!(read.last(), Some(Observation::Error(SessionError::Panicked(_)))) {
+        let left = deadline.saturating_duration_since(Instant::now());
+        read.push(watched.session.observations().recv_timeout(left).expect("the panic was never reported"));
+    }
+    finishes("dropping a session after reporting its panic", move || drop(watched.session));
+}
+
+#[test]
+fn dropping_a_session_whose_panic_nobody_read_does_not_hang() {
+    let watched = Watched::new(panics_at_1000);
+    watched.session.start().unwrap();
+    tick_until_backlogged(&watched, 2 * OBSERVATION_BACKLOG_LIMIT as u64);
+    watched.clock.set(secs(1000));
+    let deadline = Instant::now() + PATIENCE;
+    while watched.session.sync() != Err(SessionError::Ended) {
+        assert!(Instant::now() < deadline, "the session never reached its panic");
+        watched.session.observations().recv_timeout(PATIENCE).unwrap();
+    }
+    finishes("dropping a session whose panic is unread", move || drop(watched.session));
+}
+
+#[test]
+fn dropping_a_session_nobody_reads_does_not_hang() {
+    let mut watched = Watched::new(busy_source);
+    watched.session.start().unwrap();
+    watched.at(HEAVY_CATCH_UP);
+    assert_eq!(watched.session.sync(), Err(SessionError::Backlogged));
+    finishes("dropping a session waiting for a reader", move || drop(watched.session));
+}
+
+// ---------- The deadline on sync ----------
+
+#[test]
+fn sync_gives_up_at_its_deadline_on_a_session_that_is_not_getting_anywhere() {
+    let (release, blocked) = channel::<()>();
+    let session = session_on(
+        move || {
+            let _ = blocked.recv();
+            SimulationRun::new(0)
+        },
+        FakeClock::default(),
+    );
+    assert_eq!(session.sync_within(Duration::from_millis(20)), Err(SessionError::SyncTimedOut));
+
+    drop(release);
+    assert_eq!(session.sync(), Ok(()), "the session can be used once it is going again");
+}
+
 // ---------- Same seed, same outcome ----------
 
 const COMMON_TIME: u64 = 20_000;
@@ -766,6 +975,18 @@ fn the_same_seed_gives_the_same_occurrences_however_it_is_halted_and_sped_up() {
 }
 
 #[test]
+fn the_same_seed_gives_the_same_occurrences_when_read_only_after_a_long_wait() {
+    assert_watching_like_this_changes_nothing(|watched, _| {
+        watched.session.start().unwrap();
+        // Small advances report often, so nobody reading holds the session up early on.
+        let held_up_at = tick_until_backlogged(watched, 2 * OBSERVATION_BACKLOG_LIMIT as u64);
+        assert!(held_up_at < COMMON_TIME);
+        watched.collect();
+        watched.clock.set(secs(COMMON_TIME));
+    });
+}
+
+#[test]
 fn the_same_seed_gives_the_same_occurrences_when_halted_part_way_through_catching_up() {
     assert_watching_like_this_changes_nothing(|watched, occurrences| {
         let mut wall = 0;
@@ -798,7 +1019,7 @@ fn a_session_can_be_handed_to_another_thread_and_dropped_there() {
 
 #[test]
 fn dropping_a_running_session_does_not_hang() {
-    let watched = Watched::new(source_into_drain);
+    let mut watched = Watched::new(source_into_drain);
     watched.session.start().unwrap();
     watched.at(25);
     finishes("dropping a running session", move || drop(watched.session));
@@ -806,7 +1027,7 @@ fn dropping_a_running_session_does_not_hang() {
 
 #[test]
 fn dropping_a_session_part_way_through_a_catch_up_does_not_hang() {
-    let watched = Watched::new(busy_source);
+    let mut watched = Watched::new(busy_source);
     watched.session.start().unwrap();
     watched.at(HEAVY_CATCH_UP);
     watched.wait_for_catch_up_to_begin();
@@ -840,7 +1061,7 @@ fn a_panic_while_building_the_run_is_reported_and_hangs_nothing() {
 #[test]
 fn a_panic_during_a_run_is_reported_and_hangs_nothing() {
     // An edge into a Source panics when the first MU tries to move.
-    let watched = Watched::new(|| {
+    let mut watched = Watched::new(|| {
         let first = Rc::new(RefCell::new(Source::new(0, secs(1), Vec::new())));
         let second = Rc::new(RefCell::new(Source::new(0, secs(1), Vec::new())));
         first.borrow_mut().succ = vec![second.clone()];

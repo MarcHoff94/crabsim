@@ -1,39 +1,32 @@
 # crabsim handoff
 
-Written 2026-11-06 at the end of a working session. Read this first, then check it against the code and git, because it describes a moment in time.
+Written 2026-11-07 at the end of a working session. Read this first, then check it against the code and git, because it describes a moment in time.
 
-The project owner returned to this project after about six months away and didn't remember the state of the work, so this also covers what was found.
+**The next session is about the UI:** which technology to use and what matters most. Go to "The UI session" below.
 
 ## Start here
 
 1. Read `CLAUDE.md`.
 2. Read `GLOSSARY.md` and `docs/adr/`.
 3. Read "Agreed design" below. Most of it isn't recorded anywhere else.
-4. Ask the owner what they want to do next. "Possible next steps" lists the options.
+4. Read "The UI session" below, then start there with the owner. Decide before building.
 
 ## Current state
 
-Checked on 2026-11-06: the step 6 branch passes all 247 tests, with 1 long-run test ignored (`cargo test --all-targets`). The demo ran to the end in both modes on the same source code before it was merged.
+Checked on 2026-11-07: `master` at `f64aa16` passes all 247 tests, with 1 long-run test ignored (`cargo test --all-targets`).
 
-| Branch | Where | State |
-|---|---|---|
-| `master` | Local and GitHub, level | Has the repair, timing fix, PR 1, PR 2, the live session (PR 4), the glossary and this handoff |
-| `docs/glossary` | Local only | Merged into `master`, can be deleted |
-| `feat/simulation-run` | Local and GitHub | Merged through PR 2, can be deleted |
-| `chore/agent-skills-setup` | Local and GitHub | Merged through PR 1, can be deleted |
-| `fix/repair-build` | Local only | Merged into `master`, can be deleted |
+| Where | State |
+|---|---|
+| `master`, local and GitHub | Steps 1 to 6 of the build order, through PR 14. No PRs are open |
+| `prototype/restore-replay` | The throwaway prototype from step 5. Keep it, and never merge it |
+| Other branches | Merged, so they can be deleted, though the app's worktrees may be using some |
 
-Merged PRs: [#1 agent skills setup](https://github.com/MarcHoff94/crabsim/pull/1) and [#2 simulation run](https://github.com/MarcHoff94/crabsim/pull/2). The owner merges PRs on GitHub themselves, so fetch before assuming local `master` is current. The repo has no CI, so a local test run is the only check.
+The owner merges PRs on GitHub themselves, so fetch before assuming local `master` is current. The repo has no CI, so a local test run is the only check.
 
-## What happened in this session
+## How it got here
 
-1. **Skills set up:** `docs/agents/` and the `## Agent skills` section in `CLAUDE.md`. Issues live in GitHub Issues, using the default triage labels, which were created on GitHub. `gh` was installed with winget and signed in as MarcHoff94.
-2. **Found `master` broken:** three lines of work had forked from `d78c53f` and been merged badly, leaving 21 compile errors. The last good commit was `0e4db6f`.
-3. **Domain design sessions:** see "Agreed design".
-4. **Build repaired** (`3d75057`): 20 of 20 original tests passing again.
-5. **Failure timing fixed** (`068d2f4`): a short failure used to raise throughput, because a queued `MUExit` from before the failure still fired. A 5s failure gave exits at 70, 75, 130, 140, 190, and now gives 75, 135, 195.
-6. **Architecture review:** 8 candidates, listed below.
-7. **Candidates 1 and 2 built** (`408b632`, PR 2): `SimulationRun`, occurrences, typed state, per-object reset, view adapters. `crabsim-renderer`, its TCP code and `serde` were removed.
+- **2026-11-05 and earlier:** the owner came back after about six months away. `master` didn't build, and was repaired. The domain design was agreed, an architecture review was done, and `SimulationRun`, occurrences and the first `LiveSession` were built. `crabsim-renderer`, its TCP code and `serde` were removed.
+- **2026-11-06:** performance became the first design pillar, and steps 1 to 6 of the build order were designed and built. See "Build order".
 
 ## Agreed design
 
@@ -106,7 +99,7 @@ Performance is the first thing to weigh in design trade-offs. It is a guideline 
 - **MU ids** are unique across the model.
 
 ### Statistics (built for what today's model has)
-See `docs/design/statistics.md`, ADR 0003 and ADR 0004. Objects keep fixed-size, always-on statistics at two levels: machine state and MU time. Warm-up is a `clear_statistics()` call, and per-MU data exists only through recording occurrences. Pause, overlapping interruptions, capacity above 1, dwelling time and the other time bases aren't built, so their numbers stay at zero or at today's behaviour until step 7.
+See `docs/design/statistics.md`, ADR 0003 and ADR 0004. Objects keep fixed-size, always-on statistics at two levels: machine state and MU time. Warm-up is a `clear_statistics()` call, and per-MU data exists only through recording occurrences. Pause and overlap are built on Stations only. Capacity above 1, dwelling time and the other time bases aren't built, so their numbers stay at zero or at today's behaviour until step 7.
 
 ### User code (not built)
 The owner wants users to add their own source code later. The decisions so far:
@@ -118,7 +111,7 @@ The owner wants users to add their own source code later. The decisions so far:
 
 ## Build order
 
-Agreed on 2026-11-06, replacing the original repair plan, whose first two steps are done:
+Agreed on 2026-11-06, replacing the original repair plan:
 
 1. ✅ Fix `blockedlist` (longest waiting first, deduped), with a fast test of the rule and a long-run test of 25 simulated years, marked `#[ignore]` and run on demand in release (PR 6, PR 7). This cured the false `ZeroTimeLoop`.
 2. ✅ Add the benchmark, a tuned release profile and a first profile. `panic = "abort"` is out, because `LiveSession` relies on `catch_unwind`. See `docs/design/first-profile.md`.
@@ -126,7 +119,7 @@ Agreed on 2026-11-06, replacing the original repair plan, whose first two steps 
 4. ✅ Headless run without recording, with statistics for what today's model has. Memory is now flat with simulated length.
 5. ✅ Throwaway prototype of restore and replay, for real cost figures. It held up: see `docs/design/restore-replay-prototype.md`. The code is on the branch `prototype/restore-replay`, never to be merged.
 6. ✅ Read-ahead `LiveSession`, with Pause on Stations, going back, stepping forward and time modes.
-7. ⬜ The earlier domain work, in this order. The UI work also builds on step 6, and the owner may want it sooner, so ask.
+7. ⬜ The earlier domain work, in this order. It comes after the UI's first stage unless the owner says otherwise, and a UI needs some of it: see "What the engine doesn't give a UI yet".
    - Finish stops on the other three object types, including failure profiles. Pause and overlap on Stations are done, through `PauseOn` and `PauseOff` events, while `StopCtrl` is still `todo!()`, so decide what becomes of it.
    - Fix `Buffer`, test it, and add dwelling time.
    - Add the time bases.
@@ -154,27 +147,87 @@ Candidates from the review. "Strong" and "worth exploring" were the review's own
 |---|---|---|---|
 | 1 | Simulation run you can step, pause and reset | Strong | ✅ Done |
 | 2 | Observation seam, presentation out of the engine | Strong | ✅ Done |
-| 3 | Model as data, with one module that validates and builds it | Strong | Open. Needed for drag and drop, load and save |
+| 3 | Model as data, with one module that validates and builds it | Strong | Started: `ModelDescription` builds a model, but it can't be read, saved or validated. Needed for drag and drop, load and save |
 | 4 | Objects that report themselves | Strong | Partly done: state, connections and no more downcasts. Open: trim traits |
 | 5 | One MU movement module | Strong | Open. The same exit logic exists in about 6 slightly different copies |
 | 6 | Live session seam for the UI | Worth exploring | Built as read-ahead (ADR 0002) |
-| 7 | One shared stop module | Worth exploring | Open. Worth deciding before writing step 3 |
+| 7 | One shared stop module | Worth exploring | Open. Worth deciding before stops reach the other object types |
 | 8 | Reproducible runs and real errors | Worth exploring | Partly done: init order, event errors, stuck-timestamp guard, time representation |
 
 ADR 0001 must not be contradicted without flagging it. The review's HTML report was in a temporary folder and may be gone.
 
-## The UI goal
+## The UI session
 
-The owner wants to completely replace the CLI with a real UI.
-- **First:** a visualization of the code running, as a basis to build on.
+The owner wants to completely replace the CLI with a real UI, and to choose its technology in the next session. Nothing below is decided. Use the `grilling` skill, in rounds where "yes" accepts a recommendation, and check current facts about each technology with the `research` skill rather than from memory.
+
+### The goal
+
+- **First:** a visualization of a run, as a basis to build on.
 - **End goal:** drag and drop objects, configure them, start, stop, init and reset the simulation, animate and render it, watch it run, and control how fast simulation time passes.
+- **Debugging models:** the owner's stated main purpose of going back in time is to make models easier to debug and understand. So stepping back and forward, and seeing why an object is blocked or stopped, are core features rather than extras.
 
-What each stage needs:
-- **Watching a run:** the steppable run and occurrences (done), connection data (done), plus a view adapter.
-- **Controls and speed:** candidate 6.
-- **Drag and drop:** candidate 3.
+### What the engine gives a UI today
 
-**Undecided, and the owner's call:** UI technology, and desktop or browser. Node isn't installed on this PC, and neither are `wasm-pack` or `trunk`. Rust is cargo 1.91.1. The UI will probably need `serde` back. `crabsim-renderer` is gone, so there's currently no window at all.
+All of it is on `LiveSession` in `src/live_session.rs`, and `CLAUDE.md` has the overview.
+
+- **Commands:** `start`, `halt`, `reset`, `set_speed`, `set_time_mode`, `go_back`, `step_forward`, `request_state`, `pause`, `resume`, `clear_statistics`.
+- **Observations**, read from a channel: `Occurrences`, `ShownTime`, `State`, `Status`, `Error`.
+- **Rebuilding the picture:** one full state at Init, then occurrences give each object's contents, process state, stop and remaining time. `WorkStarted` and `MuCreated` carry durations, so a progress bar needs no further messages. Tests prove this on 3 models: a line with failures, with and without overlapping pauses, a line that blocks, and the full demo. Buffer is left out, because its movement is broken.
+- **Statistics:** `request_state` gives exact numbers for the instant on screen in a few milliseconds, so ask a few times a second rather than every frame.
+- **Going back:** usually under 15 ms, and up to about 400 ms for far jumps on a large model past the memory budget. See `docs/design/first-profile.md`.
+- **Moves take no simulation time:** any gliding of an MU between objects is purely visual, and the UI invents its length.
+
+### What the engine doesn't give a UI yet
+
+- **Model as data (candidate 3):** `ModelDescription` can only be built up. It can't be read, saved or loaded, doesn't validate connections, and holds no names or positions. `serde` was removed. `ObjectState` reports kinds and successors, but not configuration such as process times. Drag and drop needs all of this, while a first visualization needs little of it.
+- **Changing a model:** a session builds its run once, from a closure, so a changed model means a new session. Configuration changes after Reset, as agreed, have no API.
+- **The picture logic exists only in a test:** `Rebuilt` and `apply_occurrence` in `tests/live_session.rs`. A Rust UI should move it into the library. A UI in another language has to port it, and then has two copies to keep in step.
+- **Stepping back by instants:** the UI has to remember the instant times it has seen, because the session can't list them. That list grows with the run, so decide how much to keep.
+- **Objects:** Pause works only on Stations, and other objects return an error. Buffer's movement is still broken, so a palette offering Buffer needs step 7 first.
+- **Real playback is unmeasured:** tests mostly use a fake clock, and nothing has driven a session on a real clock for long. One thread alternates between computing and releasing, on a 16 ms tick. The first UI is what will show whether that stutters.
+- **Reading has to keep up:** past 256 unread observations a session stops releasing, so a UI drains the channel every frame. At high speed, one observation can hold up to 1,000 instants, so it can't draw each of them.
+
+### Questions to settle
+
+In roughly this order, since later ones depend on earlier ones:
+
+1. **Who is it for?** Only the owner, or other people too? That decides how much installing and sharing matter.
+2. **Desktop or browser?** Must it run without installing anything? Would it ever run on a remote machine?
+3. **Which technology?** See the options below.
+4. **What is the first stage, exactly?** For example the demo model drawn with live contents, Start, Halt, speed and stepping. What is deliberately left out?
+5. **How does it look at scale?** The target is a few thousand objects. Does the first version have to draw them all, animated? Pan and zoom? What happens at speeds too high to watch?
+6. **Where does layout come from?** Positions are chosen by the user in the end. What does the first stage use before drag and drop exists?
+7. **How is it structured?** A separate crate in a workspace would keep UI dependencies out of the engine, in line with the pillar that views cost nothing when absent. That means turning this repo into a workspace.
+8. **What happens to the CLI?** The UI is meant to replace it. The headless run stays as a library use, and the benchmark and tests need no CLI.
+9. **What needs doing first in the engine?** Probably moving the picture logic into the library, then model as data when drag and drop comes closer. Does any of step 7 have to come first?
+
+### Options to weigh
+
+From memory, so check the current state of each with `research`. The main dividing line is whether the UI runs in the same process as the engine, or has to send it everything across a boundary.
+
+| Option | In process with the engine? | Worth knowing |
+|---|---|---|
+| Native Rust, immediate mode, such as egui | Yes | All Rust, nothing else to install, simple to draw a custom canvas, and redraws everything each frame |
+| Native Rust, retained, such as iced or Slint | Yes | All Rust, and more structured, but custom canvases may be more work |
+| Game engine, such as Bevy | Yes | Built for drawing many moving things, with heavier builds and more than a form-heavy UI needs |
+| Rust with a web front end in a webview, such as Tauri | No | Web diagram and UI libraries, but every observation crosses a boundary, and the picture logic moves to the other side |
+| Browser, with a local Rust server over WebSocket | No | Any browser, and the engine at full native speed, but the same boundary, plus a server to run. The removed `crabsim-renderer` used TCP, so its history in git may be useful |
+| Browser, with the engine compiled to WebAssembly | Yes | Nothing to install and easy to share, but `LiveSession` uses `thread::spawn` and `Instant`, which don't simply work there, so the session would need rework, and it would run slower than native |
+
+### What should weigh most
+
+- **Performance stays the first pillar.** A UI is an optional layer, and a headless run must keep costing nothing because of it. Show before and after numbers from `cargo bench --bench reference`.
+- **The boundary.** A session sends about 2.5 occurrences per event. Anything that serializes them across a boundary pays for that at high speed, and has to be measured before it is relied on.
+- **Determinism.** Nothing in a UI may affect results: same seed and same interventions, same outcome. Tests already hold the session to this.
+- **Domain language.** Use `GLOSSARY.md` in the UI too: Halt rather than Pause for the whole run, and Pause for an object.
+
+### This PC
+
+Checked on 2026-11-07, on Windows 11:
+
+- **Installed:** Rust 1.91.1 with cargo and rustup, for `x86_64-pc-windows-msvc` only. WebView2 runtime 156, and `gh`.
+- **Not installed:** Node, npm, pnpm, bun, `wasm-pack`, `trunk`, Tauri's CLI, and the `wasm32` target.
+- **No window yet:** `crabsim-renderer` is gone, so nothing draws one.
 
 ## Known problems
 
@@ -192,20 +245,22 @@ What each stage needs:
 - **Wiki hook is off on this PC:** `core.hooksPath` is unset. Turning it on with `git config core.hooksPath .githooks` makes every `src/` commit run `claude` in the background.
 - **`crabsim.log` is tracked** in git, and running the demo from the repo root may change it.
 - **[Dependabot alert](https://github.com/MarcHoff94/crabsim/security/dependabot/1):** one low-severity alert, not looked into.
-- **Finished branches** can be deleted (see the table above).
+- **Finished branches** can be deleted (see "Current state").
+- **Not decided:** whether to replace the new-events `Vec`, and whether to tune statistics, which cost about 7 to 12% of a headless run.
 
 ## How to work with the owner
 
 - **Plain language and domain precision matter.** The owner knows material-flow simulation well and corrects loose models, for example that a ParallelStation is one machine rather than several. Listen for this and update `GLOSSARY.md` as terms settle.
 - **Design before code.** The `grilling` and `domain-modeling` skills worked well, in rounds with recommendations where "yes" accepts. The owner often adds a requirement to a "yes", so read the whole answer.
 - **Commit, push and merge only when asked.** The owner merges PRs on GitHub.
-- **Test-first at agreed seams.** Behaviour tests go through `SimulationRun` in `tests/`.
-- **Check that tests can fail.** Deliberately breaking the code exposed real gaps: a same-seed replay can't detect events left over after Reset, because they land on the replay's own event times. See `CLAUDE.md`.
+- **Test-first at agreed seams.** Behaviour tests go through `SimulationRun` in `tests/`, and session tests go through commands and observations with a fake clock.
+- **Check that tests can fail.** Deliberately breaking the code keeps exposing real gaps. A same-seed replay can't detect events left over after Reset, because they land on the replay's own event times, and in step 6 this found a test that never exercised the rule it was named after. See `CLAUDE.md`.
+- **Prove behaviour didn't change.** Steps 3, 4 and 6 hashed every occurrence and the final state against `master` before trusting a refactor, with a throwaway program outside the repo. Event counts alone wouldn't have shown a change in order.
+- **Say what wasn't measured.** The owner reads the limits of a result, so say what a figure doesn't cover, and which ones are single runs.
 - **The shell is Windows PowerShell 5.1.** `&&` doesn't work there, so give commands one per line. Git Bash is available to agents through the Bash tool.
 
 ## Possible next steps
 
-1. Follow the build order with step 7, or start on the UI, which can now build on the live session. Ask the owner which. GitHub issue #3 holds the full spec.
-2. Run `/update-wiki` when convenient, so the docs stop describing removed code.
-
-Candidate 7 should still be decided before `StopCtrl` gets written, and the UI technology is still undecided. Ask the owner rather than assume if the UI should come sooner.
+1. **The UI session,** as above. This is what the owner asked for next.
+2. Step 7 of the build order, for whatever the UI turns out to need first.
+3. Run `/update-wiki` when convenient, so the docs stop describing removed code.

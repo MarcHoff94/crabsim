@@ -180,13 +180,13 @@ This design was written alongside ADR 0002 rather than after it.
 
 - **Time type:** `Duration` above stands for simulation time, which is now `SimTime`.
 - **Recording:** the setting has to be changeable at any time, because replay turns it off and then back on.
-- **Checkpoints:** statistics are part of an object's state, so save and restore cover them, and the restore-and-replay test should compare them too.
+- **Checkpoints:** statistics are part of an object's state, so a checkpoint covers them, and the restore-and-replay test should compare them too.
 - **ADR 0004 after step 6:** a read-ahead live session stops sending state after every slice, which removes one of that ADR's reasons. The decision still stands, because a list on the Drain would also be copied into every checkpoint.
 
 ### Open questions for step 6
 
 1. **Live statistics at shown time.** In a read-ahead session `run.state()` describes computed time, so its statistics are ahead of what's on screen. Occurrences must be enough to rebuild the state, but rebuilding statistics from them would duplicate the engine's logic in the UI. How does a UI show statistics for shown time?
-2. **Warm-up and going back.** If a checkpoint from before `clear_statistics()` is restored, replaying past that point wouldn't clear them again unless the call is remembered, as interventions are. How should it be remembered, and what happens when going back behind it?
+2. **Warm-up and going back.** The prototype in step 5 logged `clear_statistics()` like an intervention, which stayed exact, including when going back behind it. See `docs/design/restore-replay-prototype.md`. To be confirmed when step 6 is designed.
 
 ## Tests
 

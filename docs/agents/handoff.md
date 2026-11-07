@@ -2,7 +2,7 @@
 
 Written 2026-11-07 at the end of a working session, and updated the same day after the UI design session and after steps 1 to 5 of the UI's order of work. Read this first, then check it against the code and git, because it describes a moment in time.
 
-**The UI's order of work is done.** UI stage 1 was built in four slices, PRs 24 to 27: the demo drawn live with state colours and MUs, pan and zoom, the run controls, speed, time mode, stepping, going back to a time, the error banner, the inspector, interventions on Stations and their marks. Step 7 trimmed the CLI to a headless run of the demo, in the PR after 29. Next is model as data with the JSON model file and MCP v1: see "AI-native" and "Possible next steps".
+**The UI's order of work is done.** UI stage 1 was built in four slices, PRs 24 to 27: the demo drawn live with state colours and MUs, pan and zoom, the run controls, speed, time mode, stepping, going back to a time, the error banner, the inspector, interventions on Stations and their marks. Step 7 trimmed the CLI to a headless run of the demo, in PR 30. Next is model as data with the JSON model file and MCP v1: see "AI-native" and "Possible next steps".
 
 ## Start here
 
@@ -17,7 +17,7 @@ Checked on 2026-11-07, on Rust 1.99.1: all 284 engine tests pass, with 1 long-ru
 
 | Where | State |
 |---|---|
-| `master` on GitHub | Steps 1 to 6 of the build order and the AI-native design, through PR 29 (`f43074d`), with all of the UI's order of work once the headless CLI's PR is merged |
+| `master` on GitHub | Steps 1 to 6 of the build order and the AI-native design, through PR 29 (`f43074d`), with all of the UI's order of work once PR 30 is merged |
 | `prototype/restore-replay` | The throwaway prototype from build step 5. Keep it, and never merge it |
 | `prototype/ui-bevy` | The throwaway UI prototype from UI step 2, with temporary counters in the session. Keep it, and never merge it |
 | `docs/adr-0006-ui-technology` | Local only and never pushed. Its commit went into PR 20, so it can be deleted |

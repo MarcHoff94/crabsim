@@ -183,7 +183,8 @@ impl EventInterface for Source {
 			contents: self.content.iter().map(|mu| mu.id).collect(),
 			process: self.state.clone(),
 			stop: self.interruption.cause(),
-			interruptions: self.interruption.cause().into_iter().collect(),
+			// A Source can't be interrupted yet: its stops aren't built.
+			interruptions: Vec::new(),
 			remaining: self.completion_time.map(|completion| completion.saturating_sub(now)),
 			blocked_predecessors: Vec::new(),
 			successors: self.succ.clone(),

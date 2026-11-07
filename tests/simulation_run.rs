@@ -5,7 +5,7 @@ use crabsim::demo::build_model;
 use crabsim::flows::MaterialFlow;
 use crabsim::random_numbers::Distribution;
 use crabsim::{
-    Dimensions, Drain, EventType, FailureProfile, ModelDescription, ObjectKind, Position, ObjectStatistics, Occurrence, OccurrenceKind, OccurrenceType,
+    Dimensions, Drain, EventType, FailureProfile, Interruption, ModelDescription, ObjectKind, Position, ObjectStatistics, Occurrence, OccurrenceKind, OccurrenceType,
     ProcessState, Recording, RunError, RunState, SimTime, SimulationRun, SingleStation, StopCause,
     ZERO_TIME_EVENT_LIMIT,
 };
@@ -2279,7 +2279,8 @@ fn a_forced_failure_overlapping_a_random_failure_is_one_stop() {
     run.advance_to(secs(27)).unwrap();
     let state = run.state();
     assert_eq!(object(&state, st).stop, Some(StopCause::Failure), "a random failure is reported over a forced one");
-    assert_eq!(object(&state, st).interruptions, vec![StopCause::Failure, StopCause::ForcedFailure]);
+    let causes: Vec<StopCause> = object(&state, st).interruptions.iter().map(|i| i.cause).collect();
+    assert_eq!(causes, vec![StopCause::Failure, StopCause::ForcedFailure]);
     run.advance_to(secs(32)).unwrap();
     assert_eq!(object(&run.state(), st).stop, Some(StopCause::ForcedFailure));
     // MU 1 entered at t=10, so it leaves at 10 + 60 + 15.
@@ -2291,7 +2292,7 @@ fn a_forced_failure_overlapping_a_random_failure_is_one_stop() {
 }
 
 #[test]
-fn state_lists_every_active_interruption() {
+fn state_lists_every_active_interruption_and_when_it_began() {
     let (mut run, st, _) = line(10_000.0);
     run.init().unwrap();
     fail_at(&mut run, 20, st);
@@ -2299,8 +2300,26 @@ fn state_lists_every_active_interruption() {
     pause_at(&mut run, 22, st);
     run.advance_to(secs(25)).unwrap();
     let state = run.state();
-    assert_eq!(object(&state, st).interruptions, vec![StopCause::Failure, StopCause::ForcedFailure, StopCause::Pause]);
+    assert_eq!(
+        object(&state, st).interruptions,
+        vec![
+            Interruption { cause: StopCause::Failure, since: secs(20) },
+            Interruption { cause: StopCause::ForcedFailure, since: secs(21) },
+            Interruption { cause: StopCause::Pause, since: secs(22) },
+        ]
+    );
     assert_eq!(object(&state, st - 1).interruptions, vec![]);
+}
+
+#[test]
+fn an_interruption_that_begins_again_reports_its_new_start() {
+    let (mut run, st, _) = line(0.0);
+    run.init().unwrap();
+    pause_at(&mut run, 20, st);
+    resume_at(&mut run, 30, st);
+    pause_at(&mut run, 40, st);
+    run.advance_to(secs(45)).unwrap();
+    assert_eq!(object(&run.state(), st).interruptions, vec![Interruption { cause: StopCause::Pause, since: secs(40) }]);
 }
 
 #[test]

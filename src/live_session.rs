@@ -914,7 +914,10 @@ impl<'a, C: Clock> SessionThread<'a, C> {
     }
 
     fn request_state(&mut self) {
-        if !self.run.is_initialised() || (self.buffer.is_empty() && self.stopped.is_none() && self.run.time() == self.shown) {
+        // The run stands at shown time with nothing left to do there, so it can report itself.
+        // An intervention leaves an event due at shown time until the run handles it.
+        let done_at_shown = self.run.time() == self.shown && self.run.next_event_time().is_none_or(|next| next > self.shown);
+        if !self.run.is_initialised() || (self.buffer.is_empty() && self.stopped.is_none() && done_at_shown) {
             self.observe(Observation::State(self.run.state()));
             return;
         }

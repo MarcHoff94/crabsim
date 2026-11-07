@@ -1,6 +1,6 @@
 use crate::error::{InitError, MaterialflowError, RunTimeError};
 use crate::event::{EventContext, EventTemplate, EventType, ExitTicket};
-use crate::observation::{ObjectKind, ObjectState, OccurrenceKind, StopCause};
+use crate::observation::{Interruption, ObjectKind, ObjectState, OccurrenceKind, StopCause};
 use crate::statistics::{MachineState, StatisticsKeeper};
 use crate::time::SimTime;
 use super::flows::BaseObject;
@@ -32,6 +32,9 @@ pub struct SingleStation {
 	/// underneath: each random failure schedules the next only when it ends.
 	forced: bool,
 	paused: bool,
+	/// When each kind of interruption last began, by `StopCause::index`. Read only while it is
+	/// active.
+	interrupted_since: [SimTime; 3],
 	pub statistics: StatisticsKeeper,
 }
 
@@ -63,6 +66,7 @@ impl SingleStation {
 			failed: false,
 			forced: false,
 			paused: false,
+			interrupted_since: [SimTime::ZERO; 3],
 			statistics: StatisticsKeeper::new(1),
 		}
 	}
@@ -256,6 +260,7 @@ impl SingleStation {
 	/// time spent stopped counts once however many overlap.
 	fn begin_interruption(&mut self, cause: StopCause, context: &mut EventContext) {
 		context.record(OccurrenceKind::InterruptionBegan { object_id: self.base.object_id, cause });
+		self.interrupted_since[cause.index()] = context.time;
 		if self.is_stopped() {
 			return;
 		}
@@ -332,11 +337,12 @@ impl SingleStation {
 			InterruptionState::None
 		}
 	}
-	/// Every active interruption, most serious first.
-	fn interruptions(&self) -> Vec<StopCause> {
+	/// Every active interruption, most serious first, with when it began.
+	fn interruptions(&self) -> Vec<Interruption> {
 		[(self.failed, StopCause::Failure), (self.forced, StopCause::ForcedFailure), (self.paused, StopCause::Pause)]
 			.into_iter()
-			.filter_map(|(active, cause)| active.then_some(cause))
+			.filter(|&(active, _)| active)
+			.map(|(_, cause)| Interruption { cause, since: self.interrupted_since[cause.index()] })
 			.collect()
 	}
 	/// Tells the statistics what the station ended up doing.
@@ -446,6 +452,7 @@ impl EventInterface for SingleStation {
 		self.failed = false;
 		self.forced = false;
 		self.paused = false;
+		self.interrupted_since = [SimTime::ZERO; 3];
 		self.statistics.reset();
 	}
 	fn clear_statistics(&mut self, now: SimTime) {

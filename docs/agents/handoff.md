@@ -29,7 +29,7 @@ The owner merges PRs on GitHub themselves, so fetch before assuming local `maste
 
 - **2026-11-05 and earlier:** the owner came back after about six months away. `master` didn't build, and was repaired. The domain design was agreed, an architecture review was done, and `SimulationRun`, occurrences and the first `LiveSession` were built. `crabsim-renderer`, its TCP code and `serde` were removed.
 - **2026-11-06:** performance became the first design pillar, and steps 1 to 6 of the build order were designed and built. See "Build order".
-- **2026-11-07:** the UI was designed in a grilling session, with technology research, and the target scale went up to 6,000 objects. Then steps 1 to 5 of the UI's order of work were built: Rust 1.99.1 and a new baseline, the Bevy prototype, ADR 0006, the workspace and the Picture, and the engine additions for stage 1. The prototype found a live-session bug that lost about 30% of shown time at high load, fixed in PR 19. After trying the prototype, the owner decided MUs move instantly in the UI. See "UI design".
+- **2026-11-07:** the UI was designed in a grilling session, with technology research, and the target scale went up to 6,000 objects. Then steps 1 to 5 of the UI's order of work were built: Rust 1.99.1 and a new baseline, the Bevy prototype, ADR 0006, the workspace and the Picture, and the engine additions for stage 1. The prototype found a live-session bug that lost about 30% of shown time at high load, fixed in PR 19. After trying the prototype, the owner decided MUs move instantly in the UI. See "UI design". Later that day, AI-native became the second design pillar, in another grilling session. See "AI-native".
 
 ## Agreed design
 
@@ -51,7 +51,7 @@ Performance is the first thing to weigh in design trade-offs. It is a guideline 
 - **Checkpoints (built):** kept up to a memory budget the user configures. When it is full, every other checkpoint in the older half goes and the one from Init stays, so the whole run stays reachable. Every 100,000 events, with 256 MB, to start with. A checkpoint is a clone of the run, plus how much of the intervention log is in it, and a test checks that restoring and replaying gives occurrences identical to the original run.
 - **Interventions (built, on Stations only):** take effect immediately at shown time, without a Halt, and discard the computed future. Pause on and off, forced failure on and off, changing a process time, and clearing statistics for a warm-up. Same seed plus same intervention log gives the same result. There are no branching timelines. Reset can keep changed process times as the new default state, a session setting that is off by default.
 - **Object storage (built):** one `Vec` indexed by id, successors stored as ids, an `enum` for the object type. See ADR 0005.
-- **Threads:** each run executes on one thread at a time, and can move between threads. Cores are used through distributed simulation, which means many replications at once. One `ModelDescription` can already build many runs, but nothing else is built for this yet.
+- **Threads:** each run executes on one thread at a time, and can move between threads. Cores are used through distributed simulation, which means many simulation runs at once, such as the observations of an experiment. One `ModelDescription` can already build many runs, but nothing else is built for this yet.
 - **Time representation (built):** simulation time is a 64-bit count of milliseconds behind its own type, `SimTime`. Process times and sampled failure times are whole milliseconds, with sampled times rounded rather than cut off.
 
 ### Model
@@ -96,7 +96,7 @@ Performance is the first thing to weigh in design trade-offs. It is a guideline 
 - **Controls:** Init, Start, Halt, Reset. Halt avoids clashing with Stop and Pause, which happen to objects.
 - **Init is its own step**, the first step of every run: t=0, every object's init in id order, first events queued but not processed, even those due at t=0. Start does Init if needed, then advances. Start and Halt are commands on a live session.
 - **Reset** returns objects to their default state and keeps them in the model. Every run MU is deleted, and configured starting MUs come back as fresh copies. The same seed replays the same run.
-- **The default state is what the user configured**, and can be changed. Configuration changes are only allowed after Reset, for now, except a Station's process time. That can change during a run, as an intervention: the MU in work keeps its time and the next MU uses the new one. *Built.* More mid-run changes can come once their behaviour is defined.
+- **The default state is what the user configured**, and can be changed. Today configuration changes are only allowed after Reset, except a Station's process time. That can change during a run, as an intervention: the MU in work keeps its time and the next MU uses the new one. *Built.* The agreed rule for later is that every attribute can change during a run, so each one needs its mid-run behaviour defined (see "AI-native").
 - **Control order:** Init only from the default state, advancing requires Init, Reset allowed at any time. Violations return errors rather than panicking.
 - **A run advances only when asked** and has no end time of its own. `advance_to(t)` includes events at t. Speed control belongs to the caller.
 - **A run executes on one thread at a time.** A live session still creates its run on its own dedicated thread, though a run can now move.
@@ -239,7 +239,7 @@ All built in PR 21, as planned except where noted. The benchmark gave identical 
    4. ⬜ MUs drawn in the object that holds them, below the zoom and speed thresholds, and counts above them.
 7. Trim the CLI to the headless version.
 
-After that: step 7 of the build order and model as data with save and load, then drag and drop, configuration forms and the layout image in 2D, then the 3D view. Drag and drop waits for step 7 because forms and the palette depend on what each object can be configured with, and a palette offering Buffer needs Buffer fixed.
+After that: model as data with the file format and save and load, with the MCP server on top (see "AI-native"), then step 7 of the build order, then drag and drop, configuration forms and the layout image in 2D, then the 3D view. Drag and drop waits for step 7 because forms and the palette depend on what each object can be configured with, and a palette offering Buffer needs Buffer fixed.
 
 **Left for later:** the model file format, whether a layout image is stored inside the model file, multiple images or floors, where 3D models come from, polish, and signing the download for sharing.
 
@@ -267,6 +267,76 @@ Checked on 2026-11-07, on Windows 11:
 - **GPU:** AMD Radeon RX 9070 XT, plus the processor's integrated Radeon graphics.
 - **Not installed:** Node, npm, pnpm, bun, `wasm-pack`, `trunk`, Tauri's CLI, and the `wasm32` target. Bevy needs none of these.
 - **A window:** `crabsim-ui` opens one, and the prototype on `prototype/ui-bevy` draws a working model. A clean debug build of the UI takes about 8 minutes.
+
+## AI-native
+
+Decided with the owner on 2026-11-07, in a grilling session. AI-native is the second design pillar, after performance (`CLAUDE.md`, ADR 0007). Nothing of it is built. The spec is GitHub issue 28, a sub-issue of spec issue 3, with the user stories, the order of work and the test seams.
+
+### Decided
+- **The pillar:** anything a person can do with crabsim, an AI agent can do too: build a model, run it, read the results, manage models. It's a guideline like performance, and comes second to it.
+- **One operation catalogue,** in Rust, with typed inputs and outputs and descriptions, offered through front-ends (ADR 0007). The MCP server is the first front-end and the starting point. In-app agents and skills, which call the user's own LLM endpoint with the user's tokens, come second, on the same catalogue.
+- **Models are readable text files** that agents may write directly, with operations to validate, run and read them. This pulls the model file format forward. Changing a model through operations, for example in an open UI, is also wanted, as the alternative when rebuilding from the file would cost too much. The file comes first.
+- **MCP v1:** validate a model file with precise errors, a headless run with seed, length and optional warm-up, the observations of one experiment, and each object's statistics. Live-session control comes later.
+- **Where:** a standalone `crabsim-mcp` crate over stdio, a non-default workspace member, so the engine never depends on it. The server inside the UI app, so the owner can watch an agent work, comes later as another front-end.
+- **No LLM inside a simulation run** by default. The owner wants AI decisions inside a run as a later opt-in that accepts its cost. The concerns are in `docs/design/ai-decisions-in-runs.md`.
+- **When:** after UI stage 1. Then model as data with the file format and MCP v1, on today's objects, before build step 7. Step 7 extends the format, and each new object option comes with its operation.
+- **What agents do:** everything a user does, by piloting the UI or by changing the model file: run experiments, Start and Reset, change parameters, create objects and connect them. A models folder, which the server is started with, gets list, read, write, copy and delete operations limited to it, for agents without file tools of their own.
+- **Changing a model in an open UI:** after Reset or before Init, through operations, after which the run is rebuilt. The UI applies each change on its own, rather than reloading the model, because a 3D view with many detailed objects would make a full reload slow. Changing a model's structure mid-run, such as adding a Station at t = 3 days and carrying on, is an open idea and not agreed: it would be a new kind of intervention that checkpoints, replay, statistics and the Picture all have to handle.
+- **Model file:** JSON, with a JSON Schema generated from the Rust types and published beside it, which the MCP operations reuse as their input schema. It holds the model only: objects with their configuration, names, positions and dimensions, and connections. Seed, length, warm-up and the number of observations are inputs to a run. Every object has a unique name, connections refer to names, and ids follow the file's order. 3D models will be referenced by path, never embedded, and a run never loads them. The benchmark's 429 copies need unique names.
+- **Runs over MCP are jobs:** `start_run` returns an id, with `run_status`, `run_results` and `cancel_run`. Observations run on parallel threads, the first real use of distributed simulation. Results always carry their seed and crabsim's version.
+- **MCP library:** `rmcp`, the official Rust SDK, pinned like Bevy. A tutorial gives 3.8.0 (October 2026) as the latest, needing Rust 1.88: check crates.io before pinning. tokio and `schemars` stay in `crabsim-mcp`, and the engine gets only `serde`, used by the model description.
+- **Skills** use the `SKILL.md` format of the Agent Skills open standard (agentskills.io), which Claude Code, GitHub Copilot, OpenAI Codex, Gemini CLI and Cursor read, each from its own folder. crabsim's own skills, such as building a model from a description or finding the bottleneck, are written alongside MCP v1, as the test that the operations are enough. The same skills work in the in-app agents.
+- **LLM endpoints (phase 2):** tokens only in the operating system's credential store, never in a model file or settings file. Two API shapes: Anthropic's Messages API, and the OpenAI-compatible chat API, which also covers local models.
+
+### Classes (decided, not built)
+The owner wants models built in the UI later, by drag and drop, by setting values, and by deriving a class from an existing one or duplicating it and changing it. The terms are in `GLOSSARY.md`: class, instance, derived class, duplicate, inheritance. Class and instance are the words the UI uses too, because users know that much programming.
+- **Derive and duplicate:** a derived class stays linked to its parent, and a duplicate is an independent copy. Classes can be derived from derived classes, and the UI and operations always show where a value comes from: built-in default, which class, or set on the instance.
+- **Inheritance covers everything a user can change,** decided value by value: numbers such as a process time, and choices such as which exit strategy, once several exist. Setting a value cuts its inheritance.
+- **What a derived class can change:** values only, at first. Behaviour comes later, from built-in choices such as exit strategies and from user code. A class made of several objects, as a sub-model, is its own later discussion.
+- **Where classes live:** the model file holds every class it uses, so it stands alone. Shared libraries are a later discussion, with versioning as their main question.
+- **A run never sees classes:** building a run works out every instance's values from its chain of classes. The per-event path is unchanged, and a headless run pays nothing.
+- **Changing a class mid-run** reaches every instance whose inheritance of that value isn't cut, as an intervention at shown time. The session works out which instances that is from the model description and applies the change to each, so the run still knows nothing of classes.
+- **Experiment and simulation study,** as the owner uses them: an experiment is a model with chosen values, run with a defined seed, several times with different seeds. A simulation study is several experiments of one model, each changing different values, each run a defined number of times. MCP v1 runs one experiment's runs. Studies follow, on the same job mechanism.
+
+- **Observation** is one run of an experiment, the owner's word. "Replication" is to be avoided, and the code's `Observation`, a live session's output, is renamed `SessionOutput` before MCP v1, as a small refactor of its own.
+- **Seeds:** an experiment has one defined seed, and its observation *k* gets a seed derived from it in a fixed way. In a study, observation *k* of every experiment uses the same seed by default (common random numbers), which can be switched off per study.
+- **A study reports,** per experiment and statistic, the mean over its observations, a 95% confidence interval, and the minimum and maximum. Each observation's own figures stay available.
+- **Attribute** is anything about a class or instance a user can set. Name, position and connections belong to the instance, and every other attribute, including dimensions and later the 3D model, can be inherited.
+- **Interventions on instances:** setting a value on an instance cuts its inheritance, before or during a run. Restoring inheritance is its own intervention, and the instance then takes its class's current value.
+- **Every attribute can change during a run, as an intervention.** That's the owner's general rule: users see attributes, never how an object works inside, and add or change behaviour only at defined hooks. A class may change an attribute during a run just as an instance may. "Reset keeps changes" applies to classes too. Today only a Station's process time can change during a run, so each attribute needs its mid-run behaviour defined when it's built. See ADR 0008, which the owner chose knowingly: watch its performance cost and reconsider it if the cost shows.
+  - **Default rule:** what has already started or been scheduled keeps its values, and the change applies from the next decision on. Exceptions are decided per attribute when it's built.
+  - **Refused changes:** a change that would leave the model invalid at that moment gets an error, and the value stays. For example, a capacity below the MUs held right now.
+  - **Structure isn't an attribute:** instances and connections change only after Reset. The owner wants to explore mid-run structure changes later. Visual attributes change at any time, outside the intervention log.
+  - **Cost:** interventions change the run directly, never as events, so the per-event path is unchanged. Each attribute's mid-run support is benchmarked as it's built.
+  - **Tests:** every attribute gets one that changes it mid-run, goes back, replays and compares.
+- **Attribute operations:** `set_attribute(target, attribute, value)` with an instance or class as target, `restore_inheritance(target, attribute)`, and `get_attributes(target)` with where each value comes from. Before Init or after Reset they change the model, and during a run they are interventions. Types and limits come from the Rust types and the JSON Schema, so an invalid value gets the same precise error in the file, the UI and over MCP.
+- **In-app agents ask first** before writing or deleting a model file or making an intervention in the open session, with "ask every time", "allow for this session" and "always allow". Reading, validating and running are free. Over MCP the harness asks.
+
+- **In-app agents are Markdown files** with a header (name, description, LLM endpoint and model, the operations it may call, the skills it loads, its default approvals) and its instructions below, shaped like Claude Code's subagents. Agents and skills live in the user's own crabsim folder, or beside a models folder when they belong to those models.
+- **What an agent sees of a live run:** never the occurrence stream, which reaches about 1.9M occurrences per second. It reads state and statistics on request, runs until a time or a condition (such as a Drain's throughput falling below 50 per hour), and asks for recorded occurrences filtered to chosen objects and a time window.
+
+### The model as a graph, for agents (decided)
+An agent should never need to read a whole model: a model of 6,000 objects is probably 1 to 3 MB of JSON, an estimate. It retrieves only the context it needs.
+- **What it can ask:** structure (neighbours, upstream and downstream within *n* steps, paths from Source to Drain, cycles), classes (the inheritance tree, which instances follow a class, where a value comes from), search by attribute, and structure joined with a study's results.
+- **One source of truth:** the graph is derived from the model, kept up to date as operations change it, and read-only. Changes go through operations.
+- **Graph operations in the catalogue first:** `neighbours`, `upstream`, `downstream`, `paths`, `subgraph_around`, `find_instances`, `class_tree`, computed on the model in memory, with no extra dependency. Beside them, export to standard graph formats (a Cypher script or Neo4j's CSV import, and GraphML), so anyone can load a model into their own graph database. An embedded graph database waits until the operations prove too limited, and gets its own ADR then. When this was decided the field was unsettled: Kùzu is archived, its fork RyuGraph is mostly C++, and NervusDB, in Rust, is young with a Cypher subset.
+- **Results in the graph:** queries can include a study's results attached to instances, per experiment and observation. Results stay outside the model file.
+- **Description:** classes and instances get an optional free-text description, visual-only, searchable and inherited, also shown in the UI.
+- **`describe_model`** is an agent's entry point: instances per class, Sources and Drains, the main flows, cycles and validation problems, in a summary whose size doesn't grow with the model.
+
+### Later, not agreed yet
+- Search by meaning with embeddings (GraphRAG), if search by name, description and attribute isn't enough.
+- An embedded graph database, if the graph operations prove too limited.
+- Details of the in-app agent loop and LLM client.
+- The MCP server inside the UI, so the owner can watch an agent work.
+- Changing a model's structure during a run.
+- AI decisions inside a run (`docs/design/ai-decisions-in-runs.md`).
+- Shared class libraries and how they're versioned.
+- Sub-models: classes made of several objects.
+
+JSON is the only model file format: YAML is out.
+
+The grilling session ended here on 2026-11-07, with nothing left open.
 
 ## Known problems
 
@@ -302,5 +372,6 @@ Checked on 2026-11-07, on Windows 11:
 ## Possible next steps
 
 1. **The UI's order of work,** in "UI design". Steps 1 to 5 are done, and so is the session fix the prototype found. Next is step 6: UI stage 1. This is what the owner asked for next.
-2. Step 7 of the build order, after UI stage 1.
-3. Run `/update-wiki` when convenient, so the docs stop describing removed code.
+2. Model as data with the JSON model file, the `SessionOutput` rename and MCP v1, after UI stage 1. See "AI-native".
+3. Step 7 of the build order.
+4. Run `/update-wiki` when convenient, so the docs stop describing removed code.

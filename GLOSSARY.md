@@ -30,11 +30,21 @@ _Avoid_: Fast mode, batch mode
 **Model description**:
 The objects of a model and how they connect. One description can build any number of simulation runs.
 
-**Replication**:
-One simulation run of a model that differs from the model's other runs only in its seed.
+**Model file**:
+A model description written as text, which people and agents can read and write directly. It holds the model only: settings of a simulation run, such as its seed and length, are not part of it.
+
+**Experiment**:
+A model with chosen attribute values and a defined random seed, run as one or more observations.
+
+**Observation**:
+One simulation run of an experiment. Observations of one experiment differ only in their seeds, which all follow from the experiment's seed.
+_Avoid_: Replication
+
+**Simulation study**:
+Several experiments of one model, each changing different attribute values, each run as a defined number of observations. By default, observation *k* of every experiment uses the same seed, so the experiments differ by their values and not by chance.
 
 **Distributed simulation**:
-Running many replications at the same time across CPU cores. Each simulation run stays on one thread; a single run is never split up.
+Running many simulation runs, such as observations, at the same time across CPU cores. Each simulation run stays on one thread; a single run is never split up.
 
 **Live session**:
 A simulation run controlled while it goes, on its own thread. It takes Start, Halt, Reset and a speed, and reports occurrences, state, its status and errors.
@@ -61,7 +71,7 @@ A saved copy of a simulation run's complete state at one instant, from which the
 _Avoid_: Undo, snapshot
 
 **Intervention**:
-A change made from outside to a simulation run in progress, such as switching a Pause on or off. It takes effect at shown time and discards any future already computed. The same seed and the same interventions give the same result.
+A change made from outside to a simulation run in progress, such as switching a Pause on or off or changing an attribute. Every attribute a user can set can also be changed by an intervention. It takes effect at shown time and discards any future already computed. The same seed and the same interventions give the same result.
 
 **Speed**:
 How much shown time passes per unit of wall time in a live session. Changing it never makes shown time jump.
@@ -111,6 +121,28 @@ A material-flow object that takes MUs out of the model.
 
 **Capacity**:
 How many MUs a Station or Buffer can hold at the same time.
+
+### Classes
+
+**Attribute**:
+Anything about a class or instance that a user can set, such as a process time, a capacity or the choice of exit strategy. How an object works inside is hidden: users change attributes, and later add behaviour only at defined hooks.
+_Avoid_: Parameter
+
+**Class**:
+What a material-flow object is. Source, Station, Buffer and Drain are built-in classes, and users make their own by deriving from them.
+
+**Instance**:
+A material-flow object placed in a model, made from a class. Its name, position and connections are its own, and every other attribute, including its dimensions and look, it can inherit.
+
+**Derived class**:
+A class made from another class, which stays linked to it: it inherits every value it hasn't set itself, including any later change to its parent. Classes can be derived from derived classes.
+
+**Duplicate**:
+A copy of a class or instance with no link to the original.
+_Avoid_: Derived class (that stays linked)
+
+**Inheritance**:
+Taking a value from the parent class rather than setting it, decided separately for each attribute. Setting a value cuts the inheritance of that one value. A change to a class reaches every instance and derived class whose inheritance of that value isn't cut, during a simulation run too.
 
 ### Starting work
 
@@ -230,3 +262,15 @@ _Avoid_: Reset (that returns every object to its default state)
 
 **Recording**:
 Keeping the occurrences of chosen kinds from a simulation run. It is opt-in, and it is the only way to get data per MU.
+
+### Working with agents
+
+**Agent**:
+An AI that uses crabsim through its operations, either from a harness outside crabsim, such as a coding assistant, or inside crabsim itself. It acts from outside a simulation run, as a person does.
+
+**Operation**:
+One thing crabsim can do for a person or an agent, such as validating a model or starting a simulation run. Anything a person can do is an operation an agent can use too.
+_Avoid_: Tool (the word one agent protocol uses for an operation), command (what a live session takes)
+
+**Skill**:
+Written instructions that teach an agent one kind of task with crabsim's operations, such as finding the bottleneck of a model.

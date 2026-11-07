@@ -47,6 +47,13 @@ cargo bench --bench reference -- --reps 9 --scenario demo-dropped
 - **Memory** stays flat as simulated length grows, unless the user asked for recording.
 - **Headless runs** are plain simulation runs. Live sessions, views and animation are optional layers that cost nothing when absent.
 
+**AI-native** comes second: anything a person can do with crabsim, an AI agent can do too, through the same operations: build a model, run it, read the results, manage models. No feature exists only behind a mouse. Like performance, it is a guideline that can be overruled case by case with real reasoning. See ADR 0007.
+
+- **One operation catalogue:** every capability is an operation with typed input, typed output and a description, offered to agents through front-ends. The MCP server is the first, and in-app agents with the user's own LLM endpoint come later on the same catalogue.
+- **Models are readable text** that agents may write directly, and operations validate, run and read them.
+- **Every attribute can change during a run,** as an intervention, so a person or agent can experiment with a running model (ADR 0008).
+- **Agents act from outside a simulation run,** as a user does. AI decisions inside a run are a possible later opt-in that keeps runs reproducible through a decision log. See `docs/design/ai-decisions-in-runs.md`.
+
 The design already agreed for this, including what isn't built yet, is in `docs/agents/handoff.md`. The sections below describe what is built today.
 
 ## Architecture

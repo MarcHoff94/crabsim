@@ -2,7 +2,7 @@
 //! fed in as the window would feed them, and what would be drawn read back out.
 
 use crabsim::{
-    demo, Clock, Dimensions, FailureProfile, LiveSession, ModelDescription, Observation, Position, RunError,
+    demo, Dimensions, FailureProfile, ModelDescription, Observation, Position, RunError,
     SessionError, SessionStatus, SimTime, TimeMode,
 };
 use crabsim::random_numbers::Distribution;
@@ -11,60 +11,11 @@ use crabsim_ui::view::{
     format_time, label_size, parse_time, Control, JumpProblem, Point, Rect, Shade, ViewState, DEFAULT_SPEED,
     MAX_LABEL_PIXELS, MAX_SPEED, MIN_LABEL_PIXELS, MIN_SPEED,
 };
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-#[derive(Clone, Default)]
-struct FakeClock(Arc<Mutex<Duration>>);
+mod common;
 
-impl FakeClock {
-    fn set(&self, elapsed: Duration) {
-        *self.0.lock().unwrap() = elapsed;
-    }
-}
-
-impl Clock for FakeClock {
-    fn elapsed(&self) -> Duration {
-        *self.0.lock().unwrap()
-    }
-}
-
-/// The demo model in a live session, and a view of it.
-struct Watched {
-    session: LiveSession,
-    clock: FakeClock,
-    view: ViewState,
-}
-
-const STATION_1: u32 = 1;
-const STATION_2: u32 = 2;
-
-impl Watched {
-    fn demo() -> Watched {
-        let model = demo::model();
-        let view = ViewState::new(&model);
-        let clock = FakeClock::default();
-        let session = LiveSession::new(move || model.build(0), clock.clone());
-        Watched { session, clock, view }
-    }
-
-    /// Waits for the session to handle everything sent and reach the clock, then feeds the view
-    /// every observation, as one frame of the window would.
-    fn frame(&mut self) {
-        self.session.sync().unwrap();
-        let wall = self.clock.elapsed();
-        for observation in self.session.observations().try_iter() {
-            self.view.observe(&observation, wall);
-        }
-    }
-
-    fn at(&mut self, secs: u64) {
-        // Commands sent before take effect at the time on the clock now, not at `secs`.
-        self.session.sync().unwrap();
-        self.clock.set(Duration::from_secs(secs));
-        self.frame();
-    }
-}
+use common::{Watched, STATION_1, STATION_2};
 
 fn point(x: f64, y: f64) -> Point {
     Point { x, y }
@@ -483,5 +434,8 @@ fn a_run_error_stays_and_going_back_is_still_offered() {
     assert!(view.allows(Control::StepBack));
     assert!(view.allows(Control::Reset));
     view.observe(&Observation::State(run.state()), Duration::from_secs(2));
+    assert!(view.error().is_some(), "a state asked for while failed changes nothing");
+    // Going back or Reset reports the state, then that the session is halted again.
+    view.observe(&Observation::Status(SessionStatus::Halted), Duration::from_secs(2));
     assert_eq!(view.error(), None);
 }

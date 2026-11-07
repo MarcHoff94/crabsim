@@ -4,6 +4,8 @@ Written 2026-11-07 at the end of a working session, and updated the same day aft
 
 **The UI's order of work is done.** UI stage 1 was built in four slices, PRs 24 to 27: the demo drawn live with state colours and MUs, pan and zoom, the run controls, speed, time mode, stepping, going back to a time, the error banner, the inspector, interventions on Stations and their marks. Step 7 trimmed the CLI to a headless run of the demo, in PR 30. Next is model as data with the JSON model file and MCP v1: see "AI-native" and "Possible next steps".
 
+**The AI-native order of work has begun** (issue 28): the `SessionOutput` rename is merged (PR 33), and slice 1 of the model file is built: a `crabsim-model` crate that reads, checks and saves model files, `models/demo.json`, and `--model` on the CLI, which moved to `cli/` (ADR 0009). The design is in `docs/design/model-file.md`. Next are slices 2 and 3: derived classes with inheritance, then the published JSON Schema.
+
 ## Start here
 
 1. Read `CLAUDE.md`.
@@ -13,11 +15,11 @@ Written 2026-11-07 at the end of a working session, and updated the same day aft
 
 ## Current state
 
-Checked on 2026-11-07, on Rust 1.99.1: all 284 engine tests pass, with 1 long-run test ignored (`cargo test --all-targets`), and so do the UI's 51 tests (`cargo test -p crabsim-ui --profile ui`).
+Checked on 2026-11-07, on Rust 1.99.1: all 312 tests of the default members pass (engine, `crabsim-model` and `crabsim-cli`), with 1 long-run test ignored (`cargo test --all-targets`), and so do the UI's 55 tests (`cargo test -p crabsim-ui --profile ui`).
 
 | Where | State |
 |---|---|
-| `master` on GitHub | Steps 1 to 6 of the build order and the AI-native design, through PR 29 (`f43074d`), with all of the UI's order of work once PR 30 is merged |
+| `master` on GitHub | Steps 1 to 6 of the build order, all of the UI's order of work, and step 1 of the AI-native order of work, through PR 33 (`86cc5c7`), with slice 1 of the model file once its PR is merged |
 | `prototype/restore-replay` | The throwaway prototype from build step 5. Keep it, and never merge it |
 | `prototype/ui-bevy` | The throwaway UI prototype from UI step 2, with temporary counters in the session. Keep it, and never merge it |
 | Other branches | None: every merged branch was deleted on 2026-11-07, locally and on GitHub, with the app's worktrees |
@@ -191,9 +193,9 @@ Throwaway, on `prototype/ui-bevy`, never to be merged, with its results in `docs
 If 1 or 3 fails, try eframe. If 2 fails, the problem is in the session, not the technology.
 
 ### Structure
-- **Workspace (built):** the engine stays at the repo root with its tests and benchmark, and the UI is the member crate `ui/`, called `crabsim-ui`. `cargo test` and `cargo bench` at the root never build Bevy. Run the UI with `cargo run -p crabsim-ui --profile ui`, a release profile without LTO that rebuilds in seconds.
+- **Workspace (built):** the engine stays at the repo root with its tests and benchmark. The member crates are `model/` (`crabsim-model`), `cli/` (`crabsim-cli`) and the UI, `ui/` (`crabsim-ui`), the only one that isn't a default member, so `cargo test` and `cargo bench` at the root never build Bevy (ADR 0009). Run the UI with `cargo run -p crabsim-ui --profile ui`, a release profile without LTO that rebuilds in seconds.
 - **Picture (built):** `crabsim::Picture` in `src/picture.rs`, logical state only, what is where and since when. Feed it every session output in order. Visual state, such as where a marker is drawn on screen, stays in the UI.
-- **CLI (built):** a simple headless CLI. It runs the demo model with `--seed` and `--length`, the length written as the UI shows time, then prints each object's final statistics, each Drain's throughput and mean lead time, and how many events it ran in how long. A run error still prints the statistics up to it. Once model as data exists it takes a model file. `--inplace`, `RunView`, the terminal table and the topology text are gone.
+- **CLI (built):** a simple headless CLI. It runs the demo model with `--seed` and `--length`, the length written as the UI shows time, then prints each object's final statistics, each Drain's throughput and mean lead time, and how many events it ran in how long. A run error still prints the statistics up to it. Since slice 1 of the model file it also runs a model file, with `--model`, and it lives in `cli/`. `--inplace`, `RunView`, the terminal table and the topology text are gone.
 
 ### Model data for the UI
 - **Names and positions (built)** on `ModelDescription`, as optional fields: `set_name`, `set_position`, `set_dimensions`, with getters, `kind` and `object_count`. Stage 1 writes them by hand for the demo, with no automatic layout. Drag and drop will later write the same fields. The run ignores them, so a headless run pays nothing.
@@ -281,7 +283,7 @@ Decided with the owner on 2026-11-07, in a grilling session. AI-native is the se
 - **When:** after UI stage 1. Then model as data with the file format and MCP v1, on today's objects, before build step 7. Step 7 extends the format, and each new object option comes with its operation.
 - **What agents do:** everything a user does, by piloting the UI or by changing the model file: run experiments, Start and Reset, change parameters, create objects and connect them. A models folder, which the server is started with, gets list, read, write, copy and delete operations limited to it, for agents without file tools of their own.
 - **Changing a model in an open UI:** after Reset or before Init, through operations, after which the run is rebuilt. The UI applies each change on its own, rather than reloading the model, because a 3D view with many detailed objects would make a full reload slow. Changing a model's structure mid-run, such as adding a Station at t = 3 days and carrying on, is an open idea and not agreed: it would be a new kind of intervention that checkpoints, replay, statistics and the Picture all have to handle.
-- **Model file:** JSON, with a JSON Schema generated from the Rust types and published beside it, which the MCP operations reuse as their input schema. It holds the model only: objects with their configuration, names, positions and dimensions, and connections. Seed, length, warm-up and the number of observations are inputs to a run. Every object has a unique name, connections refer to names, and ids follow the file's order. 3D models will be referenced by path, never embedded, and a run never loads them. The benchmark's 429 copies need unique names.
+- **Model file:** designed in detail on 2026-11-07, in `docs/design/model-file.md`, and built in three slices: slice 1 (today's objects with built-in classes, validation, canonical saving, `models/demo.json`, the CLI's `--model`) is built; derived classes and the published JSON Schema follow. The design round also decided that a Station's process time defaults to 0 (a dummy Station), a Source's interval may be 0, and a zero-interval Source that can reach a Drain through only zero-time objects is a validation error. The file code lives in its own crate and the engine gains nothing (ADR 0009), and the CLI moved to `cli/` because of it. JSON, with a JSON Schema generated from the Rust types and published beside it, which the MCP operations reuse as their input schema. It holds the model only: objects with their configuration, names, positions and dimensions, and connections. Seed, length, warm-up and the number of observations are inputs to a run. Every object has a unique name, connections refer to names, and ids follow the file's order. 3D models will be referenced by path, never embedded, and a run never loads them. The benchmark's 429 copies need unique names.
 - **Runs over MCP are jobs:** `start_run` returns an id, with `run_status`, `run_results` and `cancel_run`. Observations run on parallel threads, the first real use of distributed simulation. Results always carry their seed and crabsim's version.
 - **MCP library:** `rmcp`, the official Rust SDK, pinned like Bevy. A tutorial gives 3.8.0 (October 2026) as the latest, needing Rust 1.88: check crates.io before pinning. tokio and `schemars` stay in `crabsim-mcp`, and the engine gets only `serde`, used by the model description.
 - **Skills** use the `SKILL.md` format of the Agent Skills open standard (agentskills.io), which Claude Code, GitHub Copilot, OpenAI Codex, Gemini CLI and Cursor read, each from its own folder. crabsim's own skills, such as building a model from a description or finding the bottleneck, are written alongside MCP v1, as the test that the operations are enough. The same skills work in the in-app agents.
@@ -366,5 +368,6 @@ Done on 2026-11-07: the wiki was rewritten against today's code, with four pages
 
 ## Possible next steps
 
-1. Model as data with the JSON model file and MCP v1, now that `SessionOutput` is renamed. See "AI-native". The CLI then takes a model file.
-2. Step 7 of the build order.
+1. Slices 2 and 3 of the model file: derived classes with inheritance and where each value comes from, then the JSON Schema generated from the types. See `docs/design/model-file.md`.
+2. The rest of the AI-native order of work in issue 28: the operation catalogue crate, the MCP server, crabsim's first skills.
+3. Step 7 of the build order.

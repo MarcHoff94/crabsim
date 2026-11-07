@@ -33,6 +33,9 @@ The objects of a model and how they connect. One description can build any numbe
 **Model file**:
 A model description written as text, which people and agents can read and write directly. It holds the model only: settings of a simulation run, such as its seed and length, are not part of it.
 
+**Canonical form**:
+The one way crabsim writes a model file, so that saving, loading and saving again gives the same file. A file written by hand may be reformatted the first time crabsim saves it.
+
 **Experiment**:
 A model with chosen attribute values and a defined random seed, run as one or more observations.
 
@@ -112,6 +115,9 @@ A material-flow object that creates MUs.
 **Station**:
 A material-flow object that works on MUs for a process time. It is one machine, even when its capacity lets it work on several MUs at once.
 _Avoid_: ParallelStation, parallel machines
+
+**Dummy Station**:
+A Station with a process time of 0. It takes no time, and is there so that something can happen as an MU passes, such as user code at a hook.
 
 **Buffer**:
 A material-flow object that holds MUs without working on them, optionally for a dwelling time.

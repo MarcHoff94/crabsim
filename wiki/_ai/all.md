@@ -1,6 +1,6 @@
 # crabsim — full AI context
 
-Discrete-event material-flow simulator in Rust, built for speed. Engine library and headless CLI at the root, Bevy UI in `ui/`. `CLAUDE.md` describes what is built and `docs/agents/handoff.md` the agreed design. Generated from the summaries in `wiki/_ai/`.
+Discrete-event material-flow simulator in Rust, built for speed. Engine library at the root, model files in `model/`, the headless CLI in `cli/` and the Bevy UI in `ui/`. `CLAUDE.md` describes what is built and `docs/agents/handoff.md` the agreed design. Generated from the summaries in `wiki/_ai/`.
 
 ---
 
@@ -99,7 +99,8 @@ Discrete-event material-flow simulator in Rust, built for speed. Engine library 
 ### Architecture Overview
 
 #### Facts
-- Workspace: engine = root package (library + headless CLI); UI = member crate `ui/` (`crabsim-ui`, Bevy + egui, ADR 0006); engine is the only default member and never depends on the UI
+- Workspace: engine `crabsim` (root, library), `crabsim-model` (`model/`, model files, ADR 0009), `crabsim-cli` (`cli/`, binary `crabsim`), `crabsim-ui` (`ui/`, Bevy + egui, ADR 0006); the UI is the only non-default member; the engine depends on none of them
+- A model file → `crabsim_model::load` → `Model` or every `Problem` → `to_description()` → `ModelDescription` → `build(seed)`
 - Layers: front-ends (CLI, UI) → optional live session + Picture → `SimulationRun` → material-flow objects (`enum ModelObject`)
 - Headless run = a `SimulationRun` with nothing attached: build, `init`, `advance_to`, `state`
 - One `Vec<ModelObject>` indexed by id; objects refer to each other by id; the run splits the `Vec` around the object handling an event and passes `OtherObjects` (ADR 0005)
@@ -110,7 +111,8 @@ Discrete-event material-flow simulator in Rust, built for speed. Engine library 
 - Live sessions and views cost a headless run nothing
 
 #### Code locations
-- `src/simulation_run.rs` SimulationRun · `src/model.rs` ModelDescription · `src/event.rs` events · `src/report.rs` occurrences and state · `src/statistics.rs` · `src/live_session.rs` · `src/picture.rs` · `src/time.rs` SimTime, format/parse · `src/main.rs` CLI · `src/demo.rs`
+- `src/simulation_run.rs` SimulationRun · `src/model.rs` ModelDescription · `src/event.rs` events · `src/report.rs` occurrences and state · `src/statistics.rs` · `src/live_session.rs` · `src/picture.rs` · `src/time.rs` SimTime, format/parse · `src/demo.rs`
+- `model/src/`: `lib.rs` (Model, Problem, load), `read.rs`, `check.rs`, `write.rs`, `build.rs`; `cli/src/main.rs`; `models/demo.json`
 - `src/materialflow_objects/`: `model_object.rs`, `flows.rs`, `source.rs`, `station.rs`, `buffer.rs`, `drain.rs`
 - `ui/src/`: `view.rs`, `camera.rs`, `marks.rs`, `main.rs`
 
@@ -190,7 +192,7 @@ Discrete-event material-flow simulator in Rust, built for speed. Engine library 
 ### Running crabsim
 
 #### Facts
-- CLI: `cargo run --release --bin crabsim -- --seed 7 --length 365d` runs the demo headless and prints per-object statistics, Drain throughput and lead time, events and wall time
+- CLI: `cargo run --release --bin crabsim -- --seed 7 --length 365d` runs the demo headless (or a model file with `--model models/demo.json`) and prints per-object statistics, Drain throughput and lead time, events and wall time
 - `--length` uses the UI's time syntax (`90`, `1:30`, `8:00:00`, `30d 12:00:00`); defaults: seed 0, length `1d`
 - UI: `cargo run -p crabsim-ui --profile ui` (first build several minutes)
 - In code: `demo::model().build(seed)`, `init`, `advance_to`, `state`; `set_recording(Recording::ALL)` for occurrences
@@ -202,7 +204,7 @@ Discrete-event material-flow simulator in Rust, built for speed. Engine library 
 - A run error still prints statistics, then exits with failure
 
 #### Code locations
-- CLI — `src/main.rs`; demo — `src/demo.rs`; benchmark — `benches/reference.rs`
+- CLI — `cli/src/main.rs`; model files — `model/`, `models/demo.json`; demo — `src/demo.rs`; benchmark — `benches/reference.rs`
 
 ### Adding a New Object Type
 
@@ -229,7 +231,8 @@ Discrete-event material-flow simulator in Rust, built for speed. Engine library 
 #### Facts
 - `tests/simulation_run.rs`: run behaviour via Init, advance, Reset, occurrences, state; helpers `secs`, `no_failures`, `station`, `preloaded_station`, `recorded`, `exit_ids`, `exit_times`, `statistics_of`
 - `tests/live_session.rs`: commands and outputs with `FakeClock` and `sync`; Picture checked against the run
-- `tests/cli.rs`: the binary end to end
+- `model/tests/model_file.rs`: model files, text in, a model, problems or a run out
+- `cli/tests/cli.rs`: the binary end to end
 - Unit tests in `src/`: failures part way through an event (`RecordsThenFails`), session buffer limit and thinning
 - `ui/tests/`: view state against a real session, no window
 - Build models through `ModelDescription`; `availability = 1.0` unless testing failures; `Recording::ALL` to read occurrences
@@ -241,7 +244,7 @@ Discrete-event material-flow simulator in Rust, built for speed. Engine library 
 - Refactors of scheduling must keep every occurrence identical (hash against master)
 
 #### Code locations
-- `tests/simulation_run.rs`, `tests/live_session.rs`, `tests/cli.rs`
+- `tests/simulation_run.rs`, `tests/live_session.rs`, `model/tests/model_file.rs`, `cli/tests/cli.rs`
 - Long run: `cargo test --release --test simulation_run -- --ignored --nocapture the_demo_model`
 
 ---
@@ -269,7 +272,7 @@ Discrete-event material-flow simulator in Rust, built for speed. Engine library 
 ### Configuration Flags
 
 #### Facts
-- CLI (`src/main.rs`): `--seed <N>` (default 0), `--length <TIME>` (default `1d`, UI time syntax)
+- CLI (`cli/src/main.rs`): `--model <FILE>` (default: the built-in demo), `--seed <N>` (default 0), `--length <TIME>` (default `1d`, UI time syntax)
 - `RUST_LOG` controls `env_logger`; per-event `info` logging is slow
 - Profiles: `dev` (deps optimised), `release` (thin LTO, 1 codegen unit, `panic = unwind` for `LiveSession`), `ui` (release without LTO)
 - Rust version pinned in `rust-toolchain.toml`
@@ -277,4 +280,4 @@ Discrete-event material-flow simulator in Rust, built for speed. Engine library 
 - A session starts halted at speed 1; the UI uses 60x
 
 #### Code locations
-- `src/main.rs`, `src/live_session.rs`, `Cargo.toml`
+- `cli/src/main.rs`, `src/live_session.rs`, `Cargo.toml`

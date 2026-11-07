@@ -1,0 +1,16 @@
+[package]
+name = "crabsim-cli"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "crabsim's headless command line"
+
+[[bin]]
+name = "crabsim"
+path = "src/main.rs"
+
+[dependencies]
+crabsim = { path = ".." }
+crabsim-model = { path = "../model" }
+clap = { version = "4.5", features = ["derive"] }
+env_logger = "0.11.8"

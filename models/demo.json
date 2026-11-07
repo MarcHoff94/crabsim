@@ -1,0 +1,309 @@
+{
+  "format_version": 1,
+  "description": "The demo model: a Source, a line that splits into two branches with parallel Stations, and a Drain. Every Station fails at random, available 90% of the time.",
+  "instances": [
+    {
+      "name": "Source",
+      "class": "Source",
+      "position": {
+        "x": 0.0,
+        "y": 0.0
+      },
+      "successors": [
+        "Station 1"
+      ],
+      "attributes": {
+        "interval": "00:00:05"
+      }
+    },
+    {
+      "name": "Station 1",
+      "class": "Station",
+      "position": {
+        "x": 4.0,
+        "y": 0.0
+      },
+      "successors": [
+        "Station 2"
+      ],
+      "attributes": {
+        "process_time": "00:00:10",
+        "failures": {
+          "availability": 0.9,
+          "repair_time": {
+            "erlang": {
+              "mean": "00:01:00",
+              "k": 2
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "Station 2",
+      "class": "Station",
+      "position": {
+        "x": 8.0,
+        "y": 0.0
+      },
+      "successors": [
+        "Station 3",
+        "Station 5"
+      ],
+      "attributes": {
+        "process_time": "00:00:15",
+        "failures": {
+          "availability": 0.9,
+          "repair_time": {
+            "erlang": {
+              "mean": "00:01:00",
+              "k": 2
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "Station 3",
+      "class": "Station",
+      "position": {
+        "x": 12.0,
+        "y": 4.0
+      },
+      "successors": [
+        "Station 4"
+      ],
+      "attributes": {
+        "process_time": "00:00:20",
+        "failures": {
+          "availability": 0.9,
+          "repair_time": {
+            "erlang": {
+              "mean": "00:01:00",
+              "k": 2
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "Station 4",
+      "class": "Station",
+      "position": {
+        "x": 16.0,
+        "y": 4.0
+      },
+      "successors": [
+        "Station 4a",
+        "Station 4b",
+        "Station 4c"
+      ],
+      "attributes": {
+        "process_time": "00:00:25",
+        "failures": {
+          "availability": 0.9,
+          "repair_time": {
+            "erlang": {
+              "mean": "00:01:00",
+              "k": 2
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "Station 4a",
+      "class": "Station",
+      "position": {
+        "x": 20.0,
+        "y": 7.0
+      },
+      "successors": [
+        "Station 7"
+      ],
+      "attributes": {
+        "process_time": "00:00:12",
+        "failures": {
+          "availability": 0.9,
+          "repair_time": {
+            "erlang": {
+              "mean": "00:01:00",
+              "k": 2
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "Station 4b",
+      "class": "Station",
+      "position": {
+        "x": 20.0,
+        "y": 4.0
+      },
+      "successors": [
+        "Station 7"
+      ],
+      "attributes": {
+        "process_time": "00:00:15",
+        "failures": {
+          "availability": 0.9,
+          "repair_time": {
+            "erlang": {
+              "mean": "00:01:00",
+              "k": 2
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "Station 4c",
+      "class": "Station",
+      "position": {
+        "x": 20.0,
+        "y": 1.0
+      },
+      "successors": [
+        "Station 7"
+      ],
+      "attributes": {
+        "process_time": "00:00:18",
+        "failures": {
+          "availability": 0.9,
+          "repair_time": {
+            "erlang": {
+              "mean": "00:01:00",
+              "k": 2
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "Station 7",
+      "class": "Station",
+      "position": {
+        "x": 24.0,
+        "y": 4.0
+      },
+      "successors": [
+        "Drain"
+      ],
+      "attributes": {
+        "process_time": "00:00:30",
+        "failures": {
+          "availability": 0.9,
+          "repair_time": {
+            "erlang": {
+              "mean": "00:01:00",
+              "k": 2
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "Station 5",
+      "class": "Station",
+      "position": {
+        "x": 12.0,
+        "y": -4.0
+      },
+      "successors": [
+        "Station 5a",
+        "Station 5b",
+        "Station 5c"
+      ],
+      "attributes": {
+        "process_time": "00:00:18",
+        "failures": {
+          "availability": 0.9,
+          "repair_time": {
+            "erlang": {
+              "mean": "00:01:00",
+              "k": 2
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "Station 5a",
+      "class": "Station",
+      "position": {
+        "x": 16.0,
+        "y": -1.0
+      },
+      "successors": [
+        "Drain"
+      ],
+      "attributes": {
+        "process_time": "00:00:10",
+        "failures": {
+          "availability": 0.9,
+          "repair_time": {
+            "erlang": {
+              "mean": "00:01:00",
+              "k": 2
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "Station 5b",
+      "class": "Station",
+      "position": {
+        "x": 16.0,
+        "y": -4.0
+      },
+      "successors": [
+        "Drain"
+      ],
+      "attributes": {
+        "process_time": "00:00:14",
+        "failures": {
+          "availability": 0.9,
+          "repair_time": {
+            "erlang": {
+              "mean": "00:01:00",
+              "k": 2
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "Station 5c",
+      "class": "Station",
+      "position": {
+        "x": 16.0,
+        "y": -7.0
+      },
+      "successors": [
+        "Drain"
+      ],
+      "attributes": {
+        "process_time": "00:00:16",
+        "failures": {
+          "availability": 0.9,
+          "repair_time": {
+            "erlang": {
+              "mean": "00:01:00",
+              "k": 2
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "Drain",
+      "class": "Drain",
+      "position": {
+        "x": 28.0,
+        "y": 0.0
+      }
+    }
+  ]
+}

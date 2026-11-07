@@ -1,0 +1,12 @@
+[package]
+name = "crabsim-model"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "crabsim's model files: reading, validating, saving and building them into a run (ADR 0009)"
+
+[dependencies]
+crabsim = { path = ".." }
+serde = { version = "1", features = ["derive"] }
+# `preserve_order` keeps keys in the order they are written, so a saved file has one canonical form.
+serde_json = { version = "1", features = ["preserve_order"] }

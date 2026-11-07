@@ -224,7 +224,7 @@ Each states its cost, as `CLAUDE.md` asks. Where one touches the per-event path,
 1. ✅ Update Rust, raise the benchmark's large scenario to about 6,000 objects (429 copies of the demo), record the new baseline, and pin the version. See "After the Rust update and the 6,000-object model" in `docs/design/first-profile.md`.
 2. ✅ The prototype, with its results in `docs/design/ui-prototype.md`. Bevy with `bevy_egui` holds up. It found a bug in the live session, which lost about 30% of shown time at high load. Fixed in PR 19: `release` now reads the clock once.
 3. ✅ ADR 0006 for the technology.
-4. The workspace, and the Picture moved into the library.
+4. ✅ The workspace, and the Picture moved into the library, as `crabsim::Picture`. The `ui/` crate only opens a window so far.
 5. The engine additions above, with names, positions and dimensions on `ModelDescription`.
 6. UI stage 1.
 7. Trim the CLI to the headless version.
@@ -239,7 +239,7 @@ All of it is on `LiveSession` in `src/live_session.rs`, and `CLAUDE.md` has the 
 
 - **Commands:** `start`, `halt`, `reset`, `set_speed`, `set_time_mode`, `go_back`, `step_forward`, `request_state`, `pause`, `resume`, `clear_statistics`.
 - **Observations**, read from a channel: `Occurrences`, `ShownTime`, `State`, `Status`, `Error`.
-- **Rebuilding the picture:** one full state at Init, then occurrences give each object's contents, process state, stop and remaining time. `WorkStarted` and `MuCreated` carry durations, so a progress bar needs no further messages. Tests prove this on 3 models: a line with failures, with and without overlapping pauses, a line that blocks, and the full demo. Buffer is left out, because its movement is broken.
+- **Rebuilding the picture:** `crabsim::Picture` takes every observation in order and keeps what the user knows at shown time. One full state at Init, then occurrences give each object's contents, process state, stop and remaining time. `WorkStarted` and `MuCreated` carry durations, so a progress bar needs no further messages. Tests prove this on 3 models: a line with failures, with and without overlapping pauses, a line that blocks, and the full demo. Buffer is left out, because its movement is broken.
 - **Statistics:** `request_state` gives exact numbers for the instant on screen in a few milliseconds.
 - **Going back:** usually under 15 ms, and up to about 400 ms for far jumps on a large model past the memory budget. See `docs/design/first-profile.md`.
 - **Reading has to keep up:** past 256 unread observations a session stops releasing, so a UI drains the channel every frame. At high speed, one observation can hold up to 1,000 instants, so it can't draw each of them.
@@ -289,6 +289,6 @@ Checked on 2026-11-07, on Windows 11:
 
 ## Possible next steps
 
-1. **The UI's order of work,** in "UI design". Steps 1 to 3 are done, and so is the session fix the prototype found. Next is step 4: the workspace, and the Picture moved into the library. This is what the owner asked for next.
+1. **The UI's order of work,** in "UI design". Steps 1 to 4 are done, and so is the session fix the prototype found. Next is step 5: the engine additions for stage 1. This is what the owner asked for next.
 2. Step 7 of the build order, after UI stage 1.
 3. Run `/update-wiki` when convenient, so the docs stop describing removed code.

@@ -29,6 +29,9 @@ cargo test --release --test simulation_run -- --ignored --nocapture the_demo_mod
 # Run the benchmark (about a minute)
 cargo bench --bench reference
 
+# Run the UI (a Bevy application, ADR 0006), optimised without LTO so it rebuilds quickly
+cargo run -p crabsim-ui --profile ui
+
 # Run the benchmark for one scenario, with more repetitions
 cargo bench --bench reference -- --reps 9 --scenario demo-dropped
 ```
@@ -45,7 +48,7 @@ The design already agreed for this, including what isn't built yet, is in `docs/
 
 ## Architecture
 
-This is a Rust discrete-event material-flow simulator structured as a library (`src/`) with a demo binary (`src/main.rs`).
+This is a Rust discrete-event material-flow simulator structured as a library (`src/`) with a demo binary (`src/main.rs`), in a Cargo workspace with the UI as a member crate (`ui/`). The engine is the only default member, so `cargo test` and `cargo bench` at the root never build the UI, and the engine never depends on it.
 
 **Core engine** (`src/simulation_run.rs`): `SimulationRun` owns the objects (one `Vec<ModelObject>`, indexed by id), clock and event queue (`BinaryHeap<ScheduledEvent>`, 32 bytes per entry). At one simulation time, `BlockedRetry` events run before all others, and a monotonically increasing `seq` preserves FIFO order within each of those two groups. A run only advances when asked and knows nothing about views or pacing:
 - `init` — sets t=0, calls each object's `init` in id order and queues the first events without processing them. Only allowed from the default state.
@@ -69,6 +72,10 @@ This is a Rust discrete-event material-flow simulator structured as a library (`
 
 **Observation** (`src/observation.rs`): every advance returns the `Occurrence`s the run is recording, as set by `set_recording`: `Recording::NOTHING` by default, `ALL` or `only(&[...])`. A live session records everything. The kinds are (MU created/moved/left, work started/finished, blocked/unblocked, stop began/ended). Scheduling events are engine internals and are never shown to views. Objects record occurrences through the `EventContext` they receive with each event, which also gives them the time and new MU ids.
 
+**Picture** (`src/picture.rs`): what the user knows about a run at shown time. A UI feeds it every observation from a live session, in order, through `observe`. A full state replaces it, as after Init, Reset or going back. Occurrences update each object's contents, process state, interruptions and remaining time, but only once it has a state, because Init's occurrences arrive before Init's state. Statistics and waiting predecessors come only from a full state, so they aren't in it. It holds nothing about drawing, so a 2D view, a 3D view and tests read the same thing.
+
+**UI** (`ui/`): a Bevy application with egui panels (ADR 0006). So far it only opens a window. It filters the engine's per-event `info` logging, which Bevy's logger would otherwise print, and draws only when something changes.
+
 **Material-flow objects** (`src/materialflow_objects/`):
 - `model_object.rs` — the `ModelObject` enum over the object types, which dispatches the traits with a `match`, and `OtherObjects`, which is how an object handling an event reaches the others by id. The run splits its `Vec` around the object in hand, so this takes no `unsafe` and no shared ownership. See ADR 0005.
 - `flows.rs` — `MaterialFlow` and `EventInterface` traits; `MoveableUnit`; `ProcessState` enum (Processing/Blocked/Idle); `try_to_move_to_successor` (round-robin via `succ_pointer`, records blocked predecessors in `blockedlist`).
@@ -88,7 +95,7 @@ This is a Rust discrete-event material-flow simulator structured as a library (`
 
 **Demo** (`src/demo.rs`): the example model behind `--inplace` and the default run.
 
-**Tests** (`tests/`): `simulation_run.rs` tests behaviour at the run's interface: Init, advance, Reset, then read occurrences and state. `views.rs` tests the view adapters. `live_session.rs` tests commands in and observations out, with a fake clock, and includes rebuilding the picture from occurrences. Tests build models through `ModelDescription`. A failure part way through an event can't happen in a real object, so the few tests of it are unit tests in `src/`, using `RecordsThenFails`, a `#[cfg(test)]` variant of `ModelObject`. What can't be seen from outside a session, such as the buffer limit and thinning, is unit tested in `src/live_session.rs`.
+**Tests** (`tests/`): `simulation_run.rs` tests behaviour at the run's interface: Init, advance, Reset, then read occurrences and state. `views.rs` tests the view adapters. `live_session.rs` tests commands in and observations out, with a fake clock, and checks the `Picture` against the run's own state. Tests build models through `ModelDescription`. A failure part way through an event can't happen in a real object, so the few tests of it are unit tests in `src/`, using `RecordsThenFails`, a `#[cfg(test)]` variant of `ModelObject`. What can't be seen from outside a session, such as the buffer limit and thinning, is unit tested in `src/live_session.rs`.
 
 **Benchmark** (`benches/reference.rs`): runs a copy of the demo model, and 429 copies of it side by side (6,006 objects), and reports speed and peak memory. `cargo test --all-targets` runs it without `--bench`, and then it only checks that the copy still matches the demo model.
 

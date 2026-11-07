@@ -6,8 +6,8 @@
 //! a hang into a failure, so an extremely overloaded machine could fail a test that is fine.
 
 use crabsim::{
-    Clock, FailureProfile, LiveSession, ModelDescription, Observation, Occurrence, OccurrenceKind, Recording, RunState,
-    EventType, ObjectState, RunError, SessionError, SessionSettings, SessionStatus, SimTime, SimulationRun, StopCause,
+    Clock, FailureProfile, LiveSession, Picture, ModelDescription, Observation, Occurrence, OccurrenceKind, Recording, RunState,
+    EventType, RunError, SessionError, SessionSettings, SessionStatus, SimTime, SimulationRun, StopCause,
     TimeMode, WallClock, OBSERVATION_BACKLOG_LIMIT, ZERO_TIME_EVENT_LIMIT,
 };
 use crabsim::random_numbers::Distribution;
@@ -56,6 +56,10 @@ struct Watched {
     state: Option<RunState>,
     shown: SimTime,
     unread: Seen,
+    /// Everything observed, in order, as a UI would see it.
+    picture: Picture,
+    /// Whether full states reach the picture. Off once a test asks for states only to compare.
+    picture_takes_states: bool,
 }
 
 #[derive(Default)]
@@ -76,7 +80,15 @@ impl Watched {
         arm_watchdog();
         let clock = FakeClock::default();
         let session = LiveSession::with_settings(build, clock.clone(), settings);
-        Watched { session, clock, state: None, shown: SimTime::ZERO, unread: Seen::default() }
+        Watched {
+            session,
+            clock,
+            state: None,
+            shown: SimTime::ZERO,
+            unread: Seen::default(),
+            picture: Picture::new(),
+            picture_takes_states: true,
+        }
     }
 
     /// Moves the clock, once the session has handled every command given so far. A command
@@ -103,6 +115,9 @@ impl Watched {
 
     fn collect(&mut self) {
         for observation in self.session.observations().try_iter() {
+            if self.picture_takes_states || !matches!(observation, Observation::State(_)) {
+                self.picture.observe(&observation);
+            }
             match observation {
                 Observation::Occurrences(new) => self.unread.occurrences.extend(new),
                 Observation::ShownTime(shown) => {
@@ -1707,126 +1722,25 @@ fn the_time_mode_changes_no_results() {
 
 // ---------- What it takes to rebuild the picture ----------
 
-/// What a UI needs to draw an object, built only from one full state and occurrences.
+/// What a UI needs to draw an object, which the picture rebuilds from one full state and
+/// occurrences.
 #[derive(Debug, Clone, PartialEq)]
 struct Drawn {
     contents: Vec<u32>,
     process: crabsim::ProcessState,
     stop: Option<StopCause>,
     remaining: Option<SimTime>,
+    successors: Vec<u32>,
 }
 
-/// One object, while a UI rebuilds it.
-#[derive(Clone)]
-struct Rebuilt {
-    contents: Vec<u32>,
-    process: crabsim::ProcessState,
-    failed: bool,
-    paused: bool,
-    completion: Option<SimTime>,
-    frozen: Option<SimTime>,
-}
-
-impl Rebuilt {
-    fn from_state(state: &ObjectState, now: SimTime) -> Rebuilt {
-        let stopped = state.stop.is_some();
-        let remaining = state.remaining;
-        Rebuilt {
-            contents: state.contents.clone(),
-            process: state.process.clone(),
-            failed: state.stop == Some(StopCause::Failure),
-            paused: state.stop == Some(StopCause::Pause),
-            completion: remaining.filter(|_| !stopped).map(|left| now + left),
-            frozen: remaining.filter(|_| stopped),
-        }
-    }
-
-    fn drawn(&self, now: SimTime) -> Drawn {
-        let stop = if self.failed {
-            Some(StopCause::Failure)
-        } else if self.paused {
-            Some(StopCause::Pause)
-        } else {
-            None
-        };
-        let remaining = self.frozen.or_else(|| self.completion.map(|completion| completion.saturating_sub(now)));
-        Drawn { contents: self.contents.clone(), process: self.process.clone(), stop, remaining }
-    }
-
-    fn stopped(&self) -> bool {
-        self.failed || self.paused
-    }
-}
-
-fn apply_occurrence(objects: &mut [Rebuilt], occurrence: &Occurrence) {
-    use crabsim::ProcessState::{Blocked, Idle, Processing};
-    let now = occurrence.time;
-    match occurrence.kind {
-        OccurrenceKind::RunInitialised => {}
-        OccurrenceKind::MuCreated { mu_id, at, duration } => {
-            let object = &mut objects[at as usize];
-            object.contents = vec![mu_id];
-            object.process = Processing;
-            object.completion = Some(now + duration);
-        }
-        OccurrenceKind::MuMoved { mu_id, from, to } => {
-            let object = &mut objects[from as usize];
-            object.contents.retain(|&id| id != mu_id);
-            object.process = Idle;
-            object.completion = None;
-            if !matches!(objects.get(to as usize), None) {
-                objects[to as usize].contents.push(mu_id);
-            }
-        }
-        OccurrenceKind::MuLeft { mu_id, at, .. } => objects[at as usize].contents.retain(|&id| id != mu_id),
-        OccurrenceKind::WorkStarted { at, duration, .. } => {
-            let object = &mut objects[at as usize];
-            object.process = Processing;
-            object.completion = Some(now + duration);
-        }
-        OccurrenceKind::WorkFinished { at, .. } => objects[at as usize].completion = None,
-        OccurrenceKind::Blocked { object_id } => {
-            objects[object_id as usize].process = Blocked;
-            objects[object_id as usize].completion = None;
-        }
-        OccurrenceKind::Unblocked { object_id } => {
-            // A Source unblocks by creating its next MU, which has already set what it is doing.
-            let object = &mut objects[object_id as usize];
-            if object.process == Blocked {
-                object.process = Idle;
-            }
-        }
-        OccurrenceKind::InterruptionBegan { object_id, cause } => {
-            let object = &mut objects[object_id as usize];
-            if !object.stopped() {
-                object.frozen = object.completion.take().map(|completion| completion.saturating_sub(now));
-            }
-            match cause {
-                StopCause::Failure => object.failed = true,
-                StopCause::Pause => object.paused = true,
-            }
-        }
-        OccurrenceKind::InterruptionEnded { object_id, cause } => {
-            let object = &mut objects[object_id as usize];
-            match cause {
-                StopCause::Failure => object.failed = false,
-                StopCause::Pause => object.paused = false,
-            }
-            if !object.stopped() {
-                object.completion = object.frozen.take().map(|left| now + left);
-            }
-        }
-    }
-}
-
-/// Plays a session through `steps`, rebuilding the picture only from its first state and its
-/// occurrences, and compares it with the run's own state at each of them.
+/// Plays a session through `steps`, with the picture fed from everything it reports but the
+/// states asked for here, and compares the picture with the run's own state at each step.
 fn assert_picture_rebuilds(build: fn() -> SimulationRun, steps: &[u64], actions: &[(u64, u32)]) {
     let mut watched = Watched::new(build);
     watched.session.start().unwrap();
-    let mut seen = watched.look();
-    let first = watched.state.clone().expect("the state from Init");
-    let mut objects: Vec<Rebuilt> = first.objects.iter().map(|o| Rebuilt::from_state(o, first.time)).collect();
+    watched.look();
+    assert!(watched.picture.has_state(), "the picture takes the state from Init");
+    watched.picture_takes_states = false;
 
     let mut compared = 0;
     let mut pending = actions.iter();
@@ -1835,7 +1749,7 @@ fn assert_picture_rebuilds(build: fn() -> SimulationRun, steps: &[u64], actions:
     for &step in steps {
         while let Some(&(at, id)) = next_action.filter(|(at, _)| *at <= step) {
             watched.at(at);
-            seen.occurrences.extend(watched.look().occurrences);
+            watched.look();
             if paused {
                 watched.session.resume(id).unwrap();
             } else {
@@ -1845,17 +1759,37 @@ fn assert_picture_rebuilds(build: fn() -> SimulationRun, steps: &[u64], actions:
             next_action = pending.next();
         }
         watched.at(step);
-        seen.occurrences.extend(watched.look().occurrences);
-        // The Init state already holds what Init did.
-        for occurrence in seen.occurrences.drain(..).filter(|o| o.time > SimTime::ZERO) {
-            apply_occurrence(&mut objects, &occurrence);
-        }
+        watched.look();
         let now = secs(step);
+        assert_eq!(watched.picture.shown(), now);
+        let pictured: Vec<(u32, crabsim::ObjectKind, Drawn)> = watched
+            .picture
+            .objects()
+            .iter()
+            .map(|object| {
+                let drawn = Drawn {
+                    contents: object.contents().to_vec(),
+                    process: object.process(),
+                    stop: object.stop(),
+                    remaining: object.remaining(now),
+                    successors: object.successors().to_vec(),
+                };
+                (object.id(), object.kind(), drawn)
+            })
+            .collect();
         let state = watched.state_now();
         assert_eq!(state.time, now);
-        for (rebuilt, own) in objects.iter().zip(&state.objects) {
-            let expected = Drawn { contents: own.contents.clone(), process: own.process.clone(), stop: own.stop, remaining: own.remaining };
-            assert_eq!(rebuilt.drawn(now), expected, "object {} at t={step}", own.id);
+        assert_eq!(pictured.len(), state.objects.len());
+        for ((id, kind, drawn), own) in pictured.into_iter().zip(&state.objects) {
+            let expected = Drawn {
+                contents: own.contents.clone(),
+                process: own.process.clone(),
+                stop: own.stop,
+                remaining: own.remaining,
+                successors: own.successors.clone(),
+            };
+            assert_eq!((id, kind), (own.id, own.kind));
+            assert_eq!(drawn, expected, "object {} at t={step}", own.id);
             compared += 1;
         }
     }

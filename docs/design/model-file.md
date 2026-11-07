@@ -1,6 +1,6 @@
 # The model file
 
-Agreed with the owner on 2026-11-07 in a design round, as step 2 of the AI-native order of work (issue 28). The code is in `model/` (`crabsim-model`, ADR 0009). It's built in three slices: today's objects with the built-in classes only, then derived classes and inheritance, then the published JSON Schema. The first two are built, and the schema is next.
+Agreed with the owner on 2026-11-07 in a design round, as step 2 of the AI-native order of work (issue 28). The code is in `model/` (`crabsim-model`, ADR 0009). It's built in three slices: today's objects with the built-in classes only, then derived classes and inheritance, then the published JSON Schema. All three are built.
 
 ## What it is
 
@@ -12,6 +12,7 @@ A file holds the model only: classes, instances, their attributes, names, positi
 
 ```json
 {
+  "$schema": "./model-file.schema.json",
   "format_version": 1,
   "description": "A line with two branches",
   "classes": [ ... ],
@@ -19,6 +20,8 @@ A file holds the model only: classes, instances, their attributes, names, positi
 }
 ```
 
+- `$schema` is optional: where the JSON Schema is, so an editor checks the file as it's typed. crabsim keeps it when saving and otherwise ignores it.
+- `$schema` is optional: where the JSON Schema is, so an editor checks the file as it's typed. crabsim keeps it when saving and otherwise ignores it.
 - `format_version` is required. Only 1 exists, and any other is refused with a clear error. When the format has a reason to change, the version goes up and older files are migrated.
 - `description` is optional, for the model as a whole.
 - `classes` is optional.
@@ -130,8 +133,40 @@ A valid file becomes the engine's `ModelDescription`, with every instance's valu
 
 ## Files
 
-- `models/demo.json` is the demo model as a file. Its Stations share their failures through one class, `Demo station`, and set only their process times. A test checks it builds a run identical to `demo::model()` for the same seed.
+- `models/demo.json` is the demo model as a file, pointing at the schema with `"$schema": "./model-file.schema.json"`. Its Stations share their failures through one class, `Demo station`, and set only their process times. A test checks it builds a run identical to `demo::model()` for the same seed.
 - The benchmark's 6,006-object model is generated in code and checked to round-trip as a file in a test, rather than committed, since it is about 2 MB.
+
+## The JSON Schema
+
+`models/model-file.schema.json` is the published schema, generated from the types in `model/src/schema.rs` with `schemars`, pinned to one version because a new one can change the file. Its descriptions come from those types' doc comments, so an editor shows them on hover and an agent can read them.
+
+The schema checks a file's shape: fields, types, time strings, ranges such as an availability between 0 and 1. crabsim's own validation goes further: names that must exist, classes going round in a circle, seconds below 60, values set nowhere in a chain, a Source that would create MUs forever. So a file the schema accepts may still have problems, but a file crabsim accepts always passes the schema.
+
+The reader reads files by hand, so it can report every problem at once, and the schema comes from separate types. Tests in `model/tests/schema.rs` keep the two from drifting apart:
+
+- every file the reader accepts, including one with every field and kind of value, passes the schema,
+- shape mistakes, from unknown fields to a time that isn't one, fail both,
+- the schema's attributes are exactly the reader's,
+- times crabsim saves and typical typed ones match the schema's pattern,
+- the committed file is the generated one. After changing the format, write it again with `cargo test -p crabsim-model --test schema -- --ignored write_the_schema_file`.
+
+The operation catalogue will reuse these types for its own input schemas, so the file's schema and the operations' never disagree.
+
+## The JSON Schema
+
+`models/model-file.schema.json` is the published schema, generated from the types in `model/src/schema.rs` with `schemars`, pinned to one version because a new one can change the file. Its descriptions come from those types' doc comments, so an editor shows them on hover and an agent can read them.
+
+The schema checks a file's shape: fields, types, time strings, ranges such as an availability between 0 and 1. crabsim's own validation goes further: names that must exist, classes going round in a circle, seconds below 60, values set nowhere in a chain, a Source that would create MUs forever. So a file the schema accepts may still have problems, but a file crabsim accepts always passes the schema.
+
+The reader reads files by hand, so it can report every problem at once, and the schema comes from separate types. Tests in `model/tests/schema.rs` keep the two from drifting apart:
+
+- every file the reader accepts, including one with every field and kind of value, passes the schema,
+- shape mistakes, from unknown fields to a time that isn't one, fail both,
+- the schema's attributes are exactly the reader's,
+- times crabsim saves and typical typed ones match the schema's pattern,
+- the committed file is the generated one. After changing the format, write it again with `cargo test -p crabsim-model --test schema -- --ignored write_the_schema_file`.
+
+The operation catalogue will reuse these types for its own input schemas, so the file's schema and the operations' never disagree.
 
 ## The CLI
 

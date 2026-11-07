@@ -1,0 +1,326 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "crabsim model file",
+  "description": "A crabsim model file. It holds the model only: a run's seed, length and warm-up are not part of it. See docs/design/model-file.md in the crabsim repository.",
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "description": "Where this schema is, for editors. crabsim ignores it and keeps it when saving.",
+      "type": "string"
+    },
+    "format_version": {
+      "description": "The format's version. Only 1 exists.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0,
+      "const": 1
+    },
+    "description": {
+      "description": "What the model is, as a whole.",
+      "type": "string"
+    },
+    "classes": {
+      "description": "The model's own classes, in any order. Each derives from a built-in class (Source, Station, Buffer, Drain) or from another class here.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ClassFile"
+      }
+    },
+    "instances": {
+      "description": "The material-flow objects, in the order a run initialises them.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/InstanceFile"
+      }
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "format_version",
+    "instances"
+  ],
+  "$defs": {
+    "ClassFile": {
+      "description": "A class of the model's own.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "description": "Unique among classes, and not the name of a built-in class.",
+          "$ref": "#/$defs/Name"
+        },
+        "parent": {
+          "description": "The class it derives from: Source, Station, Buffer, Drain or another class in the file.",
+          "type": "string"
+        },
+        "attributes": {
+          "description": "Only the values this class changes from its parent.",
+          "$ref": "#/$defs/AttributesFile"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "parent"
+      ]
+    },
+    "Name": {
+      "description": "A name: not empty, and with no spaces at either end.",
+      "type": "string",
+      "pattern": "^\\S(.*\\S)?$"
+    },
+    "AttributesFile": {
+      "description": "The values a class or instance sets. Each applies to some built-in classes only, and anything left out is inherited.",
+      "type": "object",
+      "properties": {
+        "interval": {
+          "description": "Source: the time between creating an MU and offering it on. Must be set somewhere in the chain of classes. 0 offers each MU at once.",
+          "$ref": "#/$defs/Time"
+        },
+        "process_time": {
+          "description": "Station: the time it works on each MU. 0 by default, a dummy Station that takes no time.",
+          "$ref": "#/$defs/Time"
+        },
+        "failures": {
+          "description": "Station: random failures. Left out, it never fails.",
+          "$ref": "#/$defs/FailuresFile"
+        },
+        "starting_mus": {
+          "description": "Station: how many MUs it holds from the start of a run, 0 or 1.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "capacity": {
+          "description": "Buffer: how many MUs it holds. Must be set somewhere in the chain of classes.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        },
+        "dimensions": {
+          "description": "Any object: its size in metres and rotation in degrees. Visual only.",
+          "$ref": "#/$defs/DimensionsFile"
+        },
+        "description": {
+          "description": "Any object: free text saying what it is. Visual only.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "Time": {
+      "description": "A time, written as crabsim's UI shows it: seconds, minutes and seconds, or hours, minutes and seconds, with days in front and a fraction of a second at the end. Such as \"90\", \"1:30\", \"8:00:00\", \"2d 06:00:00\", \"3d\" or \"0:00:12.5\".",
+      "type": "string",
+      "pattern": "^\\s*(\\d+\\s*d(\\s*((\\d+:)?\\d+:)?\\d+(\\.\\d+)?)?|((\\d+:)?\\d+:)?\\d+(\\.\\d+)?)\\s*$"
+    },
+    "FailuresFile": {
+      "description": "Random failures. The time between failures follows from the availability and the repair time.",
+      "type": "object",
+      "properties": {
+        "availability": {
+          "description": "The share of time available, above 0 and below 1.",
+          "type": "number",
+          "format": "double",
+          "exclusiveMinimum": 0,
+          "exclusiveMaximum": 1
+        },
+        "repair_time": {
+          "$ref": "#/$defs/RepairTimeFile"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "availability",
+        "repair_time"
+      ]
+    },
+    "RepairTimeFile": {
+      "description": "How long a repair takes: exactly one of these.",
+      "oneOf": [
+        {
+          "description": "Always the same time, above 0.",
+          "type": "object",
+          "properties": {
+            "constant": {
+              "$ref": "#/$defs/Time"
+            }
+          },
+          "required": [
+            "constant"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "description": "Evenly spread between `min` and `max`.",
+          "type": "object",
+          "properties": {
+            "uniform": {
+              "type": "object",
+              "properties": {
+                "min": {
+                  "$ref": "#/$defs/Time"
+                },
+                "max": {
+                  "$ref": "#/$defs/Time"
+                }
+              },
+              "additionalProperties": false,
+              "required": [
+                "min",
+                "max"
+              ]
+            }
+          },
+          "required": [
+            "uniform"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "description": "Normally distributed with this mean and standard deviation.",
+          "type": "object",
+          "properties": {
+            "normal": {
+              "type": "object",
+              "properties": {
+                "mean": {
+                  "$ref": "#/$defs/Time"
+                },
+                "std": {
+                  "$ref": "#/$defs/Time"
+                }
+              },
+              "additionalProperties": false,
+              "required": [
+                "mean",
+                "std"
+              ]
+            }
+          },
+          "required": [
+            "normal"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "description": "Erlang distributed with this mean and shape `k`.",
+          "type": "object",
+          "properties": {
+            "erlang": {
+              "type": "object",
+              "properties": {
+                "mean": {
+                  "$ref": "#/$defs/Time"
+                },
+                "k": {
+                  "type": "integer",
+                  "format": "uint64",
+                  "minimum": 1
+                }
+              },
+              "additionalProperties": false,
+              "required": [
+                "mean",
+                "k"
+              ]
+            }
+          },
+          "required": [
+            "erlang"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "DimensionsFile": {
+      "description": "An object's size and rotation.",
+      "type": "object",
+      "properties": {
+        "length": {
+          "type": "number",
+          "format": "double",
+          "exclusiveMinimum": 0
+        },
+        "width": {
+          "type": "number",
+          "format": "double",
+          "exclusiveMinimum": 0
+        },
+        "height": {
+          "type": "number",
+          "format": "double",
+          "exclusiveMinimum": 0
+        },
+        "rotation_degrees": {
+          "description": "Around the vertical axis, 0 if left out.",
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "length",
+        "width",
+        "height"
+      ]
+    },
+    "InstanceFile": {
+      "description": "One material-flow object.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "description": "Unique among instances.",
+          "$ref": "#/$defs/Name"
+        },
+        "class": {
+          "description": "Source, Station, Buffer, Drain or a class in the file.",
+          "type": "string"
+        },
+        "position": {
+          "description": "The centre of its footprint, in metres. Visual only.",
+          "$ref": "#/$defs/PositionFile"
+        },
+        "successors": {
+          "description": "The instances it passes MUs to, by name, in the order they are tried.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "attributes": {
+          "description": "Only the values set on this instance. Anything else comes from its class.",
+          "$ref": "#/$defs/AttributesFile"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "class"
+      ]
+    },
+    "PositionFile": {
+      "description": "A position in metres.",
+      "type": "object",
+      "properties": {
+        "x": {
+          "type": "number",
+          "format": "double"
+        },
+        "y": {
+          "type": "number",
+          "format": "double"
+        },
+        "z": {
+          "description": "Height above the floor, 0 if left out.",
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "x",
+        "y"
+      ]
+    }
+  }
+}

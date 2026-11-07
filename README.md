@@ -32,7 +32,7 @@ The same with a seed and a simulated length, written as the UI shows time, such 
 cargo run --release --bin crabsim -- --seed 7 --length 365d
 ```
 
-Run a model file. `models/demo.json` is the demo model as a file, and `docs/design/model-file.md` describes the format:
+Run a model file. `models/demo.json` is the demo model as a file, `models/model-file.schema.json` is the format's JSON Schema, which editors such as VS Code use to check a file as you type, and `docs/design/model-file.md` describes the format:
 
 ```powershell
 cargo run --release --bin crabsim -- --model models/demo.json --length 30d

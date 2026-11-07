@@ -1,4 +1,5 @@
 {
+  "$schema": "./model-file.schema.json",
   "format_version": 1,
   "description": "The demo model: a Source, a line that splits into two branches with parallel Stations, and a Drain. Every Station fails at random, available 90% of the time.",
   "classes": [

@@ -10,3 +10,9 @@ crabsim = { path = ".." }
 serde = { version = "1", features = ["derive"] }
 # `preserve_order` keeps keys in the order they are written, so a saved file has one canonical form.
 serde_json = { version = "1", features = ["preserve_order"] }
+# Generates the published JSON Schema. Pinned, because a new version can change the generated file.
+schemars = "=1.2.3"
+
+[dev-dependencies]
+# Checks files against the generated schema. Without default features it has no network code.
+jsonschema = { version = "0.60", default-features = false }

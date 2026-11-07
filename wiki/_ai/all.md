@@ -112,7 +112,7 @@ Discrete-event material-flow simulator in Rust, built for speed. Engine library 
 
 #### Code locations
 - `src/simulation_run.rs` SimulationRun · `src/model.rs` ModelDescription · `src/event.rs` events · `src/report.rs` occurrences and state · `src/statistics.rs` · `src/live_session.rs` · `src/picture.rs` · `src/time.rs` SimTime, format/parse · `src/demo.rs`
-- `model/src/`: `lib.rs` (Model, Problem, load), `read.rs`, `check.rs`, `write.rs`, `build.rs`; `cli/src/main.rs`; `models/demo.json`
+- `model/src/`: `lib.rs` (Model, Problem, load), `read.rs`, `check.rs`, `write.rs`, `build.rs`, `schema.rs` (JSON Schema via schemars, drift-tested against the reader); `cli/src/main.rs`; `models/demo.json`, `models/model-file.schema.json`
 - `src/materialflow_objects/`: `model_object.rs`, `flows.rs`, `source.rs`, `station.rs`, `buffer.rs`, `drain.rs`
 - `ui/src/`: `view.rs`, `camera.rs`, `marks.rs`, `main.rs`
 

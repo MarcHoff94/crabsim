@@ -9,6 +9,9 @@ use serde_json::{json, Map, Value};
 
 pub(crate) fn write(model: &Model) -> String {
     let mut file = Map::new();
+    if let Some(schema) = &model.schema {
+        file.insert("$schema".into(), json!(schema));
+    }
     file.insert("format_version".into(), json!(FORMAT_VERSION));
     if let Some(description) = &model.description {
         file.insert("description".into(), json!(description));

@@ -1,15 +1,15 @@
 # crabsim handoff
 
-Written 2026-11-07 at the end of a working session. Read this first, then check it against the code and git, because it describes a moment in time.
+Written 2026-11-07 at the end of a working session, and updated the same day after the UI design session. Read this first, then check it against the code and git, because it describes a moment in time.
 
-**The next session is about the UI:** which technology to use and what matters most. Go to "The UI session" below.
+**The UI is designed but not built.** The next work is its "Order of work", starting at step 1. Go to "UI design" below.
 
 ## Start here
 
 1. Read `CLAUDE.md`.
 2. Read `GLOSSARY.md` and `docs/adr/`.
 3. Read "Agreed design" below. Most of it isn't recorded anywhere else.
-4. Read "The UI session" below, then start there with the owner. Decide before building.
+4. Read "UI design" below, and `docs/design/ui-technology-research.md` for the technology behind it. Then start its order of work at step 1.
 
 ## Current state
 
@@ -17,7 +17,7 @@ Checked on 2026-11-07: `master` at `f64aa16` passes all 247 tests, with 1 long-r
 
 | Where | State |
 |---|---|
-| `master`, local and GitHub | Steps 1 to 6 of the build order, through PR 14. No PRs are open |
+| `master` on GitHub | Steps 1 to 6 of the build order, through PR 14, and the first handoff in PR 15 (`fb64ea8`). No PRs are open |
 | `prototype/restore-replay` | The throwaway prototype from step 5. Keep it, and never merge it |
 | Other branches | Merged, so they can be deleted, though the app's worktrees may be using some |
 
@@ -27,13 +27,14 @@ The owner merges PRs on GitHub themselves, so fetch before assuming local `maste
 
 - **2026-11-05 and earlier:** the owner came back after about six months away. `master` didn't build, and was repaired. The domain design was agreed, an architecture review was done, and `SimulationRun`, occurrences and the first `LiveSession` were built. `crabsim-renderer`, its TCP code and `serde` were removed.
 - **2026-11-06:** performance became the first design pillar, and steps 1 to 6 of the build order were designed and built. See "Build order".
+- **2026-11-07:** the UI was designed in a grilling session, with technology research. Nothing was built. The target scale went up to 6,000 objects. See "UI design".
 
 ## Agreed design
 
 The owner decided all of this. Don't reopen it without a reason, and flag it if you need to. **Built** means it's in the code now, and **not built** means it's agreed for later.
 
 ### Performance (built where noted, otherwise not yet)
-Performance is the first thing to weigh in design trade-offs. It is a guideline rather than a hard rule, and `CLAUDE.md` holds the wording and the measuring rules. The target scale is up to a few thousand objects and tens of simulated years per run, with no fixed speed target.
+Performance is the first thing to weigh in design trade-offs. It is a guideline rather than a hard rule, and `CLAUDE.md` holds the wording and the measuring rules. The target scale is up to 6,000 objects (raised from "a few thousand" on 2026-11-07) and tens of simulated years per run, with no fixed speed target. *Still to do in a later session: the benchmark's large scenario is 2,800 objects (200 copies of the demo), so raise it to about 6,000 (429 copies), re-baseline, and update the figures here and in `CLAUDE.md`.*
 
 - **Headless run (built):** a plain simulation run with no live session or view, not a separate mode. It gives back its final state and the objects' data, with no reset, including after a run error.
 - **Recording (built)** is a runtime setting on the run for which occurrence kinds to keep, changeable at any time, because replay needs it off and then back on. A run records nothing by default, and a live session records everything.
@@ -156,15 +157,80 @@ Candidates from the review. "Strong" and "worth exploring" were the review's own
 
 ADR 0001 must not be contradicted without flagging it. The review's HTML report was in a temporary folder and may be gone.
 
-## The UI session
+## UI design
 
-The owner wants to completely replace the CLI with a real UI, and to choose its technology in the next session. Nothing below is decided. Use the `grilling` skill, in rounds where "yes" accepts a recommendation, and check current facts about each technology with the `research` skill rather than from memory.
+Decided with the owner on 2026-11-07, in a grilling session. Nothing of it is built yet. The technology research behind it is in `docs/design/ui-technology-research.md`. Like the rest of "Agreed design", don't reopen it without a reason.
 
-### The goal
+### Who, where and what matters
+- **Who:** the owner first. Later it's shared as a program to download, with no hosted service or accounts. Nothing should rule that out, but no effort goes into it now.
+- **Where:** engine and window are always on the same PC. A long run on a bigger machine is a headless run with no UI.
+- **Priority, by default:** building models first, then smooth, good-looking animation, then debugging. Animation matters because it's how non-technical people understand a model and come to trust it. Like performance, this is a default and not a rule: it can be overturned case by case, given real reasoning and a trade-off worth making.
+- **Views:** a 2D view now. A 3D view **will** come later, as a second view of the same model, not a replacement. 2D stays for building and debugging, and 3D is for showing and watching. Keep that move in mind in every UI decision.
+- **Scale:** up to 6,000 objects. The whole model can always be drawn, with pan and zoom, and every object always shows its state as a colour. MUs and their gliding appear only when zoomed in far enough and running slowly enough to follow. Above that, objects show counts and state only.
 
-- **First:** a visualization of a run, as a basis to build on.
-- **End goal:** drag and drop objects, configure them, start, stop, init and reset the simulation, animate and render it, watch it run, and control how fast simulation time passes.
-- **Debugging models:** the owner's stated main purpose of going back in time is to make models easier to debug and understand. So stepping back and forward, and seeing why an object is blocked or stopped, are core features rather than extras.
+### Technology
+- **Bevy with `bevy_egui`,** if the prototype below holds up, with eframe and a custom wgpu canvas as the fallback. Bevy won because 2D and 3D share one renderer and one world, so the 3D view costs least, and its forms and panels are egui, the same as eframe's. Its price is upgrade churn, heavier builds and an ECS to learn.
+- **Rules that limit the risk:**
+  - The engine never depends on Bevy, and Bevy's ECS stays in the UI crate, so ADR 0005's storage is untouched.
+  - The Picture lives in the engine library with no Bevy types, and Bevy only reads it.
+  - Panels are plain functions taking `&mut egui::Ui`, so they could move to eframe. A wrong choice then costs the canvas, not the whole UI.
+  - Bevy's version is pinned, and upgraded only when there's a reason.
+- **ADR 0006** records the choice, written once the prototype has settled it.
+- **Toolchain:** Rust 1.91.1 is too old (Bevy 0.20 needs 1.97.1, egui 0.37 needs 1.95). Update to the latest stable, re-run the benchmark for a new baseline, and pin the version in `rust-toolchain.toml`.
+
+### The prototype
+Throwaway, on a `prototype/` branch that is never merged, like `prototype/restore-replay`. Its results go in `docs/design/`. It answers four things:
+1. **Scale:** 6,000 flat objects with state colours, 5,000 gliding markers and labels on zoom, at a steady 60 frames per second on the owner's AMD Radeon RX 9070 XT. Compare sprites with flat meshes under an orthographic camera, since that decides how cheap the 3D view really is.
+2. **Real session:** a live session at 6,000 objects and 1 simulated hour per second behind a window, on a real clock, with no visible stutter. That's about 1.9M occurrences per second by calculation. Nothing has driven a session on a real clock for long, so this is needed whatever the technology.
+3. **Panels and canvas together:** dragging from an egui palette into the canvas, clicks reaching the right layer, selecting one of 6,000 objects, and little CPU while Halted.
+4. **Build times,** clean and incremental, judged rather than held to a limit.
+
+If 1 or 3 fails, try eframe. If 2 fails, the problem is in the session, not the technology.
+
+### Structure
+- **Workspace:** the engine stays at the repo root with its tests and benchmark, and the UI becomes a member crate. Headless runs pay nothing for the UI.
+- **Picture:** `Rebuilt` and `apply_occurrence` move from `tests/live_session.rs` into the engine library as the Picture: logical state only, what is where and since when. Visual state, such as where a marker is mid-glide, stays in the UI.
+- **CLI:** a simple headless CLI stays. For now it runs the demo model with a seed and a simulated length, then prints each object's final statistics and how long the run took. Once model as data exists it takes a model file. `--inplace`, the terminal view and the topology text go once UI stage 1 can show the demo.
+
+### Model data for the UI
+- **Names and positions** go on `ModelDescription` now, as optional fields, written by hand for the demo, with no automatic layout. Drag and drop will later write the same fields. The run ignores them, so a headless run pays nothing.
+- **Units:** metres for everything. Position is the object's centre, as x, y and z, with z = 0 for now.
+- **Dimensions:** length, width and height, plus a rotation around the vertical axis. All optional, with a default size per object type. Stage 1 draws objects to size, and height waits for 3D. They are **visual only**: MU moves stay instant whatever the distance. Dimensions matter for results only in future transport objects such as a conveyor.
+- **Layout image** (with drag and drop, step 3 of the order below): an image of the real site under the model. Its scale comes from clicking two points and entering the real distance. One per model, lying flat, and the floor in 3D. A headless run and the CLI never load it.
+
+### UI stage 1
+- **In:** the demo model drawn in 2D with state colours and contents, MUs gliding, Init, Start, Halt, Reset, speed and time mode, shown time, step forward and back, jumping to an earlier time, Pause, forced failure and process time changes on a Station, an inspector, and pan and zoom.
+- **Out:** building or editing a model, save and load, scale work beyond a stress check, and polish.
+- **Window:** a fixed layout with no docking yet. The top bar has Init, Start, Halt, Reset, step back and forward, jump to a time, speed, time mode and shown time. The 2D view is in the centre, and the inspector is on the right. Defaults are continuous time mode at 60 times real time, which is about 30 events per second on the demo by calculation. Speed is on a logarithmic slider. When playback can't keep up, the top bar shows the speed actually achieved. A run error shows as a banner, and going back out of it stays possible.
+- **Inspector:**
+  - **State:** type, name, process state, contents and remaining time.
+  - **Why it's blocked:** the MU it holds and each successor's state, such as "holding MU 17: Station 4 is working, Station 5 has a forced failure".
+  - **Why it's stopped:** every active interruption and since when.
+  - **Process time:** current and configured.
+  - **Statistics and waiting predecessors:** these come only from a full state, so the UI calls `request_state` about twice a second while something is selected, and never otherwise.
+- **Gliding:** a glide takes a fixed wall time, about 0.2 s to start with and adjustable, and is shorter if the MU moves on again. On Halt, running glides finish, so the screen settles on the truth. Going back or a jump puts markers in place with no glide.
+- **Interventions on the time display:** each shows as a mark. Going back past one asks for confirmation, saying how many will be lost. The engine rule stays that going back drops later interventions.
+
+### Engine additions for stage 1
+Each states its cost, as `CLAUDE.md` asks. Where one touches the per-event path, show before and after benchmark numbers.
+- **Forced failure,** on Stations for now: an intervention the user starts and ends, with no sampled repair time. It counts as a failure in statistics and against availability, random failures carry on underneath it, and an overlap is one stop. It **can't reuse** `StartFailure` and `EndFailure`, because each random failure schedules the next only when it ends. Reusing them would start a second chain of failures, or, when a random failure came due during a forced one, discard it and end that Station's random failures for the rest of the run. *Cost:* two event kinds, handled only at a stop.
+- **Changing a Station's process time** during a run: an intervention at shown time. The MU in work keeps its time and the next uses the new one. It goes in the intervention log, so replay and going back work. It applies directly to the run, as clearing statistics does, rather than as an event, because a time inside `EventType` would push `ScheduledEvent` past its 32 bytes. *Cost:* nothing per event.
+- **Reset keeps changes,** a session setting, off by default, read when Reset is pressed. When on, a changed process time becomes the new default state, and Pauses, forced failures and clears of statistics are dropped. A change already dropped by going back is not kept. Replaying the whole intervention log in the next run, as saved intervention scripts, could come later as its own feature.
+- **`step_back`:** a session command that finds the previous instant by replaying from the nearest checkpoint, at about the cost of a `go_back`. The UI keeps no list of instants, so memory stays flat.
+- **Configuration in `ObjectState`:** at least a Station's current and configured process time, for the inspector.
+
+### Order of work
+1. Update Rust, raise the benchmark's large scenario to about 6,000 objects (429 copies of the demo), record the new baseline, and pin the version.
+2. The prototype, with its results in `docs/design/`.
+3. ADR 0006 for the technology.
+4. The workspace, and the Picture moved into the library.
+5. The engine additions above, with names, positions and dimensions on `ModelDescription`.
+6. UI stage 1.
+7. Trim the CLI to the headless version.
+
+After that: step 7 of the build order and model as data with save and load, then drag and drop, configuration forms and the layout image in 2D, then the 3D view. Drag and drop waits for step 7 because forms and the palette depend on what each object can be configured with, and a palette offering Buffer needs Buffer fixed.
+
+**Left for later:** the model file format, whether a layout image is stored inside the model file, multiple images or floors, where 3D models come from, polish, and signing the download for sharing.
 
 ### What the engine gives a UI today
 
@@ -173,60 +239,21 @@ All of it is on `LiveSession` in `src/live_session.rs`, and `CLAUDE.md` has the 
 - **Commands:** `start`, `halt`, `reset`, `set_speed`, `set_time_mode`, `go_back`, `step_forward`, `request_state`, `pause`, `resume`, `clear_statistics`.
 - **Observations**, read from a channel: `Occurrences`, `ShownTime`, `State`, `Status`, `Error`.
 - **Rebuilding the picture:** one full state at Init, then occurrences give each object's contents, process state, stop and remaining time. `WorkStarted` and `MuCreated` carry durations, so a progress bar needs no further messages. Tests prove this on 3 models: a line with failures, with and without overlapping pauses, a line that blocks, and the full demo. Buffer is left out, because its movement is broken.
-- **Statistics:** `request_state` gives exact numbers for the instant on screen in a few milliseconds, so ask a few times a second rather than every frame.
+- **Statistics:** `request_state` gives exact numbers for the instant on screen in a few milliseconds.
 - **Going back:** usually under 15 ms, and up to about 400 ms for far jumps on a large model past the memory budget. See `docs/design/first-profile.md`.
-- **Moves take no simulation time:** any gliding of an MU between objects is purely visual, and the UI invents its length.
-
-### What the engine doesn't give a UI yet
-
-- **Model as data (candidate 3):** `ModelDescription` can only be built up. It can't be read, saved or loaded, doesn't validate connections, and holds no names or positions. `serde` was removed. `ObjectState` reports kinds and successors, but not configuration such as process times. Drag and drop needs all of this, while a first visualization needs little of it.
-- **Changing a model:** a session builds its run once, from a closure, so a changed model means a new session. Configuration changes after Reset, as agreed, have no API.
-- **The picture logic exists only in a test:** `Rebuilt` and `apply_occurrence` in `tests/live_session.rs`. A Rust UI should move it into the library. A UI in another language has to port it, and then has two copies to keep in step.
-- **Stepping back by instants:** the UI has to remember the instant times it has seen, because the session can't list them. That list grows with the run, so decide how much to keep.
-- **Objects:** Pause works only on Stations, and other objects return an error. Buffer's movement is still broken, so a palette offering Buffer needs step 7 first.
-- **Real playback is unmeasured:** tests mostly use a fake clock, and nothing has driven a session on a real clock for long. One thread alternates between computing and releasing, on a 16 ms tick. The first UI is what will show whether that stutters.
 - **Reading has to keep up:** past 256 unread observations a session stops releasing, so a UI drains the channel every frame. At high speed, one observation can hold up to 1,000 instants, so it can't draw each of them.
-
-### Questions to settle
-
-In roughly this order, since later ones depend on earlier ones:
-
-1. **Who is it for?** Only the owner, or other people too? That decides how much installing and sharing matter.
-2. **Desktop or browser?** Must it run without installing anything? Would it ever run on a remote machine?
-3. **Which technology?** See the options below.
-4. **What is the first stage, exactly?** For example the demo model drawn with live contents, Start, Halt, speed and stepping. What is deliberately left out?
-5. **How does it look at scale?** The target is a few thousand objects. Does the first version have to draw them all, animated? Pan and zoom? What happens at speeds too high to watch?
-6. **Where does layout come from?** Positions are chosen by the user in the end. What does the first stage use before drag and drop exists?
-7. **How is it structured?** A separate crate in a workspace would keep UI dependencies out of the engine, in line with the pillar that views cost nothing when absent. That means turning this repo into a workspace.
-8. **What happens to the CLI?** The UI is meant to replace it. The headless run stays as a library use, and the benchmark and tests need no CLI.
-9. **What needs doing first in the engine?** Probably moving the picture logic into the library, then model as data when drag and drop comes closer. Does any of step 7 have to come first?
-
-### Options to weigh
-
-From memory, so check the current state of each with `research`. The main dividing line is whether the UI runs in the same process as the engine, or has to send it everything across a boundary.
-
-| Option | In process with the engine? | Worth knowing |
-|---|---|---|
-| Native Rust, immediate mode, such as egui | Yes | All Rust, nothing else to install, simple to draw a custom canvas, and redraws everything each frame |
-| Native Rust, retained, such as iced or Slint | Yes | All Rust, and more structured, but custom canvases may be more work |
-| Game engine, such as Bevy | Yes | Built for drawing many moving things, with heavier builds and more than a form-heavy UI needs |
-| Rust with a web front end in a webview, such as Tauri | No | Web diagram and UI libraries, but every observation crosses a boundary, and the picture logic moves to the other side |
-| Browser, with a local Rust server over WebSocket | No | Any browser, and the engine at full native speed, but the same boundary, plus a server to run. The removed `crabsim-renderer` used TCP, so its history in git may be useful |
-| Browser, with the engine compiled to WebAssembly | Yes | Nothing to install and easy to share, but `LiveSession` uses `thread::spawn` and `Instant`, which don't simply work there, so the session would need rework, and it would run slower than native |
-
-### What should weigh most
-
-- **Performance stays the first pillar.** A UI is an optional layer, and a headless run must keep costing nothing because of it. Show before and after numbers from `cargo bench --bench reference`.
-- **The boundary.** A session sends about 2.5 occurrences per event. Anything that serializes them across a boundary pays for that at high speed, and has to be measured before it is relied on.
-- **Determinism.** Nothing in a UI may affect results: same seed and same interventions, same outcome. Tests already hold the session to this.
-- **Domain language.** Use `GLOSSARY.md` in the UI too: Halt rather than Pause for the whole run, and Pause for an object.
+- **The boundary:** a session sends about 2.5 occurrences per event. The research found that even a UI in another language wouldn't need them: the Picture could stay in Rust and send one small message per frame. This matters only if the technology changes.
+- **Changing a model:** a session builds its run once, from a closure, so a changed model means a new session. Configuration changes after Reset have no API yet.
+- **Determinism:** nothing in a UI may affect results. Same seed and same interventions, same outcome.
+- **Domain language:** use `GLOSSARY.md` in the UI too, such as Halt for the whole run and Pause for an object.
 
 ### This PC
 
 Checked on 2026-11-07, on Windows 11:
 
 - **Installed:** Rust 1.91.1 with cargo and rustup, for `x86_64-pc-windows-msvc` only. WebView2 runtime 156, and `gh`.
-- **Not installed:** Node, npm, pnpm, bun, `wasm-pack`, `trunk`, Tauri's CLI, and the `wasm32` target.
+- **GPU:** AMD Radeon RX 9070 XT, plus the processor's integrated Radeon graphics.
+- **Not installed:** Node, npm, pnpm, bun, `wasm-pack`, `trunk`, Tauri's CLI, and the `wasm32` target. Bevy needs none of these.
 - **No window yet:** `crabsim-renderer` is gone, so nothing draws one.
 
 ## Known problems
@@ -261,6 +288,6 @@ Checked on 2026-11-07, on Windows 11:
 
 ## Possible next steps
 
-1. **The UI session,** as above. This is what the owner asked for next.
-2. Step 7 of the build order, for whatever the UI turns out to need first.
+1. **The UI's order of work,** in "UI design", starting with the Rust update and the 6,000-object baseline, then the prototype. This is what the owner asked for next.
+2. Step 7 of the build order, after UI stage 1.
 3. Run `/update-wiki` when convenient, so the docs stop describing removed code.

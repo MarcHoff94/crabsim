@@ -87,7 +87,7 @@ Performance is the first thing to weigh in design trade-offs. It is a guideline 
 - **Under push, MUs can't overtake within a Station**, because successors belong to the Station rather than to one MU. Only pull could change that.
 - **Blocked predecessors:** the longest-waiting one retries first, and each is listed once. Built, including at one instant: retries run before other events at the same time, and offer only the successor that sent them.
 - **Reproducibility:** the same seed on the same version always gives identical results. Results may differ between versions when behaviour changes on purpose.
-- **A move takes no simulation time.** Any gliding is visual only. Real transport time would be a new material-flow object, such as a conveyor.
+- **A move takes no simulation time,** and the UI shows it that way: the MU jumps straight to its new object. Real transport time would be a new material-flow object, such as a conveyor, and gliding belongs to that.
 
 ### Running a simulation (built, except where noted)
 - **Controls:** Init, Start, Halt, Reset. Halt avoids clashing with Stop and Pause, which happen to objects.
@@ -167,7 +167,7 @@ Decided with the owner on 2026-11-07, in a grilling session. Nothing of it is bu
 - **Where:** engine and window are always on the same PC. A long run on a bigger machine is a headless run with no UI.
 - **Priority, by default:** building models first, then smooth, good-looking animation, then debugging. Animation matters because it's how non-technical people understand a model and come to trust it. Like performance, this is a default and not a rule: it can be overturned case by case, given real reasoning and a trade-off worth making.
 - **Views:** a 2D view now. A 3D view **will** come later, as a second view of the same model, not a replacement. 2D stays for building and debugging, and 3D is for showing and watching. Keep that move in mind in every UI decision.
-- **Scale:** up to 6,000 objects. The whole model can always be drawn, with pan and zoom, and every object always shows its state as a colour. MUs and their gliding appear only when zoomed in far enough and running slowly enough to follow. Above that, objects show counts and state only.
+- **Scale:** up to 6,000 objects. The whole model can always be drawn, with pan and zoom, and every object always shows its state as a colour. MUs appear only when zoomed in far enough and running slowly enough to follow, drawn in the object that holds them. Above that, objects show counts and state only.
 
 ### Technology
 - **Bevy with `bevy_egui`,** if the prototype below holds up, with eframe and a custom wgpu canvas as the fallback. Bevy won because 2D and 3D share one renderer and one world, so the 3D view costs least, and its forms and panels are egui, the same as eframe's. Its price is upgrade churn, heavier builds and an ECS to learn.
@@ -190,7 +190,7 @@ If 1 or 3 fails, try eframe. If 2 fails, the problem is in the session, not the 
 
 ### Structure
 - **Workspace:** the engine stays at the repo root with its tests and benchmark, and the UI becomes a member crate. Headless runs pay nothing for the UI.
-- **Picture:** `Rebuilt` and `apply_occurrence` move from `tests/live_session.rs` into the engine library as the Picture: logical state only, what is where and since when. Visual state, such as where a marker is mid-glide, stays in the UI.
+- **Picture:** `Rebuilt` and `apply_occurrence` move from `tests/live_session.rs` into the engine library as the Picture: logical state only, what is where and since when. Visual state, such as where a marker is drawn on screen, stays in the UI.
 - **CLI:** a simple headless CLI stays. For now it runs the demo model with a seed and a simulated length, then prints each object's final statistics and how long the run took. Once model as data exists it takes a model file. `--inplace`, the terminal view and the topology text go once UI stage 1 can show the demo.
 
 ### Model data for the UI
@@ -200,7 +200,7 @@ If 1 or 3 fails, try eframe. If 2 fails, the problem is in the session, not the 
 - **Layout image** (with drag and drop, step 3 of the order below): an image of the real site under the model. Its scale comes from clicking two points and entering the real distance. One per model, lying flat, and the floor in 3D. A headless run and the CLI never load it.
 
 ### UI stage 1
-- **In:** the demo model drawn in 2D with state colours and contents, MUs gliding, Init, Start, Halt, Reset, speed and time mode, shown time, step forward and back, jumping to an earlier time, Pause, forced failure and process time changes on a Station, an inspector, and pan and zoom.
+- **In:** the demo model drawn in 2D with state colours and contents, MUs shown in the object that holds them, Init, Start, Halt, Reset, speed and time mode, shown time, step forward and back, jumping to an earlier time, Pause, forced failure and process time changes on a Station, an inspector, and pan and zoom.
 - **Out:** building or editing a model, save and load, scale work beyond a stress check, and polish.
 - **Window:** a fixed layout with no docking yet. The top bar has Init, Start, Halt, Reset, step back and forward, jump to a time, speed, time mode and shown time. The 2D view is in the centre, and the inspector is on the right. Defaults are continuous time mode at 60 times real time, which is about 30 events per second on the demo by calculation. Speed is on a logarithmic slider. When playback can't keep up, the top bar shows the speed actually achieved. A run error shows as a banner, and going back out of it stays possible.
 - **Inspector:**
@@ -209,7 +209,7 @@ If 1 or 3 fails, try eframe. If 2 fails, the problem is in the session, not the 
   - **Why it's stopped:** every active interruption and since when.
   - **Process time:** current and configured.
   - **Statistics and waiting predecessors:** these come only from a full state, so the UI calls `request_state` about twice a second while something is selected, and never otherwise.
-- **Gliding:** a glide takes a fixed wall time, about 0.2 s to start with and adjustable, and is shorter if the MU moves on again. On Halt, running glides finish, so the screen settles on the truth. Going back or a jump puts markers in place with no glide.
+- **Moves are instant:** an MU is drawn in the object that holds it and jumps straight to the next one, with no glide. The owner decided this after trying the prototype: gliding suggested travel time that doesn't exist. The gliding code is kept for a future conveyor, which has real transport time.
 - **Interventions on the time display:** each shows as a mark. Going back past one asks for confirmation, saying how many will be lost. The engine rule stays that going back drops later interventions.
 
 ### Engine additions for stage 1
@@ -222,7 +222,7 @@ Each states its cost, as `CLAUDE.md` asks. Where one touches the per-event path,
 
 ### Order of work
 1. ✅ Update Rust, raise the benchmark's large scenario to about 6,000 objects (429 copies of the demo), record the new baseline, and pin the version. See "After the Rust update and the 6,000-object model" in `docs/design/first-profile.md`.
-2. The prototype, with its results in `docs/design/`.
+2. ✅ The prototype, with its results in `docs/design/ui-prototype.md`. Bevy with `bevy_egui` holds up. It found a bug in the live session, which loses about 30% of shown time at high load, to fix on `master` before stage 1. See "The session bug this found" there.
 3. ADR 0006 for the technology.
 4. The workspace, and the Picture moved into the library.
 5. The engine additions above, with names, positions and dimensions on `ModelDescription`.
@@ -289,6 +289,6 @@ Checked on 2026-11-07, on Windows 11:
 
 ## Possible next steps
 
-1. **The UI's order of work,** in "UI design". Step 1, the Rust update and the 6,000-object baseline, is done, so the prototype is next. This is what the owner asked for next.
+1. **The UI's order of work,** in "UI design". Steps 1 and 2 are done. Next are the session fix the prototype found, then ADR 0006. This is what the owner asked for next.
 2. Step 7 of the build order, after UI stage 1.
 3. Run `/update-wiki` when convenient, so the docs stop describing removed code.

@@ -125,6 +125,19 @@ impl ModelDescription {
         }
     }
 
+    /// The object's successors, in the order they were connected, which is the order they are
+    /// tried in. Empty for a Drain.
+    pub fn successors(&self, id: u32) -> &[u32] {
+        match self.object(id) {
+            ModelObject::Source(source) => &source.succ,
+            ModelObject::Station(station) => &station.succ,
+            ModelObject::Buffer(buffer) => &buffer.succ,
+            ModelObject::Drain(_) => &[],
+            #[cfg(test)]
+            ModelObject::RecordsThenFails(_) => &[],
+        }
+    }
+
     pub fn set_name(&mut self, id: u32, name: impl Into<String>) {
         self.layout_mut(id).name = Some(name.into());
     }

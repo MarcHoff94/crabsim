@@ -2,7 +2,7 @@
 
 Written 2026-11-07 at the end of a working session, and updated the same day after the UI design session and after steps 1 to 5 of the UI's order of work. Read this first, then check it against the code and git, because it describes a moment in time.
 
-**The engine is ready for UI stage 1, and the UI isn't built yet.** The `ui/` crate only opens a window. The next work is step 6 of the UI's "Order of work": UI stage 1. Go to "UI design" below.
+**UI stage 1 is under way, in four slices, on `feat/ui-stage-1`.** Slice 1 is built: the demo drawn with state colours, pan and zoom, and Init, Start, Halt and Reset. Next is slice 2. See step 6 of the UI's "Order of work" below.
 
 ## Start here
 
@@ -232,7 +232,11 @@ All built in PR 21, as planned except where noted. The benchmark gave identical 
 3. ✅ ADR 0006 for the technology.
 4. ✅ The workspace, and the Picture moved into the library, as `crabsim::Picture`. The `ui/` crate only opens a window so far.
 5. ✅ The engine additions above, with names, positions and dimensions on `ModelDescription` (PR 21).
-6. ⬜ UI stage 1, as described under "UI stage 1" above. Start from the prototype's code on `prototype/ui-bevy`, which already drains a session into a picture each frame, draws 6,006 objects with state colours, keeps a halted window idle, drags from a palette, moves objects and selects them. Keep the rules under "Technology": panels as plain functions of an egui UI, and no Bevy types outside the UI crate. Test the UI's logic through a view state with no window, as spec issue 3 describes.
+6. ⬜ UI stage 1, as described under "UI stage 1" above. Start from the prototype's code on `prototype/ui-bevy`, which already drains a session into a picture each frame, draws 6,006 objects with state colours, keeps a halted window idle, drags from a palette, moves objects and selects them. Keep the rules under "Technology": panels as plain functions of an egui UI, and no Bevy types outside the UI crate. Test the UI's logic through a view state with no window, as spec issue 3 describes. Built in four slices, each one runnable:
+   1. ✅ The first working version: the view state (`ui/src/view.rs`) and camera, tested without a window, the demo laid out by hand in `demo::model()`, a live session drained every frame, objects drawn to size as flat meshes with state colours, connections, names, pan and zoom, and Init, Start, Halt, Reset and shown time. A halted window uses no CPU once settled, and a running one about 0.26 cores, capped at about 60 frames a second. **Known problem:** in about 1 launch in 7, a thread kept a core busy before the first Init or Start, until a burst of frames. 3 s of frames at startup made it rarer, and the cause wasn't found. Names shrink and grow with the model, up to 16 pixels, and go only below 5 pixels: the owner asked for this after trying it, instead of the prototype's rule of no names below 25 pixels per metre.
+   2. ⬜ Time controls: speed on a logarithmic slider with the achieved speed, time mode, step forward and back, jump to a time, the run-error banner, and intervention marks with confirmation before going back past them.
+   3. ⬜ Inspector and interventions: select by click, state, why blocked, why stopped, process time, statistics and waiting predecessors from `request_state` about twice a second while selected, and Pause, forced failure and process time changes on Stations.
+   4. ⬜ MUs drawn in the object that holds them, below the zoom and speed thresholds, and counts above them.
 7. Trim the CLI to the headless version.
 
 After that: step 7 of the build order and model as data with save and load, then drag and drop, configuration forms and the layout image in 2D, then the 3D view. Drag and drop waits for step 7 because forms and the palette depend on what each object can be configured with, and a palette offering Buffer needs Buffer fixed.

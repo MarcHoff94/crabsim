@@ -32,6 +32,9 @@ cargo bench --bench reference
 # Run the UI (a Bevy application, ADR 0006), optimised without LTO so it rebuilds quickly
 cargo run -p crabsim-ui --profile ui
 
+# Run the UI's tests, which builds Bevy (about 5 minutes the first time)
+cargo test -p crabsim-ui --profile ui
+
 # Run the benchmark for one scenario, with more repetitions
 cargo bench --bench reference -- --reps 9 --scenario demo-dropped
 ```
@@ -58,7 +61,7 @@ This is a Rust discrete-event material-flow simulator structured as a library (`
 - Too many events at one simulation time (`ZERO_TIME_EVENT_LIMIT`) return `RunError::ZeroTimeLoop` rather than looping forever.
 - An advance that fails returns `AdvanceFailure`, holding the `RunError` and everything recorded before it, so no caller loses occurrences.
 
-**Model description** (`src/model.rs`): `ModelDescription` is how a model gets built: `add_source`, `add_station`, `add_station_holding`, `add_buffer` and `add_drain` return ids, `connect` wires them, and `build(seed)` gives a run. One description can build any number of runs. Ids follow the order objects are added, which is also the order Init visits them. It doesn't validate connections yet. It also holds each object's name, `Position` and `Dimensions` in metres, for views. `build` leaves them behind, so they can't change a result, and an object without dimensions gets its type's default size.
+**Model description** (`src/model.rs`): `ModelDescription` is how a model gets built: `add_source`, `add_station`, `add_station_holding`, `add_buffer` and `add_drain` return ids, `connect` wires them, and `build(seed)` gives a run. One description can build any number of runs. Ids follow the order objects are added, which is also the order Init visits them. It doesn't validate connections yet. It can report each object's `kind` and `successors`, and holds each object's name, `Position` and `Dimensions` in metres, for views. `build` leaves them behind, so they can't change a result, and an object without dimensions gets its type's default size.
 
 **Simulation time** (`src/time.rs`): `SimTime` is a 64-bit count of whole milliseconds, for both points in time and lengths of it. Sampled times are rounded to the nearest millisecond. Wall time stays a `std::time::Duration`, so the compiler keeps the two apart.
 
@@ -74,7 +77,11 @@ This is a Rust discrete-event material-flow simulator structured as a library (`
 
 **Picture** (`src/picture.rs`): what the user knows about a run at shown time. A UI feeds it every observation from a live session, in order, through `observe`. A full state replaces it, as after Init, Reset or going back. Occurrences update each object's contents, process state, interruptions and remaining time, but only once it has a state, because Init's occurrences arrive before Init's state. Statistics and waiting predecessors come only from a full state, so they aren't in it. It holds nothing about drawing, so a 2D view, a 3D view and tests read the same thing.
 
-**UI** (`ui/`): a Bevy application with egui panels (ADR 0006). So far it only opens a window. It filters the engine's per-event `info` logging, which Bevy's logger would otherwise print, and draws only when something changes.
+**UI** (`ui/`): a Bevy application with egui panels (ADR 0006), being built as UI stage 1. It runs the demo model in a live session at 60 times real time and draws it in 2D, as flat meshes under an orthographic 3D camera, with state colours, connections, names that shrink with the model and go only when too small to read, pan and zoom, and Init, Start, Halt and Reset. It filters the engine's per-event `info` logging, which Bevy's logger would otherwise print.
+- `src/view.rs` — the view state, plain Rust with no Bevy types: from the `ModelDescription`, the session's observations and wall time, it works out what is drawn, which controls are offered, and whether frames are needed. A halted window draws nothing once things settle, and a running one at most about 60 frames a second.
+- `src/camera.rs` — where the 2D view looks and how close, as plain numbers.
+- `src/main.rs` — Bevy and egui, drawing only what the view state says. Panels are plain functions taking `&mut egui::Ui`.
+- `tests/view_state.rs` — the view state against a real live session on a fake clock, with no window.
 
 **Material-flow objects** (`src/materialflow_objects/`):
 - `model_object.rs` — the `ModelObject` enum over the object types, which dispatches the traits with a `match`, and `OtherObjects`, which is how an object handling an event reaches the others by id. The run splits its `Vec` around the object in hand, so this takes no `unsafe` and no shared ownership. See ADR 0005.
@@ -93,7 +100,7 @@ This is a Rust discrete-event material-flow simulator structured as a library (`
 - `terminal.rs` — `render_table` and the in-place `InPlaceTerminalView`.
 - `topology.rs` — ASCII topology text, meant to be replaced by the UI.
 
-**Demo** (`src/demo.rs`): the example model behind `--inplace` and the default run.
+**Demo** (`src/demo.rs`): the example model behind `--inplace`, the default run and the UI. `model()` gives its description, with a name and a hand-written position for every object.
 
 **Tests** (`tests/`): `simulation_run.rs` tests behaviour at the run's interface: Init, advance, Reset, then read occurrences and state. `views.rs` tests the view adapters. `live_session.rs` tests commands in and observations out, with a fake clock, and checks the `Picture` against the run's own state. Tests build models through `ModelDescription`. A failure part way through an event can't happen in a real object, so the few tests of it are unit tests in `src/`, using `RecordsThenFails`, a `#[cfg(test)]` variant of `ModelObject`. What can't be seen from outside a session, such as the buffer limit and thinning, is unit tested in `src/live_session.rs`.
 

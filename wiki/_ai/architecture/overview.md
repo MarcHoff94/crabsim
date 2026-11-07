@@ -5,9 +5,9 @@ section: architecture
 ---
 
 ## Facts
-- Workspace: engine `crabsim` (root, library), `crabsim-model` (`model/`, model files, ADR 0009), `crabsim-cli` (`cli/`, binary `crabsim`), `crabsim-ui` (`ui/`, Bevy + egui, ADR 0006); the UI is the only non-default member; the engine depends on none of them
+- Workspace: engine `crabsim` (root, library), `crabsim-model` (`model/`, model files, ADR 0009), `crabsim-catalogue` (`catalogue/`, operations, jobs, results store), `crabsim-cli` (`cli/`, binary `crabsim`), `crabsim-mcp` (`mcp/`, MCP server), `crabsim-ui` (`ui/`, Bevy + egui, ADR 0006); the UI and the MCP server are the non-default members; the engine depends on none of them
 - A model file → `crabsim_model::load` → `Model` or every `Problem` → `to_description()` → `ModelDescription` → `build(seed)`
-- Layers: front-ends (CLI, UI) → optional live session + Picture → `SimulationRun` → material-flow objects (`enum ModelObject`)
+- Layers: front-ends (CLI, MCP server, UI) → operation catalogue (CLI and MCP) → optional live session + Picture → `SimulationRun` → material-flow objects (`enum ModelObject`)
 - Headless run = a `SimulationRun` with nothing attached: build, `init`, `advance_to`, `state`
 - One `Vec<ModelObject>` indexed by id; objects refer to each other by id; the run splits the `Vec` around the object handling an event and passes `OtherObjects` (ADR 0005)
 - No shared ownership, no `unsafe`; a run runs on one thread at a time and can move; a clone is a checkpoint

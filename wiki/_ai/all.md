@@ -1,6 +1,6 @@
 # crabsim — full AI context
 
-Discrete-event material-flow simulator in Rust, built for speed. Engine library at the root, model files in `model/`, the headless CLI in `cli/` and the Bevy UI in `ui/`. `CLAUDE.md` describes what is built and `docs/agents/handoff.md` the agreed design. Generated from the summaries in `wiki/_ai/`.
+Discrete-event material-flow simulator in Rust, built for speed. Engine library at the root, model files in `model/`, the operation catalogue in `catalogue/`, the headless CLI in `cli/`, the MCP server in `mcp/` and the Bevy UI in `ui/`. `CLAUDE.md` describes what is built and `docs/agents/handoff.md` the agreed design. Generated from the summaries in `wiki/_ai/`.
 
 ---
 
@@ -99,9 +99,9 @@ Discrete-event material-flow simulator in Rust, built for speed. Engine library 
 ### Architecture Overview
 
 #### Facts
-- Workspace: engine `crabsim` (root, library), `crabsim-model` (`model/`, model files, ADR 0009), `crabsim-cli` (`cli/`, binary `crabsim`), `crabsim-ui` (`ui/`, Bevy + egui, ADR 0006); the UI is the only non-default member; the engine depends on none of them
+- Workspace: engine `crabsim` (root, library), `crabsim-model` (`model/`, model files, ADR 0009), `crabsim-catalogue` (`catalogue/`, operations, jobs, results store), `crabsim-cli` (`cli/`, binary `crabsim`), `crabsim-mcp` (`mcp/`, MCP server), `crabsim-ui` (`ui/`, Bevy + egui, ADR 0006); the UI and the MCP server are the non-default members; the engine depends on none of them
 - A model file → `crabsim_model::load` → `Model` or every `Problem` → `to_description()` → `ModelDescription` → `build(seed)`
-- Layers: front-ends (CLI, UI) → optional live session + Picture → `SimulationRun` → material-flow objects (`enum ModelObject`)
+- Layers: front-ends (CLI, MCP server, UI) → operation catalogue (CLI and MCP) → optional live session + Picture → `SimulationRun` → material-flow objects (`enum ModelObject`)
 - Headless run = a `SimulationRun` with nothing attached: build, `init`, `advance_to`, `state`
 - One `Vec<ModelObject>` indexed by id; objects refer to each other by id; the run splits the `Vec` around the object handling an event and passes `OtherObjects` (ADR 0005)
 - No shared ownership, no `unsafe`; a run runs on one thread at a time and can move; a clone is a checkpoint
@@ -187,6 +187,31 @@ Discrete-event material-flow simulator in Rust, built for speed. Engine library 
 
 ---
 
+### Operation Catalogue
+
+#### Facts
+- `crabsim-catalogue` (`catalogue/`): every capability as an `Operation` (NAME, DESCRIPTION, EFFECT, serde + JsonSchema Input/Output, `run`); front-ends use only `operations()` and `call(name, json)`
+- Front-ends: `crabsim-mcp` (`mcp/`, rmcp `=3.9.0`, stdio, not a default member) and the CLI's `run`, `runs`, `results`, `query` subcommands
+- Errors: `OperationError { kind, message, problems }`; MCP returns them as tool results marked as errors
+- Slice 1 operations: validate/list/read/write/copy/delete_model, start_run, run_status, cancel_run, run_results, query_results, label_run, forget_run
+- Jobs: pool of one thread per core, one observation per thread, chunks of 100,000 events, jobs take turns; observation k seed = `splitmix64(seed + k)`
+- Store: `<models>/.crabsim/results.sqlite`, WAL, tables runs/observations/statistics (long and thin), ADR 0010
+
+#### Invariants
+- Operations touch only `.json` files inside the models folder and `.crabsim/`; never code, commands or the network
+- A models folder with `Cargo.toml`, `.git` or `.rs` is refused; paths must stay inside after following links
+- A run error fails only its observation; a run is `failed` only if every observation failed
+- `query_results` can't write, attach a database, return more than 1,000 rows or run past 5 s
+
+#### Pitfalls
+- A run left queued or running when its process ended stays so in the store
+- Seeds are TEXT in the store: they use all 64 bits
+- Debug test builds run the engine unoptimised: keep test runs short
+
+#### Code locations
+- `catalogue/src/`: `lib.rs` (Catalogue, Operation), `error.rs`, `folder.rs`, `model_files.rs`, `jobs.rs`, `results.rs`, `store.rs`
+- `mcp/src/main.rs`; `cli/src/main.rs`, `cli/src/tables.rs`; design in `docs/design/operation-catalogue.md`
+
 ## GUIDES
 
 ### Running crabsim
@@ -194,6 +219,8 @@ Discrete-event material-flow simulator in Rust, built for speed. Engine library 
 #### Facts
 - CLI: `cargo run --release --bin crabsim -- --seed 7 --length 365d` runs the demo headless (or a model file with `--model models/demo.json`) and prints per-object statistics, Drain throughput and lead time, events and wall time
 - `--length` uses the UI's time syntax (`90`, `1:30`, `8:00:00`, `30d 12:00:00`); defaults: seed 0, length `1d`
+- Experiments: `crabsim run --models <folder> --model line.json --length 30d --observations 10`, then `runs`, `results <run>`, `query "<sql>"`; results kept in `<folder>/.crabsim/results.sqlite`
+- MCP server: `cargo build --release -p crabsim-mcp`, run as `crabsim-mcp --models <folder>` over stdio
 - UI: `cargo run -p crabsim-ui --profile ui` (first build several minutes)
 - In code: `demo::model().build(seed)`, `init`, `advance_to`, `state`; `set_recording(Recording::ALL)` for occurrences
 - Benchmark: `cargo bench --bench reference` (about a minute; demo and 6,006 objects)
@@ -204,7 +231,7 @@ Discrete-event material-flow simulator in Rust, built for speed. Engine library 
 - A run error still prints statistics, then exits with failure
 
 #### Code locations
-- CLI — `cli/src/main.rs`; model files — `model/`, `models/demo.json`; demo — `src/demo.rs`; benchmark — `benches/reference.rs`
+- CLI — `cli/src/main.rs`; MCP server — `mcp/src/main.rs`; catalogue — `catalogue/`; model files — `model/`, `models/demo.json`; demo — `src/demo.rs`; benchmark — `benches/reference.rs`
 
 ### Adding a New Object Type
 

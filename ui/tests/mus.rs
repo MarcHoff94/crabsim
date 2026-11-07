@@ -4,7 +4,7 @@
 mod common;
 
 use common::{Watched, SOURCE, STATION_1};
-use crabsim::{demo, SessionStatus, SimTime, Observation};
+use crabsim::{demo, SessionStatus, SimTime, SessionOutput};
 use crabsim_ui::camera::Camera;
 use crabsim_ui::view::{Point, ViewState, MU_MAX_SPEED, MU_METRES, MU_MIN_PIXELS_PER_METRE};
 use std::time::Duration;
@@ -90,11 +90,11 @@ fn mus_show_while_advancing_only_slowly_enough_to_follow() {
     let mut run = demo::model().build(0);
     run.init().unwrap();
     run.advance_to(SimTime::from_secs(12)).unwrap();
-    view.observe(&Observation::State(run.state()), wall);
+    view.observe(&SessionOutput::State(run.state()), wall);
     assert!(view.shows_mus(&close()), "halted, whatever the speed");
     view.set_speed(MU_MAX_SPEED * 10.0);
     assert!(view.shows_mus(&close()), "halted, nothing moves");
-    view.observe(&Observation::Status(SessionStatus::Advancing), wall);
+    view.observe(&SessionOutput::Status(SessionStatus::Advancing), wall);
     assert!(!view.shows_mus(&close()), "too fast to follow");
     view.set_speed(MU_MAX_SPEED);
     assert!(view.shows_mus(&close()));

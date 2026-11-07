@@ -1,4 +1,4 @@
-//! A simulation run on its own thread, controlled live: commands go in, observations come
+//! A simulation run on its own thread, controlled live: commands go in, outputs come
 //! out. This knows nothing about any UI technology, and takes its clock from outside.
 //!
 //! The run computes ahead as fast as it can, into a bounded buffer, and the clock releases what
@@ -9,7 +9,7 @@
 use crate::error::RunError;
 use crate::event::EventType;
 use crate::materialflow_objects::ModelObject;
-use crate::observation::{Occurrence, Recording, RunState};
+use crate::report::{Occurrence, Recording, RunState};
 use crate::simulation_run::SimulationRun;
 use crate::time::SimTime;
 use std::{
@@ -35,9 +35,9 @@ const INSTANTS_PER_RELEASE: usize = 1_000;
 /// than computing, because it records nothing.
 const EVENTS_PER_REPLAY_SLICE: usize = 10_000;
 
-/// How many unread observations a session lets build up before it stops releasing until they are
-/// read. It keeps handling commands meanwhile, and no observation is ever dropped.
-pub const OBSERVATION_BACKLOG_LIMIT: usize = 256;
+/// How many unread outputs a session lets build up before it stops releasing until they are
+/// read. It keeps handling commands meanwhile, and no output is ever dropped.
+pub const OUTPUT_BACKLOG_LIMIT: usize = 256;
 
 /// How long `sync` waits before it gives up. Far longer than a session needs to reach the
 /// clock or a backlog, so only a session stuck on something else runs into this.
@@ -120,7 +120,7 @@ impl Default for SessionSettings {
 /// at Init, after Reset, after going back and on request, and a status follows every change of
 /// status.
 #[derive(Debug, Clone, PartialEq)]
-pub enum Observation {
+pub enum SessionOutput {
     Occurrences(Vec<Occurrence>),
     /// Long stretches can pass with no occurrences, and shown time still moves.
     ShownTime(SimTime),
@@ -157,7 +157,7 @@ pub enum SessionError {
     NotInThePast { to: SimTime, shown: SimTime },
     /// The session thread panicked and has ended. Only a new session can continue.
     Panicked(String),
-    /// `sync` stopped waiting because too many observations are unread, so the session won't
+    /// `sync` stopped waiting because too many outputs are unread, so the session won't
     /// go further until they are read. Earlier commands have been handled.
     Backlogged,
     /// `sync` reached its deadline before the session got there.
@@ -175,7 +175,7 @@ impl fmt::Display for SessionError {
             SessionError::NotAStation(id) => write!(f, "object {id} is not a Station, and only a Station can do this so far"),
             SessionError::NotInThePast { to, shown } => write!(f, "can't go back to {to}s: shown time is {shown}s"),
             SessionError::Panicked(message) => write!(f, "the live session panicked: {message}"),
-            SessionError::Backlogged => write!(f, "too many observations are unread; read them first"),
+            SessionError::Backlogged => write!(f, "too many outputs are unread; read them first"),
             SessionError::SyncTimedOut => write!(f, "the live session did not catch up in time"),
             SessionError::Ended => write!(f, "the live session has ended"),
         }
@@ -221,7 +221,7 @@ enum Command {
 /// The handle to a simulation run living on its own thread. Dropping it ends the thread.
 pub struct LiveSession {
     commands: Sender<Command>,
-    observations: Receiver<Observation>,
+    outputs: Receiver<SessionOutput>,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -244,7 +244,7 @@ impl LiveSession {
         C: Clock,
     {
         let (commands, command_inbox) = channel();
-        let (observer, observations) = sync_channel(OBSERVATION_BACKLOG_LIMIT);
+        let (observer, outputs) = sync_channel(OUTPUT_BACKLOG_LIMIT);
         let thread = thread::spawn(move || {
             let mut outbox = Outbox { observer, unsent: VecDeque::new() };
             let outcome = catch_unwind(AssertUnwindSafe(|| {
@@ -252,14 +252,14 @@ impl LiveSession {
             }));
             if let Err(panic) = outcome {
                 // By now the command channel is closed, so commands find the session has ended.
-                outbox.send(Observation::Error(SessionError::Panicked(panic_message(panic))));
+                outbox.send(SessionOutput::Error(SessionError::Panicked(panic_message(panic))));
                 while outbox.is_backlogged() {
                     thread::sleep(TICK);
                     outbox.flush();
                 }
             }
         });
-        LiveSession { commands, observations, thread: Some(thread) }
+        LiveSession { commands, outputs, thread: Some(thread) }
     }
 
     /// Starts or continues advancing shown time, doing Init first if the run needs it. Does
@@ -371,10 +371,10 @@ impl LiveSession {
     }
 
     /// Blocks until the session has handled every earlier command and advanced to the
-    /// clock's current time, with everything that produced waiting in `observations`.
+    /// clock's current time, with everything that produced waiting in `outputs`.
     ///
     /// It always returns. `Backlogged` means earlier commands are handled but the session
-    /// won't go further until observations are read, so read them and sync again. `SyncTimedOut`
+    /// won't go further until outputs are read, so read them and sync again. `SyncTimedOut`
     /// means neither happened by a generous deadline.
     pub fn sync(&self) -> Result<(), SessionError> {
         self.sync_within(SYNC_DEADLINE)
@@ -391,8 +391,8 @@ impl LiveSession {
         }
     }
 
-    pub fn observations(&self) -> &Receiver<Observation> {
-        &self.observations
+    pub fn outputs(&self) -> &Receiver<SessionOutput> {
+        &self.outputs
     }
 
     fn send(&self, command: Command) -> Result<(), SessionError> {
@@ -405,9 +405,9 @@ impl Drop for LiveSession {
         // The thread ends when it finds its command channel closed.
         (self.commands, _) = channel();
         // A thread that panicked stays until its report is out, and nothing else will read it.
-        while self.observations.recv().is_ok() {}
+        while self.outputs.recv().is_ok() {}
         if let Some(thread) = self.thread.take() {
-            // A panic has already been reported as an observation.
+            // A panic has already been reported as an output.
             let _ = thread.join();
         }
     }
@@ -441,26 +441,26 @@ struct Waiter {
     done: Sender<Result<(), SessionError>>,
 }
 
-/// Observations on their way out. Sending never blocks the session thread, so it can always
+/// Outputs on their way out. Sending never blocks the session thread, so it can always
 /// handle commands. What the channel has no room for waits here, in order, and a session
 /// doesn't release while anything is waiting, so only commands can add more.
 struct Outbox {
-    observer: SyncSender<Observation>,
-    unsent: VecDeque<Observation>,
+    observer: SyncSender<SessionOutput>,
+    unsent: VecDeque<SessionOutput>,
 }
 
 impl Outbox {
-    fn send(&mut self, observation: Observation) {
-        self.unsent.push_back(observation);
+    fn send(&mut self, output: SessionOutput) {
+        self.unsent.push_back(output);
         self.flush();
     }
 
     fn flush(&mut self) {
-        while let Some(observation) = self.unsent.pop_front() {
-            match self.observer.try_send(observation) {
+        while let Some(output) = self.unsent.pop_front() {
+            match self.observer.try_send(output) {
                 Ok(()) => {}
-                Err(TrySendError::Full(observation)) => {
-                    self.unsent.push_front(observation);
+                Err(TrySendError::Full(output)) => {
+                    self.unsent.push_front(output);
                     return;
                 }
                 // Nobody is listening once the handle is gone.
@@ -703,7 +703,7 @@ impl<'a, C: Clock> SessionThread<'a, C> {
 
     fn start(&mut self) {
         if self.status == SessionStatus::Failed {
-            self.observe(Observation::Error(SessionError::ResetRequired));
+            self.observe(SessionOutput::Error(SessionError::ResetRequired));
             return;
         }
         if self.pace.is_some() {
@@ -723,8 +723,8 @@ impl<'a, C: Clock> SessionThread<'a, C> {
         if !self.run.is_initialised() {
             match self.run.init() {
                 Ok(occurrences) => {
-                    self.observe(Observation::Occurrences(occurrences));
-                    self.observe(Observation::State(self.run.state()));
+                    self.observe(SessionOutput::Occurrences(occurrences));
+                    self.observe(SessionOutput::State(self.run.state()));
                 }
                 Err(error) => {
                     self.fail(error);
@@ -779,7 +779,7 @@ impl<'a, C: Clock> SessionThread<'a, C> {
         self.log.clear();
         self.replay = None;
         self.steps_wanted = 0;
-        self.observe(Observation::State(self.run.state()));
+        self.observe(SessionOutput::State(self.run.state()));
         self.set_status(SessionStatus::Halted);
     }
 
@@ -798,7 +798,7 @@ impl<'a, C: Clock> SessionThread<'a, C> {
 
     fn step_back(&mut self) {
         if !self.run.is_initialised() {
-            self.observe(Observation::Error(SessionError::Run(RunError::NotInitialised)));
+            self.observe(SessionOutput::Error(SessionError::Run(RunError::NotInitialised)));
         } else if let Some(to) = self.instant_before_shown() {
             self.go_back(to);
         }
@@ -806,10 +806,10 @@ impl<'a, C: Clock> SessionThread<'a, C> {
 
     fn locate_step_back(&mut self) {
         if !self.run.is_initialised() {
-            self.observe(Observation::Error(SessionError::Run(RunError::NotInitialised)));
+            self.observe(SessionOutput::Error(SessionError::Run(RunError::NotInitialised)));
         } else {
             let to = self.instant_before_shown();
-            self.observe(Observation::StepBackTarget { shown: self.shown, to });
+            self.observe(SessionOutput::StepBackTarget { shown: self.shown, to });
         }
     }
 
@@ -859,9 +859,9 @@ impl<'a, C: Clock> SessionThread<'a, C> {
 
     fn go_back(&mut self, to: SimTime) {
         if !self.run.is_initialised() {
-            self.observe(Observation::Error(SessionError::Run(RunError::NotInitialised)));
+            self.observe(SessionOutput::Error(SessionError::Run(RunError::NotInitialised)));
         } else if to > self.shown {
-            self.observe(Observation::Error(SessionError::NotInThePast { to, shown: self.shown }));
+            self.observe(SessionOutput::Error(SessionError::NotInThePast { to, shown: self.shown }));
         } else {
             self.abandon_future_and_replay_to(to, AfterReplay::GoBack);
         }
@@ -869,11 +869,11 @@ impl<'a, C: Clock> SessionThread<'a, C> {
 
     fn intervene(&mut self, action: Action) {
         if !self.run.is_initialised() {
-            self.observe(Observation::Error(SessionError::Run(RunError::NotInitialised)));
+            self.observe(SessionOutput::Error(SessionError::Run(RunError::NotInitialised)));
             return;
         }
         if self.status == SessionStatus::Failed {
-            self.observe(Observation::Error(SessionError::ResetRequired));
+            self.observe(SessionOutput::Error(SessionError::ResetRequired));
             return;
         }
         if let Action::Pause(id)
@@ -885,11 +885,11 @@ impl<'a, C: Clock> SessionThread<'a, C> {
             match self.run.object(id) {
                 Some(ModelObject::Station(_)) => {}
                 Some(_) => {
-                    self.observe(Observation::Error(SessionError::NotAStation(id)));
+                    self.observe(SessionOutput::Error(SessionError::NotAStation(id)));
                     return;
                 }
                 None => {
-                    self.observe(Observation::Error(SessionError::Run(RunError::UnknownObject(id))));
+                    self.observe(SessionOutput::Error(SessionError::Run(RunError::UnknownObject(id))));
                     return;
                 }
             }
@@ -939,7 +939,7 @@ impl<'a, C: Clock> SessionThread<'a, C> {
         // An intervention leaves an event due at shown time until the run handles it.
         let done_at_shown = self.run.time() == self.shown && self.run.next_event_time().is_none_or(|next| next > self.shown);
         if !self.run.is_initialised() || (self.buffer.is_empty() && self.stopped.is_none() && done_at_shown) {
-            self.observe(Observation::State(self.run.state()));
+            self.observe(SessionOutput::State(self.run.state()));
             return;
         }
         let shown = self.shown;
@@ -968,7 +968,7 @@ impl<'a, C: Clock> SessionThread<'a, C> {
     fn finish_replay(&mut self, replay: Replay, error: Option<RunError>) {
         let Replay { mut run, target, then, .. } = replay;
         if let AfterReplay::ReportState = then {
-            self.observe(Observation::State(run.state()));
+            self.observe(SessionOutput::State(run.state()));
             return;
         }
         run.set_recording(Recording::ALL);
@@ -981,7 +981,7 @@ impl<'a, C: Clock> SessionThread<'a, C> {
         match then {
             AfterReplay::GoBack => {
                 self.pace = None;
-                self.observe(Observation::State(self.run.state()));
+                self.observe(SessionOutput::State(self.run.state()));
                 self.set_status(SessionStatus::Halted);
             }
             AfterReplay::Intervene(action) => {
@@ -1098,7 +1098,7 @@ impl<'a, C: Clock> SessionThread<'a, C> {
         }
     }
 
-    /// Releases what the clock has reached, unless too many observations are unread. Time spent
+    /// Releases what the clock has reached, unless too many outputs are unread. Time spent
     /// waiting for a reader counts and is caught up on afterwards. Time spent waiting for the run
     /// to compute doesn't, so shown time carries on from where it waited. Results depend on none
     /// of this.
@@ -1141,7 +1141,7 @@ impl<'a, C: Clock> SessionThread<'a, C> {
             }
         }
         if !released.is_empty() {
-            self.observe(Observation::Occurrences(released));
+            self.observe(SessionOutput::Occurrences(released));
         }
         self.report_shown_time();
         let stop_is_due = self.stopped.as_ref().and_then(Stopped::due_at).is_some_and(|at| at <= limit);
@@ -1153,7 +1153,7 @@ impl<'a, C: Clock> SessionThread<'a, C> {
     fn report_shown_time(&mut self) {
         if self.shown != self.shown_reported {
             self.shown_reported = self.shown;
-            self.observe(Observation::ShownTime(self.shown));
+            self.observe(SessionOutput::ShownTime(self.shown));
         }
     }
 
@@ -1183,7 +1183,7 @@ impl<'a, C: Clock> SessionThread<'a, C> {
                 self.steps_wanted -= 1;
                 let instant = self.buffer.pop_front().expect("checked above");
                 self.shown = instant.time;
-                self.observe(Observation::Occurrences(instant.occurrences));
+                self.observe(SessionOutput::Occurrences(instant.occurrences));
                 self.report_shown_time();
             } else if self.stopped.is_some() {
                 self.steps_wanted = 0;
@@ -1202,7 +1202,7 @@ impl<'a, C: Clock> SessionThread<'a, C> {
         let halted = self.pace.is_none();
         let shown = self.shown;
         let next = self.next_unreleased();
-        // A backlogged session can't promise everything is waiting in `observations`, and
+        // A backlogged session can't promise everything is waiting in `outputs`, and
         // nobody can read while a sync is waiting, so no waiter would ever be released.
         let backlogged = self.outbox.is_backlogged();
         self.waiters.retain(|waiter| {
@@ -1223,18 +1223,18 @@ impl<'a, C: Clock> SessionThread<'a, C> {
         self.pace = None;
         self.waiting_since = None;
         self.set_status(SessionStatus::Failed);
-        self.observe(Observation::Error(SessionError::Run(error)));
+        self.observe(SessionOutput::Error(SessionError::Run(error)));
     }
 
     fn set_status(&mut self, status: SessionStatus) {
         if self.status != status {
             self.status = status;
-            self.observe(Observation::Status(status));
+            self.observe(SessionOutput::Status(status));
         }
     }
 
-    fn observe(&mut self, observation: Observation) {
-        self.outbox.send(observation);
+    fn observe(&mut self, output: SessionOutput) {
+        self.outbox.send(output);
     }
 }
 
@@ -1284,13 +1284,13 @@ mod tests {
 
     fn with_session_on(run: SimulationRun, settings: SessionSettings, check: impl FnOnce(&mut SessionThread<'_, FakeClock>, &FakeClock)) {
         let (_commands, inbox) = channel();
-        let (observer, observations) = sync_channel(1_000_000);
+        let (observer, outputs) = sync_channel(1_000_000);
         let mut outbox = Outbox { observer, unsent: VecDeque::new() };
         let clock = FakeClock::default();
         let mut session = SessionThread::new(run, clock.clone(), inbox, &mut outbox, settings);
         session.start();
         check(&mut session, &clock);
-        drop(observations);
+        drop(outputs);
     }
 
     fn finish_replay_by_hand(session: &mut SessionThread<'_, FakeClock>) {

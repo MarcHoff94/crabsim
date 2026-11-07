@@ -7,7 +7,7 @@ use super::records_then_fails::RecordsThenFails;
 use super::{Buffer, Drain, SingleStation, Source};
 use crate::error::{InitError, MaterialflowError, RunTimeError};
 use crate::event::{EventContext, EventTemplate, EventType};
-use crate::observation::ObjectState;
+use crate::report::ObjectState;
 use crate::time::SimTime;
 
 /// One material-flow object in a model.

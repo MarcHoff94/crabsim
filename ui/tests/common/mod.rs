@@ -44,12 +44,12 @@ impl Watched {
     }
 
     /// Waits for the session to handle everything sent and reach the clock, then feeds the view
-    /// every observation, as one frame of the window would.
+    /// every output, as one frame of the window would.
     pub fn frame(&mut self) {
         self.session.sync().unwrap();
         let wall = self.clock.elapsed();
-        for observation in self.session.observations().try_iter() {
-            self.view.observe(&observation, wall);
+        for output in self.session.outputs().try_iter() {
+            self.view.observe(&output, wall);
         }
     }
 

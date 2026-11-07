@@ -6,7 +6,7 @@ section: guides
 
 ## Facts
 - `tests/simulation_run.rs`: run behaviour via Init, advance, Reset, occurrences, state; helpers `secs`, `no_failures`, `station`, `preloaded_station`, `recorded`, `exit_ids`, `exit_times`, `statistics_of`
-- `tests/live_session.rs`: commands and observations with `FakeClock` and `sync`; Picture checked against the run
+- `tests/live_session.rs`: commands and outputs with `FakeClock` and `sync`; Picture checked against the run
 - `tests/cli.rs`: the binary end to end
 - Unit tests in `src/`: failures part way through an event (`RecordsThenFails`), session buffer limit and thinning
 - `ui/tests/`: view state against a real session, no window

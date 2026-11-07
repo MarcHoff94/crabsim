@@ -7,7 +7,7 @@
 
 use crate::flows::{FailureProfile, MoveableUnit};
 use crate::materialflow_objects::{Buffer, Drain, ModelObject, SingleStation, Source};
-use crate::observation::ObjectKind;
+use crate::report::ObjectKind;
 use crate::simulation_run::SimulationRun;
 use crate::time::SimTime;
 

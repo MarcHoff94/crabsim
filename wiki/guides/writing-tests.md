@@ -14,7 +14,7 @@ Tests go through the engine's seams, never into an object's insides:
 | File | What it tests |
 |---|---|
 | `tests/simulation_run.rs` | Behaviour at the run's interface: Init, advance, Reset, then read occurrences and state |
-| `tests/live_session.rs` | Commands in and observations out, with a fake clock, and the `Picture` against the run's own state |
+| `tests/live_session.rs` | Commands in and outputs out, with a fake clock, and the `Picture` against the run's own state |
 | `tests/cli.rs` | The CLI's binary, end to end |
 | `src/` unit tests | What can't be seen from outside: a failure part way through an event (`RecordsThenFails`), and in `live_session.rs` the buffer limit and thinning |
 | `ui/tests/` | The UI's view state against a real live session on a fake clock, with no window |
@@ -46,7 +46,7 @@ To set up a particular moment, give a Station a starting MU (`add_station_holdin
 
 ## A session test
 
-Use the fake clock: move it, then `sync`, which blocks until the session has handled earlier commands and shown time has reached the clock. Read observations from `session.observations()` and feed them to a `Picture` to compare with the run's own state.
+Use the fake clock: move it, then `sync`, which blocks until the session has handled earlier commands and shown time has reached the clock. Read outputs from `session.outputs()` and feed them to a `Picture` to compare with the run's own state.
 
 ## Rules
 

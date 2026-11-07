@@ -2,7 +2,7 @@
 
 use std::cmp::Ordering;
 
-use crate::observation::{Occurrence, OccurrenceKind, Recording};
+use crate::report::{Occurrence, OccurrenceKind, Recording};
 use crate::time::SimTime;
 
 /// Names the MU an `MUExit` is for and how many times its object had been stopped

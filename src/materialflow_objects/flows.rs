@@ -2,7 +2,7 @@
 use crate::time::SimTime;
 use crate::error::{InitError, MaterialflowError, RunTimeError};
 use crate::event::{EventContext, EventTemplate, EventType};
-use crate::observation::{ObjectState, OccurrenceKind, StopCause};
+use crate::report::{ObjectState, OccurrenceKind, StopCause};
 use crate::materialflow_objects::OtherObjects;
 use crate::random_numbers::{Distribution, DistributionSampler};
 use crate::statistics::StatisticsKeeper;

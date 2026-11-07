@@ -1,6 +1,6 @@
 use crate::error::MaterialflowError;
 use crate::event::{EventContext, EventTemplate, EventType};
-use crate::observation::{ObjectKind, ObjectState, OccurrenceKind};
+use crate::report::{ObjectKind, ObjectState, OccurrenceKind};
 use crate::statistics::StatisticsKeeper;
 use crate::time::SimTime;
 use super::flows::BaseObject;

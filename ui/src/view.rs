@@ -103,6 +103,22 @@ pub const MIN_LABEL_PIXELS: f64 = 5.0;
 /// Names grow no bigger than this when zoomed in close, the size of the panels' text.
 pub const MAX_LABEL_PIXELS: f64 = 16.0;
 
+/// How big an MU is drawn, in metres. Visual only: MUs have no size in the model yet.
+pub const MU_METRES: f64 = 0.5;
+/// MUs are drawn from this zoom on, where one is 3 pixels across.
+pub const MU_MIN_PIXELS_PER_METRE: f64 = 6.0;
+/// The fastest speed at which MUs are drawn while advancing. Faster, they jump about too quickly
+/// to follow, so holders show a count instead.
+pub const MU_MAX_SPEED: f64 = 120.0;
+
+/// One MU as drawn, in the object that holds it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MuMarker {
+    pub mu: u32,
+    pub holder: u32,
+    pub at: Point,
+}
+
 /// How long the window keeps drawing frames after something happens while halted, so that the
 /// answer to a command reaches the screen. After that a halted window draws nothing.
 const SETTLE: Duration = Duration::from_secs(1);
@@ -427,6 +443,47 @@ impl ViewState {
         self.status == SessionStatus::Advancing || wall < self.settle_until
     }
 
+    // ---------- MUs ----------
+
+    /// Whether MUs are drawn: when zoomed in far enough, and while halted or advancing slowly
+    /// enough to follow them. Otherwise objects show their state, and a count where readable.
+    pub fn shows_mus(&self, camera: &Camera) -> bool {
+        camera.pixels_per_metre >= MU_MIN_PIXELS_PER_METRE
+            && (self.status != SessionStatus::Advancing || self.speed <= MU_MAX_SPEED)
+    }
+
+    /// Every MU to draw, each in the object that holds it, or none when MUs aren't shown. A move
+    /// takes no time, so an MU is drawn in its new holder at once.
+    pub fn mu_markers(&self, camera: &Camera) -> Vec<MuMarker> {
+        if !self.shows_mus(camera) {
+            return Vec::new();
+        }
+        self.picture
+            .objects()
+            .iter()
+            .filter(|pictured| !pictured.contents().is_empty())
+            .flat_map(|pictured| {
+                let holder = pictured.id();
+                let spots = self.objects[holder as usize].mu_spots(pictured.contents().len());
+                pictured.contents().iter().zip(spots).map(move |(&mu, at)| MuMarker { mu, holder, at })
+            })
+            .collect()
+    }
+
+    /// How many MUs each object holds, for the objects holding any, where MUs aren't drawn and a
+    /// count can be read.
+    pub fn counts(&self, camera: &Camera) -> Vec<(u32, usize)> {
+        if self.shows_mus(camera) || label_size(camera).is_none() {
+            return Vec::new();
+        }
+        self.picture
+            .objects()
+            .iter()
+            .filter(|pictured| !pictured.contents().is_empty())
+            .map(|pictured| (pictured.id(), pictured.contents().len()))
+            .collect()
+    }
+
     // ---------- Selecting and inspecting ----------
 
     /// The object whose footprint holds `floor`, if any. Where footprints overlap, the one added
@@ -603,6 +660,23 @@ impl ObjectView {
         let (half_length, half_width) = (self.length / 2.0 + margin, self.width / 2.0 + margin);
         [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)]
             .map(|(sx, sy)| self.from_local(Point { x: sx * half_length, y: sy * half_width }))
+    }
+
+    /// Where `count` MUs sit in the footprint: spread over a grid, in the order held, starting
+    /// at the top left. One sits in the middle.
+    pub fn mu_spots(&self, count: usize) -> Vec<Point> {
+        let columns = (count as f64).sqrt().ceil().max(1.0) as usize;
+        let rows = count.div_ceil(columns).max(1);
+        let (step_x, step_y) = (self.length / columns as f64, self.width / rows as f64);
+        (0..count)
+            .map(|index| {
+                let (column, row) = (index % columns, index / columns);
+                self.from_local(Point {
+                    x: (column as f64 + 0.5) * step_x - self.length / 2.0,
+                    y: self.width / 2.0 - (row as f64 + 0.5) * step_y,
+                })
+            })
+            .collect()
     }
 
     fn holds(&self, floor: Point) -> bool {

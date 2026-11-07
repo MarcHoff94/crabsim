@@ -1,25 +1,26 @@
 # crabsim handoff
 
-Written 2026-11-07 at the end of a working session, and updated the same day after the UI design session. Read this first, then check it against the code and git, because it describes a moment in time.
+Written 2026-11-07 at the end of a working session, and updated the same day after the UI design session and after steps 1 to 5 of the UI's order of work. Read this first, then check it against the code and git, because it describes a moment in time.
 
-**The UI is designed but not built.** The next work is its "Order of work", starting at step 1. Go to "UI design" below.
+**The engine is ready for UI stage 1, and the UI isn't built yet.** The `ui/` crate only opens a window. The next work is step 6 of the UI's "Order of work": UI stage 1. Go to "UI design" below.
 
 ## Start here
 
 1. Read `CLAUDE.md`.
 2. Read `GLOSSARY.md` and `docs/adr/`.
 3. Read "Agreed design" below. Most of it isn't recorded anywhere else.
-4. Read "UI design" below, and `docs/design/ui-technology-research.md` for the technology behind it. Then start its order of work at step 1.
+4. Read "UI design" below, ADR 0006 and `docs/design/ui-prototype.md`. The prototype's code on `prototype/ui-bevy` shows working Bevy 0.20 and `bevy_egui` code for most of stage 1. Then start the order of work at step 6.
 
 ## Current state
 
-Checked on 2026-11-07, on Rust 1.99.1: all 248 tests pass, with 1 long-run test ignored (`cargo test --all-targets`).
+Checked on 2026-11-07, on Rust 1.99.1: all 279 tests pass, with 1 long-run test ignored (`cargo test --all-targets`).
 
 | Where | State |
 |---|---|
-| `master` on GitHub | Steps 1 to 6 of the build order, through PR 14, and the UI design in PRs 15 and 16 (`96011a5`) |
-| `chore/rust-update-6000-baseline` | Step 1 of the UI's order of work: Rust 1.99.1 pinned, the 6,006-object benchmark and the new baseline |
-| `prototype/restore-replay` | The throwaway prototype from step 5. Keep it, and never merge it |
+| `master` on GitHub | Steps 1 to 6 of the build order, and steps 1 to 5 of the UI's order of work, through PR 21 (`393fc6e`). No PRs are open |
+| `prototype/restore-replay` | The throwaway prototype from build step 5. Keep it, and never merge it |
+| `prototype/ui-bevy` | The throwaway UI prototype from UI step 2, with temporary counters in the session. Keep it, and never merge it |
+| `docs/adr-0006-ui-technology` | Local only and never pushed. Its commit went into PR 20, so it can be deleted |
 | Other branches | Merged, so they can be deleted, though the app's worktrees may be using some |
 
 The owner merges PRs on GitHub themselves, so fetch before assuming local `master` is current. The repo has no CI, so a local test run is the only check.
@@ -28,7 +29,7 @@ The owner merges PRs on GitHub themselves, so fetch before assuming local `maste
 
 - **2026-11-05 and earlier:** the owner came back after about six months away. `master` didn't build, and was repaired. The domain design was agreed, an architecture review was done, and `SimulationRun`, occurrences and the first `LiveSession` were built. `crabsim-renderer`, its TCP code and `serde` were removed.
 - **2026-11-06:** performance became the first design pillar, and steps 1 to 6 of the build order were designed and built. See "Build order".
-- **2026-11-07:** the UI was designed in a grilling session, with technology research. Nothing was built. The target scale went up to 6,000 objects. See "UI design".
+- **2026-11-07:** the UI was designed in a grilling session, with technology research, and the target scale went up to 6,000 objects. Then steps 1 to 5 of the UI's order of work were built: Rust 1.99.1 and a new baseline, the Bevy prototype, ADR 0006, the workspace and the Picture, and the engine additions for stage 1. The prototype found a live-session bug that lost about 30% of shown time at high load, fixed in PR 19. After trying the prototype, the owner decided MUs move instantly in the UI. See "UI design".
 
 ## Agreed design
 
@@ -45,10 +46,10 @@ Performance is the first thing to weigh in design trade-offs. It is a guideline 
   - **Buffer:** limited by a maximum number of instants, with no limit on how far ahead in time the run gets. When it's full the run waits and still handles commands.
   - **Time:** Halt, errors and everything else the user experiences follow shown time. Reset throws the buffer away. If computing falls behind the clock, shown time waits and carries on from there, with no debt. A panic while computing also waits for shown time to reach it.
   - **Time modes:** continuous, or skipping, where no gap between instants takes longer than a set wall time (0.25 s to start with). Switchable at any time, and results don't depend on it.
-  - **Going back:** `go_back(to)` reaches any earlier instant, also out of a run error, and leaves the session halted with a full state. `step_forward()` shows one instant while halted.
-  - **What the UI gets:** one full state at Init, after Reset and after a jump back, occurrences and `ShownTime` in between, and a full state on request, from a replay on a copy. The UI rebuilds contents, process state, stop and remaining time from occurrences. Blocked predecessors and statistics come only from a full state.
+  - **Going back:** `go_back(to)` reaches any earlier instant, also out of a run error, and leaves the session halted with a full state. `step_forward()` shows one instant while halted, and `step_back()` goes to the instant before the one on screen. An instant is a time with occurrences.
+  - **What the UI gets:** one full state at Init, after Reset and after a jump back, occurrences and `ShownTime` in between, and a full state on request, from a replay on a copy. `crabsim::Picture` rebuilds contents, process state, every active interruption and remaining time from them. Blocked predecessors and statistics come only from a full state.
 - **Checkpoints (built):** kept up to a memory budget the user configures. When it is full, every other checkpoint in the older half goes and the one from Init stays, so the whole run stays reachable. Every 100,000 events, with 256 MB, to start with. A checkpoint is a clone of the run, plus how much of the intervention log is in it, and a test checks that restoring and replaying gives occurrences identical to the original run.
-- **Interventions (built, Pause on Stations only):** take effect immediately at shown time, without a Halt, and discard the computed future. Pause on and off, and clearing statistics for a warm-up. Same seed plus same intervention log gives the same result. There are no branching timelines.
+- **Interventions (built, on Stations only):** take effect immediately at shown time, without a Halt, and discard the computed future. Pause on and off, forced failure on and off, changing a process time, and clearing statistics for a warm-up. Same seed plus same intervention log gives the same result. There are no branching timelines. Reset can keep changed process times as the new default state, a session setting that is off by default.
 - **Object storage (built):** one `Vec` indexed by id, successors stored as ids, an `enum` for the object type. See ADR 0005.
 - **Threads:** each run executes on one thread at a time, and can move between threads. Cores are used through distributed simulation, which means many replications at once. One `ModelDescription` can already build many runs, but nothing else is built for this yet.
 - **Time representation (built):** simulation time is a 64-bit count of milliseconds behind its own type, `SimTime`. Process times and sampled failure times are whole milliseconds, with sampled times rounded rather than cut off.
@@ -69,6 +70,8 @@ Performance is the first thing to weigh in design trade-offs. It is a guideline 
 ### Stops
 - **Interruption** is the cause (a failure or a pause). **Stop** is the resulting state of the object. A failure from t=20 to 30 plus a pause from t=25 to 35 is two interruptions and one stop from t=20 to 35.
 - **Failure** is unplanned, with random timing. **Pause** is planned and commanded from outside, and doesn't count against availability. They are independent of each other. *Built on Stations only, including overlap. A second failure while already failed is still discarded.*
+- **Forced failure** is a failure the user starts and ends by hand, to see what happens if a machine breaks down now. It counts as a failure, and random failures carry on underneath it. It has its own stop cause, `ForcedFailure`, between `Failure` and `Pause` in seriousness. *Built on Stations only.*
+- **Reporting overlapping interruptions:** each begins and ends as its own occurrence, and a full state reports the most serious as `stop` and lists all of them in `interruptions`. *Built.*
 - **Completion time** = entry + process time + time spent stopped. Overlapping stops count once. *Built on Stations, including overlap.*
 - **A stop by type** (*built only for Stations*):
   - **Station:** takes no MU, releases no MU, work is frozen. A whole Station stops at once, whatever its capacity.
@@ -93,7 +96,7 @@ Performance is the first thing to weigh in design trade-offs. It is a guideline 
 - **Controls:** Init, Start, Halt, Reset. Halt avoids clashing with Stop and Pause, which happen to objects.
 - **Init is its own step**, the first step of every run: t=0, every object's init in id order, first events queued but not processed, even those due at t=0. Start does Init if needed, then advances. Start and Halt are commands on a live session.
 - **Reset** returns objects to their default state and keeps them in the model. Every run MU is deleted, and configured starting MUs come back as fresh copies. The same seed replays the same run.
-- **The default state is what the user configured**, and can be changed. Configuration changes are only allowed after Reset, for now. More mid-run changes can come once their behaviour is defined; a new process time, for example, would apply to the next MU and not the current one.
+- **The default state is what the user configured**, and can be changed. Configuration changes are only allowed after Reset, for now, except a Station's process time. That can change during a run, as an intervention: the MU in work keeps its time and the next MU uses the new one. *Built.* More mid-run changes can come once their behaviour is defined.
 - **Control order:** Init only from the default state, advancing requires Init, Reset allowed at any time. Violations return errors rather than panicking.
 - **A run advances only when asked** and has no end time of its own. `advance_to(t)` includes events at t. Speed control belongs to the caller.
 - **A run executes on one thread at a time.** A live session still creates its run on its own dedicated thread, though a run can now move.
@@ -121,7 +124,7 @@ Agreed on 2026-11-06, replacing the original repair plan:
 4. ✅ Headless run without recording, with statistics for what today's model has. Memory is now flat with simulated length.
 5. ✅ Throwaway prototype of restore and replay, for real cost figures. It held up: see `docs/design/restore-replay-prototype.md`. The code is on the branch `prototype/restore-replay`, never to be merged.
 6. ✅ Read-ahead `LiveSession`, with Pause on Stations, going back, stepping forward and time modes.
-7. ⬜ The earlier domain work, in this order. It comes after the UI's first stage unless the owner says otherwise, and a UI needs some of it: see "What the engine doesn't give a UI yet".
+7. ⬜ The earlier domain work, in this order. It comes after UI stage 1 unless the owner says otherwise, and drag and drop needs it, because the palette and forms depend on what each object can be configured with.
    - Finish stops on the other three object types, including failure profiles. Pause and overlap on Stations are done, through `PauseOn` and `PauseOff` events, while `StopCtrl` is still `todo!()`, so decide what becomes of it.
    - Fix `Buffer`, test it, and add dwelling time.
    - Add the time bases.
@@ -160,7 +163,7 @@ ADR 0001 must not be contradicted without flagging it. The review's HTML report 
 
 ## UI design
 
-Decided with the owner on 2026-11-07, in a grilling session. Nothing of it is built yet. The technology research behind it is in `docs/design/ui-technology-research.md`. Like the rest of "Agreed design", don't reopen it without a reason.
+Decided with the owner on 2026-11-07, in a grilling session. Steps 1 to 5 of its order of work are built, and the UI itself isn't yet. The technology research is in `docs/design/ui-technology-research.md`, and the prototype's results in `docs/design/ui-prototype.md`. Like the rest of "Agreed design", don't reopen it without a reason.
 
 ### Who, where and what matters
 - **Who:** the owner first. Later it's shared as a program to download, with no hosted service or accounts. Nothing should rule that out, but no effort goes into it now.
@@ -170,17 +173,17 @@ Decided with the owner on 2026-11-07, in a grilling session. Nothing of it is bu
 - **Scale:** up to 6,000 objects. The whole model can always be drawn, with pan and zoom, and every object always shows its state as a colour. MUs appear only when zoomed in far enough and running slowly enough to follow, drawn in the object that holds them. Above that, objects show counts and state only.
 
 ### Technology
-- **Bevy with `bevy_egui`,** if the prototype below holds up, with eframe and a custom wgpu canvas as the fallback. Bevy won because 2D and 3D share one renderer and one world, so the 3D view costs least, and its forms and panels are egui, the same as eframe's. Its price is upgrade churn, heavier builds and an ECS to learn.
+- **Bevy with `bevy_egui`,** settled by the prototype and recorded in ADR 0006, with eframe and a custom wgpu canvas as the fallback. Bevy won because 2D and 3D share one renderer and one world, so the 3D view costs least, and its forms and panels are egui, the same as eframe's. Its price is upgrade churn, heavier builds and an ECS to learn.
 - **Rules that limit the risk:**
   - The engine never depends on Bevy, and Bevy's ECS stays in the UI crate, so ADR 0005's storage is untouched.
   - The Picture lives in the engine library with no Bevy types, and Bevy only reads it.
   - Panels are plain functions taking `&mut egui::Ui`, so they could move to eframe. A wrong choice then costs the canvas, not the whole UI.
   - Bevy's version is pinned, and upgraded only when there's a reason.
-- **ADR 0006** records the choice, now that the prototype has settled it.
+- **ADR 0006** records the choice and what it costs, such as builds of 4 to 8 minutes clean and a UI that must show nothing changing while halted.
 - **Toolchain (done):** Rust 1.91.1 was too old (Bevy 0.20 needs 1.97.1, egui 0.37 needs 1.95). It is now 1.99.1, pinned in `rust-toolchain.toml`, with a new baseline. The update changed no result.
 
-### The prototype
-Throwaway, on a `prototype/` branch that is never merged, like `prototype/restore-replay`. Its results go in `docs/design/`. It answers four things:
+### The prototype (done)
+Throwaway, on `prototype/ui-bevy`, never to be merged, with its results in `docs/design/ui-prototype.md`. Every mark passed: 6,006 objects at 367 to 484 frames per second, a real session at 3,600 times real time with no frame over 33 ms, and a halted window at 0.006 CPU seconds per second. The owner tried it by hand. It answered these four things:
 1. **Scale:** 6,000 flat objects with state colours, 5,000 gliding markers and labels on zoom, at a steady 60 frames per second on the owner's AMD Radeon RX 9070 XT. Compare sprites with flat meshes under an orthographic camera, since that decides how cheap the 3D view really is.
 2. **Real session:** a live session at 6,000 objects and 1 simulated hour per second behind a window, on a real clock, with no visible stutter. That's about 1.9M occurrences per second by calculation. Nothing has driven a session on a real clock for long, so this is needed whatever the technology.
 3. **Panels and canvas together:** dragging from an egui palette into the canvas, clicks reaching the right layer, selecting one of 6,000 objects, and little CPU while Halted.
@@ -189,14 +192,14 @@ Throwaway, on a `prototype/` branch that is never merged, like `prototype/restor
 If 1 or 3 fails, try eframe. If 2 fails, the problem is in the session, not the technology.
 
 ### Structure
-- **Workspace:** the engine stays at the repo root with its tests and benchmark, and the UI becomes a member crate. Headless runs pay nothing for the UI.
-- **Picture:** `Rebuilt` and `apply_occurrence` move from `tests/live_session.rs` into the engine library as the Picture: logical state only, what is where and since when. Visual state, such as where a marker is drawn on screen, stays in the UI.
+- **Workspace (built):** the engine stays at the repo root with its tests and benchmark, and the UI is the member crate `ui/`, called `crabsim-ui`. `cargo test` and `cargo bench` at the root never build Bevy. Run the UI with `cargo run -p crabsim-ui --profile ui`, a release profile without LTO that rebuilds in seconds.
+- **Picture (built):** `crabsim::Picture` in `src/picture.rs`, logical state only, what is where and since when. Feed it every observation in order. Visual state, such as where a marker is drawn on screen, stays in the UI.
 - **CLI:** a simple headless CLI stays. For now it runs the demo model with a seed and a simulated length, then prints each object's final statistics and how long the run took. Once model as data exists it takes a model file. `--inplace`, the terminal view and the topology text go once UI stage 1 can show the demo.
 
 ### Model data for the UI
-- **Names and positions** go on `ModelDescription` now, as optional fields, written by hand for the demo, with no automatic layout. Drag and drop will later write the same fields. The run ignores them, so a headless run pays nothing.
+- **Names and positions (built)** on `ModelDescription`, as optional fields: `set_name`, `set_position`, `set_dimensions`, with getters, `kind` and `object_count`. Stage 1 writes them by hand for the demo, with no automatic layout. Drag and drop will later write the same fields. The run ignores them, so a headless run pays nothing.
 - **Units:** metres for everything. Position is the object's centre, as x, y and z, with z = 0 for now.
-- **Dimensions:** length, width and height, plus a rotation around the vertical axis. All optional, with a default size per object type. Stage 1 draws objects to size, and height waits for 3D. They are **visual only**: MU moves stay instant whatever the distance. Dimensions matter for results only in future transport objects such as a conveyor.
+- **Dimensions (built):** length, width and height, plus a rotation around the vertical axis in degrees. All optional, with a default size per object type: placeholders of 2 × 1.5 × 1.5 m for a Station, 2 × 1 × 1 m for a Buffer, and 1 m each way for a Source or Drain. Stage 1 draws objects to size, and height waits for 3D. They are **visual only**: MU moves stay instant whatever the distance. Dimensions matter for results only in future transport objects such as a conveyor.
 - **Layout image** (with drag and drop, step 3 of the order below): an image of the real site under the model. Its scale comes from clicking two points and entering the real distance. One per model, lying flat, and the floor in 3D. A headless run and the CLI never load it.
 
 ### UI stage 1
@@ -212,21 +215,24 @@ If 1 or 3 fails, try eframe. If 2 fails, the problem is in the session, not the 
 - **Moves are instant:** an MU is drawn in the object that holds it and jumps straight to the next one, with no glide. The owner decided this after trying the prototype: gliding suggested travel time that doesn't exist. The gliding code is kept for a future conveyor, which has real transport time.
 - **Interventions on the time display:** each shows as a mark. Going back past one asks for confirmation, saying how many will be lost. The engine rule stays that going back drops later interventions.
 
-### Engine additions for stage 1
-Each states its cost, as `CLAUDE.md` asks. Where one touches the per-event path, show before and after benchmark numbers.
-- **Forced failure,** on Stations for now: an intervention the user starts and ends, with no sampled repair time. It counts as a failure in statistics and against availability, random failures carry on underneath it, and an overlap is one stop. It **can't reuse** `StartFailure` and `EndFailure`, because each random failure schedules the next only when it ends. Reusing them would start a second chain of failures, or, when a random failure came due during a forced one, discard it and end that Station's random failures for the rest of the run. *Cost:* two event kinds, handled only at a stop.
+### Engine additions for stage 1 (built)
+All built in PR 21, as planned except where noted. The benchmark gave identical results and speed within noise.
+- **Forced failure,** on Stations for now: an intervention the user starts and ends, with no sampled repair time. It counts as a failure in statistics and against availability, random failures carry on underneath it, and an overlap is one stop. Built as its own stop cause, `ForcedFailure`, with `force_failure` and `end_forced_failure` on the session. It **can't reuse** `StartFailure` and `EndFailure`, because each random failure schedules the next only when it ends. Reusing them would start a second chain of failures, or, when a random failure came due during a forced one, discard it and end that Station's random failures for the rest of the run. *Cost:* two event kinds, handled only at a stop.
 - **Changing a Station's process time** during a run: an intervention at shown time. The MU in work keeps its time and the next uses the new one. It goes in the intervention log, so replay and going back work. It applies directly to the run, as clearing statistics does, rather than as an event, because a time inside `EventType` would push `ScheduledEvent` past its 32 bytes. *Cost:* nothing per event.
-- **Reset keeps changes,** a session setting, off by default, read when Reset is pressed. When on, a changed process time becomes the new default state, and Pauses, forced failures and clears of statistics are dropped. A change already dropped by going back is not kept. Replaying the whole intervention log in the next run, as saved intervention scripts, could come later as its own feature.
-- **`step_back`:** a session command that finds the previous instant by replaying from the nearest checkpoint, at about the cost of a `go_back`. The UI keeps no list of instants, so memory stays flat.
-- **Configuration in `ObjectState`:** at least a Station's current and configured process time, for the inspector.
+- **Reset keeps changes,** a session setting, off by default, read when Reset is pressed. When on, a changed process time becomes the new default state, and Pauses, forced failures and clears of statistics are dropped. A change already dropped by going back is not kept: the values come from the intervention log, which holds what is true at shown time, rather than from the run, which may be ahead or mid-replay. Replaying the whole intervention log in the next run, as saved intervention scripts, could come later as its own feature.
+- **`step_back`:** a session command that finds the previous instant by replaying from the nearest checkpoint, at about the cost of a `go_back`, or two when it has to fall back to an earlier checkpoint. The UI keeps no list of instants, so memory stays flat. An instant is a time with occurrences, so an event that records nothing, such as a stale exit, makes none.
+- **Configuration in `ObjectState`:** a Station's current and configured process time, for the inspector.
+- **Added on the way:**
+  - **Every active interruption in `ObjectState`:** a picture taken while a failure and a pause overlapped used to lose the pause, because state reported only the most serious.
+  - **`NotAStation`:** `SessionError::CannotPause` became `SessionError::NotAStation`, and the run gained `RunError::NotAStation`.
 
 ### Order of work
 1. ✅ Update Rust, raise the benchmark's large scenario to about 6,000 objects (429 copies of the demo), record the new baseline, and pin the version. See "After the Rust update and the 6,000-object model" in `docs/design/first-profile.md`.
 2. ✅ The prototype, with its results in `docs/design/ui-prototype.md`. Bevy with `bevy_egui` holds up. It found a bug in the live session, which lost about 30% of shown time at high load. Fixed in PR 19: `release` now reads the clock once.
 3. ✅ ADR 0006 for the technology.
 4. ✅ The workspace, and the Picture moved into the library, as `crabsim::Picture`. The `ui/` crate only opens a window so far.
-5. ✅ The engine additions above, with names, positions and dimensions on `ModelDescription`. *Done:* names, positions and dimensions, each Station's current and configured process time in the full state, changing a process time during a run, as an intervention, and forced failure, as its own stop cause `ForcedFailure`. `CannotPause` became `NotAStation`. A full state now lists every active interruption, because a picture taken while two overlapped used to lose the less serious one. Then Reset keeping changes, taken from the log, and `step_back`, where an instant is a time with occurrences, as for stepping forward.
-6. UI stage 1.
+5. ✅ The engine additions above, with names, positions and dimensions on `ModelDescription` (PR 21).
+6. ⬜ UI stage 1, as described under "UI stage 1" above. Start from the prototype's code on `prototype/ui-bevy`, which already drains a session into a picture each frame, draws 6,006 objects with state colours, keeps a halted window idle, drags from a palette, moves objects and selects them. Keep the rules under "Technology": panels as plain functions of an egui UI, and no Bevy types outside the UI crate. Test the UI's logic through a view state with no window, as spec issue 3 describes.
 7. Trim the CLI to the headless version.
 
 After that: step 7 of the build order and model as data with save and load, then drag and drop, configuration forms and the layout image in 2D, then the 3D view. Drag and drop waits for step 7 because forms and the palette depend on what each object can be configured with, and a palette offering Buffer needs Buffer fixed.
@@ -239,12 +245,13 @@ All of it is on `LiveSession` in `src/live_session.rs`, and `CLAUDE.md` has the 
 
 - **Commands:** `start`, `halt`, `reset`, `set_speed`, `set_time_mode`, `go_back`, `step_forward`, `step_back`, `set_reset_keeps_changes`, `request_state`, `pause`, `resume`, `force_failure`, `end_forced_failure`, `set_process_time`, `clear_statistics`.
 - **Observations**, read from a channel: `Occurrences`, `ShownTime`, `State`, `Status`, `Error`.
-- **Rebuilding the picture:** `crabsim::Picture` takes every observation in order and keeps what the user knows at shown time. One full state at Init, then occurrences give each object's contents, process state, stop and remaining time. `WorkStarted` and `MuCreated` carry durations, so a progress bar needs no further messages. Tests prove this on 3 models: a line with failures, with and without overlapping pauses, a line that blocks, and the full demo. Buffer is left out, because its movement is broken.
+- **Rebuilding the picture:** `crabsim::Picture` takes every observation in order and keeps what the user knows at shown time. One full state at Init, then occurrences give each object's contents, process state, every active interruption and remaining time. `WorkStarted` and `MuCreated` carry durations, so a progress bar needs no further messages. Tests prove this on 3 models: a line with failures, with overlapping pauses or forced failures, a line that blocks, and the full demo. A further test takes a picture while interruptions overlap. Buffer is left out, because its movement is broken.
+- **Model data:** a `ModelDescription` holds names, positions and dimensions in metres. A session builds its run from a closure, so a UI keeps the description beside the session to draw from.
 - **Statistics:** `request_state` gives exact numbers for the instant on screen in a few milliseconds.
 - **Going back:** usually under 15 ms, and up to about 400 ms for far jumps on a large model past the memory budget. See `docs/design/first-profile.md`.
 - **Reading has to keep up:** past 256 unread observations a session stops releasing, so a UI drains the channel every frame. At high speed, one observation can hold up to 1,000 instants, so it can't draw each of them.
 - **The boundary:** a session sends about 2.5 occurrences per event. The research found that even a UI in another language wouldn't need them: the Picture could stay in Rust and send one small message per frame. This matters only if the technology changes.
-- **Changing a model:** a session builds its run once, from a closure, so a changed model means a new session. Configuration changes after Reset have no API yet.
+- **Changing a model:** a session builds its run once, from a closure, so a changed model means a new session. Apart from a process time, which can change during a run and be kept by Reset, configuration changes have no API yet.
 - **Determinism:** nothing in a UI may affect results. Same seed and same interventions, same outcome.
 - **Domain language:** use `GLOSSARY.md` in the UI too, such as Halt for the whole run and Pause for an object.
 
@@ -255,7 +262,7 @@ Checked on 2026-11-07, on Windows 11:
 - **Installed:** Rust 1.99.1 (stable, and pinned by the repo) with cargo and rustup, for `x86_64-pc-windows-msvc` only. WebView2 runtime 156, and `gh`.
 - **GPU:** AMD Radeon RX 9070 XT, plus the processor's integrated Radeon graphics.
 - **Not installed:** Node, npm, pnpm, bun, `wasm-pack`, `trunk`, Tauri's CLI, and the `wasm32` target. Bevy needs none of these.
-- **No window yet:** `crabsim-renderer` is gone, so nothing draws one.
+- **A window:** `crabsim-ui` opens one, and the prototype on `prototype/ui-bevy` draws a working model. A clean debug build of the UI takes about 8 minutes.
 
 ## Known problems
 
@@ -274,6 +281,7 @@ Checked on 2026-11-07, on Windows 11:
 - **`crabsim.log` is tracked** in git, and running the demo from the repo root may change it.
 - **[Dependabot alert](https://github.com/MarcHoff94/crabsim/security/dependabot/1):** one low-severity alert, not looked into.
 - **Finished branches** can be deleted (see "Current state").
+- **`ui-prototype/` on disk:** a leftover of the prototype branch, untracked on other branches, holding several gigabytes of build folders. It can be deleted.
 - **Not decided:** whether to replace the new-events `Vec`, and whether to tune statistics, which cost about 7 to 12% of a headless run.
 
 ## How to work with the owner

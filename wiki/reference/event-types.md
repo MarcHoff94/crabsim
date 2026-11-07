@@ -4,92 +4,84 @@ section: reference
 related:
   - discrete-event-simulation
   - blocked-retry
-  - simulator-and-event-controller
+  - simulation-run
 ---
 
 # Event Types
 
-Defined in `src/event.rs` as `pub enum EventType`.
+Defined in `src/event.rs` as `pub enum EventType`. Events are engine internals: views never see them, only the occurrences objects record.
 
-## Active event types
+## In use
 
-### MUExit
+### MUExit(ExitTicket)
 
-**Fires when:** processing is complete and the object should try to move its MU to a successor.
+**Fires when** an object is done with its MU: a Source's interval or a Station's process time is up.
 
-**Who emits it:**
-- `Source::create_mu()` — schedules itself after `proc_time` to signal the new MU is ready to move.
-- `SingleStation::process_mu_entrance()` — schedules itself after `proc_time` to signal processing complete.
+**Scheduled by** `Source::create_mu` and a Station's `start_work`, or on resuming after a stop, for the remaining process time.
 
-**What happens on dispatch:**
-1. `try_to_move_to_successor` is called.
-2. If a successor accepts: predecessor goes Idle, `notify_blocked_predecessors()` fires.
-3. If all successors deny: predecessor goes Blocked, stays locked.
+**On a Station:** ignored if the Station is stopped or the ticket is stale (its `stop_count` differs, or it names another MU). Otherwise it records `WorkFinished` and tries `try_to_move_to_successor`. Moved: Idle, entrance unlocked, retries sent to waiting predecessors. Refused everywhere: Blocked.
 
-### BlockedRetry
+**On a Source:** tries the move, and creates the next MU once this one has gone.
 
-**Fires when:** a successor that previously denied entrance has just freed up, and is notifying its blocked predecessors to retry.
+`ExitTicket { mu_id, stop_count }` exists because the heap can't cancel events.
 
-**Who emits it:** `SingleStation::notify_blocked_predecessors()` — one event per `object_id` in `blockedlist`, at `exec_time = 0` (immediate).
+### BlockedRetry { from }
 
-**What happens on dispatch:**
-1. `is_exit_allowed()` is checked first. Returns `false` if `ProcessState::Processing` — the retry is a **no-op**.
-2. If exit allowed: `retry_move_to_successor` tries only the successor named by `from`. If successful, predecessor goes Idle.
+**Fires when** the successor `from` has room, at the same time, ahead of every other event at that time.
 
-At one simulation time, `BlockedRetry` events run before all other event types.
+**Scheduled by** `notify_blocked_predecessors`, through `retries_for_blocked`: one per waiting predecessor, longest-waiting first.
 
-### StartFailure
+**On dispatch:** nothing if the object can't exit (working or stopped) or is empty. Otherwise `retry_move_to_successor` offers the MU to `from` only.
 
-**Fires when:** a station's next failure is due (scheduled by `FailureProfile`).
+### StartFailure and EndFailure
 
-**Who emits it:**
-- `SingleStation::init()` — if `failure_profile.active`, schedules the first `StartFailure` at time-to-next-failure.
-- `EndFailure` handler — schedules the next failure cycle after repair.
+Random failures on a Station with an active `FailureProfile`.
 
-**What happens on dispatch:**
-1. Sets `interruption = InterruptionState::Failed`.
-2. If station was `Processing`, saves `remain_proc_time` into `interrupted_remain_proc_time`.
-3. Schedules `EndFailure` after MTTR (sampled from `dist_sampler_mttr`).
+- `StartFailure`: scheduled first by `init`, then by each `EndFailure`. Discarded if already failed. Begins a `Failure` interruption, counts a failure and schedules `EndFailure` after a sampled repair time.
+- `EndFailure`: ends the interruption, schedules the next `StartFailure`, and resumes the Station if no other interruption is active.
 
-### EndFailure
+### ForceFailureOn and ForceFailureOff
 
-**Fires when:** the repair period expires.
+A failure the user starts and ends by hand, scheduled from outside the model (`schedule_event`), which is what the live session does. It has its own flag, so random failures carry on underneath. It counts as a failure in statistics.
 
-**Who emits it:** `StartFailure` handler, after sampling MTTR.
+### PauseOn and PauseOff
 
-**What happens on dispatch:**
-1. Clears `interruption` back to `InterruptionState::None`.
-2. Schedules the next `StartFailure` (if profile still active).
-3. If `interrupted_remain_proc_time` is set: resumes processing, schedules `MUExit` with the saved remaining time.
-4. If station was `Blocked` when failure hit: retries `try_to_move_to_successor`.
-5. If station was `Idle`: notifies blocked predecessors they can push MUs again.
+A planned stop, scheduled from outside the model. It doesn't count against availability.
 
-## Defined but not yet active
+Only the first interruption of a stop freezes a Station's work, and only the last to end resumes it, however the three kinds overlap.
+
+## Defined but unused
 
 | Type | Status |
 |---|---|
-| `MUEntrance` | Defined; entrance is handled directly via `process_mu_entrance()` from `try_to_move_to_successor`, not via a scheduled event |
-| `Finished` | Defined; not dispatched in current implementation |
+| `MUEntrance` | A move calls `process_mu_entrance` directly, with no event |
+| `Finished` | Never scheduled |
 
 ## EventTemplate
 
 ```rust
 pub struct EventTemplate {
     pub eventtype: EventType,
-    pub exec_time: Duration,  // relative offset from current time when scheduling
-    pub object_id: u32,       // which object receives the event
-    pub seq: u64,             // set to 0 by objects; overwritten by EventController
+    pub exec_time: SimTime,  // from now
+    pub object_id: u32,      // who gets it
 }
 ```
 
 ## ScheduledEvent
 
 ```rust
-pub struct ScheduledEvent {
-    pub time: Duration,       // absolute simulation time (current_time + exec_time)
-    pub template: EventTemplate,
-    pub seq: u64,             // for FIFO tiebreaking — assigned by EventController
+pub struct ScheduledEvent {   // 32 bytes, on the per-event path
+    pub time: SimTime,        // now + exec_time
+    pub seq: u64,             // assigned by the run, for FIFO order
+    pub object_id: u32,
+    pub eventtype: EventType,
 }
 ```
 
-Ordering: earlier time wins; equal time → lower seq wins.
+Order: earliest time first; at one time, `BlockedRetry` first; then lowest `seq`.
+
+## Code references
+
+- `EventType`, `EventTemplate`, `ScheduledEvent`, `ExitTicket` — `src/event.rs`
+- Station handling — `SingleStation::handle_event` in `src/materialflow_objects/station.rs`
+- Source handling — `src/materialflow_objects/source.rs`

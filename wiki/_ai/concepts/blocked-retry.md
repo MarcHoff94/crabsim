@@ -5,30 +5,25 @@ section: concepts
 ---
 
 ## Facts
-- When all successors deny entrance: predecessor → `ProcessState::Blocked`, entrance stays locked, self recorded in each denied successor's `blockedlist`
-- When a station frees up: calls `notify_blocked_predecessors()`, drains `blockedlist`, emits `BlockedRetry` at `exec_time = 0` for each
-- `BlockedRetry` on a station where `is_exit_allowed() == false` is a **no-op** (e.g. if it is currently Processing a new MU)
-- `Source` also handles `BlockedRetry`: retries push, then creates next MU if successful
-- `Drain` never blocks predecessors: `notify_blocked_predecessors` returns `None`; entrance always open
+- MUExit → `try_to_move_to_successor`; each refusing successor gets the predecessor in its `blockedlist` (`add_blocked` → `list_blocked`)
+- All refuse → predecessor `Blocked`, keeps its MU, entrance stays locked, records `Blocked`
+- An object that frees up calls `notify_blocked_predecessors` → `retries_for_blocked` empties the list into `BlockedRetry { from }` events due now, longest-waiting first
+- On a retry: nothing if `!is_exit_allowed()` (working or stopped) or empty; else `retry_move_to_successor` offers the MU to `from` only
+- `MUExit` is scheduled (work done); `BlockedRetry` is reactive (successor freed up)
 
 ## Invariants
-- `MUExit` = scheduled; `BlockedRetry` = reactive. Keep them separate.
-- Always call `notify_blocked_predecessors()` when a station transitions to Idle
-- Always check `is_exit_allowed()` at the top of the `BlockedRetry` handler
+- `blockedlist`: longest-waiting first, each predecessor once; a refused retry lists it again
+- A predecessor whose MU moves is removed from all its successors' lists
+- Retries run before other events at the same time, and offer only the sender, so nothing overtakes those waiting
+- A Drain's entrance is always open, so nothing waits for it
 
-## Retry rule
-- `blockedlist` = predecessors waiting, longest-waiting first, each once (`list_blocked`, `retries_for_blocked` in flows.rs)
-- A refused retry lists its predecessor again, so those still waiting keep their order
-- `try_to_move_to_successor` removes a predecessor from all its successors' lists when its MU moves (`remove_blocked`)
-- A `BlockedRetry` on an empty station does nothing
-- At one simulation time, retries run before all other events (`ScheduledEvent::cmp`)
-- `BlockedRetry { from }`: the predecessor tries only successor `from` (`retry_move_to_successor`)
-- A retry that finds its predecessor stopped is used up; it lists itself again at the back after repair
-- Giving up a place on any move assumes one MU per object: revisit with Station capacity, the Buffer fix and exit strategies
+## Pitfalls
+- A retry that finds its predecessor stopped is used up; the predecessor relists at the back after repair
+- Giving up a place on any move assumes one MU per object: revisit with Station capacity, Buffer fix, exit strategies
+- Source's `is_exit_allowed` is always true, so with several successors a retry can move an MU before its interval ends (known problem)
+- Without dedup, refused retries once multiplied into a false `ZeroTimeLoop`
 
 ## Code locations
-- `try_to_move_to_successor` — `src/materialflow_objects/flows.rs`
-- `SingleStation::notify_blocked_predecessors` — `src/materialflow_objects/station.rs`
-- `BlockedRetry` dispatch in `execute_event` — `src/materialflow_objects/station.rs`
-- `ProcessState`, `is_exit_allowed` — `src/materialflow_objects/station.rs`
-- Tests — `src/lib.rs`: `blocked_retry_while_predecessor_processing_does_not_move_mu`, `station_becomes_blocked_when_no_successor_accepts`, `blocked_retry_full_flow`, `blockedlist_dedup`
+- `try_to_move_to_successor`, `retry_move_to_successor`, `list_blocked`, `retries_for_blocked` — `src/materialflow_objects/flows.rs`
+- Retry handling — `src/materialflow_objects/station.rs`, `source.rs`
+- Tests — `tests/simulation_run.rs`

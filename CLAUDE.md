@@ -144,10 +144,11 @@ Deep-context pages live in `wiki/`. Pull these in with `@` when working on a spe
 |---|---|
 | Full project context | `@wiki/_ai/all.md` |
 | Blocked/retry mechanics | `@wiki/_ai/concepts/blocked-retry.md` |
-| Event scheduling & FIFO | `@wiki/_ai/architecture/simulator-and-event-controller.md` |
+| Event scheduling & FIFO | `@wiki/_ai/architecture/simulation-run.md` |
 | Station/source/drain internals | `@wiki/_ai/architecture/material-flow-objects.md` |
-| Adding a new object type | `@wiki/_ai/guides/adding-a-new-station-type.md` |
+| Adding a new object type | `@wiki/_ai/guides/adding-a-new-object-type.md` |
 | Test patterns | `@wiki/_ai/guides/writing-tests.md` |
+| Live session and UI | `@wiki/_ai/architecture/live-session-and-ui.md` |
 
 ## Adding a New Material-Flow Type
 

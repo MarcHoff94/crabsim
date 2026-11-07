@@ -20,8 +20,7 @@ Checked on 2026-11-07, on Rust 1.99.1: all 284 engine tests pass, with 1 long-ru
 | `master` on GitHub | Steps 1 to 6 of the build order and the AI-native design, through PR 29 (`f43074d`), with all of the UI's order of work once PR 30 is merged |
 | `prototype/restore-replay` | The throwaway prototype from build step 5. Keep it, and never merge it |
 | `prototype/ui-bevy` | The throwaway UI prototype from UI step 2, with temporary counters in the session. Keep it, and never merge it |
-| `docs/adr-0006-ui-technology` | Local only and never pushed. Its commit went into PR 20, so it can be deleted |
-| Other branches | Merged, so they can be deleted, though the app's worktrees may be using some |
+| Other branches | None: every merged branch was deleted on 2026-11-07, locally and on GitHub, with the app's worktrees |
 
 The owner merges PRs on GitHub themselves, so fetch before assuming local `master` is current. The repo has no CI, so a local test run is the only check.
 
@@ -349,14 +348,10 @@ The grilling session ended here on 2026-11-07, with nothing left open.
 
 ## Open housekeeping
 
-- **Stale docs:** the README is up to date as of 2026-11-07, but files across `wiki/` and `docs/` still name `Simulator`, `EventController` or the renderer. Run `/update-wiki`. `wiki.html` is generated from the wiki.
-- **Duplicate wiki:** both `wiki/` and `docs/wiki/` exist. Not decided.
-- **Wiki hook is off on this PC:** `core.hooksPath` is unset. Turning it on with `git config core.hooksPath .githooks` makes every `src/` commit run `claude` in the background.
-- **`crabsim.log` is tracked** in git, and running the demo from the repo root may change it.
-- **[Dependabot alert](https://github.com/MarcHoff94/crabsim/security/dependabot/1):** one low-severity alert, not looked into.
-- **Finished branches** can be deleted (see "Current state").
-- **`ui-prototype/` on disk:** a leftover of the prototype branch, untracked on other branches, holding several gigabytes of build folders. It can be deleted.
+- **The wiki hook stays off,** by the owner's choice: `core.hooksPath` is unset on this PC, so run `/update-wiki` by hand after changes to `src/`. The command only looks at the last commit and uncommitted changes, so after several commits check every page against the code, as the full rewrite on 2026-11-07 did.
 - **Not decided:** whether to replace the new-events `Vec`, and whether to tune statistics, which cost about 7 to 12% of a headless run.
+
+Done on 2026-11-07: the wiki was rewritten against today's code, with four pages renamed and `wiki.html` rebuilt from it. The duplicate `docs/wiki/`, `docs/ExtensionGuide.md`, the stale `.github/copilot-instructions.md` and the tracked `crabsim.log` were deleted, and `*.log` is ignored. `rand` went to 0.9.3 for the Dependabot alert, with identical statistics on 5 seeds over 30 simulated days. Merged branches, the app's old worktrees and the 12 GB `ui-prototype/` build folder were deleted.
 
 ## How to work with the owner
 
@@ -373,4 +368,3 @@ The grilling session ended here on 2026-11-07, with nothing left open.
 
 1. Model as data with the JSON model file, the `SessionOutput` rename and MCP v1. See "AI-native". The CLI then takes a model file.
 2. Step 7 of the build order.
-3. Run `/update-wiki` when convenient, so the docs stop describing removed code, including the terminal views and topology text this step removed.

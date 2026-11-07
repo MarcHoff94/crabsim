@@ -4,23 +4,13 @@ for: reference/configuration-flags.md
 section: reference
 ---
 
-## CLI flags → env vars they set
-- `--inplace` → `CRABSIM_LIVE_INPLACE=1`
-- `--renderer-window` → `CRABSIM_RENDERER=1`
-- `--speed <f>` → `CRABSIM_RENDERER_SPEED=<f>` (default `5.0`; `-1` = unpaced)
-- `--hold <s>` → `CRABSIM_RENDERER_HOLD=<s>` (default `1`)
-- `--renderer-launcher <l>` → `CRABSIM_RENDERER_LAUNCHER=<l>` (Windows only: `powershell`|`cmd`)
-
-## Direct env vars (bypass CLI)
-Same variables as above. CLI flags overwrite env vars (they set them before `run_demo()`).
-
-## RUST_LOG
-Parsed by `env_logger`. Values: `info`, `debug`, `crabsim=debug`, `crabsim=info`.
-
-## Hardcoded values (change in src/lib.rs)
-- Simulation endtime: `3_600.0` seconds in `EventController::new(Some(...))`
-- Default renderer speed: `"5"` string in `run_demo()`
+## Facts
+- CLI (`src/main.rs`): `--seed <N>` (default 0), `--length <TIME>` (default `1d`, UI time syntax)
+- `RUST_LOG` controls `env_logger`; per-event `info` logging is slow
+- Profiles: `dev` (deps optimised), `release` (thin LTO, 1 codegen unit, `panic = unwind` for `LiveSession`), `ui` (release without LTO)
+- Rust version pinned in `rust-toolchain.toml`
+- `SessionSettings`: `buffer_instants` 100,000; `checkpoint_spacing` 100,000 events; `checkpoint_budget_bytes` 256 MB; `time_mode` Continuous; `reset_keeps_changes` off
+- A session starts halted at speed 1; the UI uses 60x
 
 ## Code locations
-- CLI parsing — `src/main.rs` (clap `Opts` struct)
-- Env var reading — `src/lib.rs` (`run_demo`)
+- `src/main.rs`, `src/live_session.rs`, `Cargo.toml`

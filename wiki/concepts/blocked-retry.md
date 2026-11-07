@@ -3,7 +3,7 @@ title: Blocked Retry Semantics
 section: concepts
 related:
   - event-types
-  - simulator-and-event-controller
+  - simulation-run
   - material-flow-objects
 ---
 
@@ -11,46 +11,38 @@ related:
 
 ## The problem
 
-A station finishing its work does not guarantee a free downstream station. The successor might already be processing another part. crabsim handles this with a **blocked/retry** mechanism: when a station cannot forward its MU, it parks itself as blocked and waits to be woken up — rather than polling or re-scheduling blind retries.
+An object finishing with its MU has no guarantee of a free successor: the successor may be working on another MU. crabsim handles this with **blocked and retry**: an object that can't pass its MU on lists itself as waiting at each successor that refused it, and is woken when one frees up, rather than polling.
 
-## Step-by-step flow
+## Step by step
 
-### 1. Transfer attempt (MUExit)
+### 1. A move is tried (MUExit)
 
-When a station finishes processing it fires a `MUExit` event and calls `try_to_move_to_successor`. This function walks the successor list (round-robin from `succ_pointer`) and checks `is_entrance_allowed()` on each.
+When a Station's process time is up, its `MUExit` fires and it calls `try_to_move_to_successor`. That walks the successors round-robin from `succ_pointer` and asks each `is_entrance_allowed()`.
 
-### 2. All successors locked → Blocked
+### 2. Every successor refuses: Blocked
 
-If every successor returns `false` from `is_entrance_allowed()`, `try_to_move_to_successor` records the predecessor's `object_id` in each denied successor's `blockedlist` (via `add_blocked`). The predecessor then:
+Each successor that refuses gets the predecessor's id in its `blockedlist` (`add_blocked`). If none accepts, the predecessor:
 
-- Stays in `ProcessState::Blocked`
-- Keeps its MU in `content`
-- Keeps `entrancelocked = true` (prevents new MUs entering while it holds the current one)
+- becomes `ProcessState::Blocked` and records a `Blocked` occurrence,
+- keeps its MU,
+- keeps its entrance locked, so nothing enters while it holds the MU.
 
-### 3. Successor frees up → notify
+### 3. A successor frees up: retries
 
-When a station successfully transfers its MU and becomes idle, it calls `notify_blocked_predecessors()`. This drains its `blockedlist` and emits one `BlockedRetry` event per recorded predecessor, scheduled at `exec_time = 0` (i.e., immediately).
+When an object's MU moves on, or it comes back from a stop with room, it calls `notify_blocked_predecessors()`. That empties its `blockedlist` into one `BlockedRetry { from }` event per waiting predecessor, due at once, where `from` is the object that freed up.
 
-### 4. Retry
+### 4. The retry
 
-The predecessor receives `BlockedRetry` and calls `is_exit_allowed()` before attempting anything. If the station is currently processing a new MU (`ProcessState::Processing`), `is_exit_allowed()` returns `false` and the retry is a no-op — the MU will move when that processing completes via the normal `MUExit` path.
+The predecessor checks `is_exit_allowed()` first. If it is working on an MU, or is stopped, the retry does nothing: a working MU moves through the normal `MUExit` later. Otherwise `retry_move_to_successor` offers the MU to the successor named by `from`, and only that one.
 
-If exit is allowed, `try_to_move_to_successor` is called again.
+## Why two event types
 
-## Why two separate event types
+`MUExit` and `BlockedRetry` both lead to a move, but mean different things:
 
-`MUExit` and `BlockedRetry` both trigger a transfer attempt but carry different meaning:
+- `MUExit` is **scheduled**: work finished at a known time.
+- `BlockedRetry` is **reactive**: a successor just freed up.
 
-- `MUExit` is **scheduled**: processing finished at a known future time.
-- `BlockedRetry` is **reactive**: a successor just became available.
-
-Keeping them separate means a `BlockedRetry` arriving on a busy station is correctly ignored. Merging them would require extra state to distinguish "just finished my own work" from "woken up while already working".
-
-## Source and Drain differences
-
-`Source` also handles `BlockedRetry` — if it was blocked trying to push its MU, it retries on notification, then immediately creates the next MU once the current one is forwarded.
-
-`Drain` never blocks predecessors. Its entrance is always open (`entrance_locked` starts `false`), so predecessors never end up in a Drain's `blockedlist`.
+Keeping them apart lets a retry that reaches a busy object be ignored, and lets retries run first at one time without extra state.
 
 ## The retry rule
 
@@ -58,24 +50,28 @@ A `blockedlist` holds the predecessors waiting for an object, longest-waiting fi
 
 - `list_blocked` leaves a predecessor that is already listed in its place. `retries_for_blocked` empties the list into retries in that order, and a retry that is refused lists its predecessor again.
 - When a predecessor's MU moves, `try_to_move_to_successor` removes it from all its successors' lists, so it can't keep a place from an earlier wait.
-- A station that is empty when a retry arrives does nothing, because it has nothing to wait with.
+- An object that is empty when a retry arrives does nothing, because it has nothing to wait with.
 
 Without the first of these, each refused retry added another entry until one release fired over a million retries at one instant, which tripped `ZERO_TIME_EVENT_LIMIT` in long runs.
 
 Two more things stop anything reaching a free successor ahead of those waiting for it:
 
 - At one simulation time, retries run before all other events, so an MU finishing at the instant a successor frees up goes behind those already waiting.
-- A retry names the successor that sent it (`BlockedRetry { from }`), and the predecessor tries only that one. Any other successor with room has sent retries of its own.
+- A retry names the successor that sent it, and the predecessor tries only that one. Any other successor with room has sent retries of its own.
 
-A retry that finds its predecessor stopped is used up, so that predecessor lists itself again at the back after its repair.
+A retry that finds its predecessor stopped is used up, so that predecessor lists itself again at the back after its repair. The owner may want it to keep its place: that's to decide when stops are built for every object type.
 
 All this serves today's push with one MU per object. Giving up a place on any move assumes the predecessor has no other MU waiting, so revisit it with Station capacity, the Buffer fix and exit strategies.
 
+## Source and Drain
+
+A Source handles `BlockedRetry` too: once its MU has moved, it creates the next one at once. Its `is_exit_allowed` is always true, so with several successors a retry can move an MU before its interval ends. That's a known problem.
+
+A Drain's entrance is always open, so predecessors never wait for it, and it never sends retries.
+
 ## Code references
 
-- `try_to_move_to_successor` — `src/materialflow_objects/flows.rs`
-- `notify_blocked_predecessors` — `src/materialflow_objects/station.rs`
-- `ProcessState` enum — `src/materialflow_objects/flows.rs`
-- `is_exit_allowed`, `is_entrance_allowed` — `src/materialflow_objects/station.rs`
-- `BlockedRetry` dispatch in `execute_event` — `src/materialflow_objects/station.rs`
-- Tests: `blocked_retry_while_predecessor_processing_does_not_move_mu`, `station_becomes_blocked_when_no_successor_accepts`, `blocked_retry_full_flow`, `blockedlist_dedup` — `src/lib.rs`
+- `try_to_move_to_successor`, `retry_move_to_successor`, `list_blocked`, `retries_for_blocked` — `src/materialflow_objects/flows.rs`
+- `is_entrance_allowed`, `is_exit_allowed`, `BlockedRetry` handling — `src/materialflow_objects/station.rs` and `source.rs`
+- Retry order in the queue — `ScheduledEvent`'s `Ord` in `src/event.rs`
+- Tests in `tests/simulation_run.rs`: `a_station_blocks_when_no_successor_accepts`, `a_retry_while_the_predecessor_is_working_does_not_move_its_mu`, `the_longest_waiting_predecessor_retries_first`, `a_predecessor_refused_on_every_retry_is_listed_once`, `a_predecessor_that_moved_on_loses_its_place_in_the_queue`, `an_mu_finishing_as_a_successor_frees_up_goes_behind_those_already_waiting`, `a_retry_only_offers_the_successor_that_sent_it`

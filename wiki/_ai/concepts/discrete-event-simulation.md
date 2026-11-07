@@ -5,18 +5,19 @@ section: concepts
 ---
 
 ## Facts
-- Time advances in discrete jumps from event to event; nothing happens between events
-- `EventController` holds a `BinaryHeap<ScheduledEvent>` ordered by (time asc, seq asc)
-- Run loop: pop event → advance clock → dispatch to object → schedule returned templates
-- `exec_time` in `EventTemplate` is a **relative** offset; EventController adds `current_time`
-- Simulation stops when queue is empty OR `endtime` is exceeded
+- Time jumps from event to event; nothing changes in between, and no time passes inside an event, so a move takes no simulation time
+- `SimulationRun` holds `BinaryHeap<ScheduledEvent>`; processing: pop earliest → clock to its time → object's `execute_event(context, eventtype, others)` → queue returned `EventTemplate`s at `now + exec_time`
+- A run advances only when asked (`step`, `advance_to`, `advance_bounded`, `advance_events`) and has no end time of its own
+- `SimTime` = 64-bit count of whole milliseconds, for points and lengths; sampled times rounded to the nearest ms; wall time stays `std::time::Duration`
 
 ## Invariants
-- `seq` is monotonically increasing; FIFO order for same-timestamp events depends on it
-- Never change seq assignment order — deterministic tests rely on it
-- `endtime: Option<Duration>` — `None` means run until queue is empty
+- At one time: `BlockedRetry` before all other events, then FIFO by `seq` within each group
+- Same seed on the same version → identical results; `seq` order is load-bearing
+
+## Pitfalls
+- More than `ZERO_TIME_EVENT_LIMIT` (1,000,000) events at one time → `RunError::ZeroTimeLoop`, not an endless loop
 
 ## Code locations
-- `EventController`, run loop — `src/simulator.rs`
-- `ScheduledEvent` ordering (`Ord` impl) — `src/event.rs`
-- `EventTemplate` (returned by objects) — `src/event.rs`
+- `SimulationRun`, `ZERO_TIME_EVENT_LIMIT` — `src/simulation_run.rs`
+- `ScheduledEvent` `Ord`, `EventTemplate`, `EventContext` — `src/event.rs`
+- `SimTime` — `src/time.rs`

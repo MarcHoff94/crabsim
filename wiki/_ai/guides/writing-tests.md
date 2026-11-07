@@ -4,30 +4,20 @@ for: guides/writing-tests.md
 section: guides
 ---
 
-## Minimal test pattern
-```rust
-let mut sim = Simulator::new();
-let mut ec = EventController::new(Some(Duration::from_secs_f64(1000.0)));
-let fp = FailureProfile::new(1.0, Distribution::CONSTANT { value: 0.0 }, 0);
-// create objects, wire succ/pred, register (register_material_flow + add_drain for Drain)
-ec.init(&mut sim);
-let sim = ec.run(sim).unwrap();
-let exit_ids = &sim.drains[0].borrow().exit_ids;
-```
-`FailureProfile::new` takes 3 args: `(availablity: f32, distribution_mttr: Distribution, seed: u64)`. MTBF distribution is derived automatically; 1.0 availability = inactive.
+## Facts
+- `tests/simulation_run.rs`: run behaviour via Init, advance, Reset, occurrences, state; helpers `secs`, `no_failures`, `station`, `preloaded_station`, `recorded`, `exit_ids`, `exit_times`, `statistics_of`
+- `tests/live_session.rs`: commands and observations with `FakeClock` and `sync`; Picture checked against the run
+- `tests/cli.rs`: the binary end to end
+- Unit tests in `src/`: failures part way through an event (`RecordsThenFails`), session buffer limit and thinning
+- `ui/tests/`: view state against a real session, no window
+- Build models through `ModelDescription`; `availability = 1.0` unless testing failures; `Recording::ALL` to read occurrences
 
-## Manual event scheduling
-```rust
-let b_id = simulator.register_material_flow(station_b.clone()); // store returned id
-eventcontroller.add_event(Duration::from_secs_f64(100.0), EventTemplate {
-    eventtype: EventType::MUExit, exec_time: Duration::ZERO, object_id: b_id, seq: 0
-});
-```
+## Invariants
+- Check every test can fail by breaking the code on purpose
+- Every new field gets a reset test
+- No speed or timing assertions
+- Refactors of scheduling must keep every occurrence identical (hash against master)
 
-## FIFO assertion
-```rust
-for (i, &id) in exit_ids.iter().enumerate() { assert_eq!(id as usize, i + 1); }
-```
-
-## Tests that must not regress
-`drain_fifo_order`, `ordering_across_stations_preserved`, `ordering_across_parallel_stations_preserved`, `station_becomes_blocked_when_no_successor_accepts`, `blocked_retry_while_predecessor_processing_does_not_move_mu`, `blocked_retry_full_flow`, `blockedlist_dedup`, `source_continues_producing_after_blocked_retry`, `no_duplicate_random_seeds_after_init`, `failure_blocks_mu_exit`, `start_failure_schedules_end_failure`, `failure_interrupts_processing_and_resumes`, `failure_on_idle_station_blocks_entrance_and_recovers`
+## Code locations
+- `tests/simulation_run.rs`, `tests/live_session.rs`, `tests/cli.rs`
+- Long run: `cargo test --release --test simulation_run -- --ignored --nocapture the_demo_model`

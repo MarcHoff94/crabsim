@@ -16,12 +16,16 @@
 
 mod error;
 mod folder;
+mod jobs;
 mod model_files;
+mod results;
 mod store;
 
 pub use crate::error::{ErrorKind, ModelProblem, OperationError};
 pub use crate::folder::{ModelsFolder, CRABSIM_FOLDER};
-pub use crate::store::{Store, STORE_FILE};
+pub use crate::jobs::{observation_seed, RunState, MAX_OBSERVATIONS};
+pub use crate::results::STATISTICS;
+pub use crate::store::{Store, QUERY_ROW_LIMIT, STORE_FILE};
 
 use schemars::JsonSchema;
 use serde::Serialize;
@@ -172,11 +176,13 @@ pub struct Settings {
     pub models: PathBuf,
     /// Who starts the runs, as the results store records it.
     pub source: Source,
+    /// How many threads run observations. One per CPU core if left out.
+    pub threads: Option<usize>,
 }
 
 impl Settings {
     pub fn new(models: impl Into<PathBuf>, source: Source) -> Settings {
-        Settings { models: models.into(), source }
+        Settings { models: models.into(), source, threads: None }
     }
 }
 
@@ -187,6 +193,8 @@ pub struct Catalogue {
     /// Opened on first use, so a folder only gets `.crabsim` once something needs the store.
     store: Mutex<Option<Store>>,
     entries: Vec<Entry>,
+    // Last, so it is dropped last: its threads may still write to the store.
+    jobs: jobs::Jobs,
 }
 
 impl Catalogue {
@@ -194,7 +202,9 @@ impl Catalogue {
     /// code: see [`ModelsFolder::open`].
     pub fn open(settings: Settings) -> Result<Catalogue, OperationError> {
         let folder = ModelsFolder::open(&settings.models)?;
-        Ok(Catalogue { folder, source: settings.source, store: Mutex::new(None), entries: model_files::entries() })
+        let threads = settings.threads.unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |cores| cores.get()));
+        let jobs = jobs::Jobs::new(folder.crabsim_folder(), threads);
+        Ok(Catalogue { folder, source: settings.source, store: Mutex::new(None), entries: model_files::entries(), jobs })
     }
 
     /// Every operation, with its description and schemas.
@@ -217,6 +227,15 @@ impl Catalogue {
 
     pub fn source(&self) -> Source {
         self.source
+    }
+
+    pub(crate) fn jobs(&self) -> &jobs::Jobs {
+        &self.jobs
+    }
+
+    /// The state of a run this process is running, if it is one.
+    pub(crate) fn jobs_status(&self, id: &str) -> Option<RunState> {
+        self.jobs.state(id)
     }
 
     /// The results store, created on first use.

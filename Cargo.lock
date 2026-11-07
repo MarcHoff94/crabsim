@@ -2566,6 +2566,7 @@ dependencies = [
  "crabsim",
  "crabsim-model",
  "jsonschema",
+ "log",
  "rusqlite",
  "schemars",
  "serde",
@@ -2579,8 +2580,10 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "crabsim",
+ "crabsim-catalogue",
  "crabsim-model",
  "env_logger",
+ "serde_json",
 ]
 
 [[package]]

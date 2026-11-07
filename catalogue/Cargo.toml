@@ -16,6 +16,7 @@ schemars = "=1.2.3"
 rusqlite = { version = "0.41", default-features = false, features = ["bundled", "hooks", "limits"] }
 # The hash of each run's canonical model text.
 sha2 = "0.11"
+log = "0.4"
 
 [dev-dependencies]
 jsonschema = { version = "0.60", default-features = false }

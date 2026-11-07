@@ -13,7 +13,7 @@ Written 2026-11-07 at the end of a working session, and updated the same day aft
 
 ## Current state
 
-Checked on 2026-11-07, on Rust 1.99.1: all 247 tests pass, with 1 long-run test ignored (`cargo test --all-targets`).
+Checked on 2026-11-07, on Rust 1.99.1: all 248 tests pass, with 1 long-run test ignored (`cargo test --all-targets`).
 
 | Where | State |
 |---|---|

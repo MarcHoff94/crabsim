@@ -4,22 +4,25 @@ Written 2026-11-07 at the end of a working session, and updated the same day aft
 
 **The UI's order of work is done.** UI stage 1 was built in four slices, PRs 24 to 27: the demo drawn live with state colours and MUs, pan and zoom, the run controls, speed, time mode, stepping, going back to a time, the error banner, the inspector, interventions on Stations and their marks. Step 7 trimmed the CLI to a headless run of the demo, in PR 30. Next is model as data with the JSON model file and MCP v1: see "AI-native" and "Possible next steps".
 
-**The AI-native order of work has begun** (issue 28): the `SessionOutput` rename is merged (PR 33), and slice 1 of the model file is built: a `crabsim-model` crate that reads, checks and saves model files, `models/demo.json`, and `--model` on the CLI, which moved to `cli/` (ADR 0009). The design is in `docs/design/model-file.md`. Slice 2, derived classes with inheritance and where each value comes from, followed in its own PR, and slice 3, the published JSON Schema, in a third, so the model file is complete. Next is the operation catalogue and MCP v1.
+**The model file is complete, and the operation catalogue is designed.** Issue 28's steps 1 and 2 are merged: the `SessionOutput` rename (PR 33), and the model file in three slices (PRs 34 to 36): `crabsim-model` reads, checks and saves model files with classes and inheritance, `models/demo.json` is the demo as a file, the CLI runs model files from `cli/` (ADR 0009), and `models/model-file.schema.json` is the published schema. The design is in `docs/design/model-file.md`.
+
+**Next: slice 1 of [spec issue 37](https://github.com/MarcHoff94/crabsim/issues/37), "MCP v1".** A design round on 2026-11-07 settled the operation catalogue, runs as jobs, a results store in SQLite, the CLI as a front-end for people, and the MCP server. Issue 37 holds all of it, with user stories, decisions and test seams, and is a sub-issue of 28. See "AI-native" below for the short version, and "Possible next steps".
 
 ## Start here
 
 1. Read `CLAUDE.md`.
 2. Read `GLOSSARY.md` and `docs/adr/`.
 3. Read "Agreed design" below. Most of it isn't recorded anywhere else.
-4. Read "UI design" below, ADR 0006 and `docs/design/ui-prototype.md`. The prototype's code on `prototype/ui-bevy` shows working Bevy 0.20 and `bevy_egui` code for most of stage 1. Then go on from "Possible next steps".
+4. Read "UI design" below, ADR 0006 and `docs/design/ui-prototype.md` when working on the UI.
+5. For the next step, read "AI-native" below, ADR 0007 to 0009, `docs/design/model-file.md` and spec issue 37 (`gh issue view 37`). Then go on from "Possible next steps".
 
 ## Current state
 
-Checked on 2026-11-07, on Rust 1.99.1: all 312 tests of the default members pass (engine, `crabsim-model` and `crabsim-cli`), with 1 long-run test ignored (`cargo test --all-targets`), and so do the UI's 55 tests (`cargo test -p crabsim-ui --profile ui`).
+Checked on 2026-11-07, on Rust 1.99.1: all 325 tests of the default members pass (engine, `crabsim-model` and `crabsim-cli`), with 2 ignored: the long run, and the test that writes the schema file again (`cargo test --all-targets`). The UI's 55 tests passed when last run (`cargo test -p crabsim-ui --profile ui`).
 
 | Where | State |
 |---|---|
-| `master` on GitHub | Steps 1 to 6 of the build order, all of the UI's order of work, and step 1 of the AI-native order of work, through PR 33 (`86cc5c7`), with slice 1 of the model file once its PR is merged |
+| `master` on GitHub | Steps 1 to 6 of the build order, all of the UI's order of work, and steps 1 and 2 of the AI-native order of work, through PR 36 (`2e55dd9`), with this handoff once its PR is merged |
 | `prototype/restore-replay` | The throwaway prototype from build step 5. Keep it, and never merge it |
 | `prototype/ui-bevy` | The throwaway UI prototype from UI step 2, with temporary counters in the session. Keep it, and never merge it |
 | Other branches | None: every merged branch was deleted on 2026-11-07, locally and on GitHub, with the app's worktrees |
@@ -31,6 +34,7 @@ The owner merges PRs on GitHub themselves, so fetch before assuming local `maste
 - **2026-11-05 and earlier:** the owner came back after about six months away. `master` didn't build, and was repaired. The domain design was agreed, an architecture review was done, and `SimulationRun`, occurrences and the first `LiveSession` were built. `crabsim-renderer`, its TCP code and `serde` were removed.
 - **2026-11-06:** performance became the first design pillar, and steps 1 to 6 of the build order were designed and built. See "Build order".
 - **2026-11-07:** the UI was designed in a grilling session, with technology research, and the target scale went up to 6,000 objects. Then steps 1 to 5 of the UI's order of work were built: Rust 1.99.1 and a new baseline, the Bevy prototype, ADR 0006, the workspace and the Picture, and the engine additions for stage 1. The prototype found a live-session bug that lost about 30% of shown time at high load, fixed in PR 19. After trying the prototype, the owner decided MUs move instantly in the UI. See "UI design". Later that day, AI-native became the second design pillar, in another grilling session. See "AI-native".
+- **2026-11-07, later:** the owner tried the UI and found the step-back warning asked on every step, fixed in PR 32. Then issue 28's first steps: the `SessionOutput` rename, the model file designed in a round and built in three slices, and a design round for the operation catalogue and MCP v1, written up as spec issue 37.
 
 ## Agreed design
 
@@ -277,7 +281,7 @@ Decided with the owner on 2026-11-07, in a grilling session. AI-native is the se
 - **The pillar:** anything a person can do with crabsim, an AI agent can do too: build a model, run it, read the results, manage models. It's a guideline like performance, and comes second to it.
 - **One operation catalogue,** in Rust, with typed inputs and outputs and descriptions, offered through front-ends (ADR 0007). The MCP server is the first front-end and the starting point. In-app agents and skills, which call the user's own LLM endpoint with the user's tokens, come second, on the same catalogue.
 - **Models are readable text files** that agents may write directly, with operations to validate, run and read them. This pulls the model file format forward. Changing a model through operations, for example in an open UI, is also wanted, as the alternative when rebuilding from the file would cost too much. The file comes first.
-- **MCP v1:** validate a model file with precise errors, a headless run with seed, length and optional warm-up, the observations of one experiment, and each object's statistics. Live-session control comes later.
+- **MCP v1:** validate a model file with precise errors, a headless run with seed, length and optional warm-up, the observations of one experiment, and each object's statistics. Live-session control comes later. Designed in detail in spec issue 37: see "Operation catalogue and MCP v1" below.
 - **Where:** a standalone `crabsim-mcp` crate over stdio, a non-default workspace member, so the engine never depends on it. The server inside the UI app, so the owner can watch an agent work, comes later as another front-end.
 - **No LLM inside a simulation run** by default. The owner wants AI decisions inside a run as a later opt-in that accepts its cost. The concerns are in `docs/design/ai-decisions-in-runs.md`.
 - **When:** after UI stage 1. Then model as data with the file format and MCP v1, on today's objects, before build step 7. Step 7 extends the format, and each new object option comes with its operation.
@@ -285,9 +289,27 @@ Decided with the owner on 2026-11-07, in a grilling session. AI-native is the se
 - **Changing a model in an open UI:** after Reset or before Init, through operations, after which the run is rebuilt. The UI applies each change on its own, rather than reloading the model, because a 3D view with many detailed objects would make a full reload slow. Changing a model's structure mid-run, such as adding a Station at t = 3 days and carrying on, is an open idea and not agreed: it would be a new kind of intervention that checkpoints, replay, statistics and the Picture all have to handle.
 - **Model file:** designed in detail on 2026-11-07, in `docs/design/model-file.md`, and built in three slices: slice 1 (today's objects with built-in classes, validation, canonical saving, `models/demo.json`, the CLI's `--model`) and slice 2 (derived classes, inheritance per attribute, `Model::resolve` with each value's origin) and slice 3 (`models/model-file.schema.json`, generated with `schemars` from mirror types, with drift tests against the reader, and an optional `$schema` field in files) are built. The design round also decided that a Station's process time defaults to 0 (a dummy Station), a Source's interval may be 0, and a zero-interval Source that can reach a Drain through only zero-time objects is a validation error. The file code lives in its own crate and the engine gains nothing (ADR 0009), and the CLI moved to `cli/` because of it. JSON, with a JSON Schema generated from the Rust types and published beside it, which the MCP operations reuse as their input schema. It holds the model only: objects with their configuration, names, positions and dimensions, and connections. Seed, length, warm-up and the number of observations are inputs to a run. Every object has a unique name, connections refer to names, and ids follow the file's order. 3D models will be referenced by path, never embedded, and a run never loads them. The benchmark's 429 copies need unique names.
 - **Runs over MCP are jobs:** `start_run` returns an id, with `run_status`, `run_results` and `cancel_run`. Observations run on parallel threads, the first real use of distributed simulation. Results always carry their seed and crabsim's version.
-- **MCP library:** `rmcp`, the official Rust SDK, pinned like Bevy. A tutorial gives 3.8.0 (October 2026) as the latest, needing Rust 1.88: check crates.io before pinning. tokio and `schemars` stay in `crabsim-mcp`, and the engine gets only `serde`, used by the model description.
+- **MCP library:** `rmcp`, the official Rust SDK, pinned to `=3.9.0`, the latest on 2026-11-07, needing Rust 1.88. tokio stays in `crabsim-mcp`. The engine gains nothing (ADR 0009).
 - **Skills** use the `SKILL.md` format of the Agent Skills open standard (agentskills.io), which Claude Code, GitHub Copilot, OpenAI Codex, Gemini CLI and Cursor read, each from its own folder. crabsim's own skills, such as building a model from a description or finding the bottleneck, are written alongside MCP v1, as the test that the operations are enough. The same skills work in the in-app agents.
 - **LLM endpoints (phase 2):** tokens only in the operating system's credential store, never in a model file or settings file. Two API shapes: Anthropic's Messages API, and the OpenAI-compatible chat API, which also covers local models.
+
+### Operation catalogue and MCP v1 (designed, not built)
+
+Decided with the owner on 2026-11-07 in a design round, and written up as [spec issue 37](https://github.com/MarcHoff94/crabsim/issues/37), which has the user stories, every decision and the test seams. The short version:
+
+- **Crates:** `crabsim-catalogue` (default member: the engine, `crabsim-model`, `serde`, `schemars`, `rusqlite` with SQLite built in, threads, no async) and `crabsim-mcp` (not a default member: `rmcp` `=3.9.0`, tokio, stdio). The CLI becomes a second front-end on the catalogue, for people.
+- **Operations:** a Rust trait with a name, a description and typed input and output that derive `schemars::JsonSchema`. `call(name, JSON)` runs one, and front-ends only translate. Structured errors (`invalid_input`, `invalid_model` with every problem, `not_found`, `outside_models_folder`, `already_exists`, `run_error`), which MCP returns as tool errors. Read-only and destructive hints over MCP.
+- **Scope, the owner's concern:** crabsim's operations touch only `.json` model files in one models folder and crabsim's own `.crabsim/` there. Never crabsim's code, commands or the network. The server refuses a folder holding a `Cargo.toml`, `.git` or `.rs` file. A harness's own file tools are the harness's business.
+- **Slice 1, MCP v1:**
+  - `validate_model` (path or text), `list_models`, `read_model`, `write_model` (valid saved canonical, invalid saved as given with its problems), `copy_model`, `delete_model`
+  - `start_run` as a job, `run_status` with simulated time reached, `cancel_run`
+  - `run_results` (a short summary by default, filterable by objects and classes), `query_results` (read-only SQL, capped), `label_run`, `forget_run`
+- **Runs:** observation *k* gets `splitmix64(seed + k)`. One thread per core, each running one observation, and jobs take turns for free cores. A run error fails only its observation.
+- **Results store:** `<models>/.crabsim/results.sqlite`, WAL mode, with tables `runs` (including the model's canonical text and hash, label and source), `observations` and a long, thin `statistics`. Statistic names: `mus_in`, `mus_out`, `*_share`, `failures`, `availability`, `throughput_per_hour`, `mean_lead_time_s`. Mean, 95% interval, minimum and maximum over observations.
+- **The CLI:** `crabsim run`, `runs`, `results` and `query` with `--models`, writing to the same store with source `cli`. Without `--models` it's unchanged.
+- **People, not only agents:** the owner was clear that jobs and results are for people too. The CLI covers that until the UI's results views, which are planned in issue 37's Further Notes: a list of runs, side-by-side comparison with intervals, the model coloured by a figure, an object's figures across runs, and CSV export.
+- **To record in slice 1's PR:** `docs/design/operation-catalogue.md`, an ADR for SQLite as the results store, and the glossary words Job and Results store.
+- **Later slices of the catalogue:** 2, building and attributes; 3, `describe_model`, the graph operations and exports. Then skills, experiments and studies, and live-session operations.
 
 ### Classes (decided, not built)
 The owner wants models built in the UI later, by drag and drop, by setting values, and by deriving a class from an existing one or duplicating it and changing it. The terms are in `GLOSSARY.md`: class, instance, derived class, duplicate, inheritance. Class and instance are the words the UI uses too, because users know that much programming.
@@ -368,5 +390,6 @@ Done on 2026-11-07: the wiki was rewritten against today's code, with four pages
 
 ## Possible next steps
 
-1. The rest of the AI-native order of work in issue 28: the operation catalogue crate, the MCP server, crabsim's first skills. The catalogue reuses `crabsim_model::schema`'s types for its input schemas.
-2. Step 7 of the build order.
+1. **Slice 1 of spec issue 37, MCP v1.** Start with `docs/design/operation-catalogue.md` and the SQLite ADR from the spec, then the catalogue crate test-first through `call(name, JSON)`, then the CLI subcommands, then `crabsim-mcp` and its end-to-end test. It's large: building it in two or three PRs is reasonable, such as the catalogue with model files and the store, then jobs and results, then the MCP server.
+2. Slices 2 and 3 of the catalogue, then crabsim's first skills, as issue 28's order of work says.
+3. Step 7 of the build order.

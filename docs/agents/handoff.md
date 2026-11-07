@@ -176,7 +176,7 @@ Decided with the owner on 2026-11-07, in a grilling session. Nothing of it is bu
   - The Picture lives in the engine library with no Bevy types, and Bevy only reads it.
   - Panels are plain functions taking `&mut egui::Ui`, so they could move to eframe. A wrong choice then costs the canvas, not the whole UI.
   - Bevy's version is pinned, and upgraded only when there's a reason.
-- **ADR 0006** records the choice, written once the prototype has settled it.
+- **ADR 0006** records the choice, now that the prototype has settled it.
 - **Toolchain (done):** Rust 1.91.1 was too old (Bevy 0.20 needs 1.97.1, egui 0.37 needs 1.95). It is now 1.99.1, pinned in `rust-toolchain.toml`, with a new baseline. The update changed no result.
 
 ### The prototype
@@ -222,8 +222,8 @@ Each states its cost, as `CLAUDE.md` asks. Where one touches the per-event path,
 
 ### Order of work
 1. ✅ Update Rust, raise the benchmark's large scenario to about 6,000 objects (429 copies of the demo), record the new baseline, and pin the version. See "After the Rust update and the 6,000-object model" in `docs/design/first-profile.md`.
-2. ✅ The prototype, with its results in `docs/design/ui-prototype.md`. Bevy with `bevy_egui` holds up. It found a bug in the live session, which loses about 30% of shown time at high load, to fix on `master` before stage 1. See "The session bug this found" there.
-3. ADR 0006 for the technology.
+2. ✅ The prototype, with its results in `docs/design/ui-prototype.md`. Bevy with `bevy_egui` holds up. It found a bug in the live session, which lost about 30% of shown time at high load. Fixed in PR 19: `release` now reads the clock once.
+3. ✅ ADR 0006 for the technology.
 4. The workspace, and the Picture moved into the library.
 5. The engine additions above, with names, positions and dimensions on `ModelDescription`.
 6. UI stage 1.
@@ -289,6 +289,6 @@ Checked on 2026-11-07, on Windows 11:
 
 ## Possible next steps
 
-1. **The UI's order of work,** in "UI design". Steps 1 and 2 are done. Next are the session fix the prototype found, then ADR 0006. This is what the owner asked for next.
+1. **The UI's order of work,** in "UI design". Steps 1 to 3 are done, and so is the session fix the prototype found. Next is step 4: the workspace, and the Picture moved into the library. This is what the owner asked for next.
 2. Step 7 of the build order, after UI stage 1.
 3. Run `/update-wiki` when convenient, so the docs stop describing removed code.

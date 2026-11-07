@@ -701,16 +701,27 @@ related:
 
 # Architecture Overview
 
-## Two crates
+## Crates
 
-crabsim is a Cargo workspace. The engine is the root package, a library with a headless CLI. The UI is the member crate `ui/` (`crabsim-ui`), a Bevy application (ADR 0006). The engine is the only default member, so `cargo test` and `cargo bench` at the root never build Bevy, and the engine never depends on the UI.
+crabsim is a Cargo workspace:
+
+| Crate | Folder | What it is |
+|---|---|---|
+| `crabsim` | root | The engine, a library. It depends on none of the others |
+| `crabsim-model` | `model/` | Model files: reading, checking, saving, and building them into a `ModelDescription` (ADR 0009) |
+| `crabsim-cli` | `cli/` | The headless CLI, binary `crabsim` |
+| `crabsim-ui` | `ui/` | The UI, a Bevy application (ADR 0006) |
+
+The UI is the only member that isn't a default one, so `cargo test` and `cargo bench` at the root never build Bevy.
 
 ## Layers
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
 │  Front-ends                                                  │
-│  headless CLI (src/main.rs) · UI (ui/, Bevy + egui)          │
+│  headless CLI (cli/) · UI (ui/, Bevy + egui)                 │
+├──────────────────────────────────────────────────────────────┤
+│  Model files (model/): JSON in, ModelDescription out         │
 ├──────────────────────────────────────────────────────────────┤
 │  Live session (optional)                                     │
 │  LiveSession: computes ahead, releases on a clock,           │
@@ -730,7 +741,11 @@ A run with nothing attached is a headless run: build, Init, advance, read the st
 ## Building and running a model
 
 ```
-ModelDescription::new()
+crabsim_model::load(text)       a model file, or every problem in it
+  .to_description()              → ModelDescription
+
+ModelDescription::new()         or in code
+
   add_source / add_station / add_buffer / add_drain → ids
   connect(from, to)
   build(seed) → SimulationRun
@@ -764,7 +779,6 @@ Drain::process_mu_entrance       MuLeft with lead time, exit statistics
 ```
 src/
   lib.rs              public API, re-exports
-  main.rs             headless CLI
   demo.rs             the demo model, with names and positions
   model.rs            ModelDescription, Position, Dimensions
   simulation_run.rs   SimulationRun
@@ -780,6 +794,12 @@ src/
     model_object.rs   ModelObject, OtherObjects
     flows.rs          traits, MoveableUnit, FailureProfile, movement helpers
     source.rs · station.rs · buffer.rs · drain.rs
+model/src/
+  lib.rs              Model, Instance, Attributes, Problem, load
+  read.rs · check.rs  reading the JSON, then checking what it means
+  write.rs · build.rs canonical saving, building a ModelDescription
+cli/src/main.rs       the headless CLI
+models/demo.json      the demo model as a file
 ui/src/
   main.rs             Bevy and egui, drawing what the view state says
   view.rs             the view state, plain Rust
@@ -1086,7 +1106,7 @@ related:
 
 # Running crabsim
 
-There are three ways to run a model: the headless CLI, the UI, and a `SimulationRun` in your own code. All three run the demo model from `src/demo.rs` today. A model file comes with model as data.
+There are three ways to run a model: the headless CLI, the UI, and a `SimulationRun` in your own code. The CLI runs a model file or the built-in demo, and the UI runs the demo from `src/demo.rs`.
 
 ## Headless CLI
 
@@ -1095,7 +1115,10 @@ Runs the demo model with a seed for a simulated length, then prints each object'
 ```bash
 cargo run --release --bin crabsim
 cargo run --release --bin crabsim -- --seed 7 --length 365d
+cargo run --release --bin crabsim -- --model models/demo.json --length 30d
 ```
+
+An invalid model file prints every problem in it, one per line with where it is, and runs nothing. `models/demo.json` is the demo model as a file, and `docs/design/model-file.md` describes the format.
 
 `--length` is written as the UI shows time: `90`, `1:30`, `8:00:00` or `30d 12:00:00`. The same seed always gives the same statistics. A run error still prints the statistics up to it, then exits with failure. Build in release for long lengths: a debug build is about ten times slower.
 
@@ -1110,7 +1133,8 @@ The `ui` profile is optimised without LTO, so it rebuilds in seconds. The first 
 ## In your own code
 
 ```rust
-let mut run = crabsim::demo::model().build(seed);
+let model = crabsim_model::load(&std::fs::read_to_string("models/demo.json")?).expect("a valid model");
+let mut run = model.to_description().build(seed);   // or crabsim::demo::model().build(seed)
 run.init()?;
 run.advance_to(SimTime::from_secs(86_400)).map_err(|failure| failure.error)?;
 let state = run.state();   // each object's ObjectState and statistics
@@ -1260,7 +1284,8 @@ Tests go through the engine's seams, never into an object's insides:
 |---|---|
 | `tests/simulation_run.rs` | Behaviour at the run's interface: Init, advance, Reset, then read occurrences and state |
 | `tests/live_session.rs` | Commands in and outputs out, with a fake clock, and the `Picture` against the run's own state |
-| `tests/cli.rs` | The CLI's binary, end to end |
+| `model/tests/model_file.rs` | Model files: text in, a model, its problems or a run out. Validation tests feed broken files and check every problem comes back with its location |
+| `cli/tests/cli.rs` | The CLI's binary, end to end |
 | `src/` unit tests | What can't be seen from outside: a failure part way through an event (`RecordsThenFails`), and in `live_session.rs` the buffer limit and thinning |
 | `ui/tests/` | The UI's view state against a real live session on a fake clock, with no window |
 
@@ -1320,7 +1345,8 @@ Use the fake clock: move it, then `sync`, which blocks until the session has han
 
 - Run tests and helpers — `tests/simulation_run.rs`
 - Session tests — `tests/live_session.rs`
-- CLI tests — `tests/cli.rs`
+- Model file tests — `model/tests/model_file.rs`
+- CLI tests — `cli/tests/cli.rs`
 - `RecordsThenFails` — `src/materialflow_objects/records_then_fails.rs`
 </script>
 
@@ -1427,14 +1453,14 @@ related:
 
 ## CLI
 
-Parsed by `clap` in `src/main.rs`.
+Parsed by `clap` in `cli/src/main.rs`.
 
 | Flag | Default | Effect |
 |---|---|---|
+| `--model <FILE>` | the built-in demo | A model file to run. An invalid one prints every problem and runs nothing |
 | `--seed <N>` | `0` | Seed for the run's random numbers. The same seed gives the same results |
 | `--length <TIME>` | `1d` | Simulated length, written as the UI shows time: `90`, `1:30`, `8:00:00`, `30d 12:00:00`. Anything else is refused |
 
-The CLI runs the demo model. It takes a model file once models can be saved.
 
 ## Environment
 
@@ -1468,7 +1494,7 @@ A session starts halted at speed 1. The UI sets 60 times real time.
 
 ## Code references
 
-- `Opts` — `src/main.rs`
+- `Opts` — `cli/src/main.rs`
 - `SessionSettings`, `TimeMode` — `src/live_session.rs`
 - Profiles — `Cargo.toml`
 </script>

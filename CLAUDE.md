@@ -14,6 +14,9 @@ cargo run --release --bin crabsim
 # The same with a seed and a simulated length, written as the UI shows time
 cargo run --release --bin crabsim -- --seed 7 --length 365d
 
+# Run a model file
+cargo run --release --bin crabsim -- --model models/demo.json --length 30d
+
 # Run all tests
 cargo test
 
@@ -58,7 +61,7 @@ The design already agreed for this, including what isn't built yet, is in `docs/
 
 ## Architecture
 
-This is a Rust discrete-event material-flow simulator structured as a library (`src/`) with a headless CLI (`src/main.rs`), in a Cargo workspace with the UI as a member crate (`ui/`). The engine is the only default member, so `cargo test` and `cargo bench` at the root never build the UI, and the engine never depends on it.
+This is a Rust discrete-event material-flow simulator: the engine is a library (`src/`) at the root of a Cargo workspace, with member crates for model files (`model/`, `crabsim-model`), the headless CLI (`cli/`, `crabsim-cli`, binary `crabsim`) and the UI (`ui/`, `crabsim-ui`). The UI is the only member that isn't a default one, so `cargo test` and `cargo bench` at the root never build Bevy. The engine depends on none of them (ADR 0009).
 
 **Core engine** (`src/simulation_run.rs`): `SimulationRun` owns the objects (one `Vec<ModelObject>`, indexed by id), clock and event queue (`BinaryHeap<ScheduledEvent>`, 32 bytes per entry). At one simulation time, `BlockedRetry` events run before all others, and a monotonically increasing `seq` preserves FIFO order within each of those two groups. A run only advances when asked and knows nothing about views or pacing:
 - `init` — sets t=0, calls each object's `init` in id order and queues the first events without processing them. Only allowed from the default state.
@@ -103,11 +106,13 @@ This is a Rust discrete-event material-flow simulator structured as a library (`
 
 **Event types** (`src/event.rs`): `MUExit` (processing complete, try to transfer) and `BlockedRetry { from }` (reactive — successor `from` freed up, predecessor retries that successor only). Keeping them distinct preserves scheduling vs. reactive semantics.
 
-**Headless CLI** (`src/main.rs`): runs the demo model with `--seed` (default 0) and `--length` (default `1d`, written as the UI shows time), then prints each object's statistics, each Drain's throughput and mean lead time, and how many events it ran in how long. A run error still prints the statistics up to it, then exits with failure. It takes a model file once models can be saved.
+**Model files** (`model/`, `crabsim-model`): a model as readable JSON, described in `docs/design/model-file.md`. `load` reads a file and returns the `Model` or every problem in it at once, each with a JSON Pointer, the instance's name and a message, and never panics. It reads the JSON by hand rather than through `serde` derives, so it can keep going after a problem. `Model::save` writes one canonical form, and `Model::to_description` builds the engine's `ModelDescription`, so a run never sees files. Instances name a built-in class (Source, Station, Buffer, Drain) and set only the `attributes` they change. Derived classes and the published JSON Schema are the next two slices. `models/demo.json` is the demo model as a file.
+
+**Headless CLI** (`cli/`, binary `crabsim`): runs a model file (`--model`) or the built-in demo, with `--seed` (default 0) and `--length` (default `1d`, written as the UI shows time), then prints each object's statistics, each Drain's throughput and mean lead time, and how many events it ran in how long. A run error still prints the statistics up to it, then exits with failure. An invalid model file prints every problem and runs nothing.
 
 **Demo** (`src/demo.rs`): the example model behind the CLI and the UI. `model()` gives its description, with a name and a hand-written position for every object.
 
-**Tests** (`tests/`): `simulation_run.rs` tests behaviour at the run's interface: Init, advance, Reset, then read occurrences and state. `cli.rs` runs the CLI's binary end to end. `live_session.rs` tests commands in and outputs out, with a fake clock, and checks the `Picture` against the run's own state. Tests build models through `ModelDescription`. A failure part way through an event can't happen in a real object, so the few tests of it are unit tests in `src/`, using `RecordsThenFails`, a `#[cfg(test)]` variant of `ModelObject`. What can't be seen from outside a session, such as the buffer limit and thinning, is unit tested in `src/live_session.rs`.
+**Tests** (`tests/`): `simulation_run.rs` tests behaviour at the run's interface: Init, advance, Reset, then read occurrences and state. `live_session.rs` tests commands in and outputs out, with a fake clock, and checks the `Picture` against the run's own state. Tests build models through `ModelDescription`. A failure part way through an event can't happen in a real object, so the few tests of it are unit tests in `src/`, using `RecordsThenFails`, a `#[cfg(test)]` variant of `ModelObject`. What can't be seen from outside a session, such as the buffer limit and thinning, is unit tested in `src/live_session.rs`. `model/tests/model_file.rs` tests model files: text in, a model, its problems or a run out. `cli/tests/cli.rs` runs the CLI's binary end to end.
 
 **Benchmark** (`benches/reference.rs`): runs a copy of the demo model, and 429 copies of it side by side (6,006 objects), and reports speed and peak memory. `cargo test --all-targets` runs it without `--bench`, and then it only checks that the copy still matches the demo model.
 

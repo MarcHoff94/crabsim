@@ -10,14 +10,14 @@ related:
 
 ## CLI
 
-Parsed by `clap` in `src/main.rs`.
+Parsed by `clap` in `cli/src/main.rs`.
 
 | Flag | Default | Effect |
 |---|---|---|
+| `--model <FILE>` | the built-in demo | A model file to run. An invalid one prints every problem and runs nothing |
 | `--seed <N>` | `0` | Seed for the run's random numbers. The same seed gives the same results |
 | `--length <TIME>` | `1d` | Simulated length, written as the UI shows time: `90`, `1:30`, `8:00:00`, `30d 12:00:00`. Anything else is refused |
 
-The CLI runs the demo model. It takes a model file once models can be saved.
 
 ## Environment
 
@@ -51,6 +51,6 @@ A session starts halted at speed 1. The UI sets 60 times real time.
 
 ## Code references
 
-- `Opts` — `src/main.rs`
+- `Opts` — `cli/src/main.rs`
 - `SessionSettings`, `TimeMode` — `src/live_session.rs`
 - Profiles — `Cargo.toml`

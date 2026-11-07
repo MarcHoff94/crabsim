@@ -9,16 +9,27 @@ related:
 
 # Architecture Overview
 
-## Two crates
+## Crates
 
-crabsim is a Cargo workspace. The engine is the root package, a library with a headless CLI. The UI is the member crate `ui/` (`crabsim-ui`), a Bevy application (ADR 0006). The engine is the only default member, so `cargo test` and `cargo bench` at the root never build Bevy, and the engine never depends on the UI.
+crabsim is a Cargo workspace:
+
+| Crate | Folder | What it is |
+|---|---|---|
+| `crabsim` | root | The engine, a library. It depends on none of the others |
+| `crabsim-model` | `model/` | Model files: reading, checking, saving, and building them into a `ModelDescription` (ADR 0009) |
+| `crabsim-cli` | `cli/` | The headless CLI, binary `crabsim` |
+| `crabsim-ui` | `ui/` | The UI, a Bevy application (ADR 0006) |
+
+The UI is the only member that isn't a default one, so `cargo test` and `cargo bench` at the root never build Bevy.
 
 ## Layers
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
 │  Front-ends                                                  │
-│  headless CLI (src/main.rs) · UI (ui/, Bevy + egui)          │
+│  headless CLI (cli/) · UI (ui/, Bevy + egui)                 │
+├──────────────────────────────────────────────────────────────┤
+│  Model files (model/): JSON in, ModelDescription out         │
 ├──────────────────────────────────────────────────────────────┤
 │  Live session (optional)                                     │
 │  LiveSession: computes ahead, releases on a clock,           │
@@ -38,7 +49,11 @@ A run with nothing attached is a headless run: build, Init, advance, read the st
 ## Building and running a model
 
 ```
-ModelDescription::new()
+crabsim_model::load(text)       a model file, or every problem in it
+  .to_description()              → ModelDescription
+
+ModelDescription::new()         or in code
+
   add_source / add_station / add_buffer / add_drain → ids
   connect(from, to)
   build(seed) → SimulationRun
@@ -72,7 +87,6 @@ Drain::process_mu_entrance       MuLeft with lead time, exit statistics
 ```
 src/
   lib.rs              public API, re-exports
-  main.rs             headless CLI
   demo.rs             the demo model, with names and positions
   model.rs            ModelDescription, Position, Dimensions
   simulation_run.rs   SimulationRun
@@ -88,6 +102,12 @@ src/
     model_object.rs   ModelObject, OtherObjects
     flows.rs          traits, MoveableUnit, FailureProfile, movement helpers
     source.rs · station.rs · buffer.rs · drain.rs
+model/src/
+  lib.rs              Model, Instance, Attributes, Problem, load
+  read.rs · check.rs  reading the JSON, then checking what it means
+  write.rs · build.rs canonical saving, building a ModelDescription
+cli/src/main.rs       the headless CLI
+models/demo.json      the demo model as a file
 ui/src/
   main.rs             Bevy and egui, drawing what the view state says
   view.rs             the view state, plain Rust

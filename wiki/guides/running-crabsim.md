@@ -8,7 +8,7 @@ related:
 
 # Running crabsim
 
-There are three ways to run a model: the headless CLI, the UI, and a `SimulationRun` in your own code. All three run the demo model from `src/demo.rs` today. A model file comes with model as data.
+There are three ways to run a model: the headless CLI, the UI, and a `SimulationRun` in your own code. The CLI runs a model file or the built-in demo, and the UI runs the demo from `src/demo.rs`.
 
 ## Headless CLI
 
@@ -17,7 +17,10 @@ Runs the demo model with a seed for a simulated length, then prints each object'
 ```bash
 cargo run --release --bin crabsim
 cargo run --release --bin crabsim -- --seed 7 --length 365d
+cargo run --release --bin crabsim -- --model models/demo.json --length 30d
 ```
+
+An invalid model file prints every problem in it, one per line with where it is, and runs nothing. `models/demo.json` is the demo model as a file, and `docs/design/model-file.md` describes the format.
 
 `--length` is written as the UI shows time: `90`, `1:30`, `8:00:00` or `30d 12:00:00`. The same seed always gives the same statistics. A run error still prints the statistics up to it, then exits with failure. Build in release for long lengths: a debug build is about ten times slower.
 
@@ -32,7 +35,8 @@ The `ui` profile is optimised without LTO, so it rebuilds in seconds. The first 
 ## In your own code
 
 ```rust
-let mut run = crabsim::demo::model().build(seed);
+let model = crabsim_model::load(&std::fs::read_to_string("models/demo.json")?).expect("a valid model");
+let mut run = model.to_description().build(seed);   // or crabsim::demo::model().build(seed)
 run.init()?;
 run.advance_to(SimTime::from_secs(86_400)).map_err(|failure| failure.error)?;
 let state = run.state();   // each object's ObjectState and statistics

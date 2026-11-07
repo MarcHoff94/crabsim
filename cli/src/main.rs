@@ -1,16 +1,20 @@
-﻿//! The headless CLI: runs the demo model with a seed for a simulated length, then prints each
-//! object's final statistics and how long the run took. It takes a model file once models can be
-//! saved.
+﻿//! The headless CLI: runs a model file, or the built-in demo model, with a seed for a simulated
+//! length, then prints each object's final statistics and how long the run took. An invalid model
+//! file prints every problem in it and runs nothing.
 
 use clap::Parser;
 use crabsim::time::{format_time, format_time_exact, parse_time};
 use crabsim::{demo, ModelDescription, ObjectKind, ObjectStatistics, RunState, SimTime};
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Instant;
 
 #[derive(Parser, Debug)]
-#[command(name = "crabsim", about = "Runs crabsim's demo model headless and prints its statistics")]
+#[command(name = "crabsim", about = "Runs a crabsim model headless and prints its statistics")]
 struct Opts {
+    /// A model file to run. Without one, the built-in demo model runs.
+    #[arg(long)]
+    model: Option<PathBuf>,
     /// Seed for the run's random numbers. The same seed gives the same results.
     #[arg(long, default_value_t = 0)]
     seed: u64,
@@ -27,9 +31,21 @@ fn length(typed: &str) -> Result<SimTime, String> {
 fn main() -> ExitCode {
     let _ = env_logger::try_init();
     let opts = Opts::parse();
-    let model = demo::model();
+    let (model, which) = match &opts.model {
+        None => (demo::model(), "the demo model".to_string()),
+        Some(path) => match read_model(path) {
+            Ok(model) => (model, path.display().to_string()),
+            Err(problems) => {
+                eprintln!("{} can't be run:", path.display());
+                for problem in problems {
+                    eprintln!("{problem}");
+                }
+                return ExitCode::FAILURE;
+            }
+        },
+    };
     let mut run = model.build(opts.seed);
-    println!("crabsim: the demo model, seed {}, for {}", opts.seed, format_time_exact(opts.length));
+    println!("crabsim: {which}, seed {}, for {}", opts.seed, format_time_exact(opts.length));
 
     let start = Instant::now();
     let outcome = run.init().and_then(|_| run.advance_to(opts.length).map_err(|failure| failure.error));
@@ -51,6 +67,13 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// The model in the file at `path`, or every problem with reading it.
+fn read_model(path: &PathBuf) -> Result<ModelDescription, Vec<String>> {
+    let text = std::fs::read_to_string(path).map_err(|error| vec![format!("it can't be read: {error}")])?;
+    let model = crabsim_model::load(&text).map_err(|problems| problems.iter().map(ToString::to_string).collect::<Vec<_>>())?;
+    Ok(model.to_description())
 }
 
 /// Each object's statistics as a table, then what only Drains keep.

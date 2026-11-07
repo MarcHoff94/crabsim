@@ -5,7 +5,7 @@ section: reference
 ---
 
 ## Facts
-- CLI (`src/main.rs`): `--seed <N>` (default 0), `--length <TIME>` (default `1d`, UI time syntax)
+- CLI (`cli/src/main.rs`): `--model <FILE>` (default: the built-in demo), `--seed <N>` (default 0), `--length <TIME>` (default `1d`, UI time syntax)
 - `RUST_LOG` controls `env_logger`; per-event `info` logging is slow
 - Profiles: `dev` (deps optimised), `release` (thin LTO, 1 codegen unit, `panic = unwind` for `LiveSession`), `ui` (release without LTO)
 - Rust version pinned in `rust-toolchain.toml`
@@ -13,4 +13,4 @@ section: reference
 - A session starts halted at speed 1; the UI uses 60x
 
 ## Code locations
-- `src/main.rs`, `src/live_session.rs`, `Cargo.toml`
+- `cli/src/main.rs`, `src/live_session.rs`, `Cargo.toml`

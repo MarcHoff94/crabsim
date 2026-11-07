@@ -32,6 +32,12 @@ The same with a seed and a simulated length, written as the UI shows time, such 
 cargo run --release --bin crabsim -- --seed 7 --length 365d
 ```
 
+Run a model file. `models/demo.json` is the demo model as a file, and `docs/design/model-file.md` describes the format:
+
+```powershell
+cargo run --release --bin crabsim -- --model models/demo.json --length 30d
+```
+
 Run the benchmark, which takes about a minute and reports events per second, simulated time per wall second and peak memory:
 
 ```powershell
@@ -150,7 +156,7 @@ The same seed always gives the same result. For a run to watch, `LiveSession` ta
   - **`picture.rs`:** what a UI shows.
   - **`statistics.rs`:** statistics.
   - **`materialflow_objects/`:** Sources, Stations, Buffers and Drains.
-- `src/main.rs` is the headless command line.
+- `model/` reads, checks and saves model files, `models/` holds example models, and `cli/` is the headless command line.
 - `ui/` is the UI, a Bevy application.
 - `tests/` holds the behaviour tests, and `benches/reference.rs` the benchmark.
 - `docs/` holds the decisions (`adr/`), design notes and measurements (`design/`), and the handoff for whoever works on it next (`agents/handoff.md`).

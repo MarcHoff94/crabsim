@@ -15,7 +15,8 @@ Tests go through the engine's seams, never into an object's insides:
 |---|---|
 | `tests/simulation_run.rs` | Behaviour at the run's interface: Init, advance, Reset, then read occurrences and state |
 | `tests/live_session.rs` | Commands in and outputs out, with a fake clock, and the `Picture` against the run's own state |
-| `tests/cli.rs` | The CLI's binary, end to end |
+| `model/tests/model_file.rs` | Model files: text in, a model, its problems or a run out. Validation tests feed broken files and check every problem comes back with its location |
+| `cli/tests/cli.rs` | The CLI's binary, end to end |
 | `src/` unit tests | What can't be seen from outside: a failure part way through an event (`RecordsThenFails`), and in `live_session.rs` the buffer limit and thinning |
 | `ui/tests/` | The UI's view state against a real live session on a fake clock, with no window |
 
@@ -75,5 +76,6 @@ Use the fake clock: move it, then `sync`, which blocks until the session has han
 
 - Run tests and helpers — `tests/simulation_run.rs`
 - Session tests — `tests/live_session.rs`
-- CLI tests — `tests/cli.rs`
+- Model file tests — `model/tests/model_file.rs`
+- CLI tests — `cli/tests/cli.rs`
 - `RecordsThenFails` — `src/materialflow_objects/records_then_fails.rs`

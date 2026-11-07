@@ -1,7 +1,7 @@
 //! crabsim's model files: a model as readable JSON that people, agents and scripts can write, with
-//! validation that reports every problem at once, one canonical form for saving, and building into
-//! the engine's `ModelDescription`. The format is described in `docs/design/model-file.md`, and
-//! why it lives in its own crate in ADR 0009.
+//! classes and inheritance, validation that reports every problem at once, one canonical form for
+//! saving, and building into the engine's `ModelDescription`. The format is described in
+//! `docs/design/model-file.md`, and why it lives in its own crate in ADR 0009.
 //!
 //! ```no_run
 //! let text = std::fs::read_to_string("models/demo.json").unwrap();
@@ -14,14 +14,15 @@ mod check;
 mod read;
 mod write;
 
-use crabsim::{Dimensions, Position, SimTime};
+use crabsim::{Dimensions, ObjectKind, Position, SimTime};
 use serde::Serialize;
+use std::collections::HashSet;
 use std::fmt;
 
 /// The only format version this crabsim reads and writes.
 pub const FORMAT_VERSION: u64 = 1;
 
-/// The built-in classes every instance's chain of classes ends in.
+/// The built-in classes every chain of classes ends in.
 pub const BUILT_IN_CLASSES: [&str; 4] = ["Source", "Station", "Buffer", "Drain"];
 
 /// A model, as a file holds it: valid once `load` or `check` finds no problem.
@@ -29,8 +30,27 @@ pub const BUILT_IN_CLASSES: [&str; 4] = ["Source", "Station", "Buffer", "Drain"]
 pub struct Model {
     /// About the model as a whole.
     pub description: Option<String>,
+    /// The model's own classes, in any order.
+    pub classes: Vec<Class>,
     /// In Init order: an instance's id is its place here.
     pub instances: Vec<Instance>,
+}
+
+/// A class of the user's own, derived from a built-in class or another derived class.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Class {
+    /// Unique among classes, and not a built-in class's name.
+    pub name: String,
+    /// The class it derives from, built-in or derived.
+    pub parent: String,
+    /// Only the values this class changes from its parent.
+    pub attributes: Attributes,
+}
+
+impl Class {
+    pub fn new(name: impl Into<String>, parent: impl Into<String>) -> Class {
+        Class { name: name.into(), parent: parent.into(), attributes: Attributes::default() }
+    }
 }
 
 /// One material-flow object in a model.
@@ -38,13 +58,14 @@ pub struct Model {
 pub struct Instance {
     /// Unique among instances.
     pub name: String,
-    /// One of `BUILT_IN_CLASSES`, until derived classes exist.
+    /// A built-in class or one of the model's own.
     pub class: String,
     /// The centre of its footprint, in metres. `None` leaves placing it to a view.
     pub position: Option<Position>,
     /// The instances it passes MUs to, by name, in the order they are tried.
     pub successors: Vec<String>,
-    /// Only the values set on this instance. Anything else comes from its class.
+    /// Only the values set on this instance, where its inheritance is cut. Anything else comes
+    /// from its class.
     pub attributes: Attributes,
 }
 
@@ -78,6 +99,80 @@ impl Attributes {
     pub(crate) fn is_empty(&self) -> bool {
         *self == Attributes::default()
     }
+
+    /// Whether this attribute is set here.
+    pub fn is_set(&self, attribute: Attribute) -> bool {
+        match attribute {
+            Attribute::Interval => self.interval.is_some(),
+            Attribute::ProcessTime => self.process_time.is_some(),
+            Attribute::Failures => self.failures.is_some(),
+            Attribute::StartingMus => self.starting_mus.is_some(),
+            Attribute::Capacity => self.capacity.is_some(),
+            Attribute::Dimensions => self.dimensions.is_some(),
+            Attribute::Description => self.description.is_some(),
+        }
+    }
+
+    /// Takes this attribute's value from `from`.
+    fn take(&mut self, attribute: Attribute, from: &Attributes) {
+        match attribute {
+            Attribute::Interval => self.interval = from.interval,
+            Attribute::ProcessTime => self.process_time = from.process_time,
+            Attribute::Failures => self.failures = from.failures.clone(),
+            Attribute::StartingMus => self.starting_mus = from.starting_mus,
+            Attribute::Capacity => self.capacity = from.capacity,
+            Attribute::Dimensions => self.dimensions = from.dimensions,
+            Attribute::Description => self.description = from.description.clone(),
+        }
+    }
+}
+
+/// Every attribute, by name as a file writes it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Attribute {
+    Interval,
+    ProcessTime,
+    Failures,
+    StartingMus,
+    Capacity,
+    Dimensions,
+    Description,
+}
+
+impl Attribute {
+    pub const ALL: [Attribute; 7] = [
+        Attribute::Interval,
+        Attribute::ProcessTime,
+        Attribute::Failures,
+        Attribute::StartingMus,
+        Attribute::Capacity,
+        Attribute::Dimensions,
+        Attribute::Description,
+    ];
+
+    /// Its name in a file.
+    pub fn name(self) -> &'static str {
+        match self {
+            Attribute::Interval => "interval",
+            Attribute::ProcessTime => "process_time",
+            Attribute::Failures => "failures",
+            Attribute::StartingMus => "starting_mus",
+            Attribute::Capacity => "capacity",
+            Attribute::Dimensions => "dimensions",
+            Attribute::Description => "description",
+        }
+    }
+
+    /// Whether instances of this built-in class have it.
+    pub fn applies_to(self, built_in: &str) -> bool {
+        matches!(
+            (built_in, self),
+            (_, Attribute::Dimensions | Attribute::Description)
+                | ("Source", Attribute::Interval)
+                | ("Station", Attribute::ProcessTime | Attribute::Failures | Attribute::StartingMus)
+                | ("Buffer", Attribute::Capacity)
+        )
+    }
 }
 
 /// Random failures: how much of the time the object is available, and how long a repair takes.
@@ -96,6 +191,33 @@ pub enum RepairTime {
     Uniform { min: SimTime, max: SimTime },
     Normal { mean: SimTime, std: SimTime },
     Erlang { mean: SimTime, k: u64 },
+}
+
+/// Where an instance's value of an attribute comes from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Origin {
+    /// Set on the instance itself, which cuts its inheritance.
+    Instance,
+    /// Inherited from this class, the nearest in its chain that sets it.
+    Class(String),
+    /// Set nowhere in its chain, so the built-in class's default: a value, or none.
+    BuiltIn,
+}
+
+/// An instance's values, worked out from its chain of classes, and where each comes from.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Resolved {
+    /// The built-in class at the root of its chain.
+    pub built_in: &'static str,
+    /// Every value the instance has, with built-in defaults filled in.
+    pub attributes: Attributes,
+    origins: Vec<(Attribute, Origin)>,
+}
+
+impl Resolved {
+    pub fn origin(&self, attribute: Attribute) -> &Origin {
+        &self.origins.iter().find(|(a, _)| *a == attribute).expect("every attribute has an origin").1
+    }
 }
 
 /// One thing wrong with a model file.
@@ -127,9 +249,17 @@ pub fn load(text: &str) -> Result<Model, Vec<Problem>> {
     if problems.is_empty() { Ok(model) } else { Err(problems) }
 }
 
-/// Orders pointers as they come in the file: by each part, numbers as numbers.
+/// Orders pointers as they come in the file: by each part, numbers as numbers. Classes come
+/// before instances, as a saved file writes them.
 fn order(pointer: &str) -> Vec<(u64, String)> {
-    pointer.split('/').map(|part| part.parse::<u64>().map_or((u64::MAX, part.to_string()), |n| (n, String::new()))).collect()
+    pointer
+        .split('/')
+        .map(|part| match part {
+            "classes" => (0, String::new()),
+            "instances" => (1, String::new()),
+            _ => part.parse::<u64>().map_or((u64::MAX, part.to_string()), |n| (n, String::new())),
+        })
+        .collect()
 }
 
 impl Model {
@@ -143,8 +273,9 @@ impl Model {
         write::write(self)
     }
 
-    /// The engine's description of this model, ready to build runs from. The model must be
-    /// valid: `load` only gives valid models, and one built in code should pass `check` first.
+    /// The engine's description of this model, ready to build runs from, with every instance's
+    /// values worked out from its classes. The model must be valid: `load` only gives valid
+    /// models, and one built in code should pass `check` first.
     ///
     /// # Panics
     /// If the model has problems, which `check` would have reported.
@@ -152,6 +283,63 @@ impl Model {
         let problems = self.check();
         assert!(problems.is_empty(), "the model has problems: {problems:?}");
         build::build(self)
+    }
+
+    pub fn class(&self, name: &str) -> Option<&Class> {
+        self.classes.iter().find(|class| class.name == name)
+    }
+
+    /// The derived classes from `class` up to its built-in class, nearest first, and that built-in
+    /// class. `None` if the chain reaches an unknown class or goes round in a circle.
+    pub fn chain(&self, class: &str) -> Option<(Vec<&Class>, &'static str)> {
+        let mut chain = Vec::new();
+        let mut seen = HashSet::new();
+        let mut at = class;
+        loop {
+            if let Some(built_in) = BUILT_IN_CLASSES.iter().find(|&&built_in| built_in == at) {
+                return Some((chain, built_in));
+            }
+            if !seen.insert(at) {
+                return None;
+            }
+            let class = self.class(at)?;
+            chain.push(class);
+            at = &class.parent;
+        }
+    }
+
+    /// The values of the instance at `index`, worked out from its chain of classes, and where
+    /// each comes from. `None` if its class's chain is broken, which `check` reports.
+    pub fn resolve(&self, index: usize) -> Option<Resolved> {
+        let instance = self.instances.get(index)?;
+        let (chain, built_in) = self.chain(&instance.class)?;
+        let mut attributes = Attributes::default();
+        let mut origins = Vec::new();
+        for attribute in Attribute::ALL {
+            let origin = if instance.attributes.is_set(attribute) {
+                attributes.take(attribute, &instance.attributes);
+                Origin::Instance
+            } else if let Some(class) = chain.iter().find(|class| class.attributes.is_set(attribute)) {
+                attributes.take(attribute, &class.attributes);
+                Origin::Class(class.name.clone())
+            } else {
+                Origin::BuiltIn
+            };
+            origins.push((attribute, origin));
+        }
+        // Built-in defaults, where there are any.
+        if built_in == "Station" {
+            attributes.process_time.get_or_insert(SimTime::ZERO);
+            attributes.starting_mus.get_or_insert(0);
+        }
+        let kind = match built_in {
+            "Source" => ObjectKind::Source,
+            "Station" => ObjectKind::Station,
+            "Buffer" => ObjectKind::Buffer,
+            _ => ObjectKind::Drain,
+        };
+        attributes.dimensions.get_or_insert(Dimensions::default_for(kind));
+        Some(Resolved { built_in, attributes, origins })
     }
 }
 

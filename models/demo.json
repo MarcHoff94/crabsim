@@ -1,6 +1,24 @@
 {
   "format_version": 1,
   "description": "The demo model: a Source, a line that splits into two branches with parallel Stations, and a Drain. Every Station fails at random, available 90% of the time.",
+  "classes": [
+    {
+      "name": "Demo station",
+      "parent": "Station",
+      "attributes": {
+        "failures": {
+          "availability": 0.9,
+          "repair_time": {
+            "erlang": {
+              "mean": "00:01:00",
+              "k": 2
+            }
+          }
+        },
+        "description": "A Station that fails at random, available 90% of the time, with an Erlang repair time"
+      }
+    }
+  ],
   "instances": [
     {
       "name": "Source",
@@ -18,7 +36,7 @@
     },
     {
       "name": "Station 1",
-      "class": "Station",
+      "class": "Demo station",
       "position": {
         "x": 4.0,
         "y": 0.0
@@ -27,21 +45,12 @@
         "Station 2"
       ],
       "attributes": {
-        "process_time": "00:00:10",
-        "failures": {
-          "availability": 0.9,
-          "repair_time": {
-            "erlang": {
-              "mean": "00:01:00",
-              "k": 2
-            }
-          }
-        }
+        "process_time": "00:00:10"
       }
     },
     {
       "name": "Station 2",
-      "class": "Station",
+      "class": "Demo station",
       "position": {
         "x": 8.0,
         "y": 0.0
@@ -51,21 +60,12 @@
         "Station 5"
       ],
       "attributes": {
-        "process_time": "00:00:15",
-        "failures": {
-          "availability": 0.9,
-          "repair_time": {
-            "erlang": {
-              "mean": "00:01:00",
-              "k": 2
-            }
-          }
-        }
+        "process_time": "00:00:15"
       }
     },
     {
       "name": "Station 3",
-      "class": "Station",
+      "class": "Demo station",
       "position": {
         "x": 12.0,
         "y": 4.0
@@ -74,21 +74,12 @@
         "Station 4"
       ],
       "attributes": {
-        "process_time": "00:00:20",
-        "failures": {
-          "availability": 0.9,
-          "repair_time": {
-            "erlang": {
-              "mean": "00:01:00",
-              "k": 2
-            }
-          }
-        }
+        "process_time": "00:00:20"
       }
     },
     {
       "name": "Station 4",
-      "class": "Station",
+      "class": "Demo station",
       "position": {
         "x": 16.0,
         "y": 4.0
@@ -99,21 +90,12 @@
         "Station 4c"
       ],
       "attributes": {
-        "process_time": "00:00:25",
-        "failures": {
-          "availability": 0.9,
-          "repair_time": {
-            "erlang": {
-              "mean": "00:01:00",
-              "k": 2
-            }
-          }
-        }
+        "process_time": "00:00:25"
       }
     },
     {
       "name": "Station 4a",
-      "class": "Station",
+      "class": "Demo station",
       "position": {
         "x": 20.0,
         "y": 7.0
@@ -122,21 +104,12 @@
         "Station 7"
       ],
       "attributes": {
-        "process_time": "00:00:12",
-        "failures": {
-          "availability": 0.9,
-          "repair_time": {
-            "erlang": {
-              "mean": "00:01:00",
-              "k": 2
-            }
-          }
-        }
+        "process_time": "00:00:12"
       }
     },
     {
       "name": "Station 4b",
-      "class": "Station",
+      "class": "Demo station",
       "position": {
         "x": 20.0,
         "y": 4.0
@@ -145,21 +118,12 @@
         "Station 7"
       ],
       "attributes": {
-        "process_time": "00:00:15",
-        "failures": {
-          "availability": 0.9,
-          "repair_time": {
-            "erlang": {
-              "mean": "00:01:00",
-              "k": 2
-            }
-          }
-        }
+        "process_time": "00:00:15"
       }
     },
     {
       "name": "Station 4c",
-      "class": "Station",
+      "class": "Demo station",
       "position": {
         "x": 20.0,
         "y": 1.0
@@ -168,21 +132,12 @@
         "Station 7"
       ],
       "attributes": {
-        "process_time": "00:00:18",
-        "failures": {
-          "availability": 0.9,
-          "repair_time": {
-            "erlang": {
-              "mean": "00:01:00",
-              "k": 2
-            }
-          }
-        }
+        "process_time": "00:00:18"
       }
     },
     {
       "name": "Station 7",
-      "class": "Station",
+      "class": "Demo station",
       "position": {
         "x": 24.0,
         "y": 4.0
@@ -191,21 +146,12 @@
         "Drain"
       ],
       "attributes": {
-        "process_time": "00:00:30",
-        "failures": {
-          "availability": 0.9,
-          "repair_time": {
-            "erlang": {
-              "mean": "00:01:00",
-              "k": 2
-            }
-          }
-        }
+        "process_time": "00:00:30"
       }
     },
     {
       "name": "Station 5",
-      "class": "Station",
+      "class": "Demo station",
       "position": {
         "x": 12.0,
         "y": -4.0
@@ -216,21 +162,12 @@
         "Station 5c"
       ],
       "attributes": {
-        "process_time": "00:00:18",
-        "failures": {
-          "availability": 0.9,
-          "repair_time": {
-            "erlang": {
-              "mean": "00:01:00",
-              "k": 2
-            }
-          }
-        }
+        "process_time": "00:00:18"
       }
     },
     {
       "name": "Station 5a",
-      "class": "Station",
+      "class": "Demo station",
       "position": {
         "x": 16.0,
         "y": -1.0
@@ -239,21 +176,12 @@
         "Drain"
       ],
       "attributes": {
-        "process_time": "00:00:10",
-        "failures": {
-          "availability": 0.9,
-          "repair_time": {
-            "erlang": {
-              "mean": "00:01:00",
-              "k": 2
-            }
-          }
-        }
+        "process_time": "00:00:10"
       }
     },
     {
       "name": "Station 5b",
-      "class": "Station",
+      "class": "Demo station",
       "position": {
         "x": 16.0,
         "y": -4.0
@@ -262,21 +190,12 @@
         "Drain"
       ],
       "attributes": {
-        "process_time": "00:00:14",
-        "failures": {
-          "availability": 0.9,
-          "repair_time": {
-            "erlang": {
-              "mean": "00:01:00",
-              "k": 2
-            }
-          }
-        }
+        "process_time": "00:00:14"
       }
     },
     {
       "name": "Station 5c",
-      "class": "Station",
+      "class": "Demo station",
       "position": {
         "x": 16.0,
         "y": -7.0
@@ -285,16 +204,7 @@
         "Drain"
       ],
       "attributes": {
-        "process_time": "00:00:16",
-        "failures": {
-          "availability": 0.9,
-          "repair_time": {
-            "erlang": {
-              "mean": "00:01:00",
-              "k": 2
-            }
-          }
-        }
+        "process_time": "00:00:16"
       }
     },
     {

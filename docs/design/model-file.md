@@ -1,6 +1,6 @@
 # The model file
 
-Agreed with the owner on 2026-11-07 in a design round, as step 2 of the AI-native order of work (issue 28). The code is in `model/` (`crabsim-model`, ADR 0009). It's built in three slices: today's objects with the built-in classes only, then derived classes and inheritance, then the published JSON Schema. This document describes all three, and says where a slice isn't built yet.
+Agreed with the owner on 2026-11-07 in a design round, as step 2 of the AI-native order of work (issue 28). The code is in `model/` (`crabsim-model`, ADR 0009). It's built in three slices: today's objects with the built-in classes only, then derived classes and inheritance, then the published JSON Schema. The first two are built, and the schema is next.
 
 ## What it is
 
@@ -21,7 +21,7 @@ A file holds the model only: classes, instances, their attributes, names, positi
 
 - `format_version` is required. Only 1 exists, and any other is refused with a clear error. When the format has a reason to change, the version goes up and older files are migrated.
 - `description` is optional, for the model as a whole.
-- `classes` is optional, and empty until slice 2.
+- `classes` is optional.
 - `instances` is in Init order: ids follow it.
 
 ## Instances
@@ -41,7 +41,7 @@ A file holds the model only: classes, instances, their attributes, names, positi
 - `successors` names the instances an object passes MUs to, in the order they are tried. Optional, none by default.
 - `attributes` holds only the values set on this instance, where its inheritance is cut. Anything not there comes from its class. It is left out when empty, so an instance that changes nothing is a name, a class, a position and its successors.
 
-## Classes (slice 2)
+## Classes
 
 ```json
 { "name": "CNC mill", "parent": "Station", "attributes": { "process_time": "0:45", "description": "5-axis" } }
@@ -50,7 +50,15 @@ A file holds the model only: classes, instances, their attributes, names, positi
 - The built-in classes are Source, Station, Buffer and Drain. A derived class names its `parent`, a built-in or another derived class, so chains are allowed.
 - Classes can appear in any order. A cycle in the class tree is a validation error.
 - A class writes only the attributes it changes from its parent, the same way an instance does.
-- Until slice 2, an instance's class must be a built-in.
+- A class's attributes must suit the built-in class at the root of its chain, as an instance's must, and are checked the same way, with problems reported on the class.
+
+## Where a value comes from
+
+An instance's value of an attribute is the first one set along its chain: on the instance itself, then on its class, then on that class's parent, and so on, ending at the built-in class's default, if it has one. Setting a value cuts inheritance of that attribute only, and removing it from the file restores it.
+
+`Model::resolve(instance)` gives every value an instance ends up with, and its origin: `Instance`, `Class(name)` of the nearest class that sets it, or `BuiltIn`. This is what the operation catalogue's `get_attributes` will show, so a person or agent can see why an instance behaves as it does.
+
+A class change reaches every instance that inherits that attribute, through any number of derived classes, and leaves alone those that set their own. Duplicating a class or an instance, as an independent copy, and restoring inheritance as an intervention during a run are operations, so they come with the catalogue.
 
 ## Attributes
 
@@ -101,7 +109,7 @@ What it catches:
 
 - JSON that doesn't parse, a missing or unsupported `format_version`, wrong types, and unknown fields, such as a typo like `proces_time`, which would otherwise leave a value silently inherited.
 - Names that are missing, empty, padded or used twice, and a class named like a built-in.
-- Unknown classes and, from slice 2, cycles among classes.
+- Unknown classes, a class deriving from itself, and classes deriving from each other in a circle, named in the order they go round.
 - Connections to an unknown name, into a Source, out of a Drain, from an object to itself, or to the same successor twice.
 - Attributes the class doesn't have, values out of range, and required values set nowhere in the chain.
 - **A Source that would create MUs forever:** a Source with an interval of 0 that can reach a Drain through nothing but zero-time Stations and Buffers. Nothing ever fills, so it would create MUs without time passing. The run's zero-time-loop error stays as the backstop. Once Buffer is fixed and Station capacity exists, a full Buffer can block a Source, and this check gets refined.
@@ -122,7 +130,7 @@ A valid file becomes the engine's `ModelDescription`, with every instance's valu
 
 ## Files
 
-- `models/demo.json` is the demo model as a file. A test checks it builds a run identical to `demo::model()` for the same seed.
+- `models/demo.json` is the demo model as a file. Its Stations share their failures through one class, `Demo station`, and set only their process times. A test checks it builds a run identical to `demo::model()` for the same seed.
 - The benchmark's 6,006-object model is generated in code and checked to round-trip as a file in a test, rather than committed, since it is about 2 MB.
 
 ## The CLI

@@ -2,7 +2,7 @@
 //! need left out, times as `format_time_exact` writes them, two-space indentation and a final
 //! newline. Saving, loading and saving again gives the same bytes.
 
-use crate::{Attributes, Failures, Instance, Model, RepairTime, FORMAT_VERSION};
+use crate::{Attributes, Class, Failures, Instance, Model, RepairTime, FORMAT_VERSION};
 use crabsim::time::format_time_exact;
 use crabsim::SimTime;
 use serde_json::{json, Map, Value};
@@ -13,6 +13,9 @@ pub(crate) fn write(model: &Model) -> String {
     if let Some(description) = &model.description {
         file.insert("description".into(), json!(description));
     }
+    if !model.classes.is_empty() {
+        file.insert("classes".into(), Value::Array(model.classes.iter().map(class).collect()));
+    }
     file.insert("instances".into(), Value::Array(model.instances.iter().map(instance).collect()));
     let mut text = serde_json::to_string_pretty(&Value::Object(file)).expect("a model always serialises");
     text.push('\n');
@@ -21,6 +24,16 @@ pub(crate) fn write(model: &Model) -> String {
 
 fn time(time: SimTime) -> Value {
     json!(format_time_exact(time))
+}
+
+fn class(class: &Class) -> Value {
+    let mut fields = Map::new();
+    fields.insert("name".into(), json!(class.name));
+    fields.insert("parent".into(), json!(class.parent));
+    if !class.attributes.is_empty() {
+        fields.insert("attributes".into(), attributes(&class.attributes));
+    }
+    Value::Object(fields)
 }
 
 fn instance(instance: &Instance) -> Value {

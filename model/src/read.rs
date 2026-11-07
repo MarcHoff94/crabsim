@@ -2,7 +2,7 @@
 //! stopping at the first. What can't be read is left at its default, and noted in `Broken`, so the
 //! checks that follow don't report it a second time.
 
-use crate::{Attributes, Failures, Instance, Model, Problem, RepairTime, FORMAT_VERSION, escape};
+use crate::{Attributes, Class, Failures, Instance, Model, Problem, RepairTime, FORMAT_VERSION, escape};
 use crabsim::time::parse_time;
 use crabsim::{Dimensions, Position, SimTime};
 use serde_json::{Map, Value};
@@ -19,10 +19,17 @@ pub(crate) struct Broken {
     pub attributes: HashSet<(usize, &'static str)>,
     /// Instances whose successors couldn't all be read.
     pub successors: HashSet<usize>,
+    /// Classes, by index, whose name couldn't be read.
+    pub class_names: HashSet<usize>,
+    /// Classes whose parent couldn't be read.
+    pub class_parents: HashSet<usize>,
+    /// Attributes of classes that were there but couldn't be read.
+    pub class_attributes: HashSet<(usize, &'static str)>,
 }
 
 const TOP_LEVEL: [&str; 4] = ["format_version", "description", "classes", "instances"];
 const INSTANCE: [&str; 5] = ["name", "class", "position", "successors", "attributes"];
+const CLASS: [&str; 3] = ["name", "parent", "attributes"];
 const ATTRIBUTES: [&str; 7] = ["interval", "process_time", "failures", "starting_mus", "capacity", "dimensions", "description"];
 
 pub(crate) fn read(text: &str) -> (Model, Vec<Problem>, Broken) {
@@ -78,20 +85,14 @@ impl Reader {
             ),
         }
         let description = fields.get("description").and_then(|value| self.text(value, "/description", None));
-        if let Some(classes) = fields.get("classes") {
-            match classes.as_array() {
-                Some(classes) => {
-                    for index in 0..classes.len() {
-                        self.problem(
-                            format!("/classes/{index}"),
-                            classes[index].get("name").and_then(Value::as_str),
-                            "derived classes aren't supported yet: use Source, Station, Buffer or Drain",
-                        );
-                    }
-                }
-                None => self.problem("/classes".into(), None, "`classes` should be a list"),
+        let classes = match fields.get("classes") {
+            None => Vec::new(),
+            Some(Value::Array(classes)) => classes.iter().enumerate().map(|(index, value)| self.class(index, value)).collect(),
+            Some(_) => {
+                self.problem("/classes".into(), None, "`classes` should be a list");
+                Vec::new()
             }
-        }
+        };
         let instances = match fields.get("instances") {
             None => {
                 self.problem(String::new(), None, "`instances` is missing");
@@ -103,7 +104,7 @@ impl Reader {
                 Vec::new()
             }
         };
-        Model { description, instances }
+        Model { description, classes, instances }
     }
 
     fn instance(&mut self, index: usize, value: &Value) -> Instance {
@@ -161,15 +162,49 @@ impl Reader {
             }
         }
         if let Some(attributes) = fields.get("attributes") {
-            instance.attributes = self.attributes(index, attributes, &format!("{pointer}/attributes"), name);
+            let (attributes, broken) = self.attributes(attributes, &format!("{pointer}/attributes"), name);
+            instance.attributes = attributes;
+            self.broken.attributes.extend(broken.into_iter().map(|key| (index, key)));
         }
         instance
     }
 
-    fn attributes(&mut self, index: usize, value: &Value, pointer: &str, name: Option<&str>) -> Attributes {
+    fn class(&mut self, index: usize, value: &Value) -> Class {
+        let pointer = format!("/classes/{index}");
+        let readable_name = value.get("name").and_then(Value::as_str).map(str::to_owned);
+        let name = readable_name.as_deref();
+        let mut class = Class::new(String::new(), String::new());
+        let Some(fields) = self.object(value, &pointer, name, "a class", &CLASS) else {
+            self.broken.class_names.insert(index);
+            self.broken.class_parents.insert(index);
+            return class;
+        };
+        for (key, broken) in [("name", &mut self.broken.class_names), ("parent", &mut self.broken.class_parents)] {
+            let (at, message) = match fields.get(key).map(|value| value.as_str()) {
+                Some(Some(text)) => {
+                    if key == "name" { class.name = text.to_owned() } else { class.parent = text.to_owned() }
+                    continue;
+                }
+                Some(None) => (format!("{pointer}/{key}"), format!("`{key}` should be text")),
+                None => (pointer.clone(), format!("`{key}` is missing")),
+            };
+            broken.insert(index);
+            self.problems.push(Problem { pointer: at, name: if key == "name" { None } else { readable_name.clone() }, message });
+        }
+        if let Some(attributes) = fields.get("attributes") {
+            let (attributes, broken) = self.attributes(attributes, &format!("{pointer}/attributes"), name);
+            class.attributes = attributes;
+            self.broken.class_attributes.extend(broken.into_iter().map(|key| (index, key)));
+        }
+        class
+    }
+
+    /// The attributes read, and those that were there but couldn't be read.
+    fn attributes(&mut self, value: &Value, pointer: &str, name: Option<&str>) -> (Attributes, Vec<&'static str>) {
         let mut attributes = Attributes::default();
+        let mut broken = Vec::new();
         let Some(fields) = self.object(value, pointer, name, "attributes", &ATTRIBUTES) else {
-            return attributes;
+            return (attributes, broken);
         };
         for key in ATTRIBUTES {
             let Some(value) = fields.get(key) else { continue };
@@ -185,10 +220,10 @@ impl Reader {
                 _ => unreachable!("every attribute is read"),
             };
             if read.is_none() {
-                self.broken.attributes.insert((index, key));
+                broken.push(key);
             }
         }
-        attributes
+        (attributes, broken)
     }
 
     fn text(&mut self, value: &Value, pointer: &str, name: Option<&str>) -> Option<String> {

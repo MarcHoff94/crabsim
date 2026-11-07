@@ -5,7 +5,7 @@ mod common;
 use common::{Watched, SOURCE, STATION_1, STATION_2};
 use crabsim::{demo, FailureProfile, ModelDescription, ObjectKind, Position, SimTime, Dimensions};
 use crabsim::random_numbers::Distribution;
-use crabsim_ui::view::{Intervention, Point, StepBackLoss, ViewState};
+use crabsim_ui::view::{Intervention, Point, StepBack, ViewState};
 use std::time::Duration;
 
 fn secs(s: u64) -> SimTime {
@@ -256,18 +256,118 @@ fn going_back_counts_the_marks_it_would_drop_and_drops_them() {
     assert!(watched.view.marks().is_empty(), "Reset drops every intervention");
 }
 
+/// Presses Step back as the window does, asking the session where it goes when the view doesn't
+/// know. Returns what the view decided, `Now` or `Confirm`, and whether it had to ask.
+fn press_step_back(watched: &mut Watched) -> (StepBack, bool) {
+    match watched.view.step_back() {
+        StepBack::Locate => {
+            watched.session.halt().unwrap();
+            watched.session.locate_step_back().unwrap();
+            let wall = watched.wall();
+            watched.view.commanded(wall);
+            watched.view.locating_step_back();
+            watched.frame();
+            (watched.view.located_step_back().expect("the session answered"), true)
+        }
+        decided => (decided, false),
+    }
+}
+
+/// Carries out what the view decided, confirming if it asked.
+fn step_back_as_decided(watched: &mut Watched, decided: StepBack) {
+    match decided {
+        StepBack::Now => watched.session.step_back().unwrap(),
+        StepBack::Confirm(to) => watched.session.go_back(to).unwrap(),
+        StepBack::Locate => panic!("decided only once located"),
+    }
+    watched.frame();
+}
+
 #[test]
-fn stepping_back_counts_the_marks_after_the_instant_before_the_one_on_screen() {
-    // The Pause makes 12 s an instant, and the one before it is the Source's at 10 s.
+fn stepping_back_asks_only_on_the_step_that_drops_an_intervention() {
+    // The Pause at 12 s makes it an instant, and the one before it is the Source's at 10 s.
     let mut watched = halted_at(12, STATION_1);
     intervene(&mut watched, STATION_1, Intervention::Pause);
-    assert_eq!(watched.view.lost_stepping_back(), StepBackLoss::Exactly(1));
+    for _ in 0..3 {
+        watched.session.step_forward().unwrap();
+        watched.frame();
+    }
+    let mut decisions = Vec::new();
+    while !watched.view.marks().is_empty() {
+        let from = watched.view.shown_time();
+        let (decided, asked_session) = press_step_back(&mut watched);
+        decisions.push((from, decided, asked_session));
+        step_back_as_decided(&mut watched, decided);
+    }
+    assert_eq!(
+        decisions,
+        vec![
+            ("00:03:43".to_string(), StepBack::Now, false),
+            // After a step back the view hasn't seen the instant before, so it asks the session.
+            ("00:03:13".to_string(), StepBack::Now, true),
+            ("00:02:10".to_string(), StepBack::Now, true),
+            ("00:00:12".to_string(), StepBack::Confirm(secs(10)), true),
+        ]
+    );
+    assert_eq!(watched.view.shown_time(), "00:00:10");
+}
+
+#[test]
+fn without_interventions_stepping_back_never_asks() {
+    let mut watched = halted_at(30, STATION_1);
+    for _ in 0..3 {
+        assert_eq!(watched.view.step_back(), StepBack::Now);
+        watched.session.step_back().unwrap();
+        watched.frame();
+    }
+}
+
+#[test]
+fn while_advancing_with_interventions_stepping_back_finds_out_where_it_goes() {
+    let mut watched = Watched::demo();
+    watched.session.start().unwrap();
+    watched.at(12);
+    intervene(&mut watched, STATION_1, Intervention::Pause);
+    // With Station 1 paused, the next instants are at 2:10 and 3:13.
+    watched.at(200);
+    assert_eq!(watched.view.step_back(), StepBack::Locate);
+    let (decided, _) = press_step_back(&mut watched);
+    assert_eq!(decided, StepBack::Now, "the instant before the one on screen is after the Pause");
+}
+
+#[test]
+fn another_command_while_finding_out_where_stepping_back_goes_cancels_it() {
+    let mut watched = halted_at(12, STATION_1);
+    intervene(&mut watched, STATION_1, Intervention::Pause);
     watched.session.step_back().unwrap();
     watched.frame();
-    assert_eq!(watched.view.shown_time(), "00:00:10");
-    assert!(watched.view.marks().is_empty());
-    // The view saw the instant now on screen, but not the one before it.
     intervene(&mut watched, STATION_1, Intervention::Pause);
-    assert_eq!(watched.view.lost_stepping_back(), StepBackLoss::UpTo(1));
+    assert_eq!(watched.view.step_back(), StepBack::Locate);
+    watched.session.locate_step_back().unwrap();
+    let wall = watched.wall();
+    watched.view.commanded(wall);
+    watched.view.locating_step_back();
+    // Two steps forward let the view see where stepping back would go, but the user has moved on.
+    for _ in 0..2 {
+        watched.session.step_forward().unwrap();
+        watched.view.commanded(wall);
+    }
+    watched.frame();
+    assert_eq!(watched.view.located_step_back(), None, "stepping forward means the step back is off");
+}
+
+#[test]
+fn an_intervention_where_nothing_else_happened_moves_where_stepping_back_goes() {
+    // At 11 s, between the instants at 10 s and 15 s, the instant on screen is 10 s and stepping
+    // back goes to the one before it, 5 s. A process time change records nothing, so it leaves
+    // that alone. A Pause at 11 s makes 11 s an instant, so stepping back then goes to 10 s, and
+    // the session's earlier answer no longer holds.
+    let mut watched = halted_at(30, STATION_1);
+    watched.session.go_back(secs(11)).unwrap();
+    watched.frame();
+    intervene(&mut watched, STATION_2, Intervention::SetProcessTime(secs(20)));
+    assert_eq!(press_step_back(&mut watched), (StepBack::Confirm(secs(5)), true));
+    intervene(&mut watched, STATION_1, Intervention::Pause);
+    assert_eq!(press_step_back(&mut watched), (StepBack::Confirm(secs(10)), true));
 }
 

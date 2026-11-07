@@ -127,6 +127,9 @@ pub enum Observation {
     State(RunState),
     Status(SessionStatus),
     Error(SessionError),
+    /// The answer to `locate_step_back`: from shown time `shown`, stepping back would go to the
+    /// instant `to`, or nowhere from the first instant.
+    StepBackTarget { shown: SimTime, to: Option<SimTime> },
 }
 
 /// Whether a session is advancing shown time. A new session is `Halted`.
@@ -208,6 +211,7 @@ enum Command {
     GoBack(SimTime),
     StepForward,
     StepBack,
+    LocateStepBack,
     SetResetKeepsChanges(bool),
     RequestState,
     Intervene(Action),
@@ -308,6 +312,13 @@ impl LiveSession {
     /// nothing has to remember past instants. From the first instant it does nothing.
     pub fn step_back(&self) -> Result<(), SessionError> {
         self.send(Command::StepBack)
+    }
+
+    /// Says where `step_back` would go from shown time, as a `StepBackTarget`, and changes
+    /// nothing. A UI that warns before dropping interventions needs to know, and costs the same
+    /// replay as stepping back, so a UI asks only when it has interventions to warn about.
+    pub fn locate_step_back(&self) -> Result<(), SessionError> {
+        self.send(Command::LocateStepBack)
     }
 
     /// Whether Reset keeps changed settings, such as a process time, as the new default state.
@@ -674,6 +685,7 @@ impl<'a, C: Clock> SessionThread<'a, C> {
             Command::SetTimeMode(mode) => self.settings.time_mode = mode,
             Command::GoBack(to) => self.go_back(to),
             Command::StepBack => self.step_back(),
+            Command::LocateStepBack => self.locate_step_back(),
             Command::SetResetKeepsChanges(keep) => self.settings.reset_keeps_changes = keep,
             Command::StepForward => {
                 if self.pace.is_none() && self.status != SessionStatus::Failed {
@@ -789,6 +801,15 @@ impl<'a, C: Clock> SessionThread<'a, C> {
             self.observe(Observation::Error(SessionError::Run(RunError::NotInitialised)));
         } else if let Some(to) = self.instant_before_shown() {
             self.go_back(to);
+        }
+    }
+
+    fn locate_step_back(&mut self) {
+        if !self.run.is_initialised() {
+            self.observe(Observation::Error(SessionError::Run(RunError::NotInitialised)));
+        } else {
+            let to = self.instant_before_shown();
+            self.observe(Observation::StepBackTarget { shown: self.shown, to });
         }
     }
 

@@ -55,7 +55,10 @@ impl Picture {
                 }
             }
             Observation::ShownTime(time) => self.shown = *time,
-            Observation::Occurrences(_) | Observation::Status(_) | Observation::Error(_) => {}
+            Observation::Occurrences(_)
+            | Observation::Status(_)
+            | Observation::Error(_)
+            | Observation::StepBackTarget { .. } => {}
         }
     }
 

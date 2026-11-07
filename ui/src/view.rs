@@ -4,7 +4,7 @@
 use crate::camera::Camera;
 pub use crabsim::time::{format_time, format_time_exact, parse_time};
 use crate::marks::Marks;
-pub use crate::marks::{Intervention, Mark, StepBackLoss};
+pub use crate::marks::{Intervention, Mark};
 use crabsim::{
     ModelDescription, ObjectKind, ObjectStatistics, Observation, Picture, ProcessState, RunState, SessionStatus,
     SimTime, StopCause, TimeMode,
@@ -70,6 +70,21 @@ pub enum Control {
     Reset,
     StepBack,
     StepForward,
+}
+
+/// What pressing Step back should do. Stepping back goes to the instant before the one on
+/// screen, and drops the interventions after it, so the window asks first when there are any.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StepBack {
+    /// Step back: it drops no intervention.
+    Now,
+    /// Stepping back goes to this instant and drops interventions after it, so confirm first,
+    /// then go back to it.
+    Confirm(SimTime),
+    /// The view doesn't know where stepping back goes, and it might drop interventions. Halt if
+    /// advancing, ask the session with `locate_step_back`, note it with `locating_step_back`, and
+    /// take the answer from `located_step_back`.
+    Locate,
 }
 
 /// Why a time typed in to jump to can't be gone to.
@@ -154,6 +169,8 @@ pub struct ViewState {
     /// When the window last asked the session for a full state.
     last_request: Option<Duration>,
     marks: Marks,
+    /// Whether the window asked the session where stepping back goes and awaits the answer.
+    locating: bool,
 }
 
 /// What the inspector says about the selected object.
@@ -252,6 +269,7 @@ impl ViewState {
             details_stale: false,
             last_request: None,
             marks: Marks::default(),
+            locating: false,
         }
     }
 
@@ -283,10 +301,17 @@ impl ViewState {
                 }
                 self.status = *status;
                 self.pace.clear();
+                if *status == SessionStatus::Advancing {
+                    self.locating = false;
+                }
             }
-            Observation::Error(error) => self.error = Some(error.to_string()),
+            Observation::Error(error) => {
+                self.error = Some(error.to_string());
+                self.locating = false;
+            }
             Observation::Occurrences(occurrences) => self.marks.saw_occurrences(occurrences),
             Observation::ShownTime(_) => {}
+            Observation::StepBackTarget { shown, to } => self.marks.saw_step_back_target(*shown, *to),
         }
         if self.status == SessionStatus::Advancing {
             self.note_pace(wall);
@@ -296,10 +321,12 @@ impl ViewState {
 
     /// Notes that the window sent the session a command at wall time `wall`, so the answer gets
     /// drawn. A refused command's error goes, while a run error stays until Reset or going back.
+    /// Any command also ends waiting to know where stepping back goes, since the user has moved on.
     pub fn commanded(&mut self, wall: Duration) {
         if !self.run_failed() {
             self.error = None;
         }
+        self.locating = false;
         self.settle_until = self.settle_until.max(wall + SETTLE);
     }
 
@@ -616,9 +643,44 @@ impl ViewState {
         self.marks.lost_going_back(to)
     }
 
-    /// How many interventions stepping back would drop.
-    pub fn lost_stepping_back(&self) -> StepBackLoss {
-        self.marks.lost_stepping_back()
+    /// What pressing Step back should do now. It asks only when stepping back drops an
+    /// intervention, and has to find out where it goes only when there are interventions and the
+    /// view didn't see that instant arrive, or shown time is still moving.
+    pub fn step_back(&self) -> StepBack {
+        if self.marks.all().is_empty() {
+            return StepBack::Now;
+        }
+        let known = match self.status {
+            SessionStatus::Advancing => None,
+            SessionStatus::Halted | SessionStatus::Failed => self.marks.step_back_target(self.picture.shown()),
+        };
+        match known {
+            Some(to) => self.decide_step_back(to),
+            None => StepBack::Locate,
+        }
+    }
+
+    /// Notes that the window asked the session where stepping back goes, after `commanded`.
+    pub fn locating_step_back(&mut self) {
+        self.locating = true;
+    }
+
+    /// Once the session has said where stepping back goes, what to do: `Now` or `Confirm`. `None`
+    /// while still waiting, or if nothing is awaited, as after any other command.
+    pub fn located_step_back(&mut self) -> Option<StepBack> {
+        if !self.locating || self.status == SessionStatus::Advancing {
+            return None;
+        }
+        let to = self.marks.step_back_target(self.picture.shown())?;
+        self.locating = false;
+        Some(self.decide_step_back(to))
+    }
+
+    fn decide_step_back(&self, to: Option<SimTime>) -> StepBack {
+        match to {
+            Some(to) if self.lost_going_back(to) > 0 => StepBack::Confirm(to),
+            _ => StepBack::Now,
+        }
     }
 }
 

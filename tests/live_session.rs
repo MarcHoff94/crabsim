@@ -69,6 +69,8 @@ struct Seen {
     shown_times: usize,
     statuses: Vec<SessionStatus>,
     errors: Vec<SessionError>,
+    /// Each answer to `locate_step_back`: shown time, and where stepping back would go.
+    step_back_targets: Vec<(SimTime, Option<SimTime>)>,
 }
 
 impl Watched {
@@ -131,6 +133,7 @@ impl Watched {
                 }
                 Observation::Status(status) => self.unread.statuses.push(status),
                 Observation::Error(error) => self.unread.errors.push(error),
+                Observation::StepBackTarget { shown, to } => self.unread.step_back_targets.push((shown, to)),
             }
         }
     }
@@ -1838,6 +1841,51 @@ fn stepping_back_while_advancing_halts() {
     let seen = watched.look();
     assert_eq!(seen.statuses, vec![SessionStatus::Halted]);
     assert!(watched.shown < secs(500));
+}
+
+#[test]
+fn locating_a_step_back_says_where_it_would_go_and_moves_nothing() {
+    let mut watched = Watched::new(line_with_random_failures);
+    watched.session.start().unwrap();
+    watched.at(600);
+    watched.look();
+    watched.session.pause(STATION).unwrap();
+    watched.at(1_000);
+    watched.look();
+    watched.session.halt().unwrap();
+    watched.look_without_errors();
+    let done = [(600, Done::Pause(STATION))];
+    let instants = instants_until(&done, 1_000);
+    for &expected in instants.iter().rev().skip(1).take(8) {
+        let shown = watched.shown;
+        watched.session.locate_step_back().unwrap();
+        let seen = watched.look();
+        assert_eq!(seen.errors, vec![]);
+        assert_eq!(seen.step_back_targets, vec![(shown, Some(expected))]);
+        assert_eq!((seen.states, watched.shown), (0, shown), "locating moves nothing");
+        watched.session.step_back().unwrap();
+        watched.look_without_errors();
+        assert_eq!(watched.shown, expected, "stepping back goes where it was located");
+    }
+}
+
+#[test]
+fn locating_a_step_back_from_the_first_instant_finds_nowhere_to_go() {
+    let mut watched = Watched::new(line_with_random_failures);
+    watched.session.start().unwrap();
+    watched.session.halt().unwrap();
+    watched.look();
+    watched.session.locate_step_back().unwrap();
+    assert_eq!(watched.look().step_back_targets, vec![(SimTime::ZERO, None)]);
+}
+
+#[test]
+fn locating_a_step_back_before_init_is_an_error() {
+    let mut watched = Watched::new(line_with_random_failures);
+    watched.session.locate_step_back().unwrap();
+    let seen = watched.look();
+    assert_eq!(seen.errors, vec![SessionError::Run(RunError::NotInitialised)]);
+    assert_eq!(seen.step_back_targets, vec![]);
 }
 
 #[test]

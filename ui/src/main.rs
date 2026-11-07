@@ -19,7 +19,7 @@ use crabsim::{LiveSession, SessionStatus, SimTime, TimeMode, WallClock, demo};
 use crabsim_ui::camera::Camera as ViewCamera;
 use crabsim_ui::view::{
     Control, DEFAULT_SPEED, Details, Inspection, Intervention, JumpProblem, MAX_SPEED, MIN_SPEED, Mark, Point,
-    MU_METRES, Shade, StepBackLoss, ViewState, format_time, format_time_exact, label_size, parse_time,
+    MU_METRES, Shade, StepBack, ViewState, format_time, format_time_exact, label_size, parse_time,
 };
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -119,11 +119,12 @@ struct Ui {
     pending: Option<GoingBack>,
 }
 
-/// A way of going back that waits for confirmation.
+/// A way of going back that waits for confirmation, and the time it goes to.
 #[derive(Clone, Copy)]
 enum GoingBack {
     To(SimTime),
-    Step,
+    /// Stepping back, to the instant before the one on screen.
+    Step(SimTime),
 }
 
 /// A press that moves less than this, in logical pixels, is a click rather than a drag.
@@ -416,21 +417,24 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
         }
     }
 
-    // Going back past interventions drops them, so it asks first.
+    // Going back past interventions drops them, so it asks first. Stepping back may first have to
+    // ask the session where it goes, and decides once the answer is in.
     let request = match request {
         Some(Request::GoBack(to)) if ui.view.lost_going_back(to) > 0 => {
             ui.pending = Some(GoingBack::To(to));
             None
         }
-        Some(Request::Control(Control::StepBack)) if ui.view.lost_stepping_back().count() > 0 => {
-            ui.pending = Some(GoingBack::Step);
-            None
-        }
+        Some(Request::Control(Control::StepBack)) => stepping_back(ui, ui.view.step_back()),
         other => other,
     };
+    let request = request.or_else(|| {
+        let located = ui.view.located_step_back()?;
+        stepping_back(ui, located)
+    });
     let request = request.or_else(|| confirm_going_back(&ctx, ui));
 
     if let Some(request) = request {
+        let locating = matches!(request, Request::LocateStepBack);
         let session = session.0.lock().expect("the session lock is never poisoned");
         let sent = match request {
             // A step forward from before Init does Init, and nothing else.
@@ -446,10 +450,14 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
                 session.set_time_mode(mode)
             }
             Request::GoBack(to) => session.go_back(to),
+            // Shown time has to stand still for the answer to hold.
+            Request::LocateStepBack => session.halt().and_then(|()| session.locate_step_back()),
         };
         ui.view.commanded(wall);
-        if let Err(error) = sent {
-            ui.view.observe(&crabsim::Observation::Error(error), wall);
+        match sent {
+            Ok(()) if locating => ui.view.locating_step_back(),
+            Ok(()) => {}
+            Err(error) => ui.view.observe(&crabsim::Observation::Error(error), wall),
         }
     }
 
@@ -465,6 +473,21 @@ enum Request {
     Speed(f64),
     TimeMode(TimeMode),
     GoBack(SimTime),
+    /// Ask the session where stepping back goes, before deciding whether to ask the user.
+    LocateStepBack,
+}
+
+/// What to send for a step back the view has decided on: the step itself, a question to the
+/// session first, or nothing yet while the user is asked to confirm.
+fn stepping_back(ui: &mut Ui, decided: StepBack) -> Option<Request> {
+    match decided {
+        StepBack::Now => Some(Request::Control(Control::StepBack)),
+        StepBack::Locate => Some(Request::LocateStepBack),
+        StepBack::Confirm(to) => {
+            ui.pending = Some(GoingBack::Step(to));
+            None
+        }
+    }
 }
 
 /// The run controls, shown time, going back to a time, speed and time mode. `jump_text` is what
@@ -578,34 +601,19 @@ fn confirm_going_back(ctx: &egui::Context, ui: &mut Ui) -> Option<Request> {
     let mut answer = None;
     let modal = egui::Modal::new(egui::Id::new("confirm going back")).show(ctx, |modal| {
         modal.set_max_width(420.0);
-        let (heading, lost): (String, Vec<&Mark>) = match pending {
-            GoingBack::To(to) => (
-                format!("Go back to {}?", format_time_exact(to)),
-                ui.view.marks().iter().filter(|mark| mark.at > to).collect(),
-            ),
-            GoingBack::Step => ("Step back?".to_string(), Vec::new()),
+        let (heading, button, to) = match pending {
+            GoingBack::To(to) => (format!("Go back to {}?", format_time_exact(to)), "Go back", to),
+            GoingBack::Step(to) => (format!("Step back to {}?", format_time_exact(to)), "Step back", to),
         };
+        let lost: Vec<&Mark> = ui.view.marks().iter().filter(|mark| mark.at > to).collect();
         modal.heading(heading);
-        match (pending, ui.view.lost_stepping_back()) {
-            (GoingBack::To(_), _) => {
-                modal.label(format!("It drops {} later intervention{}:", lost.len(), plural(lost.len())));
-                for mark in lost {
-                    modal.label(format!("•  {}  {}", format_time_exact(mark.at), ui.view.describe(mark)));
-                }
-            }
-            (GoingBack::Step, StepBackLoss::Exactly(count)) => {
-                modal.label(format!("It drops the {count} intervention{} after the instant it goes to.", plural(count)));
-            }
-            (GoingBack::Step, StepBackLoss::UpTo(count)) => {
-                modal.label(format!(
-                    "It drops the interventions after the instant it goes to: up to {count}, because the time of \
-                     that instant isn't known here."
-                ));
-            }
+        modal.label(format!("It drops {} later intervention{}:", lost.len(), plural(lost.len())));
+        for mark in lost {
+            modal.label(format!("•  {}  {}", format_time_exact(mark.at), ui.view.describe(mark)));
         }
         modal.add_space(8.0);
         modal.horizontal(|row| {
-            if row.button("Go back").clicked() {
+            if row.button(button).clicked() {
                 answer = Some(true);
             }
             if row.button("Cancel").clicked() {
@@ -618,9 +626,10 @@ fn confirm_going_back(ctx: &egui::Context, ui: &mut Ui) -> Option<Request> {
     }
     let answer = answer?;
     ui.pending = None;
+    // Stepping back goes to the instant before the one on screen, which is `to`, so going back
+    // there is the same step, to exactly the time the user was shown.
     answer.then_some(match pending {
-        GoingBack::To(to) => Request::GoBack(to),
-        GoingBack::Step => Request::Control(Control::StepBack),
+        GoingBack::To(to) | GoingBack::Step(to) => Request::GoBack(to),
     })
 }
 

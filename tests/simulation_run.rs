@@ -1435,6 +1435,27 @@ fn a_description_keeps_names_positions_and_dimensions() {
 }
 
 #[test]
+fn a_description_reports_successors_in_the_order_connected_as_the_run_does() {
+    let mut model = ModelDescription::new();
+    let source = model.add_source(secs(5));
+    let first = model.add_station(secs(10), no_failures(0.0));
+    let second = model.add_station(secs(10), no_failures(0.0));
+    let drain = model.add_drain();
+    model.connect(source, second);
+    model.connect(source, first);
+    model.connect(first, drain);
+    model.connect(second, drain);
+    assert_eq!(model.successors(source), &[second, first]);
+    assert_eq!(model.successors(first), &[drain]);
+    assert_eq!(model.successors(drain), &[] as &[u32]);
+    let mut run = model.build(0);
+    run.init().unwrap();
+    for object in run.state().objects {
+        assert_eq!(model.successors(object.id), object.successors.as_slice());
+    }
+}
+
+#[test]
 fn dimensions_default_to_a_size_for_each_object_type() {
     let model = line_with_random_failures();
     assert_eq!(model.dimensions(0), Dimensions::default_for(ObjectKind::Source));

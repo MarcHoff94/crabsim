@@ -21,6 +21,8 @@ pub enum RunError {
     NotInitialised,
     EventInThePast,
     UnknownObject(u32),
+    /// Only a Station can do what was asked, such as change its process time.
+    NotAStation(u32),
     ObjectFailed { object_id: u32, time: SimTime },
     /// Too many events in a row happened without simulation time moving.
     ZeroTimeLoop { time: SimTime },
@@ -33,6 +35,7 @@ impl fmt::Display for RunError {
             RunError::NotInitialised => write!(f, "the simulation run has not been initialised"),
             RunError::EventInThePast => write!(f, "an event cannot be scheduled before the current simulation time"),
             RunError::UnknownObject(id) => write!(f, "an event names object {id}, which is not in the model"),
+            RunError::NotAStation(id) => write!(f, "object {id} is not a Station, and only a Station can do this"),
             RunError::ObjectFailed { object_id, time } => {
                 write!(f, "object {object_id} could not handle an event at {:.3}s", time.as_secs_f64())
             }

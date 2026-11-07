@@ -52,10 +52,13 @@ impl EventInterface for Drain {
             contents: Vec::new(),
             process: ProcessState::Idle,
             stop: None,
+            interruptions: Vec::new(),
             remaining: None,
             blocked_predecessors: self.blockedlist.clone(),
             successors: Vec::new(),
             capacity: 0,
+            process_time: None,
+            configured_process_time: None,
             statistics: self.statistics.read(now),
         }
     }

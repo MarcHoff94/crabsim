@@ -90,6 +90,7 @@ pub enum ProcessState {
 pub enum InterruptionState {
 	None,
 	Failed,
+	ForcedFailed,
 	Paused,
 }
 impl InterruptionState {
@@ -97,6 +98,7 @@ impl InterruptionState {
 		match self {
 			InterruptionState::None => None,
 			InterruptionState::Failed => Some(StopCause::Failure),
+			InterruptionState::ForcedFailed => Some(StopCause::ForcedFailure),
 			InterruptionState::Paused => Some(StopCause::Pause),
 		}
 	}

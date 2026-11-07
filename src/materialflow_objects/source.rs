@@ -183,10 +183,13 @@ impl EventInterface for Source {
 			contents: self.content.iter().map(|mu| mu.id).collect(),
 			process: self.state.clone(),
 			stop: self.interruption.cause(),
+			interruptions: self.interruption.cause().into_iter().collect(),
 			remaining: self.completion_time.map(|completion| completion.saturating_sub(now)),
 			blocked_predecessors: Vec::new(),
 			successors: self.succ.clone(),
 			capacity: self.statistics.capacity(),
+			process_time: None,
+			configured_process_time: None,
 			statistics: self.statistics.read(now),
 		}
 	}

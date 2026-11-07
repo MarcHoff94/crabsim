@@ -98,6 +98,9 @@ pub struct SessionSettings {
     /// goes, so the whole run stays reachable and only long jumps take longer.
     pub checkpoint_budget_bytes: u64,
     pub time_mode: TimeMode,
+    /// Whether Reset keeps settings changed during the run, such as a process time, as the new
+    /// default state. Momentary interventions, such as a Pause, go either way.
+    pub reset_keeps_changes: bool,
 }
 
 impl Default for SessionSettings {
@@ -107,6 +110,7 @@ impl Default for SessionSettings {
             checkpoint_spacing: 100_000,
             checkpoint_budget_bytes: 256_000_000,
             time_mode: TimeMode::Continuous,
+            reset_keeps_changes: false,
         }
     }
 }
@@ -144,8 +148,8 @@ pub enum SessionError {
     ResetRequired,
     /// A speed has to be positive and finite.
     InvalidSpeed(f64),
-    /// Only a Station can be paused so far.
-    CannotPause(u32),
+    /// Only a Station can be paused, forced to fail or have its process time changed, so far.
+    NotAStation(u32),
     /// Going back goes to shown time or earlier.
     NotInThePast { to: SimTime, shown: SimTime },
     /// The session thread panicked and has ended. Only a new session can continue.
@@ -165,7 +169,7 @@ impl fmt::Display for SessionError {
             SessionError::Run(error) => write!(f, "{error}"),
             SessionError::ResetRequired => write!(f, "the simulation run reported an error; reset it or go back first"),
             SessionError::InvalidSpeed(speed) => write!(f, "{speed} is not a speed: it has to be positive and finite"),
-            SessionError::CannotPause(id) => write!(f, "object {id} can't be paused: only a Station can so far"),
+            SessionError::NotAStation(id) => write!(f, "object {id} is not a Station, and only a Station can do this so far"),
             SessionError::NotInThePast { to, shown } => write!(f, "can't go back to {to}s: shown time is {shown}s"),
             SessionError::Panicked(message) => write!(f, "the live session panicked: {message}"),
             SessionError::Backlogged => write!(f, "too many observations are unread; read them first"),
@@ -183,6 +187,16 @@ enum Action {
     Pause(u32),
     Resume(u32),
     ClearStatistics,
+    SetProcessTime(u32, SimTime),
+    ForceFailure(u32),
+    EndForcedFailure(u32),
+}
+
+/// An interruption the user switches on and off.
+#[derive(Clone, Copy)]
+enum Switch {
+    Pause,
+    ForcedFailure,
 }
 
 enum Command {
@@ -193,6 +207,8 @@ enum Command {
     SetTimeMode(TimeMode),
     GoBack(SimTime),
     StepForward,
+    StepBack,
+    SetResetKeepsChanges(bool),
     RequestState,
     Intervene(Action),
     Sync(Sender<Result<(), SessionError>>),
@@ -286,6 +302,20 @@ impl LiveSession {
         self.send(Command::StepForward)
     }
 
+    /// Goes back to the instant before the one on screen, which is the last instant at or before
+    /// shown time, and leaves the session halted there, as `go_back` does. It finds that instant
+    /// by replaying from the nearest checkpoint, so it costs about as much as going back, and
+    /// nothing has to remember past instants. From the first instant it does nothing.
+    pub fn step_back(&self) -> Result<(), SessionError> {
+        self.send(Command::StepBack)
+    }
+
+    /// Whether Reset keeps changed settings, such as a process time, as the new default state.
+    /// It is read when Reset is handled, and is off to start with.
+    pub fn set_reset_keeps_changes(&self, keep: bool) -> Result<(), SessionError> {
+        self.send(Command::SetResetKeepsChanges(keep))
+    }
+
     /// Asks for a full state at shown time, statistics included. It comes from a copy of the run,
     /// which takes one replay, so ask a few times a second rather than every frame.
     pub fn request_state(&self) -> Result<(), SessionError> {
@@ -301,6 +331,26 @@ impl LiveSession {
     /// Ends a pause at shown time, on the same terms as `pause`.
     pub fn resume(&self, object_id: u32) -> Result<(), SessionError> {
         self.send(Command::Intervene(Action::Resume(object_id)))
+    }
+
+    /// Forces a Station to fail at shown time, without a Halt, until `end_forced_failure`. It
+    /// counts as a failure, and random failures carry on underneath it. The computed future is
+    /// gone, and Reset or going back behind it undoes it. Forcing what is already forced does
+    /// nothing.
+    pub fn force_failure(&self, object_id: u32) -> Result<(), SessionError> {
+        self.send(Command::Intervene(Action::ForceFailure(object_id)))
+    }
+
+    /// Ends a forced failure at shown time, on the same terms as `force_failure`.
+    pub fn end_forced_failure(&self, object_id: u32) -> Result<(), SessionError> {
+        self.send(Command::Intervene(Action::EndForcedFailure(object_id)))
+    }
+
+    /// Changes a Station's process time at shown time, without a Halt. The MU in work keeps its
+    /// time and the next MU uses the new one. The computed future is gone, and Reset or going
+    /// back behind it undoes it.
+    pub fn set_process_time(&self, object_id: u32, process_time: SimTime) -> Result<(), SessionError> {
+        self.send(Command::Intervene(Action::SetProcessTime(object_id, process_time)))
     }
 
     /// Starts statistics afresh at shown time, such as at the end of a warm-up. Going back behind
@@ -476,6 +526,9 @@ fn apply_action(run: &mut SimulationRun, action: Action) {
         Action::Pause(id) => run.schedule_event(at, EventType::PauseOn, id).expect("the run has been initialised"),
         Action::Resume(id) => run.schedule_event(at, EventType::PauseOff, id).expect("the run has been initialised"),
         Action::ClearStatistics => run.clear_statistics(),
+        Action::SetProcessTime(id, time) => run.set_process_time(id, time).expect("checked to be a Station"),
+        Action::ForceFailure(id) => run.schedule_event(at, EventType::ForceFailureOn, id).expect("the run has been initialised"),
+        Action::EndForcedFailure(id) => run.schedule_event(at, EventType::ForceFailureOff, id).expect("the run has been initialised"),
     }
 }
 
@@ -620,6 +673,8 @@ impl<'a, C: Clock> SessionThread<'a, C> {
             Command::SetSpeed(speed) => self.set_speed(speed),
             Command::SetTimeMode(mode) => self.settings.time_mode = mode,
             Command::GoBack(to) => self.go_back(to),
+            Command::StepBack => self.step_back(),
+            Command::SetResetKeepsChanges(keep) => self.settings.reset_keeps_changes = keep,
             Command::StepForward => {
                 if self.pace.is_none() && self.status != SessionStatus::Failed {
                     self.steps_wanted += 1;
@@ -683,7 +738,24 @@ impl<'a, C: Clock> SessionThread<'a, C> {
     }
 
     fn reset(&mut self) {
+        // What to keep comes from the log, which holds what is true at shown time, rather than
+        // from the run, which may be ahead or on its way back.
+        let mut kept: Vec<(u32, SimTime)> = Vec::new();
+        if self.settings.reset_keeps_changes {
+            for &(_, action) in &self.log {
+                if let Action::SetProcessTime(id, time) = action {
+                    kept.retain(|&(other, _)| other != id);
+                    kept.push((id, time));
+                }
+            }
+        }
         self.run.reset();
+        if self.settings.reset_keeps_changes {
+            for (id, time) in kept {
+                self.run.set_process_time(id, time).expect("only logged for a Station");
+            }
+            self.run.keep_changes_as_default();
+        }
         self.pace = None;
         self.waiting_since = None;
         self.shown = SimTime::ZERO;
@@ -712,6 +784,58 @@ impl<'a, C: Clock> SessionThread<'a, C> {
         self.speed = speed;
     }
 
+    fn step_back(&mut self) {
+        if !self.run.is_initialised() {
+            self.observe(Observation::Error(SessionError::Run(RunError::NotInitialised)));
+        } else if let Some(to) = self.instant_before_shown() {
+            self.go_back(to);
+        }
+    }
+
+    /// The instant before the last instant at or before shown time, with Init's t=0 the
+    /// earliest. An instant is a time with occurrences, as in the buffer and for stepping
+    /// forward, so an event that records nothing, such as a stale exit, makes none. A copy of the
+    /// nearest checkpoint replays up to shown time, applying logged interventions as a replay
+    /// does, and notes each instant it passes. A checkpoint's own time may or may not be one, so
+    /// if the copy sees fewer than two, an earlier checkpoint tries again.
+    fn instant_before_shown(&self) -> Option<SimTime> {
+        let shown = self.shown;
+        for checkpoint in self.checkpoints.iter().rev().filter(|c| c.run.time() <= shown) {
+            let mut run = checkpoint.run.clone();
+            run.set_recording(Recording::ALL);
+            let mut actions = self.log[checkpoint.log_len..].iter().filter(|(at, _)| *at <= shown).peekable();
+            // Init's checkpoint is the start, and t=0 the earliest instant.
+            let mut last = (run.events_processed() == 0).then_some(SimTime::ZERO);
+            let mut before = None;
+            'replay: loop {
+                let stop = actions.peek().map_or(shown, |&&(at, _)| at);
+                while let Some(time) = run.next_event_time().filter(|&time| time <= stop) {
+                    match run.step() {
+                        Ok(occurrences) if occurrences.is_empty() => {}
+                        Ok(_) if last != Some(time) => {
+                            before = last;
+                            last = Some(time);
+                        }
+                        Ok(_) => {}
+                        Err(_) => break 'replay,
+                    }
+                }
+                match actions.next() {
+                    Some(&(at, action)) => {
+                        // Logged at a time the run has reached, with every event before it done.
+                        let _ = run.advance_to(at);
+                        apply_action(&mut run, action);
+                    }
+                    None => break,
+                }
+            }
+            if before.is_some() {
+                return before;
+            }
+        }
+        None
+    }
+
     fn go_back(&mut self, to: SimTime) {
         if !self.run.is_initialised() {
             self.observe(Observation::Error(SessionError::Run(RunError::NotInitialised)));
@@ -731,11 +855,16 @@ impl<'a, C: Clock> SessionThread<'a, C> {
             self.observe(Observation::Error(SessionError::ResetRequired));
             return;
         }
-        if let Action::Pause(id) | Action::Resume(id) = action {
+        if let Action::Pause(id)
+        | Action::Resume(id)
+        | Action::SetProcessTime(id, _)
+        | Action::ForceFailure(id)
+        | Action::EndForcedFailure(id) = action
+        {
             match self.run.object(id) {
                 Some(ModelObject::Station(_)) => {}
                 Some(_) => {
-                    self.observe(Observation::Error(SessionError::CannotPause(id)));
+                    self.observe(Observation::Error(SessionError::NotAStation(id)));
                     return;
                 }
                 None => {
@@ -743,18 +872,29 @@ impl<'a, C: Clock> SessionThread<'a, C> {
                     return;
                 }
             }
-            if self.is_paused_in_log(id) == matches!(action, Action::Pause(_)) {
-                return;
-            }
+        }
+        // Switching on what is already on, or off what is off, changes nothing.
+        let already = match action {
+            Action::Pause(id) => self.is_on_in_log(id, Switch::Pause),
+            Action::Resume(id) => !self.is_on_in_log(id, Switch::Pause),
+            Action::ForceFailure(id) => self.is_on_in_log(id, Switch::ForcedFailure),
+            Action::EndForcedFailure(id) => !self.is_on_in_log(id, Switch::ForcedFailure),
+            Action::ClearStatistics | Action::SetProcessTime(..) => false,
+        };
+        if already {
+            return;
         }
         self.abandon_future_and_replay_to(self.shown, AfterReplay::Intervene(action));
     }
 
-    /// The log holds nothing after shown time, so its last word on an object is the current one.
-    fn is_paused_in_log(&self, id: u32) -> bool {
-        self.log.iter().rev().find_map(|&(_, action)| match action {
-            Action::Pause(paused) if paused == id => Some(true),
-            Action::Resume(resumed) if resumed == id => Some(false),
+    /// Whether an interruption the user switches is on for an object. The log holds nothing after
+    /// shown time, so its last word on an object is the current one.
+    fn is_on_in_log(&self, id: u32, switch: Switch) -> bool {
+        self.log.iter().rev().find_map(|&(_, action)| match (switch, action) {
+            (Switch::Pause, Action::Pause(on)) | (Switch::ForcedFailure, Action::ForceFailure(on)) if on == id => Some(true),
+            (Switch::Pause, Action::Resume(off)) | (Switch::ForcedFailure, Action::EndForcedFailure(off)) if off == id => {
+                Some(false)
+            }
             _ => None,
         }) == Some(true)
     }

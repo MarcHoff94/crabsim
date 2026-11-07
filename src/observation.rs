@@ -83,10 +83,14 @@ impl Recording {
     }
 }
 
-/// Why a material-flow object is stopped.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Why a material-flow object is stopped: one kind of interruption. Listed from most to least
+/// serious, which is how state picks one to report when several are active.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum StopCause {
+    /// A random failure.
     Failure,
+    /// A failure the user started and ends by hand. It counts as a failure in statistics.
+    ForcedFailure,
     Pause,
 }
 
@@ -106,13 +110,21 @@ pub struct ObjectState {
     /// Ids of the MUs the object currently holds.
     pub contents: Vec<u32>,
     pub process: ProcessState,
+    /// The most serious active interruption, if the object is stopped.
     pub stop: Option<StopCause>,
+    /// Every active interruption, most serious first. A view needs them all, so that it still
+    /// knows the object is stopped after the most serious one ends.
+    pub interruptions: Vec<StopCause>,
     /// Time left until the object's current work completes, frozen during a stop.
     pub remaining: Option<SimTime>,
     pub blocked_predecessors: Vec<u32>,
     pub successors: Vec<u32>,
     /// How many MUs a Station or Buffer can hold. 0 for a Source or Drain.
     pub capacity: u64,
+    /// How long a Station works on one MU, now. `None` for other objects.
+    pub process_time: Option<SimTime>,
+    /// The process time in the Station's default state, which Reset returns to.
+    pub configured_process_time: Option<SimTime>,
     pub statistics: ObjectStatistics,
 }
 

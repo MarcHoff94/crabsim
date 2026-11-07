@@ -25,7 +25,7 @@ pub use crate::live_session::{
     OBSERVATION_BACKLOG_LIMIT,
 };
 pub use crate::materialflow_objects::{Buffer, Drain, ModelObject, OtherObjects, SingleStation, Source};
-pub use crate::model::ModelDescription;
+pub use crate::model::{Dimensions, ModelDescription, Position};
 pub use crate::picture::{ObjectPicture, Picture};
 pub use crate::observation::{ObjectKind, ObjectState, Occurrence, OccurrenceKind, OccurrenceType, Recording, RunState, StopCause};
 pub use crate::simulation_run::{BoundedAdvance, SimulationRun, ZERO_TIME_EVENT_LIMIT};

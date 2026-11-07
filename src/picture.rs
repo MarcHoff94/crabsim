@@ -29,6 +29,7 @@ pub struct ObjectPicture {
     contents: Vec<u32>,
     process: ProcessState,
     failed: bool,
+    forced: bool,
     paused: bool,
     /// When the work in progress completes, while not stopped.
     completion: Option<SimTime>,
@@ -128,17 +129,11 @@ impl Picture {
                 if !object.is_stopped() {
                     object.frozen = object.completion.take().map(|completion| completion.saturating_sub(now));
                 }
-                match cause {
-                    StopCause::Failure => object.failed = true,
-                    StopCause::Pause => object.paused = true,
-                }
+                *object.flag(cause) = true;
             }
             OccurrenceKind::InterruptionEnded { object_id, cause } => {
                 let object = &mut objects[object_id as usize];
-                match cause {
-                    StopCause::Failure => object.failed = false,
-                    StopCause::Pause => object.paused = false,
-                }
+                *object.flag(cause) = false;
                 // Only the last interruption of a stop to end resumes the work.
                 if !object.is_stopped() {
                     object.completion = object.frozen.take().map(|left| now + left);
@@ -157,8 +152,9 @@ impl ObjectPicture {
             successors: state.successors.clone(),
             contents: state.contents.clone(),
             process: state.process.clone(),
-            failed: state.stop == Some(StopCause::Failure),
-            paused: state.stop == Some(StopCause::Pause),
+            failed: state.interruptions.contains(&StopCause::Failure),
+            forced: state.interruptions.contains(&StopCause::ForcedFailure),
+            paused: state.interruptions.contains(&StopCause::Pause),
             completion: state.remaining.filter(|_| !stopped).map(|left| now + left),
             frozen: state.remaining.filter(|_| stopped),
         }
@@ -185,26 +181,28 @@ impl ObjectPicture {
         self.process.clone()
     }
 
-    pub fn is_failed(&self) -> bool {
-        self.failed
-    }
-
-    pub fn is_paused(&self) -> bool {
-        self.paused
-    }
-
     pub fn is_stopped(&self) -> bool {
-        self.failed || self.paused
+        self.failed || self.forced || self.paused
     }
 
-    /// Why the object is stopped, reporting a failure over a pause, as a run's state does.
+    /// Every active interruption, most serious first.
+    pub fn interruptions(&self) -> Vec<StopCause> {
+        [(self.failed, StopCause::Failure), (self.forced, StopCause::ForcedFailure), (self.paused, StopCause::Pause)]
+            .into_iter()
+            .filter_map(|(active, cause)| active.then_some(cause))
+            .collect()
+    }
+
+    /// Why the object is stopped: its most serious active interruption, as a run's state reports.
     pub fn stop(&self) -> Option<StopCause> {
-        if self.failed {
-            Some(StopCause::Failure)
-        } else if self.paused {
-            Some(StopCause::Pause)
-        } else {
-            None
+        self.interruptions().first().copied()
+    }
+
+    fn flag(&mut self, cause: StopCause) -> &mut bool {
+        match cause {
+            StopCause::Failure => &mut self.failed,
+            StopCause::ForcedFailure => &mut self.forced,
+            StopCause::Pause => &mut self.paused,
         }
     }
 

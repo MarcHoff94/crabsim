@@ -26,6 +26,7 @@ fn row(object: &ObjectState) -> String {
     let stop = match object.stop {
         None => "-",
         Some(StopCause::Failure) => "Failed",
+        Some(StopCause::ForcedFailure) => "Forced to fail",
         Some(StopCause::Pause) => "Paused",
     };
     let blocked = if object.blocked_predecessors.is_empty() {

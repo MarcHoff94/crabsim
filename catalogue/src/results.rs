@@ -434,7 +434,14 @@ impl Operation for ForgetRun {
         if catalogue.jobs_status(&input.run).is_some_and(|state| matches!(state, RunState::Queued | RunState::Running)) {
             return Err(OperationError::invalid_input(format!("`{}` is still running: cancel it first", input.run)));
         }
-        let mut store = catalogue.store()?;
+        let mut store = catalogue.swept_store()?;
+        let state: Option<String> = store.connection().query_row("SELECT state FROM runs WHERE number = ?1", [number], |row| row.get(0)).optional()?;
+        if state.as_deref().is_some_and(|state| state == "queued" || state == "running") {
+            return Err(OperationError::invalid_input(format!(
+                "`{}` is still running in another crabsim process: cancel it there first",
+                input.run
+            )));
+        }
         let transaction = store.connection_mut().transaction()?;
         let deleted = transaction.execute("DELETE FROM runs WHERE number = ?1", [number])?;
         if deleted == 0 {

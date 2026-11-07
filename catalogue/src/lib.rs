@@ -18,6 +18,7 @@ mod error;
 mod folder;
 mod jobs;
 mod model_files;
+mod process;
 mod results;
 mod store;
 
@@ -193,8 +194,10 @@ pub struct Catalogue {
     /// Opened on first use, so a folder only gets `.crabsim` once something needs the store.
     store: Mutex<Option<Store>>,
     entries: Vec<Entry>,
-    // Last, so it is dropped last: its threads may still write to the store.
     jobs: jobs::Jobs,
+    /// This process's lock, taken with the store. Last, so it is dropped last: until its jobs have
+    /// stopped, no other process may take their runs for interrupted.
+    process: std::sync::OnceLock<process::ProcessLock>,
 }
 
 impl Catalogue {
@@ -204,7 +207,7 @@ impl Catalogue {
         let folder = ModelsFolder::open(&settings.models)?;
         let threads = settings.threads.unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |cores| cores.get()));
         let jobs = jobs::Jobs::new(folder.crabsim_folder(), threads);
-        Ok(Catalogue { folder, source: settings.source, store: Mutex::new(None), entries: model_files::entries(), jobs })
+        Ok(Catalogue { folder, source: settings.source, store: Mutex::new(None), entries: model_files::entries(), jobs, process: std::sync::OnceLock::new() })
     }
 
     /// Every operation, with its description and schemas.
@@ -238,13 +241,33 @@ impl Catalogue {
         self.jobs.state(id)
     }
 
-    /// The results store, created on first use.
+    /// The results store, created on first use. Opening it also takes this process's lock and
+    /// marks interrupted the runs of processes that have ended.
     pub(crate) fn store(&self) -> Result<StoreGuard<'_>, OperationError> {
         let mut store = self.store.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         if store.is_none() {
-            *store = Some(Store::open(&self.folder.crabsim_folder())?);
+            let crabsim_folder = self.folder.crabsim_folder();
+            let opened = Store::open(&crabsim_folder)?;
+            let lock = process::ProcessLock::acquire(&crabsim_folder)
+                .map_err(|error| OperationError::run_error(format!("this process's lock in the results store's folder can't be made: {error}")))?;
+            let lock = self.process.get_or_init(|| lock);
+            process::tidy(&crabsim_folder, lock.id());
+            opened.sweep(lock.id())?;
+            *store = Some(opened);
         }
         Ok(StoreGuard(store))
+    }
+
+    /// This process's lock id, as runs record it. Only once the store is open.
+    pub(crate) fn process_id(&self) -> &str {
+        self.process.get().map_or("", process::ProcessLock::id)
+    }
+
+    /// The results store, after marking interrupted the runs of processes that have ended.
+    pub(crate) fn swept_store(&self) -> Result<StoreGuard<'_>, OperationError> {
+        let store = self.store()?;
+        store.sweep(self.process_id())?;
+        Ok(store)
     }
 }
 

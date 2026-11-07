@@ -32,7 +32,7 @@ Slice 1's operations:
 | `copy_model { from, to }` | Copies, refused if `to` exists |
 | `delete_model { path }` | Deletes a file, never a folder |
 | `start_run { model, seed, length, warm_up?, observations, label? }` | Starts a job and returns its id at once |
-| `run_status { run }` | Queued, running, done, failed or cancelled, observations done, and where each running one has reached |
+| `run_status { run }` | Queued, running, done, failed, cancelled or interrupted, observations done, and where each running one has reached |
 | `cancel_run { run }` | Stops a job, returning once nothing of it runs |
 | `run_results { run, objects?, classes? }` | A short summary, or the chosen objects |
 | `query_results { sql }` | One read-only SQL query on the store |
@@ -69,13 +69,14 @@ The owner's concern: an agent working through crabsim must never be able to chan
 - **Warm-up:** advance to the warm-up, clear statistics, advance to warm-up plus length. Without a warm-up, statistics aren't cleared.
 - **Progress and cancelling:** each observation advances in chunks of at most 100,000 events, recording the simulated time reached and checking its job's cancel flag between chunks. So `cancel_run` takes effect within one chunk, and returns once nothing of the job runs. Observations that finished before stay in the store.
 - **A run error** fails only its observation, which is recorded with the error and the simulated time it happened, and gives no figures. A run is `failed` only if every observation failed, and `done` otherwise.
-- **After a restart,** a run that was queued or running when its process ended stays so in the store. The process that ran it is gone, so it never finishes.
+- **A run whose process ended first,** such as in a crash or a kill, is marked `interrupted`, and the observations that ended keep their results. Each catalogue that uses the store holds an exclusive lock on `.crabsim/processes/<id>.lock` for as long as it lives, and each run records that id in `process`. The operating system releases the lock however the process ends, so a process that can take another's lock knows it has ended. The check runs when a catalogue opens the store, and in `run_status`, `cancel_run` and `forget_run`. A heartbeat was rejected because a sleeping laptop would look dead, and process ids because they get reused. Runs from a store of the first tables' version have no process recorded, so any process but their own marks them interrupted. Lock files of ended processes are removed.
+- **Only the process running a run can cancel it,** and `forget_run` refuses a run another live process is running. A run that is interrupted can be forgotten, or run again from its stored model and seeds.
 
 ## The results store
 
 One SQLite database, `<models folder>/.crabsim/results.sqlite`, created on first use, in WAL mode so a CLI and a server can use it at once. Why SQLite is in ADR 0010. Its tables are an interface: skills, scripts and later the UI rely on them.
 
-- **`runs`:** `number` (counting up, never reused), `id` (`run-<number>`), `model_path`, `model_text` (the canonical model the run used), `model_hash` (its SHA-256, so equal hashes mean the same model), `seed`, `length_s`, `warm_up_s`, `observations`, `label`, `source` (`mcp` or `cli`, later `ui`), `crabsim_version`, `started` and `finished` (UTC, ISO 8601) and `state` (`queued`, `running`, `done`, `failed`, `cancelled`).
+- **`runs`:** `number` (counting up, never reused), `id` (`run-<number>`), `model_path`, `model_text` (the canonical model the run used), `model_hash` (its SHA-256, so equal hashes mean the same model), `seed`, `length_s`, `warm_up_s`, `observations`, `label`, `source` (`mcp` or `cli`, later `ui`), `crabsim_version`, `started` and `finished` (UTC, ISO 8601), `state` (`queued`, `running`, `done`, `failed`, `cancelled`, `interrupted`) and `process` (the lock id of the process that ran it). The tables are version 2, kept in `user_version`: a store of version 1 gains `process` in place when it's opened.
 - **`observations`:** `run`, `number` (from 1), `seed`, `events`, `wall_time_s`, and for a failed one `error` and `error_time_s`.
 - **`statistics`**, long and thin: `run`, `observation`, `object` (the instance's name), `class`, `built_in_class`, `statistic`, `value`. One row per figure of an observation that ran to its end, so new statistics later need no new column. About 2 million rows for 6,000 objects and 20 observations.
 - **Seeds are text,** because they use all 64 bits and SQLite's integers are signed.

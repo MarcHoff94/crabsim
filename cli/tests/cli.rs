@@ -214,3 +214,39 @@ fn an_invalid_model_is_refused_by_run_with_every_problem() {
     assert!(errors.contains("/instances/0 \"In\": a Source needs an `interval`"), "{errors}");
     assert!(errors.contains("/instances/0/successors/0 \"In\": no instance is called `Nowhere`"), "{errors}");
 }
+
+#[test]
+fn a_run_whose_process_was_killed_is_interrupted() {
+    let models = Models::new("killed");
+    // Killed when dropped, so a failing assertion never leaves a run of a hundred years going.
+    struct Killed(std::process::Child);
+    impl Drop for Killed {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let mut child = Killed(
+        Command::new(env!("CARGO_BIN_EXE_crabsim"))
+        .args(["run", "--models", models.arg(), "--model", "demo.json", "--length", "36500d", "--observations", "2"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let catalogue = || crabsim_catalogue::Catalogue::open(crabsim_catalogue::Settings::new(&models.0, crabsim_catalogue::Source::Cli)).unwrap();
+    let status = || catalogue().call("run_status", serde_json::json!({ "run": "run-1" }));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while !status().is_ok_and(|status| status["state"] == "running") {
+        assert!(std::time::Instant::now() < deadline, "the run never started");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert_eq!(status().unwrap()["state"], "running", "its process is alive");
+
+    child.0.kill().unwrap();
+    child.0.wait().unwrap();
+    let status = status().unwrap();
+    assert_eq!(status["state"], "interrupted", "{status}");
+    let runs = stdout(&crabsim(&["runs", "--models", models.arg()]));
+    assert!(runs.lines().nth(1).unwrap().contains("interrupted"), "{runs}");
+}

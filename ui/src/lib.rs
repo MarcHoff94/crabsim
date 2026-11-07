@@ -2,4 +2,5 @@
 //! The binary in `main.rs` draws what this works out, with Bevy and egui.
 
 pub mod camera;
+pub mod marks;
 pub mod view;

@@ -18,7 +18,8 @@ use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui, input::e
 use crabsim::{LiveSession, SessionStatus, SimTime, TimeMode, WallClock, demo};
 use crabsim_ui::camera::Camera as ViewCamera;
 use crabsim_ui::view::{
-    Control, DEFAULT_SPEED, JumpProblem, MAX_SPEED, MIN_SPEED, Point, Shade, ViewState, label_size,
+    Control, DEFAULT_SPEED, Details, Inspection, Intervention, JumpProblem, MAX_SPEED, MIN_SPEED, Mark, Point,
+    Shade, StepBackLoss, ViewState, format_time, format_time_exact, label_size, parse_time,
 };
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -66,13 +67,23 @@ fn main() {
         )
         .add_plugins(EguiPlugin::default())
         .insert_resource(WinitSettings::desktop_app())
-        .insert_resource(Ui { view, camera: None, camera_moved: false, canvas: None, jump_text: String::new() })
+        .insert_resource(Ui {
+            view,
+            camera: None,
+            camera_moved: false,
+            canvas: None,
+            jump_text: String::new(),
+            press: None,
+            process_time_text: (None, String::new()),
+            pending: None,
+        })
         .insert_resource(Session(Mutex::new(session)))
         .add_systems(Startup, setup)
         .add_systems(
             Update,
             (
                 drain_session,
+                request_details,
                 apply_shades,
                 canvas_input.run_if(not(egui_wants_any_pointer_input)),
                 place_camera,
@@ -98,7 +109,25 @@ struct Ui {
     canvas: Option<egui::Rect>,
     /// What has been typed into the field for going back to a time.
     jump_text: String,
+    /// Where the left button went down on the canvas, and how far the pointer has moved since,
+    /// in logical pixels. A short enough press is a click, which selects.
+    press: Option<(Vec2, f32)>,
+    /// What has been typed into the inspector's process time field, and for which object.
+    process_time_text: (Option<u32>, String),
+    /// Going back that drops interventions, waiting for the user to confirm it.
+    pending: Option<GoingBack>,
 }
+
+/// A way of going back that waits for confirmation.
+#[derive(Clone, Copy)]
+enum GoingBack {
+    To(SimTime),
+    Step,
+}
+
+/// A press that moves less than this, in logical pixels, is a click rather than a drag.
+const CLICK_SLOP: f32 = 4.0;
+const SELECTION: Color = Color::srgb(1.0, 1.0, 1.0);
 
 /// A `LiveSession` holds a `Receiver`, which can be sent between threads but not shared.
 #[derive(Resource)]
@@ -187,6 +216,20 @@ fn canvas_input(
     let size = Point { x: canvas.width() as f64, y: canvas.height() as f64 };
     let ui = &mut *ui;
     let Some(camera) = ui.camera.as_mut() else { return };
+    if buttons.just_pressed(MouseButton::Left) {
+        ui.press = window.cursor_position().map(|at| (at, 0.0));
+    }
+    if let Some((_, travelled)) = ui.press.as_mut() {
+        *travelled += motion.delta.length();
+    }
+    if buttons.just_released(MouseButton::Left) {
+        if let Some((at, travelled)) = ui.press.take() {
+            if travelled < CLICK_SLOP {
+                let pointer = Point { x: (at.x - canvas.min.x) as f64, y: (at.y - canvas.min.y) as f64 };
+                ui.view.select(ui.view.object_at(camera.to_world(pointer, size)));
+            }
+        }
+    }
     let dragging = [MouseButton::Left, MouseButton::Right, MouseButton::Middle].iter().any(|&b| buttons.pressed(b));
     if dragging && motion.delta != Vec2::ZERO {
         camera.pan(Point { x: motion.delta.x as f64, y: motion.delta.y as f64 });
@@ -242,11 +285,28 @@ fn place_camera(
     }
 }
 
+/// Asks the session for a full state when the view wants one for the inspector.
+fn request_details(session: Res<Session>, mut ui: ResMut<Ui>, time: Res<Time<Real>>) {
+    let wall = time.elapsed();
+    if ui.view.wants_state(wall) {
+        let sent = session.0.lock().expect("the session lock is never poisoned").request_state();
+        ui.view.state_requested(wall);
+        if let Err(error) = sent {
+            ui.view.observe(&crabsim::Observation::Error(error), wall);
+        }
+    }
+}
+
 fn draw_connections(mut gizmos: Gizmos, ui: Res<Ui>) {
     for connection in ui.view.connections() {
         let start = Vec3::new(connection.start.x as f32, connection.start.y as f32, 0.0);
         let end = Vec3::new(connection.end.x as f32, connection.end.y as f32, 0.0);
         gizmos.arrow(start, end, CONNECTION).with_tip_length(0.4);
+    }
+    if let Some(id) = ui.view.selected() {
+        let outline = ui.view.objects()[id as usize].outline(0.15);
+        let corner = |point: Point| Vec3::new(point.x as f32, point.y as f32, 0.1);
+        gizmos.linestrip(outline.iter().chain(outline.first()).map(|&point| corner(point)), SELECTION);
     }
 }
 
@@ -258,6 +318,7 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
         egui::UiBuilder::new().layer_id(egui::LayerId::background()).max_rect(ctx.viewport_rect()),
     );
     let ui = &mut *ui;
+    let wall = time.elapsed();
     let mut request = None;
     let top = egui::Panel::top("top bar").show(&mut root, |panel| request = top_bar(panel, &ui.view, &mut ui.jump_text));
     let mut bottom_of_bars = top.response.rect.bottom();
@@ -267,12 +328,51 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
             .show(&mut root, |panel| error_banner(panel, error, ui.view.run_failed()));
         bottom_of_bars = banner.response.rect.bottom();
     }
-    let right = egui::Panel::right("inspector").exact_size(INSPECTOR_WIDTH).show(&mut root, inspector);
+    // What has been typed for a process time belongs to the object it was typed for.
+    if ui.process_time_text.0 != ui.view.selected() {
+        ui.process_time_text = (ui.view.selected(), String::new());
+    }
+    let inspection = ui.view.inspection();
+    let mut intervention = None;
+    let right = egui::Panel::right("inspector").exact_size(INSPECTOR_WIDTH).show(&mut root, |panel| {
+        egui::ScrollArea::vertical().show(panel, |panel| {
+            intervention = inspector(panel, inspection.as_ref(), &mut ui.process_time_text.1);
+        });
+    });
     let canvas = egui::Rect::from_min_max(
         egui::pos2(ctx.viewport_rect().left(), bottom_of_bars),
         egui::pos2(right.response.rect.left(), ctx.viewport_rect().bottom()),
     );
     ui.canvas = Some(canvas);
+
+    if let (Some(intervention), Some(id)) = (intervention, ui.view.selected()) {
+        let session = session.0.lock().expect("the session lock is never poisoned");
+        let sent = match intervention {
+            Intervention::Pause => session.pause(id),
+            Intervention::Resume => session.resume(id),
+            Intervention::ForceFailure => session.force_failure(id),
+            Intervention::EndForcedFailure => session.end_forced_failure(id),
+            Intervention::SetProcessTime(time) => session.set_process_time(id, time),
+        };
+        match sent {
+            Ok(()) => ui.view.intervened(id, intervention, wall),
+            Err(error) => ui.view.observe(&crabsim::Observation::Error(error), wall),
+        }
+    }
+
+    // Going back past interventions drops them, so it asks first.
+    let request = match request {
+        Some(Request::GoBack(to)) if ui.view.lost_going_back(to) > 0 => {
+            ui.pending = Some(GoingBack::To(to));
+            None
+        }
+        Some(Request::Control(Control::StepBack)) if ui.view.lost_stepping_back().count() > 0 => {
+            ui.pending = Some(GoingBack::Step);
+            None
+        }
+        other => other,
+    };
+    let request = request.or_else(|| confirm_going_back(&ctx, ui));
 
     if let Some(request) = request {
         let session = session.0.lock().expect("the session lock is never poisoned");
@@ -291,7 +391,6 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
             }
             Request::GoBack(to) => session.go_back(to),
         };
-        let wall = time.elapsed();
         ui.view.commanded(wall);
         if let Err(error) = sent {
             ui.view.observe(&crabsim::Observation::Error(error), wall);
@@ -379,7 +478,28 @@ fn top_bar(ui: &mut egui::Ui, view: &ViewState, jump_text: &mut String) -> Optio
             }
         }
     });
+    if !view.marks().is_empty() {
+        timeline(ui, view);
+    }
     request
+}
+
+/// Each intervention as a mark on a line from t=0 to shown time. Hovering over a mark says what
+/// it was and when.
+fn timeline(ui: &mut egui::Ui, view: &ViewState) {
+    let shown = view.picture().shown();
+    let end = view.marks().iter().map(|mark| mark.at).max().unwrap_or(shown).max(shown).as_millis().max(1);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 14.0), egui::Sense::hover());
+    let painter = ui.painter_at(rect);
+    let line = egui::Stroke::new(1.0, egui::Color32::from_gray(90));
+    painter.line_segment([rect.left_center(), rect.right_center()], line);
+    for (index, mark) in view.marks().iter().enumerate() {
+        let x = rect.left() + rect.width() * (mark.at.as_millis() as f64 / end as f64) as f32;
+        let tick = egui::Rect::from_center_size(egui::pos2(x, rect.center().y), egui::vec2(4.0, rect.height()));
+        painter.rect_filled(tick, 1.0, egui::Color32::from_rgb(240, 200, 80));
+        let hover = ui.interact(tick.expand2(egui::vec2(3.0, 0.0)), ui.id().with(("mark", index)), egui::Sense::hover());
+        hover.on_hover_text(format!("{}  {}", format_time_exact(mark.at), view.describe(mark)));
+    }
 }
 
 /// The last error the session reported. A run error says how to get going again.
@@ -395,9 +515,203 @@ fn error_banner(ui: &mut egui::Ui, error: &str, run_failed: bool) {
     });
 }
 
-fn inspector(ui: &mut egui::Ui) {
+/// Asks before going back past interventions, naming those it would drop. Returns the request
+/// once confirmed.
+fn confirm_going_back(ctx: &egui::Context, ui: &mut Ui) -> Option<Request> {
+    let pending = ui.pending?;
+    let mut answer = None;
+    let modal = egui::Modal::new(egui::Id::new("confirm going back")).show(ctx, |modal| {
+        modal.set_max_width(420.0);
+        let (heading, lost): (String, Vec<&Mark>) = match pending {
+            GoingBack::To(to) => (
+                format!("Go back to {}?", format_time_exact(to)),
+                ui.view.marks().iter().filter(|mark| mark.at > to).collect(),
+            ),
+            GoingBack::Step => ("Step back?".to_string(), Vec::new()),
+        };
+        modal.heading(heading);
+        match (pending, ui.view.lost_stepping_back()) {
+            (GoingBack::To(_), _) => {
+                modal.label(format!("It drops {} later intervention{}:", lost.len(), plural(lost.len())));
+                for mark in lost {
+                    modal.label(format!("•  {}  {}", format_time_exact(mark.at), ui.view.describe(mark)));
+                }
+            }
+            (GoingBack::Step, StepBackLoss::Exactly(count)) => {
+                modal.label(format!("It drops the {count} intervention{} after the instant it goes to.", plural(count)));
+            }
+            (GoingBack::Step, StepBackLoss::UpTo(count)) => {
+                modal.label(format!(
+                    "It drops the interventions after the instant it goes to: up to {count}, because the time of \
+                     that instant isn't known here."
+                ));
+            }
+        }
+        modal.add_space(8.0);
+        modal.horizontal(|row| {
+            if row.button("Go back").clicked() {
+                answer = Some(true);
+            }
+            if row.button("Cancel").clicked() {
+                answer = Some(false);
+            }
+        });
+    });
+    if modal.should_close() && answer.is_none() {
+        answer = Some(false);
+    }
+    let answer = answer?;
+    ui.pending = None;
+    answer.then_some(match pending {
+        GoingBack::To(to) => Request::GoBack(to),
+        GoingBack::Step => Request::Control(Control::StepBack),
+    })
+}
+
+fn plural(count: usize) -> &'static str {
+    if count == 1 { "" } else { "s" }
+}
+
+/// What the view state says about the selected object, and the interventions it offers. Returns
+/// the intervention asked for, if any. `process_time_text` is what has been typed for a new
+/// process time.
+fn inspector(ui: &mut egui::Ui, inspection: Option<&Inspection>, process_time_text: &mut String) -> Option<Intervention> {
     ui.heading("Inspector");
-    ui.label("Nothing selected");
+    let Some(inspection) = inspection else {
+        ui.label("Click an object to inspect it.");
+        return None;
+    };
+    let mut asked = None;
+    ui.label(egui::RichText::new(&inspection.name).strong().size(16.0));
+    ui.label(egui::RichText::new(format!("{:?}, id {}", inspection.kind, inspection.id)).weak());
+    ui.add_space(4.0);
+    egui::Grid::new("inspection").num_columns(2).spacing([12.0, 4.0]).show(ui, |grid| {
+        grid.label("State");
+        grid.label(inspection.state);
+        grid.end_row();
+        grid.label("Holds");
+        grid.label(match inspection.contents.as_slice() {
+            [] => "nothing".to_string(),
+            mus => mus.iter().map(|mu| format!("MU {mu}")).collect::<Vec<_>>().join(", "),
+        });
+        grid.end_row();
+        if let Some(remaining) = inspection.remaining {
+            grid.label("Work left");
+            grid.label(format_time_exact(remaining));
+            grid.end_row();
+        }
+    });
+    if let Some(blocked) = &inspection.blocked {
+        ui.add_space(6.0);
+        ui.label(egui::RichText::new("Why it's blocked").strong());
+        ui.label(blocked);
+    }
+    if !inspection.stopped.is_empty() {
+        ui.add_space(6.0);
+        ui.label(egui::RichText::new("Why it's stopped").strong());
+        for interruption in &inspection.stopped {
+            ui.label(interruption);
+        }
+    }
+
+    if let Some(offered) = inspection.interventions {
+        ui.add_space(8.0);
+        ui.separator();
+        ui.label(egui::RichText::new("Interventions").strong());
+        ui.horizontal_wrapped(|row| {
+            let (pause, pause_label) =
+                if offered.paused { (Intervention::Resume, "Resume") } else { (Intervention::Pause, "Pause") };
+            if row.button(pause_label).clicked() {
+                asked = Some(pause);
+            }
+            let (force, force_label) = if offered.forced {
+                (Intervention::EndForcedFailure, "End forced failure")
+            } else {
+                (Intervention::ForceFailure, "Force failure")
+            };
+            if row.button(force_label).clicked() {
+                asked = Some(force);
+            }
+        });
+        ui.horizontal(|row| {
+            row.label("Process time");
+            let hint = inspection.details.as_ref().and_then(|details| details.process_time).map(format_time_exact);
+            let field = row.add(
+                egui::TextEdit::singleline(process_time_text).desired_width(80.0).hint_text(hint.unwrap_or_default()),
+            );
+            let typed = parse_time(process_time_text).filter(|&time| time > SimTime::ZERO);
+            let set = row
+                .add_enabled(typed.is_some(), egui::Button::new("Set"))
+                .on_hover_text("From the next MU on. The MU in work keeps its time.")
+                .on_disabled_hover_text("Type a time longer than zero, such as 25 or 1:30");
+            let entered = field.lost_focus() && row.input(|input| input.key_pressed(egui::Key::Enter));
+            if let (true, Some(time)) = (set.clicked() || entered, typed) {
+                asked = Some(Intervention::SetProcessTime(time));
+                process_time_text.clear();
+            }
+        });
+    }
+
+    if let Some(details) = &inspection.details {
+        ui.add_space(8.0);
+        ui.separator();
+        egui::Grid::new("details").num_columns(2).spacing([12.0, 4.0]).show(ui, |grid| {
+            if let (Some(now), Some(configured)) = (details.process_time, details.configured_process_time) {
+                grid.label("Process time");
+                grid.label(format_time_exact(now));
+                grid.end_row();
+                grid.label("Configured");
+                grid.label(format_time_exact(configured));
+                grid.end_row();
+            }
+            grid.label("Waiting for it");
+            grid.label(if details.waiting.is_empty() { "nothing".to_string() } else { details.waiting.join(", ") });
+            grid.end_row();
+        });
+        ui.add_space(6.0);
+        ui.label(egui::RichText::new(format!("Statistics since {}", format_time(details.statistics_since))).strong());
+        egui::Grid::new("statistics").num_columns(2).spacing([12.0, 2.0]).striped(true).show(ui, |grid| {
+            for (label, value) in statistics_rows(details) {
+                grid.label(label);
+                grid.label(value);
+                grid.end_row();
+            }
+        });
+        ui.label(egui::RichText::new(format!("as of {}", format_time_exact(details.as_of))).weak().small());
+    }
+    asked
+}
+
+/// An object's statistics as rows of the inspector: counts, and each state as a share of the
+/// time measured.
+fn statistics_rows(details: &Details) -> Vec<(&'static str, String)> {
+    let statistics = &details.statistics;
+    let measured = statistics.measured_time();
+    let share = |time: SimTime| match measured.as_millis() {
+        0 => "–".to_string(),
+        total => format!("{:.1} %", time.as_millis() as f64 * 100.0 / total as f64),
+    };
+    let mut rows = vec![
+        ("MUs in", statistics.mus_in.to_string()),
+        ("MUs out", statistics.mus_out.to_string()),
+        ("Working", share(statistics.time_busy)),
+        ("Blocked", share(statistics.time_blocked)),
+        ("Idle", share(statistics.time_idle)),
+        ("Failed", share(statistics.time_failed)),
+        ("Paused", share(statistics.time_paused)),
+        ("Failures", statistics.failures.to_string()),
+        ("Pauses", statistics.pauses.to_string()),
+    ];
+    if let Some(availability) = statistics.achieved_availability() {
+        rows.push(("Availability", format!("{:.1} %", availability * 100.0)));
+    }
+    if let Some(per_hour) = statistics.mus_per_hour(details.as_of) {
+        rows.push(("MUs an hour", format!("{per_hour:.1}")));
+    }
+    if let Some(lead_time) = statistics.lead_time_mean() {
+        rows.push(("Mean lead time", format_time_exact(lead_time)));
+    }
+    rows
 }
 
 /// Each object's name under it, `text_size` pixels tall, clipped to the canvas.

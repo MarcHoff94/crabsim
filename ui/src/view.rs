@@ -2,8 +2,11 @@
 //! the window draws and which controls it offers. Bevy and egui only draw what it says.
 
 use crate::camera::Camera;
+use crate::marks::Marks;
+pub use crate::marks::{Intervention, Mark, StepBackLoss};
 use crabsim::{
-    ModelDescription, ObjectKind, Observation, Picture, ProcessState, SessionStatus, SimTime, StopCause, TimeMode,
+    ModelDescription, ObjectKind, ObjectStatistics, Observation, Picture, ProcessState, RunState, SessionStatus,
+    SimTime, StopCause, TimeMode,
 };
 use std::collections::VecDeque;
 use std::time::Duration;
@@ -126,7 +129,59 @@ pub struct ViewState {
     time_mode: TimeMode,
     /// Wall time and shown time while advancing, oldest first, over the last `ACHIEVED_WINDOW`.
     pace: VecDeque<(Duration, SimTime)>,
+    selected: Option<u32>,
+    /// The last full state, for what only a full state says, such as statistics.
+    details: Option<RunState>,
+    /// Whether something since the last full state may have changed it at the same shown time.
+    details_stale: bool,
+    /// When the window last asked the session for a full state.
+    last_request: Option<Duration>,
+    marks: Marks,
 }
+
+/// What the inspector says about the selected object.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Inspection {
+    pub id: u32,
+    pub kind: ObjectKind,
+    pub name: String,
+    /// Working, Blocked, Idle or Stopped.
+    pub state: &'static str,
+    pub contents: Vec<u32>,
+    /// Time left on the work in progress, frozen while stopped.
+    pub remaining: Option<SimTime>,
+    /// Why it's blocked: the MU it holds and what each successor is doing.
+    pub blocked: Option<String>,
+    /// Why it's stopped: each active interruption and since when, most serious first.
+    pub stopped: Vec<String>,
+    /// What only a full state says. `None` until the session has sent one.
+    pub details: Option<Details>,
+    /// The interventions on offer, and which are on. `None` where there are none.
+    pub interventions: Option<Offered>,
+}
+
+/// What only a full state says about an object, as of `as_of`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Details {
+    pub as_of: SimTime,
+    pub process_time: Option<SimTime>,
+    pub configured_process_time: Option<SimTime>,
+    /// The names of the predecessors waiting for it, longest waiting first.
+    pub waiting: Vec<String>,
+    pub statistics: ObjectStatistics,
+    /// When the statistics began: at Init, or when they were last cleared.
+    pub statistics_since: SimTime,
+}
+
+/// The interventions a Station offers, and which are on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Offered {
+    pub paused: bool,
+    pub forced: bool,
+}
+
+/// How often, in wall time, a full state is asked for while one is wanted.
+const DETAILS_INTERVAL: Duration = Duration::from_millis(500);
 
 impl ViewState {
     /// A view of `model`, before any observation. An object the model hasn't named is called by
@@ -175,28 +230,46 @@ impl ViewState {
             speed: DEFAULT_SPEED,
             time_mode: TimeMode::Continuous,
             pace: VecDeque::new(),
+            selected: None,
+            details: None,
+            details_stale: false,
+            last_request: None,
+            marks: Marks::default(),
         }
     }
 
     /// Takes in one observation from the session, read at wall time `wall`.
     pub fn observe(&mut self, observation: &Observation, wall: Duration) {
+        let shown_before = self.picture.shown();
         self.picture.observe(observation);
         match observation {
             Observation::State(state) => {
                 self.initialised = state.initialised;
-                self.error = None;
-                // Shown time jumped, as after Reset or going back.
-                self.pace.clear();
-            }
-            Observation::Status(status) => {
-                self.status = *status;
-                if *status == SessionStatus::Advancing {
+                // A state asked for while failed changes nothing: the error goes once the
+                // session is going again.
+                if self.status != SessionStatus::Failed {
                     self.error = None;
                 }
+                // Shown time jumped, as after Reset or going back. A state asked for comes at
+                // shown time.
+                if state.time != shown_before {
+                    self.pace.clear();
+                }
+                self.marks.saw_state(state.time, state.initialised);
+                self.details = Some(state.clone());
+                self.details_stale = false;
+            }
+            Observation::Status(status) => {
+                let recovered = self.status == SessionStatus::Failed && *status != SessionStatus::Failed;
+                if *status == SessionStatus::Advancing || recovered {
+                    self.error = None;
+                }
+                self.status = *status;
                 self.pace.clear();
             }
             Observation::Error(error) => self.error = Some(error.to_string()),
-            Observation::Occurrences(_) | Observation::ShownTime(_) => {}
+            Observation::Occurrences(occurrences) => self.marks.saw_occurrences(occurrences),
+            Observation::ShownTime(_) => {}
         }
         if self.status == SessionStatus::Advancing {
             self.note_pace(wall);
@@ -353,13 +426,188 @@ impl ViewState {
     pub fn wants_frames(&self, wall: Duration) -> bool {
         self.status == SessionStatus::Advancing || wall < self.settle_until
     }
+
+    // ---------- Selecting and inspecting ----------
+
+    /// The object whose footprint holds `floor`, if any. Where footprints overlap, the one added
+    /// to the model last, which is drawn on top.
+    pub fn object_at(&self, floor: Point) -> Option<u32> {
+        self.objects.iter().rev().find(|object| object.holds(floor)).map(|object| object.id)
+    }
+
+    pub fn select(&mut self, id: Option<u32>) {
+        self.selected = id.filter(|&id| (id as usize) < self.objects.len());
+    }
+
+    pub fn selected(&self) -> Option<u32> {
+        self.selected
+    }
+
+    /// What the inspector says about the selected object.
+    pub fn inspection(&self) -> Option<Inspection> {
+        let id = self.selected?;
+        let object = &self.objects[id as usize];
+        let pictured = self.picture.object(id);
+        let state = match pictured {
+            None => "No state yet",
+            Some(pictured) if pictured.is_stopped() => "Stopped",
+            Some(pictured) => match pictured.process() {
+                ProcessState::Processing => "Working",
+                ProcessState::Blocked => "Blocked",
+                ProcessState::Idle => "Idle",
+            },
+        };
+        let blocked = pictured.filter(|pictured| pictured.process() == ProcessState::Blocked).map(|pictured| {
+            let holding = match pictured.contents().first() {
+                Some(mu) => format!("Holding MU {mu}"),
+                None => "Holding nothing".to_string(),
+            };
+            let successors: Vec<String> = pictured
+                .successors()
+                .iter()
+                .map(|&successor| format!("{} {}", self.objects[successor as usize].name, doing(self.shade(successor))))
+                .collect();
+            format!("{holding}: {}", successors.join(", "))
+        });
+        let stopped = pictured
+            .map(|pictured| pictured.interruptions())
+            .unwrap_or_default()
+            .iter()
+            .map(|interruption| format!("{} since {}", cause_name(interruption.cause), format_time(interruption.since)))
+            .collect();
+        let offered = self.initialised && !self.run_failed() && object.kind == ObjectKind::Station;
+        Some(Inspection {
+            id,
+            kind: object.kind,
+            name: object.name.clone(),
+            state,
+            contents: pictured.map(|pictured| pictured.contents().to_vec()).unwrap_or_default(),
+            remaining: pictured.and_then(|pictured| pictured.remaining(self.picture.shown())),
+            blocked,
+            stopped,
+            details: self.details_of(id),
+            interventions: pictured.filter(|_| offered).map(|pictured| {
+                let on = |cause| pictured.interruptions().iter().any(|interruption| interruption.cause == cause);
+                Offered { paused: on(StopCause::Pause), forced: on(StopCause::ForcedFailure) }
+            }),
+        })
+    }
+
+    fn details_of(&self, id: u32) -> Option<Details> {
+        let state = self.details.as_ref().filter(|state| state.initialised)?;
+        let object = state.objects.iter().find(|object| object.id == id)?;
+        Some(Details {
+            as_of: state.time,
+            process_time: object.process_time,
+            configured_process_time: object.configured_process_time,
+            waiting: object.blocked_predecessors.iter().map(|&id| self.objects[id as usize].name.clone()).collect(),
+            statistics: object.statistics,
+            statistics_since: state.statistics_since,
+        })
+    }
+
+    /// Whether the window should ask the session for a full state at wall time `wall`: only while
+    /// something is selected, at most twice a second, and only when the last one may be out of
+    /// date. So a halted window asks once, and again only after something changes.
+    pub fn wants_state(&self, wall: Duration) -> bool {
+        let out_of_date = self.details_stale
+            || self.details.as_ref().is_none_or(|state| state.time != self.picture.shown() || !state.initialised);
+        self.selected.is_some()
+            && self.initialised
+            && out_of_date
+            && self.last_request.is_none_or(|last| wall >= last + DETAILS_INTERVAL)
+    }
+
+    /// Notes that the window asked the session for a full state at wall time `wall`, so the
+    /// answer gets drawn.
+    pub fn state_requested(&mut self, wall: Duration) {
+        self.last_request = Some(wall);
+        self.settle_until = self.settle_until.max(wall + SETTLE);
+    }
+
+    // ---------- Interventions ----------
+
+    /// Notes that the window sent `intervention` on object `object` at wall time `wall`. It takes
+    /// effect at shown time, and leaves a mark there.
+    pub fn intervened(&mut self, object: u32, intervention: Intervention, wall: Duration) {
+        self.marks.add(self.picture.shown(), object, intervention);
+        self.details_stale = true;
+        self.commanded(wall);
+    }
+
+    /// Every intervention still in the run, oldest first.
+    pub fn marks(&self) -> &[Mark] {
+        self.marks.all()
+    }
+
+    /// What a mark stands for, such as "Pause on Station 1".
+    pub fn describe(&self, mark: &Mark) -> String {
+        let what = match mark.intervention {
+            Intervention::Pause => "Pause".to_string(),
+            Intervention::Resume => "Resume".to_string(),
+            Intervention::ForceFailure => "Forced failure".to_string(),
+            Intervention::EndForcedFailure => "End of forced failure".to_string(),
+            Intervention::SetProcessTime(time) => format!("Process time {}", format_time_exact(time)),
+        };
+        let name = self.objects.get(mark.object as usize).map_or("an unknown object", |object| object.name.as_str());
+        format!("{what} on {name}")
+    }
+
+    /// How many interventions going back to `to` would drop: those after it.
+    pub fn lost_going_back(&self, to: SimTime) -> usize {
+        self.marks.lost_going_back(to)
+    }
+
+    /// How many interventions stepping back would drop.
+    pub fn lost_stepping_back(&self) -> StepBackLoss {
+        self.marks.lost_stepping_back()
+    }
+}
+
+/// What an object is doing, as said after its name.
+fn doing(shade: Shade) -> &'static str {
+    match shade {
+        Shade::Unknown => "has no state yet",
+        Shade::Idle => "is idle",
+        Shade::Working => "is working",
+        Shade::Blocked => "is blocked",
+        Shade::Paused => "is paused",
+        Shade::Failed => "has failed",
+        Shade::ForcedFailure => "has a forced failure",
+    }
+}
+
+fn cause_name(cause: StopCause) -> &'static str {
+    match cause {
+        StopCause::Failure => "Failure",
+        StopCause::ForcedFailure => "Forced failure",
+        StopCause::Pause => "Pause",
+    }
+}
+
+/// As `format_time`, with milliseconds when there are any.
+pub fn format_time_exact(time: SimTime) -> String {
+    match time.subsec_millis() {
+        0 => format_time(time),
+        millis => format!("{}.{millis:03}", format_time(time)),
+    }
 }
 
 impl ObjectView {
     fn corners(&self) -> [Point; 4] {
-        let (half_length, half_width) = (self.length / 2.0, self.width / 2.0);
+        self.outline(0.0)
+    }
+
+    /// The footprint's corners, grown by `margin` metres on every side, going round.
+    pub fn outline(&self, margin: f64) -> [Point; 4] {
+        let (half_length, half_width) = (self.length / 2.0 + margin, self.width / 2.0 + margin);
         [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)]
             .map(|(sx, sy)| self.from_local(Point { x: sx * half_length, y: sy * half_width }))
+    }
+
+    fn holds(&self, floor: Point) -> bool {
+        let local = rotate(Point { x: floor.x - self.centre.x, y: floor.y - self.centre.y }, -self.rotation_degrees);
+        local.x.abs() <= self.length / 2.0 && local.y.abs() <= self.width / 2.0
     }
 
     /// Where a line from the centre towards `target` crosses the object's outline.

@@ -8,7 +8,7 @@
 
 use crate::flows::ProcessState;
 use crate::live_session::Observation;
-use crate::observation::{ObjectKind, ObjectState, OccurrenceKind, RunState, StopCause};
+use crate::observation::{Interruption, ObjectKind, ObjectState, OccurrenceKind, RunState, StopCause};
 use crate::time::SimTime;
 
 /// What the user knows about a run at shown time. Feed it every observation a session sends, in
@@ -28,9 +28,8 @@ pub struct ObjectPicture {
     successors: Vec<u32>,
     contents: Vec<u32>,
     process: ProcessState,
-    failed: bool,
-    forced: bool,
-    paused: bool,
+    /// When each active interruption began, by `StopCause::index`.
+    interrupted_since: [Option<SimTime>; 3],
     /// When the work in progress completes, while not stopped.
     completion: Option<SimTime>,
     /// The work left, frozen while stopped.
@@ -129,11 +128,11 @@ impl Picture {
                 if !object.is_stopped() {
                     object.frozen = object.completion.take().map(|completion| completion.saturating_sub(now));
                 }
-                *object.flag(cause) = true;
+                object.interrupted_since[cause.index()] = Some(now);
             }
             OccurrenceKind::InterruptionEnded { object_id, cause } => {
                 let object = &mut objects[object_id as usize];
-                *object.flag(cause) = false;
+                object.interrupted_since[cause.index()] = None;
                 // Only the last interruption of a stop to end resumes the work.
                 if !object.is_stopped() {
                     object.completion = object.frozen.take().map(|left| now + left);
@@ -152,9 +151,9 @@ impl ObjectPicture {
             successors: state.successors.clone(),
             contents: state.contents.clone(),
             process: state.process.clone(),
-            failed: state.interruptions.contains(&StopCause::Failure),
-            forced: state.interruptions.contains(&StopCause::ForcedFailure),
-            paused: state.interruptions.contains(&StopCause::Pause),
+            interrupted_since: StopCause::ALL.map(|cause| {
+                state.interruptions.iter().find(|interruption| interruption.cause == cause).map(|i| i.since)
+            }),
             completion: state.remaining.filter(|_| !stopped).map(|left| now + left),
             frozen: state.remaining.filter(|_| stopped),
         }
@@ -182,28 +181,20 @@ impl ObjectPicture {
     }
 
     pub fn is_stopped(&self) -> bool {
-        self.failed || self.forced || self.paused
+        self.interrupted_since.iter().any(Option::is_some)
     }
 
-    /// Every active interruption, most serious first.
-    pub fn interruptions(&self) -> Vec<StopCause> {
-        [(self.failed, StopCause::Failure), (self.forced, StopCause::ForcedFailure), (self.paused, StopCause::Pause)]
+    /// Every active interruption, most serious first, with when it began.
+    pub fn interruptions(&self) -> Vec<Interruption> {
+        StopCause::ALL
             .into_iter()
-            .filter_map(|(active, cause)| active.then_some(cause))
+            .filter_map(|cause| Some(Interruption { cause, since: self.interrupted_since[cause.index()]? }))
             .collect()
     }
 
     /// Why the object is stopped: its most serious active interruption, as a run's state reports.
     pub fn stop(&self) -> Option<StopCause> {
-        self.interruptions().first().copied()
-    }
-
-    fn flag(&mut self, cause: StopCause) -> &mut bool {
-        match cause {
-            StopCause::Failure => &mut self.failed,
-            StopCause::ForcedFailure => &mut self.forced,
-            StopCause::Pause => &mut self.paused,
-        }
+        StopCause::ALL.into_iter().find(|cause| self.interrupted_since[cause.index()].is_some())
     }
 
     /// Time left until the object's current work completes at `now`, frozen during a stop.

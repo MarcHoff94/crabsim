@@ -94,6 +94,23 @@ pub enum StopCause {
     Pause,
 }
 
+impl StopCause {
+    /// Every cause, most serious first.
+    pub const ALL: [StopCause; 3] = [StopCause::Failure, StopCause::ForcedFailure, StopCause::Pause];
+
+    /// The cause's place in `ALL`.
+    pub const fn index(self) -> usize {
+        self as usize
+    }
+}
+
+/// One active interruption of an object, and when it began.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Interruption {
+    pub cause: StopCause,
+    pub since: SimTime,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ObjectKind {
     Source,
@@ -112,9 +129,9 @@ pub struct ObjectState {
     pub process: ProcessState,
     /// The most serious active interruption, if the object is stopped.
     pub stop: Option<StopCause>,
-    /// Every active interruption, most serious first. A view needs them all, so that it still
-    /// knows the object is stopped after the most serious one ends.
-    pub interruptions: Vec<StopCause>,
+    /// Every active interruption, most serious first, with when it began. A view needs them all,
+    /// so that it still knows the object is stopped after the most serious one ends.
+    pub interruptions: Vec<Interruption>,
     /// Time left until the object's current work completes, frozen during a stop.
     pub remaining: Option<SimTime>,
     pub blocked_predecessors: Vec<u32>,

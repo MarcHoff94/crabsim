@@ -6,7 +6,7 @@
 //! a hang into a failure, so an extremely overloaded machine could fail a test that is fine.
 
 use crabsim::{
-    Clock, FailureProfile, LiveSession, Picture, ModelDescription, Observation, Occurrence, OccurrenceKind, Recording, RunState,
+    Clock, FailureProfile, Interruption, LiveSession, Picture, ModelDescription, Observation, Occurrence, OccurrenceKind, Recording, RunState,
     EventType, RunError, SessionError, SessionSettings, SessionStatus, SimTime, SimulationRun, StopCause,
     TimeMode, WallClock, OBSERVATION_BACKLOG_LIMIT, ZERO_TIME_EVENT_LIMIT,
 };
@@ -1260,6 +1260,22 @@ fn a_state_on_request_is_at_shown_time_rather_than_computed_time() {
 }
 
 #[test]
+fn a_state_asked_for_straight_after_an_intervention_includes_it() {
+    // A Pause takes effect as an event at shown time, so a state asked for before the run has
+    // handled that event must not be read off the run as it stands.
+    let mut watched = Watched::new(reliable_line);
+    watched.session.start().unwrap();
+    watched.at(100);
+    watched.session.halt().unwrap();
+    watched.look();
+    watched.session.pause(STATION).unwrap();
+    let state = watched.state_now();
+    let station = &state.objects[STATION as usize];
+    assert_eq!(station.stop, Some(StopCause::Pause));
+    assert_eq!(station.statistics.pauses, 1);
+}
+
+#[test]
 fn asking_for_a_state_changes_nothing() {
     assert_watching_like_this_changes_nothing(|watched, occurrences| {
         watched.session.start().unwrap();
@@ -1975,7 +1991,7 @@ fn the_time_mode_changes_no_results() {
 struct Drawn {
     contents: Vec<u32>,
     process: crabsim::ProcessState,
-    stop: Option<StopCause>,
+    interruptions: Vec<Interruption>,
     remaining: Option<SimTime>,
     successors: Vec<u32>,
 }
@@ -2026,7 +2042,7 @@ fn assert_picture_rebuilds(build: fn() -> SimulationRun, steps: &[u64], actions:
                 let drawn = Drawn {
                     contents: object.contents().to_vec(),
                     process: object.process(),
-                    stop: object.stop(),
+                    interruptions: object.interruptions(),
                     remaining: object.remaining(now),
                     successors: object.successors().to_vec(),
                 };
@@ -2040,7 +2056,7 @@ fn assert_picture_rebuilds(build: fn() -> SimulationRun, steps: &[u64], actions:
             let expected = Drawn {
                 contents: own.contents.clone(),
                 process: own.process.clone(),
-                stop: own.stop,
+                interruptions: own.interruptions.clone(),
                 remaining: own.remaining,
                 successors: own.successors.clone(),
             };
@@ -2105,6 +2121,14 @@ fn a_picture_taken_while_interruptions_overlap_keeps_them_all() {
     watched.session.halt().unwrap();
     watched.session.go_back(secs(120)).unwrap();
     watched.look_without_errors();
+    // The picture now comes from a full state, which still says when each began.
+    assert_eq!(
+        watched.picture.object(STATION).unwrap().interruptions(),
+        vec![
+            Interruption { cause: StopCause::ForcedFailure, since: secs(100) },
+            Interruption { cause: StopCause::Pause, since: secs(110) },
+        ]
+    );
 
     watched.session.end_forced_failure(STATION).unwrap();
     watched.look_without_errors();

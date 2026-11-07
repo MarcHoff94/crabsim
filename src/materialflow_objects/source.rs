@@ -1,6 +1,6 @@
 use crate::error::{InitError, MaterialflowError, RunTimeError};
 use crate::event::{EventContext, EventTemplate, EventType, ExitTicket};
-use crate::observation::{ObjectKind, ObjectState, OccurrenceKind};
+use crate::report::{ObjectKind, ObjectState, OccurrenceKind};
 use crate::statistics::{MachineState, StatisticsKeeper};
 use crate::time::SimTime;
 use crate::materialflow_objects::OtherObjects;

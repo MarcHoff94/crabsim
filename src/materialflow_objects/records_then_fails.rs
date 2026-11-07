@@ -3,7 +3,7 @@
 use super::flows::{BaseObject, EventInterface, InterruptionState, MaterialFlow, MoveableUnit, ProcessState, StopCtrl};
 use crate::error::{InitError, MaterialflowError, RunTimeError};
 use crate::event::{EventContext, EventTemplate, EventType};
-use crate::observation::{ObjectKind, ObjectState, OccurrenceKind};
+use crate::report::{ObjectKind, ObjectState, OccurrenceKind};
 use crate::materialflow_objects::OtherObjects;
 use crate::time::SimTime;
 

@@ -1,8 +1,8 @@
-//! The view state, tested without a window: a real live session on a fake clock, its observations
+//! The view state, tested without a window: a real live session on a fake clock, its outputs
 //! fed in as the window would feed them, and what would be drawn read back out.
 
 use crabsim::{
-    demo, Dimensions, FailureProfile, ModelDescription, Observation, Position, RunError,
+    demo, Dimensions, FailureProfile, ModelDescription, SessionOutput, Position, RunError,
     SessionError, SessionStatus, SimTime, TimeMode,
 };
 use crabsim::random_numbers::Distribution;
@@ -173,11 +173,11 @@ fn a_run_error_shows_until_the_run_is_reset() {
     let model = demo::model();
     let mut view = ViewState::new(&model);
     let wall = Duration::ZERO;
-    view.observe(&Observation::Error(crabsim::SessionError::ResetRequired), wall);
+    view.observe(&SessionOutput::Error(crabsim::SessionError::ResetRequired), wall);
     assert!(view.error().is_some());
     let mut run = model.build(0);
     run.init().unwrap();
-    view.observe(&Observation::State(run.state()), wall);
+    view.observe(&SessionOutput::State(run.state()), wall);
     assert_eq!(view.error(), None);
 }
 
@@ -188,9 +188,9 @@ fn frames_are_drawn_while_advancing_and_stop_soon_after_halting() {
     assert!(view.wants_frames(secs(0.0)), "the first frames draw the model");
     assert!(view.wants_frames(secs(2.5)), "startup needs frames for a while");
     assert!(!view.wants_frames(secs(5.0)));
-    view.observe(&Observation::Status(SessionStatus::Advancing), secs(10.0));
+    view.observe(&SessionOutput::Status(SessionStatus::Advancing), secs(10.0));
     assert!(view.wants_frames(secs(100.0)));
-    view.observe(&Observation::Status(SessionStatus::Halted), secs(100.0));
+    view.observe(&SessionOutput::Status(SessionStatus::Halted), secs(100.0));
     assert!(view.wants_frames(secs(100.5)), "what a Halt brings is drawn");
     assert!(!view.wants_frames(secs(102.0)), "a halted window draws nothing");
     view.commanded(secs(200.0));
@@ -263,7 +263,7 @@ fn names_shrink_with_the_model_and_go_only_when_too_small_to_read() {
 // ---------- Time controls ----------
 
 fn shown_at(view: &mut ViewState, shown_secs: u64, wall_secs: f64) {
-    view.observe(&Observation::ShownTime(SimTime::from_secs(shown_secs)), Duration::from_secs_f64(wall_secs));
+    view.observe(&SessionOutput::ShownTime(SimTime::from_secs(shown_secs)), Duration::from_secs_f64(wall_secs));
 }
 
 #[test]
@@ -289,7 +289,7 @@ fn time_mode_starts_continuous_and_can_skip_gaps() {
 #[test]
 fn the_achieved_speed_shows_only_while_playback_falls_behind() {
     let mut view = ViewState::new(&demo::model());
-    view.observe(&Observation::Status(SessionStatus::Advancing), Duration::from_secs(10));
+    view.observe(&SessionOutput::Status(SessionStatus::Advancing), Duration::from_secs(10));
     shown_at(&mut view, 30, 10.5);
     assert_eq!(view.achieved_speed(), None, "too soon to tell");
     for second in 1..=3 {
@@ -300,14 +300,14 @@ fn the_achieved_speed_shows_only_while_playback_falls_behind() {
         shown_at(&mut view, 180 + 30 * (second - 3), 10.0 + second as f64);
     }
     assert_eq!(view.achieved_speed(), Some(30.0), "half the speed asked for over the last 2 s");
-    view.observe(&Observation::Status(SessionStatus::Halted), Duration::from_secs(17));
+    view.observe(&SessionOutput::Status(SessionStatus::Halted), Duration::from_secs(17));
     assert_eq!(view.achieved_speed(), None, "nothing to achieve while halted");
 }
 
 #[test]
 fn a_new_speed_starts_measuring_afresh() {
     let mut view = ViewState::new(&demo::model());
-    view.observe(&Observation::Status(SessionStatus::Advancing), Duration::ZERO);
+    view.observe(&SessionOutput::Status(SessionStatus::Advancing), Duration::ZERO);
     for second in 1..=3 {
         shown_at(&mut view, 30 * second, second as f64);
     }
@@ -321,7 +321,7 @@ fn a_new_speed_starts_measuring_afresh() {
 #[test]
 fn skipping_ahead_of_the_speed_is_not_falling_behind() {
     let mut view = ViewState::new(&demo::model());
-    view.observe(&Observation::Status(SessionStatus::Advancing), Duration::ZERO);
+    view.observe(&SessionOutput::Status(SessionStatus::Advancing), Duration::ZERO);
     for second in 1..=3 {
         shown_at(&mut view, 600 * second, second as f64);
     }
@@ -386,7 +386,7 @@ fn a_jump_goes_only_to_an_earlier_time() {
 fn a_refused_command_shows_until_the_next_command() {
     let mut view = ViewState::new(&demo::model());
     let refused = SessionError::NotInThePast { to: SimTime::from_secs(20), shown: SimTime::from_secs(12) };
-    view.observe(&Observation::Error(refused), Duration::ZERO);
+    view.observe(&SessionOutput::Error(refused), Duration::ZERO);
     assert!(view.error().is_some());
     assert!(!view.run_failed());
     view.commanded(Duration::from_secs(1));
@@ -399,10 +399,10 @@ fn a_run_error_stays_and_going_back_is_still_offered() {
     let mut view = ViewState::new(&model);
     let mut run = model.build(0);
     run.init().unwrap();
-    view.observe(&Observation::State(run.state()), Duration::ZERO);
-    view.observe(&Observation::Status(SessionStatus::Failed), Duration::ZERO);
+    view.observe(&SessionOutput::State(run.state()), Duration::ZERO);
+    view.observe(&SessionOutput::Status(SessionStatus::Failed), Duration::ZERO);
     let error = RunError::ZeroTimeLoop { time: SimTime::from_secs(7) };
-    view.observe(&Observation::Error(SessionError::Run(error)), Duration::ZERO);
+    view.observe(&SessionOutput::Error(SessionError::Run(error)), Duration::ZERO);
     view.commanded(Duration::from_secs(1));
     assert!(view.run_failed());
     assert!(view.error().is_some(), "a run error stays until Reset or going back");
@@ -410,9 +410,9 @@ fn a_run_error_stays_and_going_back_is_still_offered() {
     assert!(!view.allows(Control::StepForward));
     assert!(view.allows(Control::StepBack));
     assert!(view.allows(Control::Reset));
-    view.observe(&Observation::State(run.state()), Duration::from_secs(2));
+    view.observe(&SessionOutput::State(run.state()), Duration::from_secs(2));
     assert!(view.error().is_some(), "a state asked for while failed changes nothing");
     // Going back or Reset reports the state, then that the session is halted again.
-    view.observe(&Observation::Status(SessionStatus::Halted), Duration::from_secs(2));
+    view.observe(&SessionOutput::Status(SessionStatus::Halted), Duration::from_secs(2));
     assert_eq!(view.error(), None);
 }

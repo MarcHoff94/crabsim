@@ -77,9 +77,9 @@ src/
   model.rs            ModelDescription, Position, Dimensions
   simulation_run.rs   SimulationRun
   event.rs            EventType, EventTemplate, ScheduledEvent, EventContext, ExitTicket
-  observation.rs      Occurrence, Recording, ObjectState, RunState, StopCause
+  report.rs           Occurrence, Recording, ObjectState, RunState, StopCause
   statistics.rs       StatisticsKeeper, ObjectStatistics
-  live_session.rs     LiveSession, Observation, checkpoints and replay
+  live_session.rs     LiveSession, SessionOutput, checkpoints and replay
   picture.rs          Picture
   time.rs             SimTime, format_time, parse_time
   error.rs            RunError, AdvanceFailure and others

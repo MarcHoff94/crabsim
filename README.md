@@ -139,7 +139,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-The same seed always gives the same result. For a run to watch, `LiveSession` takes commands, such as `start`, `halt`, `set_speed`, `go_back`, `step_back` and `pause`, and sends back observations, which `Picture` turns into what a UI shows. `CLAUDE.md` describes all of it.
+The same seed always gives the same result. For a run to watch, `LiveSession` takes commands, such as `start`, `halt`, `set_speed`, `go_back`, `step_back` and `pause`, and sends back outputs, which `Picture` turns into what a UI shows. `CLAUDE.md` describes all of it.
 
 ## Project layout
 

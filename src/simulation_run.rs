@@ -2,7 +2,7 @@ use crate::error::{AdvanceFailure, RunError};
 use crate::event::{EventContext, EventType, ScheduledEvent};
 use crate::flows::EventInterface;
 use crate::materialflow_objects::{ModelObject, OtherObjects};
-use crate::observation::{Occurrence, OccurrenceKind, Recording, RunState};
+use crate::report::{Occurrence, OccurrenceKind, Recording, RunState};
 use crate::time::SimTime;
 use std::collections::BinaryHeap;
 use std::mem::size_of;

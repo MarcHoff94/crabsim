@@ -1,4 +1,4 @@
-use crate::observation::Occurrence;
+use crate::report::Occurrence;
 use crate::time::SimTime;
 use std::fmt;
 

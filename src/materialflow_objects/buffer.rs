@@ -1,6 +1,6 @@
 use crate::time::SimTime;
 use crate::event::{EventContext, EventTemplate, EventType, ExitTicket};
-use crate::observation::{ObjectKind, ObjectState};
+use crate::report::{ObjectKind, ObjectState};
 use crate::statistics::{MachineState, StatisticsKeeper};
 use crate::materialflow_objects::OtherObjects;
 use super::flows::{BaseObject, ProcessState, InterruptionState, MaterialFlow, StopCtrl, SuccessorContainer, MoveableUnit, EventInterface, list_blocked, retries_for_blocked, try_to_move_to_successor};

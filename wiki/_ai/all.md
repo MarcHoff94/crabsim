@@ -110,7 +110,7 @@ Discrete-event material-flow simulator in Rust, built for speed. Engine library 
 - Live sessions and views cost a headless run nothing
 
 #### Code locations
-- `src/simulation_run.rs` SimulationRun · `src/model.rs` ModelDescription · `src/event.rs` events · `src/observation.rs` occurrences and state · `src/statistics.rs` · `src/live_session.rs` · `src/picture.rs` · `src/time.rs` SimTime, format/parse · `src/main.rs` CLI · `src/demo.rs`
+- `src/simulation_run.rs` SimulationRun · `src/model.rs` ModelDescription · `src/event.rs` events · `src/report.rs` occurrences and state · `src/statistics.rs` · `src/live_session.rs` · `src/picture.rs` · `src/time.rs` SimTime, format/parse · `src/main.rs` CLI · `src/demo.rs`
 - `src/materialflow_objects/`: `model_object.rs`, `flows.rs`, `source.rs`, `station.rs`, `buffer.rs`, `drain.rs`
 - `ui/src/`: `view.rs`, `camera.rs`, `marks.rs`, `main.rs`
 
@@ -166,17 +166,17 @@ Discrete-event material-flow simulator in Rust, built for speed. Engine library 
 #### Facts
 - `LiveSession` owns a thread that builds the run from a closure, computes ahead into a buffer of instants, and releases by a `Clock`; the user sees shown time, the run is at computed time (ADR 0002)
 - Commands: start, halt, reset, set_speed, set_time_mode, go_back, step_forward, step_back, locate_step_back, set_reset_keeps_changes, request_state, pause, resume, force_failure, end_forced_failure, set_process_time, clear_statistics
-- Observations: `Occurrences`, `ShownTime`, `State` (only at Init, after Reset, after going back, on request), `Status`, `Error`, `StepBackTarget { shown, to }` (answer to `locate_step_back`, changes nothing)
+- Outputs: `Occurrences`, `ShownTime`, `State` (only at Init, after Reset, after going back, on request), `Status`, `Error`, `StepBackTarget { shown, to }` (answer to `locate_step_back`, changes nothing)
 - UI step back: `ViewState::step_back()` gives `Now`, `Confirm(to)` or `Locate`; on `Locate` the window halts, sends `locate_step_back`, and `located_step_back()` decides once answered; any other command cancels
 - Time modes: `Continuous`, `Skipping` (no gap longer than 0.25 s wall time by default)
 - Interventions act at shown time, discard the computed future and go in an intervention log; Pause and forced failure reach the run through `schedule_event`
 - Checkpoint = clone of the run + log position; going back restores the nearest earlier one and replays with recording off; every 100,000 events within 256 MB, thinning the older half, Init's always kept
-- `Picture`: what the user knows at shown time, fed every observation in order; statistics and waiting predecessors only from a full state
+- `Picture`: what the user knows at shown time, fed every output in order; statistics and waiting predecessors only from a full state
 - UI (`ui/`): Bevy + egui, demo at 60x real time, 2D flat meshes, controls, inspector, intervention marks, MUs in holders when zoomed in and slow
 - UI logic in plain Rust: `view.rs` (view state), `camera.rs`, `marks.rs`; `main.rs` only draws
 
 #### Invariants
-- Sending never blocks the session thread; past 256 unread observations it stops releasing, drops nothing
+- Sending never blocks the session thread; past 256 unread outputs it stops releasing, drops nothing
 - Engine never depends on Bevy; Picture has no Bevy types; panels are plain functions of `&mut egui::Ui`
 - Nothing in a UI may affect results
 
@@ -228,7 +228,7 @@ Discrete-event material-flow simulator in Rust, built for speed. Engine library 
 
 #### Facts
 - `tests/simulation_run.rs`: run behaviour via Init, advance, Reset, occurrences, state; helpers `secs`, `no_failures`, `station`, `preloaded_station`, `recorded`, `exit_ids`, `exit_times`, `statistics_of`
-- `tests/live_session.rs`: commands and observations with `FakeClock` and `sync`; Picture checked against the run
+- `tests/live_session.rs`: commands and outputs with `FakeClock` and `sync`; Picture checked against the run
 - `tests/cli.rs`: the binary end to end
 - Unit tests in `src/`: failures part way through an event (`RecordsThenFails`), session buffer limit and thinning
 - `ui/tests/`: view state against a real session, no window

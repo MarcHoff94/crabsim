@@ -78,5 +78,5 @@ The heap can't cancel events. A Station's `MUExit` carries an `ExitTicket` with 
 
 - `SimulationRun`, `BoundedAdvance`, `ZERO_TIME_EVENT_LIMIT` — `src/simulation_run.rs`
 - `ScheduledEvent`, `EventContext`, `ExitTicket` — `src/event.rs`
-- `RunState`, `ObjectState`, `Recording` — `src/observation.rs`
+- `RunState`, `ObjectState`, `Recording` — `src/report.rs`
 - `RunError`, `AdvanceFailure` — `src/error.rs`

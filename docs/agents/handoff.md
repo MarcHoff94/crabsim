@@ -192,7 +192,7 @@ If 1 or 3 fails, try eframe. If 2 fails, the problem is in the session, not the 
 
 ### Structure
 - **Workspace (built):** the engine stays at the repo root with its tests and benchmark, and the UI is the member crate `ui/`, called `crabsim-ui`. `cargo test` and `cargo bench` at the root never build Bevy. Run the UI with `cargo run -p crabsim-ui --profile ui`, a release profile without LTO that rebuilds in seconds.
-- **Picture (built):** `crabsim::Picture` in `src/picture.rs`, logical state only, what is where and since when. Feed it every observation in order. Visual state, such as where a marker is drawn on screen, stays in the UI.
+- **Picture (built):** `crabsim::Picture` in `src/picture.rs`, logical state only, what is where and since when. Feed it every session output in order. Visual state, such as where a marker is drawn on screen, stays in the UI.
 - **CLI (built):** a simple headless CLI. It runs the demo model with `--seed` and `--length`, the length written as the UI shows time, then prints each object's final statistics, each Drain's throughput and mean lead time, and how many events it ran in how long. A run error still prints the statistics up to it. Once model as data exists it takes a model file. `--inplace`, `RunView`, the terminal table and the topology text are gone.
 
 ### Model data for the UI
@@ -247,12 +247,12 @@ After that: model as data with the file format and save and load, with the MCP s
 All of it is on `LiveSession` in `src/live_session.rs`, and `CLAUDE.md` has the overview.
 
 - **Commands:** `start`, `halt`, `reset`, `set_speed`, `set_time_mode`, `go_back`, `step_forward`, `step_back`, `locate_step_back`, `set_reset_keeps_changes`, `request_state`, `pause`, `resume`, `force_failure`, `end_forced_failure`, `set_process_time`, `clear_statistics`.
-- **Observations**, read from a channel: `Occurrences`, `ShownTime`, `State`, `Status`, `Error`, and `StepBackTarget` in answer to `locate_step_back`.
+- **Session outputs** (`SessionOutput`), read from a channel: `Occurrences`, `ShownTime`, `State`, `Status`, `Error`, and `StepBackTarget` in answer to `locate_step_back`.
 - **Rebuilding the picture:** `crabsim::Picture` takes every observation in order and keeps what the user knows at shown time. One full state at Init, then occurrences give each object's contents, process state, every active interruption and remaining time. `WorkStarted` and `MuCreated` carry durations, so a progress bar needs no further messages. Tests prove this on 3 models: a line with failures, with overlapping pauses or forced failures, a line that blocks, and the full demo. A further test takes a picture while interruptions overlap. Buffer is left out, because its movement is broken.
 - **Model data:** a `ModelDescription` holds names, positions and dimensions in metres. A session builds its run from a closure, so a UI keeps the description beside the session to draw from.
 - **Statistics:** `request_state` gives exact numbers for the instant on screen in a few milliseconds.
 - **Going back:** usually under 15 ms, and up to about 400 ms for far jumps on a large model past the memory budget. See `docs/design/first-profile.md`.
-- **Reading has to keep up:** past 256 unread observations a session stops releasing, so a UI drains the channel every frame. At high speed, one observation can hold up to 1,000 instants, so it can't draw each of them.
+- **Reading has to keep up:** past 256 unread observations a session stops releasing, so a UI drains the channel every frame. At high speed, one session output can hold up to 1,000 instants, so it can't draw each of them.
 - **The boundary:** a session sends about 2.5 occurrences per event. The research found that even a UI in another language wouldn't need them: the Picture could stay in Rust and send one small message per frame. This matters only if the technology changes.
 - **Changing a model:** a session builds its run once, from a closure, so a changed model means a new session. Apart from a process time, which can change during a run and be kept by Reset, configuration changes have no API yet.
 - **Determinism:** nothing in a UI may affect results. Same seed and same interventions, same outcome.
@@ -297,7 +297,7 @@ The owner wants models built in the UI later, by drag and drop, by setting value
 - **Changing a class mid-run** reaches every instance whose inheritance of that value isn't cut, as an intervention at shown time. The session works out which instances that is from the model description and applies the change to each, so the run still knows nothing of classes.
 - **Experiment and simulation study,** as the owner uses them: an experiment is a model with chosen values, run with a defined seed, several times with different seeds. A simulation study is several experiments of one model, each changing different values, each run a defined number of times. MCP v1 runs one experiment's runs. Studies follow, on the same job mechanism.
 
-- **Observation** is one run of an experiment, the owner's word. "Replication" is to be avoided, and the code's `Observation`, a live session's output, is renamed `SessionOutput` before MCP v1, as a small refactor of its own.
+- **Observation** is one run of an experiment, the owner's word. "Replication" is to be avoided, and the code's `Observation`, a live session's output, was renamed `SessionOutput` as a small refactor of its own, along with `outputs()`, `OUTPUT_BACKLOG_LIMIT` and the module `observation.rs`, now `report.rs`.
 - **Seeds:** an experiment has one defined seed, and its observation *k* gets a seed derived from it in a fixed way. In a study, observation *k* of every experiment uses the same seed by default (common random numbers), which can be switched off per study.
 - **A study reports,** per experiment and statistic, the mean over its observations, a 95% confidence interval, and the minimum and maximum. Each observation's own figures stay available.
 - **Attribute** is anything about a class or instance a user can set. Name, position and connections belong to the instance, and every other attribute, including dimensions and later the 3D model, can be inherited.
@@ -366,5 +366,5 @@ Done on 2026-11-07: the wiki was rewritten against today's code, with four pages
 
 ## Possible next steps
 
-1. Model as data with the JSON model file, the `SessionOutput` rename and MCP v1. See "AI-native". The CLI then takes a model file.
+1. Model as data with the JSON model file and MCP v1, now that `SessionOutput` is renamed. See "AI-native". The CLI then takes a model file.
 2. Step 7 of the build order.

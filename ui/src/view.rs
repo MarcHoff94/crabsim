@@ -1,4 +1,4 @@
-//! The view state: from the model, a live session's observations and wall time, it works out what
+//! The view state: from the model, a live session's outputs and wall time, it works out what
 //! the window draws and which controls it offers. Bevy and egui only draw what it says.
 
 use crate::camera::Camera;
@@ -6,7 +6,7 @@ pub use crabsim::time::{format_time, format_time_exact, parse_time};
 use crate::marks::Marks;
 pub use crate::marks::{Intervention, Mark};
 use crabsim::{
-    ModelDescription, ObjectKind, ObjectStatistics, Observation, Picture, ProcessState, RunState, SessionStatus,
+    ModelDescription, ObjectKind, ObjectStatistics, SessionOutput, Picture, ProcessState, RunState, SessionStatus,
     SimTime, StopCause, TimeMode,
 };
 use std::collections::VecDeque;
@@ -218,7 +218,7 @@ pub struct Offered {
 const DETAILS_INTERVAL: Duration = Duration::from_millis(500);
 
 impl ViewState {
-    /// A view of `model`, before any observation. An object the model hasn't named is called by
+    /// A view of `model`, before any output. An object the model hasn't named is called by
     /// its type and id, and one it hasn't placed stands in a row below the origin.
     pub fn new(model: &ModelDescription) -> ViewState {
         let objects: Vec<ObjectView> = (0..model.object_count())
@@ -273,12 +273,12 @@ impl ViewState {
         }
     }
 
-    /// Takes in one observation from the session, read at wall time `wall`.
-    pub fn observe(&mut self, observation: &Observation, wall: Duration) {
+    /// Takes in one output from the session, read at wall time `wall`.
+    pub fn observe(&mut self, output: &SessionOutput, wall: Duration) {
         let shown_before = self.picture.shown();
-        self.picture.observe(observation);
-        match observation {
-            Observation::State(state) => {
+        self.picture.observe(output);
+        match output {
+            SessionOutput::State(state) => {
                 self.initialised = state.initialised;
                 // A state asked for while failed changes nothing: the error goes once the
                 // session is going again.
@@ -294,7 +294,7 @@ impl ViewState {
                 self.details = Some(state.clone());
                 self.details_stale = false;
             }
-            Observation::Status(status) => {
+            SessionOutput::Status(status) => {
                 let recovered = self.status == SessionStatus::Failed && *status != SessionStatus::Failed;
                 if *status == SessionStatus::Advancing || recovered {
                     self.error = None;
@@ -305,13 +305,13 @@ impl ViewState {
                     self.locating = false;
                 }
             }
-            Observation::Error(error) => {
+            SessionOutput::Error(error) => {
                 self.error = Some(error.to_string());
                 self.locating = false;
             }
-            Observation::Occurrences(occurrences) => self.marks.saw_occurrences(occurrences),
-            Observation::ShownTime(_) => {}
-            Observation::StepBackTarget { shown, to } => self.marks.saw_step_back_target(*shown, *to),
+            SessionOutput::Occurrences(occurrences) => self.marks.saw_occurrences(occurrences),
+            SessionOutput::ShownTime(_) => {}
+            SessionOutput::StepBackTarget { shown, to } => self.marks.saw_step_back_target(*shown, *to),
         }
         if self.status == SessionStatus::Advancing {
             self.note_pace(wall);

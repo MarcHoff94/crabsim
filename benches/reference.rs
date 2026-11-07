@@ -16,7 +16,7 @@ use crabsim::demo::build_model;
 use crabsim::event::ScheduledEvent;
 use crabsim::flows::FailureProfile;
 use crabsim::model::ModelDescription;
-use crabsim::observation::{ObjectKind, Recording};
+use crabsim::report::{ObjectKind, Recording};
 use crabsim::random_numbers::Distribution;
 use crabsim::simulation_run::SimulationRun;
 use crabsim::time::SimTime;

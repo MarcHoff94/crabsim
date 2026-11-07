@@ -1,6 +1,6 @@
 use crate::error::{InitError, MaterialflowError, RunTimeError};
 use crate::event::{EventContext, EventTemplate, EventType, ExitTicket};
-use crate::observation::{Interruption, ObjectKind, ObjectState, OccurrenceKind, StopCause};
+use crate::report::{Interruption, ObjectKind, ObjectState, OccurrenceKind, StopCause};
 use crate::statistics::{MachineState, StatisticsKeeper};
 use crate::time::SimTime;
 use super::flows::BaseObject;

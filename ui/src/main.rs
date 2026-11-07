@@ -200,12 +200,12 @@ fn setup(
     });
 }
 
-/// Reads every observation waiting, every frame: past a backlog the session stops releasing.
+/// Reads every output waiting, every frame: past a backlog the session stops releasing.
 fn drain_session(session: Res<Session>, mut ui: ResMut<Ui>, time: Res<Time<Real>>) {
     let wall = time.elapsed();
     let session = session.0.lock().expect("the session lock is never poisoned");
-    for observation in session.observations().try_iter() {
-        ui.view.observe(&observation, wall);
+    for output in session.outputs().try_iter() {
+        ui.view.observe(&output, wall);
     }
 }
 
@@ -310,7 +310,7 @@ fn request_details(session: Res<Session>, mut ui: ResMut<Ui>, time: Res<Time<Rea
         let sent = session.0.lock().expect("the session lock is never poisoned").request_state();
         ui.view.state_requested(wall);
         if let Err(error) = sent {
-            ui.view.observe(&crabsim::Observation::Error(error), wall);
+            ui.view.observe(&crabsim::SessionOutput::Error(error), wall);
         }
     }
 }
@@ -413,7 +413,7 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
         };
         match sent {
             Ok(()) => ui.view.intervened(id, intervention, wall),
-            Err(error) => ui.view.observe(&crabsim::Observation::Error(error), wall),
+            Err(error) => ui.view.observe(&crabsim::SessionOutput::Error(error), wall),
         }
     }
 
@@ -457,7 +457,7 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
         match sent {
             Ok(()) if locating => ui.view.locating_step_back(),
             Ok(()) => {}
-            Err(error) => ui.view.observe(&crabsim::Observation::Error(error), wall),
+            Err(error) => ui.view.observe(&crabsim::SessionOutput::Error(error), wall),
         }
     }
 

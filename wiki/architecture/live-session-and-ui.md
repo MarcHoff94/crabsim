@@ -17,10 +17,10 @@ A headless run needs none of this. A live session plays a run on a clock for som
 
 - **Read-ahead:** the run computes ahead as fast as it can into a bounded buffer of instants, and the clock releases what it computed. Everything the user sees follows **shown time**, while the run is at a later **computed time**. One thread alternates between computing a slice and releasing.
 - **Commands in:** `start`, `halt`, `reset`, `set_speed`, `set_time_mode`, `go_back`, `step_forward`, `step_back`, `locate_step_back`, `set_reset_keeps_changes`, `request_state`, `pause`, `resume`, `force_failure`, `end_forced_failure`, `set_process_time`, `clear_statistics`.
-- **Observations out:** `Occurrences`, `ShownTime`, `State`, `Status`, `Error`, and `StepBackTarget`, which answers `locate_step_back` with where stepping back would go, changing nothing. A full state comes only at Init, after Reset, after going back and on request. A session records everything, because its observers rebuild what they show from occurrences.
+- **Outputs out:** `Occurrences`, `ShownTime`, `State`, `Status`, `Error`, and `StepBackTarget`, which answers `locate_step_back` with where stepping back would go, changing nothing. A full state comes only at Init, after Reset, after going back and on request. A session records everything, because its observers rebuild what they show from occurrences.
 - **Time modes:** `Continuous`, or `Skipping`, where no gap between instants takes longer than a set wall time (0.25 s to start with). Results don't depend on it.
 - **Interventions** (Pause, forced failure, a process time, clearing statistics) take effect at shown time and discard the computed future. They go in an intervention log, so the same seed and the same log give the same result.
-- **Backlog:** sending never blocks the session thread. Past `OBSERVATION_BACKLOG_LIMIT` (256) unread observations it stops releasing until they are read, keeps handling commands and drops nothing. A UI drains the channel every frame.
+- **Backlog:** sending never blocks the session thread. Past `OUTPUT_BACKLOG_LIMIT` (256) unread outputs it stops releasing until they are read, keeps handling commands and drops nothing. A UI drains the channel every frame.
 - **Clock:** wall time comes from a `Clock`. Tests use a fake clock with `sync`, which blocks until the session has handled earlier commands and shown time has reached the clock.
 
 ### Checkpoints and replay
@@ -29,7 +29,7 @@ A checkpoint is a clone of the run plus how much of the intervention log is in i
 
 ## Picture
 
-`Picture` (`src/picture.rs`) is what the user knows about a run at shown time. A UI feeds it every observation in order through `observe`. A full state replaces it; occurrences then update each object's contents, process state, interruptions with when each began, and remaining time. Statistics and waiting predecessors come only from a full state. It holds nothing about drawing, so a 2D view, a 3D view and tests read the same thing.
+`Picture` (`src/picture.rs`) is what the user knows about a run at shown time. A UI feeds it every output in order through `observe`. A full state replaces it; occurrences then update each object's contents, process state, interruptions with when each began, and remaining time. Statistics and waiting predecessors come only from a full state. It holds nothing about drawing, so a 2D view, a 3D view and tests read the same thing.
 
 ## UI
 
@@ -45,7 +45,7 @@ A checkpoint is a clone of the run plus how much of the intervention log is in i
 
 Its logic is in plain Rust, tested without a window:
 
-- `ui/src/view.rs` — the view state: from the `ModelDescription`, the session's observations and wall time, it works out what is drawn, which controls are offered and whether frames are needed. A halted window draws nothing once things settle.
+- `ui/src/view.rs` — the view state: from the `ModelDescription`, the session's outputs and wall time, it works out what is drawn, which controls are offered and whether frames are needed. A halted window draws nothing once things settle.
 - `ui/src/camera.rs` — where the view looks and how close.
 - `ui/src/marks.rs` — the interventions made, mirroring the session's log.
 - `ui/src/main.rs` — Bevy and egui, drawing only what the view state says. Panels are plain functions taking `&mut egui::Ui`.
@@ -54,7 +54,7 @@ The rules from ADR 0006: the engine never depends on Bevy, Bevy's ECS stays in t
 
 ## Code references
 
-- `LiveSession`, `Observation`, `SessionSettings`, `TimeMode`, `Clock` — `src/live_session.rs`
+- `LiveSession`, `SessionOutput`, `SessionSettings`, `TimeMode`, `Clock` — `src/live_session.rs`
 - `Picture`, `ObjectPicture` — `src/picture.rs`
 - `ViewState` — `ui/src/view.rs`
 - ADR 0002 (read-ahead session), ADR 0006 (UI technology) — `docs/adr/`

@@ -1,5 +1,5 @@
 //! The picture: what the user currently knows about a simulation run at shown time, rebuilt from
-//! a live session's observations. It says what is where and since when, and nothing about how
+//! a live session's outputs. It says what is where and since when, and nothing about how
 //! that is drawn, so a 2D view, a 3D view and tests all read the same thing.
 //!
 //! It keeps what occurrences can keep current: each object's contents, process state, active
@@ -7,11 +7,11 @@
 //! occurrence, so they come only from a full state, which a UI asks the session for.
 
 use crate::flows::ProcessState;
-use crate::live_session::Observation;
-use crate::observation::{Interruption, ObjectKind, ObjectState, OccurrenceKind, RunState, StopCause};
+use crate::live_session::SessionOutput;
+use crate::report::{Interruption, ObjectKind, ObjectState, OccurrenceKind, RunState, StopCause};
 use crate::time::SimTime;
 
-/// What the user knows about a run at shown time. Feed it every observation a session sends, in
+/// What the user knows about a run at shown time. Feed it every output a session sends, in
 /// order, through `observe`.
 #[derive(Debug, Clone, Default)]
 pub struct Picture {
@@ -42,23 +42,23 @@ impl Picture {
         Picture::default()
     }
 
-    /// Takes in one observation. A full state replaces the whole picture, as after Init, Reset
+    /// Takes in one output. A full state replaces the whole picture, as after Init, Reset
     /// or going back. Occurrences update it, but only once it has a state: Init's occurrences
     /// arrive before Init's state, which already includes them.
-    pub fn observe(&mut self, observation: &Observation) {
-        match observation {
-            Observation::State(state) => self.take_state(state),
-            Observation::Occurrences(occurrences) if self.has_state => {
+    pub fn observe(&mut self, output: &SessionOutput) {
+        match output {
+            SessionOutput::State(state) => self.take_state(state),
+            SessionOutput::Occurrences(occurrences) if self.has_state => {
                 for occurrence in occurrences {
                     self.apply(&occurrence.kind, occurrence.time);
                     self.shown = self.shown.max(occurrence.time);
                 }
             }
-            Observation::ShownTime(time) => self.shown = *time,
-            Observation::Occurrences(_)
-            | Observation::Status(_)
-            | Observation::Error(_)
-            | Observation::StepBackTarget { .. } => {}
+            SessionOutput::ShownTime(time) => self.shown = *time,
+            SessionOutput::Occurrences(_)
+            | SessionOutput::Status(_)
+            | SessionOutput::Error(_)
+            | SessionOutput::StepBackTarget { .. } => {}
         }
     }
 

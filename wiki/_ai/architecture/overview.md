@@ -16,6 +16,6 @@ section: architecture
 - Live sessions and views cost a headless run nothing
 
 ## Code locations
-- `src/simulation_run.rs` SimulationRun · `src/model.rs` ModelDescription · `src/event.rs` events · `src/observation.rs` occurrences and state · `src/statistics.rs` · `src/live_session.rs` · `src/picture.rs` · `src/time.rs` SimTime, format/parse · `src/main.rs` CLI · `src/demo.rs`
+- `src/simulation_run.rs` SimulationRun · `src/model.rs` ModelDescription · `src/event.rs` events · `src/report.rs` occurrences and state · `src/statistics.rs` · `src/live_session.rs` · `src/picture.rs` · `src/time.rs` SimTime, format/parse · `src/main.rs` CLI · `src/demo.rs`
 - `src/materialflow_objects/`: `model_object.rs`, `flows.rs`, `source.rs`, `station.rs`, `buffer.rs`, `drain.rs`
 - `ui/src/`: `view.rs`, `camera.rs`, `marks.rs`, `main.rs`

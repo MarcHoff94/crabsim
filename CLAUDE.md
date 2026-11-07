@@ -37,7 +37,7 @@ cargo bench --bench reference -- --reps 9 --scenario demo-dropped
 
 **Performance** is the first thing to weigh in design trade-offs: crabsim exists to simulate long periods as fast as possible. It is a guideline and doesn't automatically win. Every significant design states its performance cost. Results stay correct, and the same seed gives the same result.
 
-- **Measure:** the benchmark (`benches/reference.rs`) tracks events per second, simulated time per wall second and peak memory. Changes to the per-event path show before and after numbers. Optimise against a measurement, except for decisions that are expensive to undo, which get settled up front. The current baseline and profile are in `docs/design/first-profile.md`.
+- **Measure:** the benchmark (`benches/reference.rs`) tracks events per second, simulated time per wall second and peak memory. Changes to the per-event path show before and after numbers. Optimise against a measurement, except for decisions that are expensive to undo, which get settled up front. The current baseline and profile are in `docs/design/first-profile.md`. The Rust version is pinned in `rust-toolchain.toml`, so changing it means a new baseline.
 - **Memory** stays flat as simulated length grows, unless the user asked for recording.
 - **Headless runs** are plain simulation runs. Live sessions, views and animation are optional layers that cost nothing when absent.
 
@@ -90,7 +90,7 @@ This is a Rust discrete-event material-flow simulator structured as a library (`
 
 **Tests** (`tests/`): `simulation_run.rs` tests behaviour at the run's interface: Init, advance, Reset, then read occurrences and state. `views.rs` tests the view adapters. `live_session.rs` tests commands in and observations out, with a fake clock, and includes rebuilding the picture from occurrences. Tests build models through `ModelDescription`. A failure part way through an event can't happen in a real object, so the few tests of it are unit tests in `src/`, using `RecordsThenFails`, a `#[cfg(test)]` variant of `ModelObject`. What can't be seen from outside a session, such as the buffer limit and thinning, is unit tested in `src/live_session.rs`.
 
-**Benchmark** (`benches/reference.rs`): runs a copy of the demo model, and 200 copies of it side by side, and reports speed and peak memory. `cargo test --all-targets` runs it without `--bench`, and then it only checks that the copy still matches the demo model.
+**Benchmark** (`benches/reference.rs`): runs a copy of the demo model, and 429 copies of it side by side (6,006 objects), and reports speed and peak memory. `cargo test --all-targets` runs it without `--bench`, and then it only checks that the copy still matches the demo model.
 
 ## Key Conventions
 

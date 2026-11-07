@@ -1,0 +1,5 @@
+# Pinned so benchmark baselines and builds compare like with like. Bevy 0.20 needs at least 1.97.1.
+# Change it on purpose: re-run `cargo bench --bench reference` before and after, and record the new
+# baseline in docs/design/first-profile.md.
+[toolchain]
+channel = "1.99.1"

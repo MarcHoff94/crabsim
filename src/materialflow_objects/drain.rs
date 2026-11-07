@@ -56,6 +56,7 @@ impl EventInterface for Drain {
             blocked_predecessors: self.blockedlist.clone(),
             successors: Vec::new(),
             capacity: 0,
+            process_time: None,
             statistics: self.statistics.read(now),
         }
     }

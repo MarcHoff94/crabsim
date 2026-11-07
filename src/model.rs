@@ -1,10 +1,55 @@
 //! A minimal description of a model, so that building one takes no knowledge of how a run stores
 //! its objects. It doesn't validate connections yet: illegal ones still panic while running.
+//!
+//! It also holds what a view needs and a run doesn't: each object's name, position and
+//! dimensions. A run never sees them, so they can't change a result and cost a headless run
+//! nothing.
 
 use crate::flows::{FailureProfile, MoveableUnit};
 use crate::materialflow_objects::{Buffer, Drain, ModelObject, SingleStation, Source};
+use crate::observation::ObjectKind;
 use crate::simulation_run::SimulationRun;
 use crate::time::SimTime;
+
+/// Where an object stands, in metres: the centre of its footprint. `z` is its height above the
+/// floor, 0 until there is a 3D view.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Position {
+    pub x: f64,
+    pub y: f64,
+    pub z: f64,
+}
+
+/// An object's real size in metres, and its rotation around the vertical axis in degrees. Visual
+/// only: an MU moves instantly whatever the distance.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Dimensions {
+    pub length: f64,
+    pub width: f64,
+    pub height: f64,
+    pub rotation_degrees: f64,
+}
+
+impl Dimensions {
+    /// The size an object has until it is given one, by type. These are placeholders for drawing,
+    /// not measurements of anything.
+    pub fn default_for(kind: ObjectKind) -> Dimensions {
+        let (length, width, height) = match kind {
+            ObjectKind::Source | ObjectKind::Drain => (1.0, 1.0, 1.0),
+            ObjectKind::Station => (2.0, 1.5, 1.5),
+            ObjectKind::Buffer => (2.0, 1.0, 1.0),
+        };
+        Dimensions { length, width, height, rotation_degrees: 0.0 }
+    }
+}
+
+/// What a view needs to know about one object, beyond what the run needs.
+#[derive(Clone, Default)]
+struct Layout {
+    name: Option<String>,
+    position: Option<Position>,
+    dimensions: Option<Dimensions>,
+}
 
 /// The objects of a model and how they connect. Each `add_` returns the new object's id, which
 /// is also the order Init visits them in. One description can build any number of runs, such as
@@ -12,6 +57,8 @@ use crate::time::SimTime;
 #[derive(Clone, Default)]
 pub struct ModelDescription {
     objects: Vec<ModelObject>,
+    /// One entry per object, by id.
+    layout: Vec<Layout>,
 }
 
 impl ModelDescription {
@@ -56,9 +103,52 @@ impl ModelDescription {
         successors.push(to);
     }
 
-    /// Builds a run of this model, in its default state.
+    /// Builds a run of this model, in its default state. Names, positions and dimensions stay
+    /// behind: the run has no use for them.
     pub fn build(&self, seed: u64) -> SimulationRun {
         SimulationRun::new(self.objects.clone(), seed)
+    }
+
+    /// How many objects the model has. Their ids run from 0 to one less than this.
+    pub fn object_count(&self) -> u32 {
+        self.objects.len() as u32
+    }
+
+    pub fn kind(&self, id: u32) -> ObjectKind {
+        match self.object(id) {
+            ModelObject::Source(_) => ObjectKind::Source,
+            ModelObject::Station(_) => ObjectKind::Station,
+            ModelObject::Buffer(_) => ObjectKind::Buffer,
+            ModelObject::Drain(_) => ObjectKind::Drain,
+            #[cfg(test)]
+            ModelObject::RecordsThenFails(_) => ObjectKind::Station,
+        }
+    }
+
+    pub fn set_name(&mut self, id: u32, name: impl Into<String>) {
+        self.layout_mut(id).name = Some(name.into());
+    }
+
+    pub fn name(&self, id: u32) -> Option<&str> {
+        self.layout(id).name.as_deref()
+    }
+
+    pub fn set_position(&mut self, id: u32, position: Position) {
+        self.layout_mut(id).position = Some(position);
+    }
+
+    /// Where the object stands, if it has been placed.
+    pub fn position(&self, id: u32) -> Option<Position> {
+        self.layout(id).position
+    }
+
+    pub fn set_dimensions(&mut self, id: u32, dimensions: Dimensions) {
+        self.layout_mut(id).dimensions = Some(dimensions);
+    }
+
+    /// The object's dimensions, or its type's default size if it hasn't been given any.
+    pub fn dimensions(&self, id: u32) -> Dimensions {
+        self.layout(id).dimensions.unwrap_or_else(|| Dimensions::default_for(self.kind(id)))
     }
 
     fn next_id(&self) -> u32 {
@@ -68,6 +158,19 @@ impl ModelDescription {
     fn add(&mut self, object: ModelObject) -> u32 {
         let id = self.next_id();
         self.objects.push(object);
+        self.layout.push(Layout::default());
         id
+    }
+
+    fn object(&self, id: u32) -> &ModelObject {
+        self.objects.get(id as usize).unwrap_or_else(|| panic!("object {id} is not in the model"))
+    }
+
+    fn layout(&self, id: u32) -> &Layout {
+        self.layout.get(id as usize).unwrap_or_else(|| panic!("object {id} is not in the model"))
+    }
+
+    fn layout_mut(&mut self, id: u32) -> &mut Layout {
+        self.layout.get_mut(id as usize).unwrap_or_else(|| panic!("object {id} is not in the model"))
     }
 }

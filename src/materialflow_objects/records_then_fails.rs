@@ -45,6 +45,7 @@ impl EventInterface for RecordsThenFails {
             blocked_predecessors: Vec::new(),
             successors: Vec::new(),
             capacity: 0,
+            process_time: None,
             statistics: Default::default(),
         }
     }

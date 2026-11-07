@@ -229,6 +229,7 @@ impl EventInterface for Buffer {
             blocked_predecessors: self.blockedlist.clone(),
             successors: self.succ.clone(),
             capacity: self.statistics.capacity(),
+            process_time: None,
             statistics: self.statistics.read(now),
         }
     }

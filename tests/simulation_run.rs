@@ -5,7 +5,7 @@ use crabsim::demo::build_model;
 use crabsim::flows::MaterialFlow;
 use crabsim::random_numbers::Distribution;
 use crabsim::{
-    Drain, EventType, FailureProfile, ModelDescription, ObjectStatistics, Occurrence, OccurrenceKind, OccurrenceType,
+    Dimensions, Drain, EventType, FailureProfile, ModelDescription, ObjectKind, Position, ObjectStatistics, Occurrence, OccurrenceKind, OccurrenceType,
     ProcessState, Recording, RunError, RunState, SimTime, SimulationRun, SingleStation, StopCause,
     ZERO_TIME_EVENT_LIMIT,
 };
@@ -618,6 +618,22 @@ fn state_reports_every_object_with_its_connections() {
     assert_eq!(object(&state, st_id).contents, vec![1]);
     assert_eq!(object(&state, st_id).process, ProcessState::Processing);
     assert_eq!(object(&state, st_id).remaining, Some(secs(40)));
+}
+
+#[test]
+fn state_reports_a_stations_process_time() {
+    let mut model = ModelDescription::new();
+    let src = source(&mut model, 10);
+    let st = station(&mut model, 25);
+    let dr = drain(&mut model);
+    model.connect(src, st);
+    model.connect(st, dr);
+    let mut run = model.build(0);
+    run.init().unwrap();
+    let state = run.state();
+    assert_eq!(object(&state, st).process_time, Some(secs(25)));
+    assert_eq!(object(&state, src).process_time, None);
+    assert_eq!(object(&state, dr).process_time, None);
 }
 
 #[test]
@@ -1399,6 +1415,54 @@ fn a_connection_from_an_object_to_itself_panics_when_used() {
     let mut run = recorded(model.build(0));
     run.init().unwrap();
     let _ = run.advance_to(secs(10));
+}
+
+#[test]
+fn a_description_keeps_names_positions_and_dimensions() {
+    let mut model = line_with_random_failures();
+    let at = Position { x: 12.5, y: -3.0, z: 0.0 };
+    let size = Dimensions { length: 4.0, width: 2.5, height: 1.8, rotation_degrees: 90.0 };
+    model.set_name(1, "Press");
+    model.set_position(1, at);
+    model.set_dimensions(1, size);
+    assert_eq!(model.object_count(), 3);
+    assert_eq!(model.kind(1), ObjectKind::Station);
+    assert_eq!(model.name(1), Some("Press"));
+    assert_eq!(model.position(1), Some(at));
+    assert_eq!(model.dimensions(1), size);
+    assert_eq!(model.name(0), None);
+    assert_eq!(model.position(0), None);
+}
+
+#[test]
+fn dimensions_default_to_a_size_for_each_object_type() {
+    let model = line_with_random_failures();
+    assert_eq!(model.dimensions(0), Dimensions::default_for(ObjectKind::Source));
+    assert_eq!(model.dimensions(1), Dimensions::default_for(ObjectKind::Station));
+    assert_eq!(model.dimensions(2), Dimensions::default_for(ObjectKind::Drain));
+    assert_ne!(Dimensions::default_for(ObjectKind::Station), Dimensions::default_for(ObjectKind::Drain));
+}
+
+#[test]
+fn names_positions_and_dimensions_change_no_result() {
+    let plain = line_with_random_failures();
+    let mut placed = line_with_random_failures();
+    for id in 0..3 {
+        placed.set_name(id, format!("object {id}"));
+        placed.set_position(id, Position { x: id as f64 * 100.0, y: 7.0, z: 0.0 });
+        placed.set_dimensions(id, Dimensions { length: 30.0, width: 9.0, height: 2.0, rotation_degrees: 45.0 });
+    }
+    let (mut a, mut b) = (recorded(plain.build(3)), recorded(placed.build(3)));
+    assert_eq!(a.init().unwrap(), b.init().unwrap());
+    assert_eq!(a.advance_to(secs(20_000)).unwrap(), b.advance_to(secs(20_000)).unwrap());
+    assert_eq!(a.state(), b.state());
+}
+
+#[test]
+#[should_panic(expected = "is not in the model")]
+fn a_position_must_name_an_object_in_the_model() {
+    let mut model = line_with_random_failures();
+    model.set_position(3, Position { x: 0.0, y: 0.0, z: 0.0 });
 }
 
 // ---------- Threads ----------

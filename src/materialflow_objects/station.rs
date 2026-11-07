@@ -423,6 +423,7 @@ impl EventInterface for SingleStation {
 			blocked_predecessors: self.blockedlist.clone(),
 			successors: self.succ.clone(),
 			capacity: self.statistics.capacity(),
+			process_time: Some(self.proc_time),
 			statistics: self.statistics.read(now),
 		}
 	}

@@ -187,6 +187,7 @@ impl EventInterface for Source {
 			blocked_predecessors: Vec::new(),
 			successors: self.succ.clone(),
 			capacity: self.statistics.capacity(),
+			process_time: None,
 			statistics: self.statistics.read(now),
 		}
 	}

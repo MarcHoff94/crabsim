@@ -113,6 +113,8 @@ pub struct ObjectState {
     pub successors: Vec<u32>,
     /// How many MUs a Station or Buffer can hold. 0 for a Source or Drain.
     pub capacity: u64,
+    /// How long a Station works on one MU. `None` for other objects.
+    pub process_time: Option<SimTime>,
     pub statistics: ObjectStatistics,
 }
 

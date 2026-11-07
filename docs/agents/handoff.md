@@ -225,7 +225,7 @@ Each states its cost, as `CLAUDE.md` asks. Where one touches the per-event path,
 2. ✅ The prototype, with its results in `docs/design/ui-prototype.md`. Bevy with `bevy_egui` holds up. It found a bug in the live session, which lost about 30% of shown time at high load. Fixed in PR 19: `release` now reads the clock once.
 3. ✅ ADR 0006 for the technology.
 4. ✅ The workspace, and the Picture moved into the library, as `crabsim::Picture`. The `ui/` crate only opens a window so far.
-5. The engine additions above, with names, positions and dimensions on `ModelDescription`.
+5. The engine additions above, with names, positions and dimensions on `ModelDescription`. *Done so far:* names, positions and dimensions, and each Station's process time in the full state.
 6. UI stage 1.
 7. Trim the CLI to the headless version.
 

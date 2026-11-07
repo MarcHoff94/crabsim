@@ -1,5 +1,6 @@
 //! The headless CLI, run as its binary: the demo model with a seed and a simulated length, then
-//! each object's final statistics and how long the run took.
+//! each object's final statistics and how long the run took, and with a models folder, experiments
+//! kept in the results store.
 
 use crabsim::time::parse_time;
 use crabsim::{demo, SimTime};
@@ -110,4 +111,106 @@ fn a_model_file_that_cant_be_read_is_refused() {
     let output = crabsim(&["--model", "no/such/model.json"]);
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("can't be read"));
+}
+
+/// A models folder of its own holding the demo model, removed afterwards.
+struct Models(std::path::PathBuf);
+
+impl Models {
+    fn new(name: &str) -> Models {
+        let path = std::env::temp_dir().join(format!("crabsim-cli-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::copy(demo_file(), path.join("demo.json")).unwrap();
+        Models(path)
+    }
+
+    fn arg(&self) -> &str {
+        self.0.to_str().unwrap()
+    }
+}
+
+impl Drop for Models {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+#[test]
+fn run_runs_an_experiment_prints_its_results_and_keeps_them() {
+    let models = Models::new("run");
+    let output = crabsim(&["run", "--models", models.arg(), "--model", "demo.json", "--seed", "4", "--length", "2:00:00", "--observations", "3", "--label", "baseline"]);
+    assert!(output.status.success(), "{output:?}");
+    let printed = stdout(&output);
+    assert!(printed.starts_with("run-1 \"baseline\": demo.json, seed 4, 3 observations of 02:00:00"), "{printed}");
+    assert!(printed.contains("Drain (Drain, Drain): drain"), "{printed}");
+    assert!(printed.contains("throughput_per_hour"), "{printed}");
+    assert!(models.0.join(".crabsim/results.sqlite").is_file());
+
+    // Each observation's reported seed reproduces it as a single run, also from the CLI.
+    let query = crabsim(&["query", "--models", models.arg(), "SELECT o.seed, s.value FROM observations o JOIN statistics s ON s.run = o.run AND s.observation = o.number WHERE s.object = 'Drain' AND s.statistic = 'mus_in' ORDER BY o.number"]);
+    assert!(query.status.success(), "{query:?}");
+    let rows: Vec<Vec<String>> = stdout(&query).lines().skip(1).filter(|line| !line.ends_with("rows")).map(|line| line.split_whitespace().map(String::from).collect()).collect();
+    assert_eq!(rows.len(), 3, "{}", stdout(&query));
+    for row in rows {
+        let single = crabsim(&["--model", &demo_file(), "--seed", &row[0], "--length", "2:00:00"]);
+        let mus: f64 = row[1].parse().unwrap();
+        assert!(stdout(&single).contains(&format!("Drain: {mus} MUs")), "seed {}: {}", row[0], stdout(&single));
+    }
+}
+
+#[test]
+fn runs_lists_the_runs_newest_first_and_results_prints_one() {
+    let models = Models::new("runs");
+    for label in ["first", "second"] {
+        let output = crabsim(&["run", "--models", models.arg(), "--model", "demo.json", "--length", "1:00:00", "--label", label]);
+        assert!(output.status.success(), "{output:?}");
+    }
+    let listed = stdout(&crabsim(&["runs", "--models", models.arg()]));
+    let lines: Vec<&str> = listed.lines().collect();
+    assert!(lines[0].starts_with("Run"), "{listed}");
+    assert!(lines[1].starts_with("run-2  second"), "{listed}");
+    assert!(lines[2].starts_with("run-1  first"), "{listed}");
+    assert!(lines[1].contains("cli") && lines[1].contains("done"), "{listed}");
+
+    let results = crabsim(&["results", "--models", models.arg(), "run-1", "--object", "Station 1"]);
+    assert!(results.status.success(), "{results:?}");
+    let printed = stdout(&results);
+    assert!(printed.starts_with("run-1 \"first\""), "{printed}");
+    assert!(printed.contains("Station 1 (Demo station, Station): chosen"), "{printed}");
+    assert!(!printed.contains("Drain (Drain"), "only what was asked for: {printed}");
+
+    let missing = crabsim(&["results", "--models", models.arg(), "run-9"]);
+    assert!(!missing.status.success());
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("run-9"));
+}
+
+#[test]
+fn query_refuses_to_change_the_store() {
+    let models = Models::new("query");
+    let output = crabsim(&["query", "--models", models.arg(), "DELETE FROM runs"]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("SELECT"));
+    let output = crabsim(&["query", "--models", models.arg(), "SELECT 1 AS one"]);
+    assert_eq!(stdout(&output), "one\n  1\n1 row\n");
+}
+
+#[test]
+fn a_folder_holding_source_code_is_refused_as_a_models_folder() {
+    let repository = concat!(env!("CARGO_MANIFEST_DIR"), "/..");
+    let output = crabsim(&["runs", "--models", repository]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("source code"));
+    assert!(!std::path::Path::new(repository).join(".crabsim").exists(), "nothing was written");
+}
+
+#[test]
+fn an_invalid_model_is_refused_by_run_with_every_problem() {
+    let models = Models::new("invalid");
+    std::fs::write(models.0.join("broken.json"), r#"{ "format_version": 1, "instances": [ { "name": "In", "class": "Source", "successors": ["Nowhere"] } ] }"#).unwrap();
+    let output = crabsim(&["run", "--models", models.arg(), "--model", "broken.json"]);
+    assert!(!output.status.success());
+    let errors = String::from_utf8_lossy(&output.stderr);
+    assert!(errors.contains("/instances/0 \"In\": a Source needs an `interval`"), "{errors}");
+    assert!(errors.contains("/instances/0/successors/0 \"In\": no instance is called `Nowhere`"), "{errors}");
 }

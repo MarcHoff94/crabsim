@@ -1,0 +1,19 @@
+[package]
+name = "crabsim-mcp"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "crabsim's MCP server: every operation of the catalogue as a tool, over stdio"
+
+[[bin]]
+name = "crabsim-mcp"
+path = "src/main.rs"
+
+[dependencies]
+crabsim-catalogue = { path = "../catalogue" }
+# Pinned: the MCP SDK changes quickly, and this is the version the design round chose.
+rmcp = { version = "=3.9.0", features = ["server", "transport-io"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std"] }
+clap = { version = "4.5", features = ["derive"] }
+serde_json = "1"
+env_logger = "0.11.8"

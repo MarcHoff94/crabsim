@@ -16,6 +16,8 @@ pub(crate) fn entries() -> Vec<Entry> {
         entry::<CopyModel>(),
         entry::<DeleteModel>(),
     ];
+    entries.extend(crate::jobs::entries());
+    entries.extend(crate::results::entries());
     entries.extend(crate::store::entries());
     entries
 }

@@ -63,6 +63,7 @@ CREATE TABLE IF NOT EXISTS statistics (
     value REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS statistics_by_run ON statistics (run, statistic, object);
+CREATE INDEX IF NOT EXISTS statistics_by_object ON statistics (run, object);
 ";
 
 /// The tables and statistic names, as `query_results` describes them to an agent.

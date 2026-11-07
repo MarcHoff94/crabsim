@@ -9,37 +9,44 @@ related:
 
 # Moveable Units
 
-## What a MU is
+## What an MU is
 
-A Moveable Unit (MU) is the "part" that travels through the material flow network. In crabsim it is a small value type:
+A moveable unit (MU) is whatever travels through the model, such as a part. In crabsim it is a small value:
 
 ```rust
 pub struct MoveableUnit {
     pub id: u32,
     pub location_id: u32,
+    /// When it left its Source, where its lead time starts.
+    pub left_source: SimTime,
 }
 ```
 
-`id` is a globally unique identifier assigned sequentially by the `Source`. `location_id` is the `object_id` of the station currently holding the MU — it gets updated as the MU moves.
+## Identity
 
-## Identity and ordering
+MU ids are unique across the whole model. The run hands them out through `EventContext::new_mu_id`, starting above the highest id of any configured starting MU. Because a Source creates MUs in order, a lower id from one Source also means an earlier MU.
 
-The `Source` assigns IDs starting at 1, incrementing with each new MU (`mu_id` counter). Because IDs are sequential and the source produces MUs in order, the ID also encodes creation order. The `Drain` records `exit_ids` in arrival order, so comparing `exit_ids` against `[1, 2, 3, ...]` is how tests verify FIFO semantics end-to-end.
+## Where an MU lives
 
-## One MU per station
-
-`SingleStation` holds `content: Option<MoveableUnit>`. It can process exactly one MU at a time. When `content` is `Some`, the station's entrance is locked and no further MUs can enter. The MU is taken from `content` (via `take_content()`) only when it successfully transfers to a successor.
+- **Source:** holds the MU it is creating, from its creation until it moves on. A Source creates its first MU at Init.
+- **Station:** holds at most one MU (`content: Option<MoveableUnit>`). While it holds one, its entrance is locked. A Station can be configured with a **starting MU**, which is part of its default state: worked on from Init, and back as a fresh copy after Reset.
+- **Drain:** keeps no MU. It counts it in its statistics and records `MuLeft` with its lead time.
 
 ## Lifecycle
 
-1. `Source::create_mu()` — allocates MU with next `mu_id`, stores in `content`, schedules `MUExit` after `proc_time`.
-2. `try_to_move_to_successor` — takes the MU from the predecessor via `take_content()` and hands it to the successor via `process_mu_entrance(mu)`.
-3. `Drain::process_mu_entrance(mu)` — records `current_time` in `exits` and `mu.id` in `exit_ids`. MU is not stored; it is consumed.
+1. `Source::create_mu` gives the MU a new id, records `MuCreated` and schedules its `MUExit` after the interval.
+2. `try_to_move_to_successor` takes it from its holder (`take_content`), records `MuMoved` and hands it to the successor (`process_mu_entrance`).
+3. A Station records `WorkStarted`, and `WorkFinished` when its process time is up.
+4. `Drain::process_mu_entrance` records `MuLeft` with the lead time, from leaving its Source to entering the Drain.
+
+## Per-MU data
+
+Nothing is kept per MU unless the run records occurrences (ADR 0004). A headless run records nothing by default, so its memory stays flat however long it runs. Tests that check order read `MuLeft` occurrences from a run with recording on.
 
 ## Code references
 
-- `MoveableUnit` struct — `src/materialflow_objects/flows.rs`
+- `MoveableUnit` — `src/materialflow_objects/flows.rs`
 - `Source::create_mu` — `src/materialflow_objects/source.rs`
-- `SingleStation::content` — `src/materialflow_objects/station.rs`
-- `Drain::exits`, `Drain::exit_ids` — `src/materialflow_objects/drain.rs`
-- `take_content` (SuccessorContainer trait) — `src/materialflow_objects/flows.rs`
+- `SingleStation::content`, `starting_content` — `src/materialflow_objects/station.rs`
+- `Drain::process_mu_entrance` — `src/materialflow_objects/drain.rs`
+- `EventContext::new_mu_id` — `src/event.rs`

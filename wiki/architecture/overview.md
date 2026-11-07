@@ -2,92 +2,101 @@
 title: Architecture Overview
 section: architecture
 related:
-  - simulator-and-event-controller
+  - simulation-run
   - material-flow-objects
-  - discrete-event-simulation
+  - live-session-and-ui
 ---
 
 # Architecture Overview
 
-## The four layers
+## Two crates
+
+crabsim is a Cargo workspace. The engine is the root package, a library with a headless CLI. The UI is the member crate `ui/` (`crabsim-ui`), a Bevy application (ADR 0006). The engine is the only default member, so `cargo test` and `cargo bench` at the root never build Bevy, and the engine never depends on the UI.
+
+## Layers
 
 ```
-┌─────────────────────────────────────────────────┐
-│  EventController  (time engine)                 │
-│  BinaryHeap<ScheduledEvent>  ·  seq counter     │
-├─────────────────────────────────────────────────┤
-│  Simulator  (registry)                          │
-│  HashMap<u32, Rc<RefCell<dyn MaterialFlow>>>    │
-├─────────────────────────────────────────────────┤
-│  Material flow objects  (domain logic)          │
-│  Source · SingleStation · Drain                 │
-├─────────────────────────────────────────────────┤
-│  Visualization  (output)                        │
-│  Console (ANSI) · External renderer (TCP/JSON)  │
-└─────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│  Front-ends                                                  │
+│  headless CLI (src/main.rs) · UI (ui/, Bevy + egui)          │
+├──────────────────────────────────────────────────────────────┤
+│  Live session (optional)                                     │
+│  LiveSession: computes ahead, releases on a clock,           │
+│  checkpoints and replay · Picture: what the user knows       │
+├──────────────────────────────────────────────────────────────┤
+│  Simulation run                                              │
+│  SimulationRun: Vec<ModelObject>, BinaryHeap<ScheduledEvent>,│
+│  clock, recording, statistics                                │
+├──────────────────────────────────────────────────────────────┤
+│  Material-flow objects                                       │
+│  enum ModelObject { Source, Station, Buffer, Drain }         │
+└──────────────────────────────────────────────────────────────┘
 ```
 
-## Control flow during a simulation run
+A run with nothing attached is a headless run: build, Init, advance, read the state. The live session and views are optional layers that cost nothing when absent.
+
+## Building and running a model
 
 ```
-eventcontroller.init(&mut simulator)
-  └─ calls init() on every registered object
-  └─ objects return initial EventTemplates
-  └─ EventController schedules them
+ModelDescription::new()
+  add_source / add_station / add_buffer / add_drain → ids
+  connect(from, to)
+  build(seed) → SimulationRun
 
-eventcontroller.run(simulator)
-  loop:
-    pop earliest ScheduledEvent from BinaryHeap
-    advance clock to event.time
-    look up object by event.object_id in simulator.material_flows
-    call object.execute_event(eventtype)
-    object returns Vec<EventTemplate>
-    schedule each at current_time + template.exec_time
-  until queue empty or endtime reached
+run.init()          t = 0, every object's init in id order, first events queued
+run.advance_to(t)   process events up to and including t, clock left at t
+run.state()         RunState: every object's ObjectState, with statistics
+run.reset()         every object back to its default state
 ```
 
-## Data flow for a single MU
+Every advance returns the occurrences the run is recording, none by default. A failed advance returns an `AdvanceFailure` holding the `RunError` and everything recorded before it.
+
+## Ownership
+
+A run owns its objects in one `Vec<ModelObject>`, indexed by id, and objects refer to each other only by id (ADR 0005). While one object handles an event, the run splits the `Vec` around it, and the object reaches the others through `OtherObjects`. So there is no shared ownership and no `unsafe`, and a run executes on one thread at a time and can move between threads. A clone of a run is a checkpoint.
+
+## Data flow for one MU
 
 ```
-Source::create_mu()
-  → schedules MUExit after proc_time
-
-Source::execute_event(MUExit)
-  → try_to_move_to_successor → SingleStation::process_mu_entrance(mu)
-  → SingleStation schedules MUExit after its proc_time
-  → Source creates next MU
-
-SingleStation::execute_event(MUExit)
-  → try_to_move_to_successor → next station or Drain
-  → on success: unlocks entrance, notifies blocked predecessors
-  → on failure: goes Blocked, records self in successors' blockedlists
-
-Drain::process_mu_entrance(mu)
-  → records current_time in exits, mu.id in exit_ids
+Source::init / create_mu         MuCreated, MUExit after the interval
+Source MUExit                    try_to_move_to_successor
+  → Station::process_mu_entrance  MuMoved, WorkStarted, MUExit after the process time
+Station MUExit                   WorkFinished, try_to_move_to_successor
+  moved     → Idle, entrance unlocked, retries to waiting predecessors
+  refused   → Blocked, listed at each successor that refused
+Drain::process_mu_entrance       MuLeft with lead time, exit statistics
 ```
-
-## Ownership model
-
-Every material flow object is heap-allocated behind `Rc<RefCell<T>>`. This allows multiple owners (a station can appear in both its predecessor's `succ` list and its successor's `pred` list) while still providing mutable access at event dispatch time. The `Simulator` holds the canonical `HashMap` reference; `succ`/`pred` vectors hold additional clones of the same `Rc`.
 
 ## Module map
 
 ```
 src/
-  lib.rs              public API, run_demo(), unit tests
-  main.rs             CLI parsing, calls run_demo()
-  simulator.rs        Simulator, EventController
-  event.rs            EventType, EventTemplate, ScheduledEvent
-  error.rs            error types
+  lib.rs              public API, re-exports
+  main.rs             headless CLI
+  demo.rs             the demo model, with names and positions
+  model.rs            ModelDescription, Position, Dimensions
+  simulation_run.rs   SimulationRun
+  event.rs            EventType, EventTemplate, ScheduledEvent, EventContext, ExitTicket
+  observation.rs      Occurrence, Recording, ObjectState, RunState, StopCause
+  statistics.rs       StatisticsKeeper, ObjectStatistics
+  live_session.rs     LiveSession, Observation, checkpoints and replay
+  picture.rs          Picture
+  time.rs             SimTime, format_time, parse_time
+  error.rs            RunError, AdvanceFailure and others
   random_numbers.rs   Distribution, DistributionSampler
   materialflow_objects/
-    mod.rs            re-exports
+    model_object.rs   ModelObject, OtherObjects
     flows.rs          traits, MoveableUnit, FailureProfile, movement helpers
-    source.rs         Source
-    station.rs        SingleStation
-    drain.rs          Drain
-  visualization/
-    mod.rs
-    topology.rs       network topology printer
-    state.rs          state snapshot structs and renderer
+    source.rs · station.rs · buffer.rs · drain.rs
+ui/src/
+  main.rs             Bevy and egui, drawing what the view state says
+  view.rs             the view state, plain Rust
+  camera.rs · marks.rs
 ```
+
+## Code references
+
+- `SimulationRun` — `src/simulation_run.rs`
+- `ModelObject`, `OtherObjects` — `src/materialflow_objects/model_object.rs`
+- `ModelDescription` — `src/model.rs`
+- ADRs — `docs/adr/`

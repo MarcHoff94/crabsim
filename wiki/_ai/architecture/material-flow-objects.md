@@ -4,45 +4,24 @@ for: architecture/material-flow-objects.md
 section: architecture
 ---
 
-## Trait summary
-- `EventInterface`: `init`, `execute_event`, `get/set_object_id`, `set_random_seed`, `as_any`
-- `MaterialFlow: EventInterface`: entrance/exit gates, `process_mu_entrance/exit`, `add_blocked`, `remove_blocked`, `notify_blocked_predecessors`
-- `SuccessorContainer`: `successors`, `succ_pointer/mut`, `take_content`, `clear_content_and_idle`
+## Facts
+- `enum ModelObject { Source, Station(SingleStation), Buffer, Drain, #[cfg(test)] RecordsThenFails }`; traits dispatched by `on_the_object!`
+- Traits: `EventInterface` (init, execute_event, reset, report, clear_statistics, ids, seed), `StopCtrl` (`todo!()` everywhere), `MaterialFlow` (entrance/exit allowed, `process_mu_entrance`, blocked list, notify), `SuccessorContainer` (successors as ids, `succ_pointer`, `take_content(now)`, `statistics_mut`)
+- Station: entrance only when Idle, not stopped, not locked; exit when Idle or Blocked and not stopped, never Processing
+- Station stops: random failure, forced failure, Pause, each its own flag; first interruption freezes work, last to end resumes; completion time = entry + process time + time stopped, overlaps once
+- `state()` reports the most serious interruption as `stop` (Failure > ForcedFailure > Pause) and all of them, with since when, in `interruptions`
+- `FailureProfile::new(availability, mttr_distribution, seed)`; MTBF mean = mttr_mean / (1/availability - 1); 1.0 = never fails; distributions CONSTANT, UNIFORM, NORMAL, ERLANG
+- Source creates the first MU at Init, the next once one moves; never accepts MUs; no stops yet
+- Drain: entrance always open, records `MuLeft` and exit statistics, keeps no MU, handles no events
 
-## Source
-- `mu_id` starts at 0, incremented to 1 on first `create_mu()` — first MU has id=1
-- `init()` calls `create_mu()` → schedules `MUExit` at `exec_time = proc_time`
-- `is_entrance_allowed()` = false; `process_mu_entrance` panics; `add_blocked` panics
-- On `MUExit`: push MU to successor → create next MU. On failure: `ProcessState::Blocked`
+## Invariants
+- Every object calls `update_statistics` at the end of everything it handles
+- Every object implements `reset` fully, incl. starting MUs; new fields need reset tests
+- A second random failure while failed is discarded; random failures continue under a forced one
 
-## SingleStation key fields
-- `content: Option<MoveableUnit>` — None = idle; Some = processing or blocked
-- `remain_proc_time: Duration` — tracks time left; reset on each `process_mu_entrance`
-- `interrupted_remain_proc_time: Option<Duration>` — saved by `StartFailure` if station was Processing; consumed by `EndFailure` to resume the `MUExit`
-- `entrancelocked: bool` — set true on `process_mu_entrance`, cleared when MU exits
-- `state: ProcessState` — `Idle | Processing | Blocked`
-- `interruption: InterruptionState` — `None | Failed | Paused`
-- `is_entrance_allowed()` = `!entrancelocked && state==Idle && interruption==None`
-- `is_exit_allowed()` = `!exitlocked && (state==Idle||state==Blocked) && interruption==None`
-- `set_random_seed(seed)` also calls `failure_profile.reseed(seed)` so each object has an independent RNG stream
-
-## Drain
-- `entrance_locked` starts false; nothing sets it true in current code → always accepts
-- Records `exits: Vec<Duration>` and `exit_ids: Vec<u32>` on each `process_mu_entrance`
-- `notify_blocked_predecessors` returns `Ok(None)` — drain never blocks predecessors
-- `execute_event` has no active match arms — drain receives no scheduled events
-
-## FailureProfile
-- `FailureProfile::new(availablity, distribution_mttr, seed)` — 3 args; MTBF distribution derived automatically as same shape scaled to `mttr_mean / (1/availablity - 1)`
-- `availability=1.0` → `active=false`, no failure scheduling (availability is a fraction in `(0.0,1.0]`, not a percentage)
-- `availability<1.0` → `active=true`; `init()` schedules first `StartFailure`; MTBF mean = `mttr_mean / (1/availability - 1)`
-- `reseed(seed)`: replaces both samplers preserving shape (MTBF sampler uses `seed+1`)
-- Demo: `availability=0.9`, Erlang(mean=60 000 ms, k=2) MTTR
-- `Distribution` has `mean() -> f64` and `with_mean(f64) -> Distribution` utility methods
+## Pitfalls
+- Buffer is broken: loses MUs, never notifies predecessors, ignores a retry's `from`
 
 ## Code locations
-- Traits + `FailureProfile` + `ProcessState` — `src/materialflow_objects/flows.rs`
-- `Source` — `src/materialflow_objects/source.rs`
-- `SingleStation` — `src/materialflow_objects/station.rs`
-- `Drain` — `src/materialflow_objects/drain.rs`
-- `Distribution`, `DistributionSampler` — `src/random_numbers.rs`
+- `src/materialflow_objects/model_object.rs`, `flows.rs`, `source.rs`, `station.rs`, `buffer.rs`, `drain.rs`
+- `src/random_numbers.rs`, `src/statistics.rs`

@@ -2,47 +2,55 @@
 title: Configuration Flags
 section: reference
 related:
-  - running-the-demo
-  - visualization-and-renderer
+  - running-crabsim
+  - live-session-and-ui
 ---
 
 # Configuration Flags
 
-## CLI flags
+## CLI
 
-Parsed by `clap` in `src/main.rs`. All flags set the corresponding env var before calling `run_demo()`.
+Parsed by `clap` in `src/main.rs`.
 
-| Flag | Env var set | Default | Effect |
-|---|---|---|---|
-| `--inplace` / `-i` | `CRABSIM_LIVE_INPLACE=1` | off | Redraw state table in-place using ANSI |
-| `--renderer-window` | `CRABSIM_RENDERER=1` | off | Spawn external renderer window |
-| `--speed <f>` | `CRABSIM_RENDERER_SPEED=<f>` | `5.0` | Renderer pacing: sim-seconds per wall-second. `-1` = unpaced |
-| `--hold <s>` | `CRABSIM_RENDERER_HOLD=<s>` | `1` | Seconds to hold renderer window open after simulation ends |
-| `--renderer-launcher <l>` | `CRABSIM_RENDERER_LAUNCHER=<l>` | `powershell` (Windows) | Windows only: `powershell` or `cmd` |
-
-## Environment variables
-
-Can be set directly without using the CLI. `run_demo()` reads these after `clap` may have set them.
-
-| Variable | Values | Effect |
+| Flag | Default | Effect |
 |---|---|---|
-| `CRABSIM_LIVE_INPLACE` | `1` (or any non-empty, non-`0` value) | Enable in-place terminal rendering |
-| `CRABSIM_RENDERER` | `1` (or any non-empty, non-`0` value) | Spawn and connect external renderer |
-| `CRABSIM_RENDERER_SPEED` | float string, e.g. `5` or `-1` | Renderer playback speed factor |
-| `CRABSIM_RENDERER_HOLD` | integer string, seconds | Hold renderer open after last event |
-| `CRABSIM_RENDERER_LAUNCHER` | `powershell` or `cmd` | Windows renderer launch method |
-| `RUST_LOG` | `info`, `debug`, `crabsim=debug`, etc. | Controls `env_logger` output level |
+| `--seed <N>` | `0` | Seed for the run's random numbers. The same seed gives the same results |
+| `--length <TIME>` | `1d` | Simulated length, written as the UI shows time: `90`, `1:30`, `8:00:00`, `30d 12:00:00`. Anything else is refused |
 
-## Env var precedence
+The CLI runs the demo model. It takes a model file once models can be saved.
 
-CLI flags **set** env vars, so if both a CLI flag and env var are present, the CLI flag wins (it overwrites the env var before `run_demo()` reads it).
+## Environment
 
-## Endtime
+| Variable | Effect |
+|---|---|
+| `RUST_LOG` | `env_logger` level, such as `info`, `debug` or `crabsim=debug`. Per-event logging slows a run down a lot |
 
-The simulation endtime is hardcoded in `run_demo()`:
+## Cargo profiles
 
-```rust
-EventController::new(Some(Duration::from_secs_f64(3_600.0)))
-```
+| Profile | Use |
+|---|---|
+| `dev` | Tests. Dependencies are optimised even here, because Bevy is slow without |
+| `release` | The CLI and the benchmark: thin LTO and one codegen unit, about 11% faster than the default. `panic` stays `unwind`, because `LiveSession` catches panics |
+| `ui` | The UI day to day: release without LTO, so it rebuilds in seconds |
 
-To change the simulated duration, edit this value in `src/lib.rs`. Tests each set their own endtime via `eventcontroller.endtime = Some(...)`.
+The Rust version is pinned in `rust-toolchain.toml`.
+
+## Live session settings
+
+`SessionSettings`, fixed when a session is created except the time mode and `reset_keeps_changes`, which have commands:
+
+| Setting | Default | Effect |
+|---|---|---|
+| `buffer_instants` | 100,000 | How many instants the run may compute ahead of what has been released |
+| `checkpoint_spacing` | 100,000 events | How far apart checkpoints are |
+| `checkpoint_budget_bytes` | 256 MB | Memory for checkpoints. Past it, every other one in the older half goes |
+| `time_mode` | `Continuous` | Or `Skipping`, where no gap between instants takes longer than a set wall time (`TimeMode::SKIPPING`: 0.25 s) |
+| `reset_keeps_changes` | off | Whether Reset keeps changed process times as the new default state |
+
+A session starts halted at speed 1. The UI sets 60 times real time.
+
+## Code references
+
+- `Opts` — `src/main.rs`
+- `SessionSettings`, `TimeMode` — `src/live_session.rs`
+- Profiles — `Cargo.toml`

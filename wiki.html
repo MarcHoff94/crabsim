@@ -350,13 +350,13 @@
 
     <div class="nav-section">Architecture</div>
     <a class="nav-item" onclick="navigate('architecture/overview')">Overview</a>
-    <a class="nav-item" onclick="navigate('architecture/simulator-and-event-controller')">Simulator &amp; EventController</a>
+    <a class="nav-item" onclick="navigate('architecture/simulation-run')">Simulation Run</a>
     <a class="nav-item" onclick="navigate('architecture/material-flow-objects')">Material Flow Objects</a>
-    <a class="nav-item" onclick="navigate('architecture/visualization-and-renderer')">Visualization &amp; Renderer</a>
+    <a class="nav-item" onclick="navigate('architecture/live-session-and-ui')">Live Session &amp; UI</a>
 
     <div class="nav-section">Guides</div>
-    <a class="nav-item" onclick="navigate('guides/running-the-demo')">Running the Demo</a>
-    <a class="nav-item" onclick="navigate('guides/adding-a-new-station-type')">Adding a New Station Type</a>
+    <a class="nav-item" onclick="navigate('guides/running-crabsim')">Running crabsim</a>
+    <a class="nav-item" onclick="navigate('guides/adding-a-new-object-type')">Adding a New Object Type</a>
     <a class="nav-item" onclick="navigate('guides/writing-tests')">Writing Tests</a>
 
     <div class="nav-section">Reference</div>
@@ -381,16 +381,18 @@ section: root
 
 # crabsim Wiki
 
-Discrete-event material-flow simulator written in Rust. Models production lines where parts (Moveable Units) are created by a Source, processed by SingleStations, and consumed by a Drain.
+A discrete-event simulator for any material flow, such as a factory line, written in Rust. Sources create moveable units (MUs), Stations work on them, Buffers hold them and Drains take them out. crabsim exists to simulate long periods as fast as possible, and a live session can also play a run for a UI to show.
+
+`CLAUDE.md` describes what is built, `GLOSSARY.md` defines the words, `docs/adr/` records the decisions, and `docs/agents/handoff.md` holds the agreed design, including what isn't built yet. This wiki explains how the parts work.
 
 ## Start here
 
 Read these in order if you are new to the codebase:
 
-1. [Discrete-Event Simulation](concepts/discrete-event-simulation.md) — the core time model
-2. [Material Flow Model](concepts/material-flow-model.md) — how objects connect into a network
-3. [Blocked Retry Semantics](concepts/blocked-retry.md) — the key non-obvious mechanic
-4. [Architecture Overview](architecture/overview.md) — how the Rust code is organized
+1. [Discrete-Event Simulation](concepts/discrete-event-simulation.md): how time moves
+2. [Material Flow Model](concepts/material-flow-model.md): objects, connections and moves
+3. [Blocked Retry Semantics](concepts/blocked-retry.md): the key non-obvious mechanic
+4. [Architecture Overview](architecture/overview.md): how the Rust code is organised
 
 ## Sections
 
@@ -406,15 +408,15 @@ Domain ideas a reader must grasp before the code makes sense.
 How the main components are structured and why.
 
 - [Overview](architecture/overview.md)
-- [Simulator & EventController](architecture/simulator-and-event-controller.md)
+- [Simulation Run](architecture/simulation-run.md)
 - [Material Flow Objects](architecture/material-flow-objects.md)
-- [Visualization & Renderer](architecture/visualization-and-renderer.md)
+- [Live Session & UI](architecture/live-session-and-ui.md)
 
 ### Guides
 How to do common tasks.
 
-- [Running the Demo](guides/running-the-demo.md)
-- [Adding a New Station Type](guides/adding-a-new-station-type.md)
+- [Running crabsim](guides/running-crabsim.md)
+- [Adding a New Object Type](guides/adding-a-new-object-type.md)
 - [Writing Tests](guides/writing-tests.md)
 
 ### Reference
@@ -422,6 +424,13 @@ Quick-lookup facts.
 
 - [Event Types](reference/event-types.md)
 - [Configuration Flags](reference/configuration-flags.md)
+
+## AI context
+
+Compact summaries for model context live in `_ai/`.
+
+- Full project context: `@wiki/_ai/all.md`
+- Per topic: `@wiki/_ai/<section>/<page>.md`
 </script>
 
 <script type="text/markdown" id="page-concepts-discrete-event-simulation">
@@ -429,7 +438,7 @@ Quick-lookup facts.
 title: Discrete-Event Simulation
 section: concepts
 related:
-  - simulator-and-event-controller
+  - simulation-run
   - event-types
 ---
 
@@ -437,34 +446,42 @@ related:
 
 ## What it is
 
-In a discrete-event simulation (DES), time does not tick forward continuously. Instead, the simulation jumps directly from one event to the next. Between events, nothing changes. This makes DES extremely efficient for systems where meaningful activity is sparse relative to real time — like a factory floor where a machine might run for 30 seconds before anything interesting happens.
+In a discrete-event simulation, time doesn't tick forward continuously. The simulation jumps from one event to the next, and nothing changes in between. That makes it efficient for systems where activity is sparse, like a factory floor where a machine works for 30 seconds before anything else happens.
 
 ## How time advances in crabsim
 
-The `EventController` holds a priority queue (`BinaryHeap<ScheduledEvent>`) of future events sorted by their scheduled time. The run loop is:
+A `SimulationRun` holds a priority queue (`BinaryHeap<ScheduledEvent>`) of future events. Processing one event:
 
 1. Pop the earliest event from the queue.
-2. Advance the simulation clock to that event's time.
-3. Dispatch the event to the object it targets (looked up by `object_id` in the `Simulator`).
-4. The object processes the event and returns zero or more new `EventTemplate`s, each with a relative `exec_time` offset.
-5. Schedule those new events at `current_time + exec_time`.
-6. Repeat until the queue is empty or `endtime` is reached.
+2. Move the clock to its time.
+3. Hand it to the object it names, by id, with an `EventContext` (the time, a place to record occurrences, new MU ids) and `OtherObjects` (every other object, by id).
+4. The object returns zero or more `EventTemplate`s, each due `exec_time` from now.
+5. Queue them at `now + exec_time`.
 
-No time passes inside step 3. The state at any point is exactly the state at the most recently processed event.
+No time passes inside step 3, so a move between objects takes no simulation time. A run advances only when asked: one event (`step`), up to a time (`advance_to`), or a number of events. It has no end time of its own.
 
-## FIFO tiebreaking
+## Time
 
-Events scheduled at the same time are processed in the order they were created. The `EventController` assigns a monotonically increasing `seq` number to every scheduled event. When two events have identical times, the one with the lower `seq` fires first. This makes the simulation deterministic and the test suite reproducible.
+Simulation time is a `SimTime`: a 64-bit count of whole milliseconds, for both points in time and lengths of it. Sampled times, such as a repair time, are rounded to the nearest millisecond. Wall time stays a `std::time::Duration`, so the compiler keeps the two apart.
 
-## Why DES for a production line
+## Order at one time
 
-A manufacturing simulation has natural events: a machine finishes processing, a part transfers to the next station, a failure begins. These happen at well-defined moments with nothing to compute in between. DES captures this cleanly without the overhead of a time-step loop that would spin through thousands of idle ticks.
+Several events can fall on the same millisecond. They run in a fixed order, so the same seed always gives the same result:
+
+1. `BlockedRetry` events run before all others at that time, so predecessors already waiting get a free successor before anything else can reach it.
+2. Within each of those two groups, events run in the order they were queued, by a monotonically increasing `seq`.
+
+Too many events at one time (`ZERO_TIME_EVENT_LIMIT`, a million) return `RunError::ZeroTimeLoop` rather than looping forever.
+
+## Why discrete events for material flow
+
+A line has natural events: a Station finishes its work, an MU moves on, a failure begins or ends. They happen at well-defined moments with nothing to compute in between, so jumping between them costs far less than a loop that ticks through idle time.
 
 ## Code references
 
-- `EventController` — `src/simulator.rs`
-- `ScheduledEvent`, `EventTemplate` — `src/event.rs`
-- `BinaryHeap` ordering (time + seq) — `src/event.rs` (`Ord` impl on `ScheduledEvent`)
+- `SimulationRun`, `ZERO_TIME_EVENT_LIMIT` — `src/simulation_run.rs`
+- `ScheduledEvent` and its `Ord`, `EventTemplate`, `EventContext` — `src/event.rs`
+- `SimTime` — `src/time.rs`
 </script>
 
 <script type="text/markdown" id="page-concepts-material-flow-model">
@@ -479,44 +496,62 @@ related:
 
 # Material Flow Model
 
-## The production line abstraction
+## Objects
 
-A material flow network models a production line: parts enter at a source, pass through one or more processing stations, and exit at a drain. crabsim uses three object types to represent this:
+A model is made of material-flow objects, each standing for a real thing. MUs flow through them:
 
-| Object | Role |
-|---|---|
-| `Source` | Creates new Moveable Units at a fixed interval and pushes them into the network |
-| `SingleStation` | Holds and processes one MU at a time, then forwards it |
-| `Drain` | Consumes MUs and records their exit times |
+| Object | Role | State |
+|---|---|---|
+| Source | Creates an MU every interval and pushes it on | Works |
+| Station | Works on one MU for its process time, then pushes it on. Can fail, be paused or be forced to fail | Works |
+| Buffer | Holds MUs up to a capacity | Known to be broken, so models don't use it yet |
+| Drain | Takes MUs out of the model and keeps exit statistics | Works |
+
+"Station" means only the processing type. Station capacity above 1, Buffer's dwelling time and stops on objects other than Stations are agreed but not built. See the handoff.
+
+## Building a model
+
+Models are built through `ModelDescription`:
+
+```rust
+let mut model = ModelDescription::new();
+let source = model.add_source(SimTime::from_secs(5));
+let station = model.add_station(SimTime::from_secs(10), failures);
+let drain = model.add_drain();
+model.connect(source, station);
+model.connect(station, drain);
+let mut run = model.build(seed);
+```
+
+- Each `add_` returns the new object's id. Ids follow the order objects are added, which is also the order Init visits them.
+- `connect(from, to)` adds `to` as the next successor of `from`. Successors are tried in the order they were connected.
+- One description builds any number of runs, each with its own seed.
+- It also holds each object's name, position and dimensions, for views. `build` leaves them behind, so they can't change a result.
+- It doesn't validate connections yet. It refuses a successor on a Drain and ids not in the model, but an edge into a Source or from an object to itself panics while running.
 
 ## Topology
 
-Objects are connected by wiring `succ` (successors) and `pred` (predecessors) vectors on each object before the simulation starts. The topology is static — it does not change during a run.
+The topology is a static directed graph. Objects know only their successors, as ids. A successor learns about a predecessor only when that predecessor is refused and lists itself as waiting (see [Blocked Retry Semantics](blocked-retry.md)).
 
 ```
-Source → Station A → Station B → Drain
-                  ↘ Station C ↗
+Source → Station 1 → Station 2 → Station 3 → ... → Drain
+                              ↘ Station 5 → ... ↗
 ```
 
-A predecessor can have multiple successors (fan-out); a successor can have multiple predecessors (fan-in). `SingleStation`s track both directions. `Source` has no predecessors; `Drain` has no successors.
+## Moves
 
-## Routing
+crabsim uses **push**: when an object is done with its MU, it offers it to its successors. `try_to_move_to_successor` tries them **round-robin** from `succ_pointer`, which moves to one past the chosen successor after a move. If every successor refuses, the object becomes `Blocked` and keeps its MU.
 
-When a predecessor has multiple successors, `try_to_move_to_successor` uses **round-robin** routing by default: it starts at `succ_pointer`, tries successors in order, and advances `succ_pointer` to one past the chosen index on success. This distributes load across parallel branches over time.
+A move takes no simulation time: the MU is in its new object at once.
 
-An alternative `LowestIndexStrategy` always tries from index 0 first (useful for preferring a primary branch). Both strategies implement the `DistributionStrategy` trait.
-
-## Wiring conventions
-
-Both `succ` and `pred` must be wired to match before `eventcontroller.init()` is called. Forgetting to wire one direction doesn't crash immediately but breaks `BlockedRetry` routing — a freed successor won't know which predecessors to notify.
+**Planned, not built:** pull, set on the receiving object; an exit strategy, which picks which MU leaves; and a distribution strategy, which picks which successor gets it. `DistributionStrategy` in `flows.rs` is a start on the second.
 
 ## Code references
 
-- `MaterialFlow` trait — `src/materialflow_objects/flows.rs`
-- `SuccessorContainer` trait — `src/materialflow_objects/flows.rs`
-- `try_to_move_to_successor` / `try_to_move_to_successor_with_strategy` — `src/materialflow_objects/flows.rs`
-- `RoundRobinStrategy`, `LowestIndexStrategy` — `src/materialflow_objects/flows.rs`
-- `Source`, `SingleStation`, `Drain` — `src/materialflow_objects/`
+- `ModelDescription` — `src/model.rs`
+- `try_to_move_to_successor`, `DistributionStrategy`, `RoundRobinStrategy` — `src/materialflow_objects/flows.rs`
+- `Source`, `SingleStation`, `Buffer`, `Drain` — `src/materialflow_objects/`
+- The demo model — `src/demo.rs`
 </script>
 
 <script type="text/markdown" id="page-concepts-moveable-units">
@@ -531,40 +566,47 @@ related:
 
 # Moveable Units
 
-## What a MU is
+## What an MU is
 
-A Moveable Unit (MU) is the "part" that travels through the material flow network. In crabsim it is a small value type:
+A moveable unit (MU) is whatever travels through the model, such as a part. In crabsim it is a small value:
 
 ```rust
 pub struct MoveableUnit {
     pub id: u32,
     pub location_id: u32,
+    /// When it left its Source, where its lead time starts.
+    pub left_source: SimTime,
 }
 ```
 
-`id` is a globally unique identifier assigned sequentially by the `Source`. `location_id` is the `object_id` of the station currently holding the MU — it gets updated as the MU moves.
+## Identity
 
-## Identity and ordering
+MU ids are unique across the whole model. The run hands them out through `EventContext::new_mu_id`, starting above the highest id of any configured starting MU. Because a Source creates MUs in order, a lower id from one Source also means an earlier MU.
 
-The `Source` assigns IDs starting at 1, incrementing with each new MU (`mu_id` counter). Because IDs are sequential and the source produces MUs in order, the ID also encodes creation order. The `Drain` records `exit_ids` in arrival order, so comparing `exit_ids` against `[1, 2, 3, ...]` is how tests verify FIFO semantics end-to-end.
+## Where an MU lives
 
-## One MU per station
-
-`SingleStation` holds `content: Option<MoveableUnit>`. It can process exactly one MU at a time. When `content` is `Some`, the station's entrance is locked and no further MUs can enter. The MU is taken from `content` (via `take_content()`) only when it successfully transfers to a successor.
+- **Source:** holds the MU it is creating, from its creation until it moves on. A Source creates its first MU at Init.
+- **Station:** holds at most one MU (`content: Option<MoveableUnit>`). While it holds one, its entrance is locked. A Station can be configured with a **starting MU**, which is part of its default state: worked on from Init, and back as a fresh copy after Reset.
+- **Drain:** keeps no MU. It counts it in its statistics and records `MuLeft` with its lead time.
 
 ## Lifecycle
 
-1. `Source::create_mu()` — allocates MU with next `mu_id`, stores in `content`, schedules `MUExit` after `proc_time`.
-2. `try_to_move_to_successor` — takes the MU from the predecessor via `take_content()` and hands it to the successor via `process_mu_entrance(mu)`.
-3. `Drain::process_mu_entrance(mu)` — records `current_time` in `exits` and `mu.id` in `exit_ids`. MU is not stored; it is consumed.
+1. `Source::create_mu` gives the MU a new id, records `MuCreated` and schedules its `MUExit` after the interval.
+2. `try_to_move_to_successor` takes it from its holder (`take_content`), records `MuMoved` and hands it to the successor (`process_mu_entrance`).
+3. A Station records `WorkStarted`, and `WorkFinished` when its process time is up.
+4. `Drain::process_mu_entrance` records `MuLeft` with the lead time, from leaving its Source to entering the Drain.
+
+## Per-MU data
+
+Nothing is kept per MU unless the run records occurrences (ADR 0004). A headless run records nothing by default, so its memory stays flat however long it runs. Tests that check order read `MuLeft` occurrences from a run with recording on.
 
 ## Code references
 
-- `MoveableUnit` struct — `src/materialflow_objects/flows.rs`
+- `MoveableUnit` — `src/materialflow_objects/flows.rs`
 - `Source::create_mu` — `src/materialflow_objects/source.rs`
-- `SingleStation::content` — `src/materialflow_objects/station.rs`
-- `Drain::exits`, `Drain::exit_ids` — `src/materialflow_objects/drain.rs`
-- `take_content` (SuccessorContainer trait) — `src/materialflow_objects/flows.rs`
+- `SingleStation::content`, `starting_content` — `src/materialflow_objects/station.rs`
+- `Drain::process_mu_entrance` — `src/materialflow_objects/drain.rs`
+- `EventContext::new_mu_id` — `src/event.rs`
 </script>
 
 <script type="text/markdown" id="page-concepts-blocked-retry">
@@ -573,7 +615,7 @@ title: Blocked Retry Semantics
 section: concepts
 related:
   - event-types
-  - simulator-and-event-controller
+  - simulation-run
   - material-flow-objects
 ---
 
@@ -581,64 +623,70 @@ related:
 
 ## The problem
 
-A station finishing its work does not guarantee a free downstream station. The successor might already be processing another part. crabsim handles this with a **blocked/retry** mechanism: when a station cannot forward its MU, it parks itself as blocked and waits to be woken up — rather than polling or re-scheduling blind retries.
+An object finishing with its MU has no guarantee of a free successor: the successor may be working on another MU. crabsim handles this with **blocked and retry**: an object that can't pass its MU on lists itself as waiting at each successor that refused it, and is woken when one frees up, rather than polling.
 
-## Step-by-step flow
+## Step by step
 
-### 1. Transfer attempt (MUExit)
+### 1. A move is tried (MUExit)
 
-When a station finishes processing it fires a `MUExit` event and calls `try_to_move_to_successor`. This function walks the successor list (round-robin from `succ_pointer`) and checks `is_entrance_allowed()` on each.
+When a Station's process time is up, its `MUExit` fires and it calls `try_to_move_to_successor`. That walks the successors round-robin from `succ_pointer` and asks each `is_entrance_allowed()`.
 
-### 2. All successors locked → Blocked
+### 2. Every successor refuses: Blocked
 
-If every successor returns `false` from `is_entrance_allowed()`, `try_to_move_to_successor` records the predecessor's `object_id` in each denied successor's `blockedlist` (via `add_blocked`). The predecessor then:
+Each successor that refuses gets the predecessor's id in its `blockedlist` (`add_blocked`). If none accepts, the predecessor:
 
-- Stays in `ProcessState::Blocked`
-- Keeps its MU in `content`
-- Keeps `entrancelocked = true` (prevents new MUs entering while it holds the current one)
+- becomes `ProcessState::Blocked` and records a `Blocked` occurrence,
+- keeps its MU,
+- keeps its entrance locked, so nothing enters while it holds the MU.
 
-### 3. Successor frees up → notify
+### 3. A successor frees up: retries
 
-When a station successfully transfers its MU and becomes idle, it calls `notify_blocked_predecessors()`. This drains its `blockedlist` and emits one `BlockedRetry` event per recorded predecessor, scheduled at `exec_time = 0` (i.e., immediately).
+When an object's MU moves on, or it comes back from a stop with room, it calls `notify_blocked_predecessors()`. That empties its `blockedlist` into one `BlockedRetry { from }` event per waiting predecessor, due at once, where `from` is the object that freed up.
 
-### 4. Retry
+### 4. The retry
 
-The predecessor receives `BlockedRetry` and calls `is_exit_allowed()` before attempting anything. If the station is currently processing a new MU (`ProcessState::Processing`), `is_exit_allowed()` returns `false` and the retry is a no-op — the MU will move when that processing completes via the normal `MUExit` path.
+The predecessor checks `is_exit_allowed()` first. If it is working on an MU, or is stopped, the retry does nothing: a working MU moves through the normal `MUExit` later. Otherwise `retry_move_to_successor` offers the MU to the successor named by `from`, and only that one.
 
-If exit is allowed, `try_to_move_to_successor` is called again.
+## Why two event types
 
-## Why two separate event types
+`MUExit` and `BlockedRetry` both lead to a move, but mean different things:
 
-`MUExit` and `BlockedRetry` both trigger a transfer attempt but carry different meaning:
+- `MUExit` is **scheduled**: work finished at a known time.
+- `BlockedRetry` is **reactive**: a successor just freed up.
 
-- `MUExit` is **scheduled**: processing finished at a known future time.
-- `BlockedRetry` is **reactive**: a successor just became available.
+Keeping them apart lets a retry that reaches a busy object be ignored, and lets retries run first at one time without extra state.
 
-Keeping them separate means a `BlockedRetry` arriving on a busy station is correctly ignored. Merging them would require extra state to distinguish "just finished my own work" from "woken up while already working".
+## The retry rule
 
-## Source and Drain differences
+A `blockedlist` holds the predecessors waiting for an object, longest-waiting first, each listed once:
 
-`Source` also handles `BlockedRetry` — if it was blocked trying to push its MU, it retries on notification, then immediately creates the next MU once the current one is forwarded.
+- `list_blocked` leaves a predecessor that is already listed in its place. `retries_for_blocked` empties the list into retries in that order, and a retry that is refused lists its predecessor again.
+- When a predecessor's MU moves, `try_to_move_to_successor` removes it from all its successors' lists, so it can't keep a place from an earlier wait.
+- An object that is empty when a retry arrives does nothing, because it has nothing to wait with.
 
-`Drain` never blocks predecessors. Its entrance is always open (`entrance_locked` starts `false`), so predecessors never end up in a Drain's `blockedlist`.
+Without the first of these, each refused retry added another entry until one release fired over a million retries at one instant, which tripped `ZERO_TIME_EVENT_LIMIT` in long runs.
 
-## Known subtlety: dedup vs runtime path
+Two more things stop anything reaching a free successor ahead of those waiting for it:
 
-`SingleStation` has two `add_blocked` methods with different behaviour:
+- At one simulation time, retries run before all other events, so an MU finishing at the instant a successor frees up goes behind those already waiting.
+- A retry names the successor that sent it, and the predecessor tries only that one. Any other successor with room has sent retries of its own.
 
-- The **inherent method** (`impl SingleStation`) checks for duplicates before inserting.
-- The **trait method** (`impl MaterialFlow for SingleStation`) pushes unconditionally.
+A retry that finds its predecessor stopped is used up, so that predecessor lists itself again at the back after its repair. The owner may want it to keep its place: that's to decide when stops are built for every object type.
 
-`try_to_move_to_successor` calls through the `MaterialFlow` trait (dynamic dispatch), so the dedup check does **not** apply in the runtime path. Duplicate predecessors in `blockedlist` result in multiple `BlockedRetry` events to the same object, which is harmless (the retry is a no-op if the station is busy), but the test `blockedlist_dedup` tests the inherent method path, not the runtime path.
+All this serves today's push with one MU per object. Giving up a place on any move assumes the predecessor has no other MU waiting, so revisit it with Station capacity, the Buffer fix and exit strategies.
+
+## Source and Drain
+
+A Source handles `BlockedRetry` too: once its MU has moved, it creates the next one at once. Its `is_exit_allowed` is always true, so with several successors a retry can move an MU before its interval ends. That's a known problem.
+
+A Drain's entrance is always open, so predecessors never wait for it, and it never sends retries.
 
 ## Code references
 
-- `try_to_move_to_successor` — `src/materialflow_objects/flows.rs`
-- `notify_blocked_predecessors` — `src/materialflow_objects/station.rs`
-- `ProcessState` enum — `src/materialflow_objects/flows.rs`
-- `is_exit_allowed`, `is_entrance_allowed` — `src/materialflow_objects/station.rs`
-- `BlockedRetry` dispatch in `execute_event` — `src/materialflow_objects/station.rs`
-- Tests: `blocked_retry_while_predecessor_processing_does_not_move_mu`, `station_becomes_blocked_when_no_successor_accepts`, `blocked_retry_full_flow`, `blockedlist_dedup` — `src/lib.rs`
+- `try_to_move_to_successor`, `retry_move_to_successor`, `list_blocked`, `retries_for_blocked` — `src/materialflow_objects/flows.rs`
+- `is_entrance_allowed`, `is_exit_allowed`, `BlockedRetry` handling — `src/materialflow_objects/station.rs` and `source.rs`
+- Retry order in the queue — `ScheduledEvent`'s `Ord` in `src/event.rs`
+- Tests in `tests/simulation_run.rs`: `a_station_blocks_when_no_successor_accepts`, `a_retry_while_the_predecessor_is_working_does_not_move_its_mu`, `the_longest_waiting_predecessor_retries_first`, `a_predecessor_refused_on_every_retry_is_listed_once`, `a_predecessor_that_moved_on_loses_its_place_in_the_queue`, `an_mu_finishing_as_a_successor_frees_up_goes_behind_those_already_waiting`, `a_retry_only_offers_the_successor_that_sent_it`
 </script>
 
 <script type="text/markdown" id="page-architecture-overview">
@@ -646,100 +694,109 @@ Keeping them separate means a `BlockedRetry` arriving on a busy station is corre
 title: Architecture Overview
 section: architecture
 related:
-  - simulator-and-event-controller
+  - simulation-run
   - material-flow-objects
-  - discrete-event-simulation
+  - live-session-and-ui
 ---
 
 # Architecture Overview
 
-## The four layers
+## Two crates
+
+crabsim is a Cargo workspace. The engine is the root package, a library with a headless CLI. The UI is the member crate `ui/` (`crabsim-ui`), a Bevy application (ADR 0006). The engine is the only default member, so `cargo test` and `cargo bench` at the root never build Bevy, and the engine never depends on the UI.
+
+## Layers
 
 ```
-┌─────────────────────────────────────────────────┐
-│  EventController  (time engine)                 │
-│  BinaryHeap<ScheduledEvent>  ·  seq counter     │
-├─────────────────────────────────────────────────┤
-│  Simulator  (registry)                          │
-│  HashMap<u32, Rc<RefCell<dyn MaterialFlow>>>    │
-├─────────────────────────────────────────────────┤
-│  Material flow objects  (domain logic)          │
-│  Source · SingleStation · Drain                 │
-├─────────────────────────────────────────────────┤
-│  Visualization  (output)                        │
-│  Console (ANSI) · External renderer (TCP/JSON)  │
-└─────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│  Front-ends                                                  │
+│  headless CLI (src/main.rs) · UI (ui/, Bevy + egui)          │
+├──────────────────────────────────────────────────────────────┤
+│  Live session (optional)                                     │
+│  LiveSession: computes ahead, releases on a clock,           │
+│  checkpoints and replay · Picture: what the user knows       │
+├──────────────────────────────────────────────────────────────┤
+│  Simulation run                                              │
+│  SimulationRun: Vec<ModelObject>, BinaryHeap<ScheduledEvent>,│
+│  clock, recording, statistics                                │
+├──────────────────────────────────────────────────────────────┤
+│  Material-flow objects                                       │
+│  enum ModelObject { Source, Station, Buffer, Drain }         │
+└──────────────────────────────────────────────────────────────┘
 ```
 
-## Control flow during a simulation run
+A run with nothing attached is a headless run: build, Init, advance, read the state. The live session and views are optional layers that cost nothing when absent.
+
+## Building and running a model
 
 ```
-eventcontroller.init(&mut simulator)
-  └─ calls init() on every registered object
-  └─ objects return initial EventTemplates
-  └─ EventController schedules them
+ModelDescription::new()
+  add_source / add_station / add_buffer / add_drain → ids
+  connect(from, to)
+  build(seed) → SimulationRun
 
-eventcontroller.run(simulator)
-  loop:
-    pop earliest ScheduledEvent from BinaryHeap
-    advance clock to event.time
-    look up object by event.object_id in simulator.material_flows
-    call object.execute_event(eventtype)
-    object returns Vec<EventTemplate>
-    schedule each at current_time + template.exec_time
-  until queue empty or endtime reached
+run.init()          t = 0, every object's init in id order, first events queued
+run.advance_to(t)   process events up to and including t, clock left at t
+run.state()         RunState: every object's ObjectState, with statistics
+run.reset()         every object back to its default state
 ```
 
-## Data flow for a single MU
+Every advance returns the occurrences the run is recording, none by default. A failed advance returns an `AdvanceFailure` holding the `RunError` and everything recorded before it.
+
+## Ownership
+
+A run owns its objects in one `Vec<ModelObject>`, indexed by id, and objects refer to each other only by id (ADR 0005). While one object handles an event, the run splits the `Vec` around it, and the object reaches the others through `OtherObjects`. So there is no shared ownership and no `unsafe`, and a run executes on one thread at a time and can move between threads. A clone of a run is a checkpoint.
+
+## Data flow for one MU
 
 ```
-Source::create_mu()
-  → schedules MUExit after proc_time
-
-Source::execute_event(MUExit)
-  → try_to_move_to_successor → SingleStation::process_mu_entrance(mu)
-  → SingleStation schedules MUExit after its proc_time
-  → Source creates next MU
-
-SingleStation::execute_event(MUExit)
-  → try_to_move_to_successor → next station or Drain
-  → on success: unlocks entrance, notifies blocked predecessors
-  → on failure: goes Blocked, records self in successors' blockedlists
-
-Drain::process_mu_entrance(mu)
-  → records current_time in exits, mu.id in exit_ids
+Source::init / create_mu         MuCreated, MUExit after the interval
+Source MUExit                    try_to_move_to_successor
+  → Station::process_mu_entrance  MuMoved, WorkStarted, MUExit after the process time
+Station MUExit                   WorkFinished, try_to_move_to_successor
+  moved     → Idle, entrance unlocked, retries to waiting predecessors
+  refused   → Blocked, listed at each successor that refused
+Drain::process_mu_entrance       MuLeft with lead time, exit statistics
 ```
-
-## Ownership model
-
-Every material flow object is heap-allocated behind `Rc<RefCell<T>>`. This allows multiple owners (a station can appear in both its predecessor's `succ` list and its successor's `pred` list) while still providing mutable access at event dispatch time. The `Simulator` holds the canonical `HashMap` reference; `succ`/`pred` vectors hold additional clones of the same `Rc`.
 
 ## Module map
 
 ```
 src/
-  lib.rs              public API, run_demo(), unit tests
-  main.rs             CLI parsing, calls run_demo()
-  simulator.rs        Simulator, EventController
-  event.rs            EventType, EventTemplate, ScheduledEvent
-  error.rs            error types
+  lib.rs              public API, re-exports
+  main.rs             headless CLI
+  demo.rs             the demo model, with names and positions
+  model.rs            ModelDescription, Position, Dimensions
+  simulation_run.rs   SimulationRun
+  event.rs            EventType, EventTemplate, ScheduledEvent, EventContext, ExitTicket
+  observation.rs      Occurrence, Recording, ObjectState, RunState, StopCause
+  statistics.rs       StatisticsKeeper, ObjectStatistics
+  live_session.rs     LiveSession, Observation, checkpoints and replay
+  picture.rs          Picture
+  time.rs             SimTime, format_time, parse_time
+  error.rs            RunError, AdvanceFailure and others
   random_numbers.rs   Distribution, DistributionSampler
   materialflow_objects/
-    mod.rs            re-exports
+    model_object.rs   ModelObject, OtherObjects
     flows.rs          traits, MoveableUnit, FailureProfile, movement helpers
-    source.rs         Source
-    station.rs        SingleStation
-    drain.rs          Drain
-  visualization/
-    mod.rs
-    topology.rs       network topology printer
-    state.rs          state snapshot structs and renderer
+    source.rs · station.rs · buffer.rs · drain.rs
+ui/src/
+  main.rs             Bevy and egui, drawing what the view state says
+  view.rs             the view state, plain Rust
+  camera.rs · marks.rs
 ```
+
+## Code references
+
+- `SimulationRun` — `src/simulation_run.rs`
+- `ModelObject`, `OtherObjects` — `src/materialflow_objects/model_object.rs`
+- `ModelDescription` — `src/model.rs`
+- ADRs — `docs/adr/`
 </script>
 
-<script type="text/markdown" id="page-architecture-simulator-and-event-controller">
+<script type="text/markdown" id="page-architecture-simulation-run">
 ---
-title: Simulator & EventController
+title: Simulation Run
 section: architecture
 related:
   - discrete-event-simulation
@@ -747,81 +804,79 @@ related:
   - event-types
 ---
 
-# Simulator & EventController
+# Simulation Run
 
-These two structs in `src/simulator.rs` are the engine of the simulation. They are intentionally separated: `Simulator` is state, `EventController` is behaviour.
+`SimulationRun` in `src/simulation_run.rs` is one execution of a model, from its Init until it is reset or discarded. It is the engine's public interface, and it knows nothing about views or pacing.
 
-## Simulator
-
-`Simulator` is the authoritative registry of all material flow objects in the simulation.
+## What it holds
 
 ```rust
-pub struct Simulator {
-    pub material_flows: HashMap<u32, Rc<RefCell<dyn MaterialFlow>>>,
-    pub drains: Vec<Rc<RefCell<Drain>>>,
-    pub object_id: u32,          // increments with each registration
-    pub current_seq: u64,        // current event sequence number
-    pub live_inplace: bool,      // in-place ANSI terminal rendering
-    pub renderer_stream: Option<TcpStream>,  // external renderer connection
-    // ...
+pub struct SimulationRun {
+    objects: Vec<ModelObject>,        // indexed by object id
+    queue: BinaryHeap<ScheduledEvent>,
+    time: SimTime,
+    next_seq: u64,                    // FIFO order within one time
+    counted_time: SimTime,            // for the zero-time loop guard
+    events_at_this_time: u64,
+    seed: u64,
+    initialised: bool,
+    recording: Recording,
+    statistics_since: SimTime,
+    context: EventContext,
 }
 ```
 
-### Registration
+A `ScheduledEvent` is 32 bytes (time, seq, object id, event type), because it is on the per-event path. Build a run through `ModelDescription::build(seed)`, which guarantees each object's id matches its place in the `Vec`.
 
-`register_material_flow(obj)` assigns the next `object_id` to the object (via `set_object_id`), stores a clone of the `Rc` in `material_flows`, and returns the assigned ID. Registration order determines IDs — this matters for tests that manually schedule events by `object_id`.
+## Controls
 
-`add_drain(drain)` registers a drain separately so the simulator can access typed drain data (exit records) after the run. Drains must be registered with both methods.
+| Method | What it does |
+|---|---|
+| `init` | Sets t=0, gives each object its own seed, calls each object's `init` in id order and queues the first events without processing them, even those due at t=0. Only allowed from the default state |
+| `step` | Processes one event |
+| `advance_to(t)` | Processes events up to and including `t`, then leaves the clock at `t` |
+| `advance_bounded(t, n)` | The same for at most `n` events. If events are still due, it reports not having reached `t`, and the clock stays at the last event |
+| `advance_events(n)` | At most `n` events, however far apart, leaving the clock at the last |
+| `reset` | Returns every object to its default state. Objects stay in the model, and configured starting MUs come back as fresh copies |
+| `state` | The full typed `RunState`, including each object's statistics |
+| `schedule_event` | Queues an event from outside, such as a Pause |
+| `set_process_time` | Changes a Station's process time from the next MU on, scheduling nothing |
+| `keep_changes_as_default` | Makes changed process times the default state, so Reset keeps them |
+| `clear_statistics` | Starts every object's statistics afresh, such as after a warm-up, and changes nothing else |
+| `set_recording` | Which occurrence kinds to keep from now on: `Recording::NOTHING` (the default), `ALL` or `only(&[...])` |
 
-### Simulation init
+Advancing before Init, or Init twice, returns an error rather than panicking. Splitting an advance up gives exactly the same result as advancing at once.
 
-`Simulator::init(&mut eventcontroller)` calls `init()` on every registered object. Each object returns initial `EventTemplate`s which the EventController schedules at `current_time + exec_time`. The `Source` uses this to schedule the creation of the first MU at time 0.
+## Processing an event
 
-## EventController
+1. Count events at the next event's time. Past `ZERO_TIME_EVENT_LIMIT` the run returns `RunError::ZeroTimeLoop` and leaves the event queued, so it keeps refusing until Reset.
+2. Pop the event. The clock moves to its time.
+3. Split the objects around the one named, and call its `execute_event` with the `EventContext` and `OtherObjects`.
+4. Queue every returned `EventTemplate` at `now + exec_time`, with the next `seq`.
 
-`EventController` owns the event queue and drives time forward.
+An event for an id not in the model returns `RunError::UnknownObject`, and an error from an object becomes `RunError::ObjectFailed`. An advance that fails returns `AdvanceFailure`, holding the error and everything recorded before it, so no caller loses occurrences.
 
-```rust
-pub struct EventController {
-    pub time: Duration,                   // current simulation clock
-    pub endtime: Option<Duration>,        // stop condition
-    event_queue: BinaryHeap<ScheduledEvent>,
-    seq: u64,                             // monotonic counter for FIFO order
-}
-```
+## Order at one time
 
-### Scheduling: add_event
+`ScheduledEvent::cmp` orders by time, then puts `BlockedRetry` before everything else, then by `seq`. `BinaryHeap` is a max-heap, so the comparisons are reversed. Preserve `seq` assignment when changing scheduling: the same seed on the same version must always give identical results.
 
-```rust
-eventcontroller.add_event(scheduled_time, event_template)
-```
+## Results
 
-Wraps the template in a `ScheduledEvent` (time + template + seq), assigns the next `seq`, and pushes onto the heap.
+- **Occurrences** come back from each advance, only for the kinds being recorded. Objects record them through `EventContext::record`, which costs one predictable check when nothing is recorded.
+- **State** comes from `state()` at any time, including after an error: each object's `ObjectState`, with contents, process state, stop and every active interruption, remaining time, waiting predecessors, successors, capacity, process times and fixed-size `ObjectStatistics`.
 
-### Run loop
+A headless run records nothing, so its memory stays flat however long it runs.
 
-`run(simulator)` consumes the simulator, processes events until the queue is empty or `endtime` is exceeded, then returns the simulator so callers can inspect drain results.
+## Stale exits
 
-For each event:
-1. Pop from heap (earliest time, lowest seq for ties).
-2. Look up the object in `simulator.material_flows` by `object_id`.
-3. Call `execute_event(&mut simulator, &eventtype)`.
-4. Schedule any returned `EventTemplate`s at `current_time + exec_time`.
-5. Update `simulator.current_seq` for logging.
-6. Call `simulator.print_materialflow_state()` (console or renderer output).
-
-### FIFO tiebreaking
-
-The `seq` counter is the mechanism that makes same-time events deterministic. `ScheduledEvent::cmp` orders first by time (ascending), then by `seq` (ascending). Because `BinaryHeap` is a max-heap and the comparison is reversed, the event with the smallest time and smallest seq is popped first.
-
-Preserve `seq` assignment order when refactoring scheduling code — deterministic tests depend on it.
+The heap can't cancel events. A Station's `MUExit` carries an `ExitTicket` with the MU's id and the Station's `stop_count` when it was scheduled. A stop bumps `stop_count`, so the queued exit is ignored as stale when it fires, and resuming schedules a new exit for the remaining process time.
 
 ## Code references
 
-- `Simulator`, `EventController` — `src/simulator.rs`
-- `ScheduledEvent` ordering — `src/event.rs`
-- `Simulator::init` — `src/simulator.rs`
-- `EventController::run` — `src/simulator.rs`
+- `SimulationRun`, `BoundedAdvance`, `ZERO_TIME_EVENT_LIMIT` — `src/simulation_run.rs`
+- `ScheduledEvent`, `EventContext`, `ExitTicket` — `src/event.rs`
+- `RunState`, `ObjectState`, `Recording` — `src/observation.rs`
+- `RunError`, `AdvanceFailure` — `src/error.rs`
 </script>
 
 <script type="text/markdown" id="page-architecture-material-flow-objects">
@@ -836,299 +891,257 @@ related:
 
 # Material Flow Objects
 
-## Trait hierarchy
+## Storage
 
-Every material flow object implements two traits, and objects with successors implement a third:
+A run holds its objects as one `Vec<ModelObject>`, indexed by id (ADR 0005):
+
+```rust
+pub enum ModelObject {
+    Source(Source),
+    Station(SingleStation),
+    Buffer(Buffer),
+    Drain(Drain),
+    #[cfg(test)]
+    RecordsThenFails(RecordsThenFails),  // only tests fail part way through an event
+}
+```
+
+`ModelObject` implements every trait by dispatching with a `match` (the `on_the_object!` macro), so there are no trait objects and no downcasts. Objects refer to each other by id only: `succ` and `blockedlist` hold ids. While one object handles an event it reaches the others through `OtherObjects`, which the run builds by splitting the `Vec` around it.
+
+## Traits
 
 ```
 EventInterface
-  init() → Vec<EventTemplate>
-  execute_event(simulator, eventtype) → Option<Vec<EventTemplate>>
-  get/set_object_id, set_random_seed, as_any
+  init(context) → first events
+  execute_event(context, eventtype, others) → new events
+  reset()                     back to the default state
+  report(now) → ObjectState    state and statistics
+  clear_statistics(now)
+  get/set_object_id, set_random_seed
 
-MaterialFlow : EventInterface
-  is_entrance_allowed() → bool
-  is_exit_allowed() → bool
-  process_mu_entrance(mu) → Option<EventTemplate>
-  process_mu_exit() → Option<EventTemplate>
-  add_blocked(id)
-  notify_blocked_predecessors() → Option<Vec<EventTemplate>>
+StopCtrl                      todo!() everywhere: stops work through events instead
+  set_stop, remove_stop
 
-SuccessorContainer   (Source and SingleStation only)
-  successors() → &Vec<Rc<RefCell<dyn MaterialFlow>>>
-  succ_pointer() / succ_pointer_mut()
-  take_content() → Option<MoveableUnit>
-  clear_content_and_idle()
+MaterialFlow : EventInterface + StopCtrl
+  is_entrance_allowed, is_exit_allowed
+  process_mu_entrance(mu, context) → maybe an event
+  add_blocked, remove_blocked, notify_blocked_predecessors
+
+SuccessorContainer            Source, Station and Buffer
+  successors() → &[u32], succ_pointer, succ_pointer_mut
+  take_content(now), clear_content_and_idle, statistics_mut
 ```
 
-`SuccessorContainer` is the interface `try_to_move_to_successor` operates on — it does not need to know the concrete type of the predecessor.
+`SuccessorContainer` is what `try_to_move_to_successor` works on, so it needs no concrete type. What becomes of `StopCtrl` is to decide when stops reach the other object types.
 
-## BaseObject
-
-Every object holds a `BaseObject { object_id: u32, random_seed: u64 }`. The `object_id` is assigned at registration time by `Simulator::register_material_flow`. Before registration it holds whatever value was passed to `new()` — tests sometimes rely on the registration-assigned ID, so store the return value of `register_material_flow`.
+Every object must:
+- tell its `StatisticsKeeper` what it ended up doing, at the end of everything it handles (`update_statistics`),
+- return to its default state in `reset`, including configured starting MUs. A new field needs resetting, and a reset test in `tests/simulation_run.rs`.
 
 ## Source
 
-- Creates MUs with a sequentially incrementing `mu_id` (starts at 1).
-- `init()` immediately calls `create_mu()` to schedule the first MU at time 0.
-- `execute_event(MUExit)`: tries to push its MU to a successor. On success, creates the next MU (scheduling another `MUExit` after `proc_time`). On failure (all successors locked), goes `Blocked`.
-- Never accepts entrance: `is_entrance_allowed()` returns `false`; `process_mu_entrance` panics.
-- Has no predecessors: `notify_blocked_predecessors()` returns `None`; `add_blocked` panics.
+- Creates an MU every `proc_time` (its interval). It creates the first at Init, records `MuCreated`, and schedules its `MUExit`.
+- On `MUExit` it pushes the MU on. Once it has moved, it creates the next at once. If every successor refuses, it becomes `Blocked` and waits for a retry.
+- It never accepts an MU, and has no failures or stops yet.
 
-## SingleStation
+## Station (`SingleStation`)
 
-The core processing unit.
+Works on one MU at a time for its process time.
 
 ```rust
 pub struct SingleStation {
-    pub proc_time: Duration,
-    pub remain_proc_time: Duration,
-    pub interrupted_remain_proc_time: Option<Duration>,  // saved on StartFailure if Processing
-    pub content: Option<MoveableUnit>,  // None = idle
-    pub succ: Vec<Rc<RefCell<dyn MaterialFlow>>>,
-    pub pred: Vec<Rc<RefCell<dyn MaterialFlow>>>,
+    pub proc_time: SimTime,              // can change during a run
+    pub configured_proc_time: SimTime,   // Reset returns proc_time to this
+    pub completion_time: Option<SimTime>,
+    pub interrupted_remain_proc_time: Option<SimTime>,
+    pub stop_count: u32,                 // makes queued exits stale
+    pub failure_profile: FailureProfile,
+    pub starting_content: Option<MoveableUnit>,
+    pub content: Option<MoveableUnit>,
+    pub succ: Vec<u32>,
     pub succ_pointer: usize,
     pub blockedlist: Vec<u32>,
     pub entrancelocked: bool,
-    pub exitlocked: bool,
     pub state: ProcessState,             // Idle | Processing | Blocked
-    pub interruption: InterruptionState, // None | Failed | Paused
-    pub failure_profile: FailureProfile,
+    failed: bool, forced: bool, paused: bool,
+    interrupted_since: [SimTime; 3],     // when each kind of interruption began
+    pub statistics: StatisticsKeeper,
+    // ...
 }
 ```
 
-Key state transitions:
-
-| Event | Before | After |
-|---|---|---|
-| `process_mu_entrance` | Idle | Processing, entrance locked |
-| `MUExit` (move succeeds) | Processing | Idle, entrance unlocked |
-| `MUExit` (all blocked) | Processing | Blocked, entrance stays locked |
-| `MUExit` (interruption active) | any | no-op (returns `Ok(None)`) |
-| `BlockedRetry` (exit allowed, move succeeds) | Blocked | Idle, entrance unlocked |
-| `BlockedRetry` (exit not allowed) | Processing | Processing (no-op) |
-| `StartFailure` | any | `InterruptionState::Failed`; saves `remain_proc_time` if Processing; schedules `EndFailure` |
-| `EndFailure` | Failed | `InterruptionState::None`; resumes MUExit or notifies predecessors; schedules next `StartFailure` |
-
-`is_entrance_allowed()` returns `true` only when `state == Idle` AND `interruption == None` AND `!entrancelocked`.
+- **Entrance** is open only when Idle, not stopped and not locked. **Exit** is allowed when Idle or Blocked and not stopped, never while Processing.
+- **Work:** an MU entering starts work at once: `WorkStarted`, then an `MUExit` after the process time. On `MUExit` it records `WorkFinished` and pushes the MU on. If that works it becomes Idle and sends retries to waiting predecessors; if not, it becomes Blocked.
+- **Stops:** a random failure, a forced failure and a Pause are separate interruptions, each with its own flag, and the Station is stopped while any is active. Only the first interruption of a stop freezes the work (remaining time saved, `stop_count` bumped), and only the last to end resumes it: work carries on with its remaining time, a Blocked Station tries its move again, and an Idle one sends retries. So completion time is entry plus process time plus time stopped, with overlaps counted once.
+- **Random failures:** `init` schedules the first `StartFailure` if the profile is active. `StartFailure` samples a repair time and schedules `EndFailure`, and `EndFailure` schedules the next `StartFailure`. A failure arriving while already failed is discarded.
+- **Forced failure:** started and ended by the user (`ForceFailureOn`, `ForceFailureOff`). It has its own flag, so random failures carry on underneath it, and it counts as a failure in statistics.
+- **Pause:** `PauseOn`, `PauseOff`. Planned, so it doesn't count against availability.
+- `state()` reports the most serious active interruption as `stop` (failure, then forced failure, then pause) and lists every active one, with when it began, in `interruptions`.
 
 ### FailureProfile
 
-`SingleStation` carries a `FailureProfile` for failure modelling. Availability is a fraction in `(0.0, 1.0)` where `1.0` means 100% available; `availability = 1.0` sets `active = false` and disables all failure scheduling.
-
-Constructor:
 ```rust
 FailureProfile::new(
-    availablity: f32,               // fraction in (0.0,1.0]; 1.0 = always available
-    distribution_mttr: Distribution, // MTTR distribution; MTBF derived automatically
-    seed: u64,                       // base RNG seed (MTBF sampler uses seed+1)
+    availability: f32,               // in (0.0, 1.0); 1.0 = never fails
+    distribution_mttr: Distribution, // repair time; the time between failures is derived
+    seed: u64,
 )
 ```
-MTBF mean is derived as `mttr_mean / (1/availability - 1)`. The MTBF distribution uses the same shape as the MTTR distribution, scaled to the derived mean.
 
-`reseed(seed)` replaces both samplers while preserving their shape — called by `set_random_seed` so each registered object gets a unique RNG stream.
+The mean time between failures is `mttr_mean / (1/availability - 1)`, with the same distribution shape as the repair time. `availability = 1.0` makes the profile inactive. The run gives every object its own seed at Init, and `reseed` keeps each sampler's shape. Distributions are `CONSTANT`, `UNIFORM`, `NORMAL` and `ERLANG`. The demo uses availability 0.9 with an Erlang repair time (mean 60 s, k = 2).
 
-`init()` schedules the first `StartFailure` event if `active == true`.
+## Buffer
 
-The demo currently uses `availability = 0.9` with an Erlang(mean=60 000 ms, k=2) MTTR distribution.
+Holds MUs up to a capacity. **Known to be broken** and not used by the demo: `process_mu_exit` takes an MU and then the move takes another, so a lone MU never leaves and one is lost per move with two or more. It also never notifies waiting predecessors, and ignores a retry's `from`. Fixing it is part of step 7 of the build order.
 
 ## Drain
 
-- Always accepts entrance (`entrance_locked` starts `false`, nothing sets it `true` in current code).
-- `process_mu_entrance(mu)`: records `current_time` in `exits` and `mu.id` in `exit_ids`. Computes running average `exit_interval`.
-- Does **not** notify blocked predecessors (`notify_blocked_predecessors` returns `None`). This is safe because the Drain never becomes a blocker.
-- `execute_event` has no active match arms — the Drain receives no scheduled events.
-
-## FailureProfile and distributions
-
-`FailureProfile` encapsulates two `DistributionSampler`s (MTTR and MTBF). Available distributions: `CONSTANT`, `UNIFORM`, `NORMAL`, `ERLANG`. Each sampler holds a seeded `StdRng` for reproducibility.
-
-`Distribution` provides two utility methods:
-- `mean() -> f64` — returns the configured mean of the distribution.
-- `with_mean(mean) -> Distribution` — returns a new distribution of the same shape with a different mean (used to derive the MTBF distribution from the MTTR distribution).
+- Its entrance is always open, so predecessors never wait for it.
+- On entry it counts the exit in its statistics (lead time, exit intervals) and records `MuLeft`. It keeps no MU.
+- It handles no events of its own.
 
 ## Code references
 
-- `EventInterface`, `MaterialFlow`, `SuccessorContainer`, `FailureProfile`, `ProcessState` — `src/materialflow_objects/flows.rs`
+- `ModelObject`, `OtherObjects`, `on_the_object!` — `src/materialflow_objects/model_object.rs`
+- Traits, `MoveableUnit`, `FailureProfile`, `ProcessState`, `InterruptionState` — `src/materialflow_objects/flows.rs`
 - `Source` — `src/materialflow_objects/source.rs`
 - `SingleStation` — `src/materialflow_objects/station.rs`
+- `Buffer` — `src/materialflow_objects/buffer.rs`
 - `Drain` — `src/materialflow_objects/drain.rs`
 - `Distribution`, `DistributionSampler` — `src/random_numbers.rs`
+- `StatisticsKeeper` — `src/statistics.rs`
 </script>
 
-<script type="text/markdown" id="page-architecture-visualization-and-renderer">
+<script type="text/markdown" id="page-architecture-live-session-and-ui">
 ---
-title: Visualization & Renderer
+title: Live Session & UI
 section: architecture
 related:
-  - simulator-and-event-controller
+  - simulation-run
+  - running-crabsim
   - configuration-flags
 ---
 
-# Visualization & Renderer
+# Live Session & UI
 
-## Two output modes
+A headless run needs none of this. A live session plays a run on a clock for someone to watch, and the UI draws it. Both are optional layers that cost a headless run nothing.
 
-crabsim supports two ways to display the simulation state:
+## Live session
 
-| Mode | How | When |
-|---|---|---|
-| Console (plain) | Prints a new table after each event | Default |
-| Console (in-place) | Rewrites the same table using ANSI escape sequences | `--inplace` |
-| External renderer | Sends JSON to a separate terminal window | `--renderer-window` |
+`LiveSession` (`src/live_session.rs`, ADR 0002) owns a thread on which a builder closure creates the whole run. It knows nothing about any UI technology.
 
-## What gets printed
+- **Read-ahead:** the run computes ahead as fast as it can into a bounded buffer of instants, and the clock releases what it computed. Everything the user sees follows **shown time**, while the run is at a later **computed time**. One thread alternates between computing a slice and releasing.
+- **Commands in:** `start`, `halt`, `reset`, `set_speed`, `set_time_mode`, `go_back`, `step_forward`, `step_back`, `set_reset_keeps_changes`, `request_state`, `pause`, `resume`, `force_failure`, `end_forced_failure`, `set_process_time`, `clear_statistics`.
+- **Observations out:** `Occurrences`, `ShownTime`, `State`, `Status` and `Error`. A full state comes only at Init, after Reset, after going back and on request. A session records everything, because its observers rebuild what they show from occurrences.
+- **Time modes:** `Continuous`, or `Skipping`, where no gap between instants takes longer than a set wall time (0.25 s to start with). Results don't depend on it.
+- **Interventions** (Pause, forced failure, a process time, clearing statistics) take effect at shown time and discard the computed future. They go in an intervention log, so the same seed and the same log give the same result.
+- **Backlog:** sending never blocks the session thread. Past `OBSERVATION_BACKLOG_LIMIT` (256) unread observations it stops releasing until they are read, keeps handling commands and drops nothing. A UI drains the channel every frame.
+- **Clock:** wall time comes from a `Clock`. Tests use a fake clock with `sync`, which blocks until the session has handled earlier commands and shown time has reached the clock.
 
-After every processed event the simulator emits two things: a static **topology** (once, at the start) and a **state snapshot** (after each event).
+### Checkpoints and replay
 
-### Topology
+A checkpoint is a clone of the run plus how much of the intervention log is in it. To reach an earlier instant, the session restores the nearest earlier checkpoint and replays with recording off, applying the logged interventions it passes. Going back drops the computed future, later log entries and their checkpoints. `step_back` finds the instant before the one on screen the same way, so nothing remembers past instants. Checkpoints are taken every 100,000 events within a memory budget (256 MB by default); past it, every other checkpoint in the older half goes, and the one from Init always stays.
 
-`Simulator::print_network_topology()` (or `render_network_topology` for the renderer) prints the directed graph of objects as an ASCII tree. It walks `succ` relationships and draws branches and connectors.
+## Picture
 
-For the external renderer it is sent as:
-```json
-{ "kind": "topology", "text": "..." }
-```
+`Picture` (`src/picture.rs`) is what the user knows about a run at shown time. A UI feeds it every observation in order through `observe`. A full state replaces it; occurrences then update each object's contents, process state, interruptions with when each began, and remaining time. Statistics and waiting predecessors come only from a full state. It holds nothing about drawing, so a 2D view, a 3D view and tests read the same thing.
 
-### State snapshot
+## UI
 
-`Simulator::print_materialflow_state()` collects a `StateSnapshot` from all registered objects — each becomes a `StateRow` containing the object's current state, content, timing info, and interruption status — and renders it as a table with columns: ID, Type, Content, State, Interr (interruption), RemTime, Blocked.
+`crabsim-ui` (`ui/`) is a Bevy application with egui panels (ADR 0006). It runs the demo model in a live session at 60 times real time and draws it in 2D, as flat meshes under an orthographic camera:
 
-For the external renderer:
-```json
-{ "kind": "snapshot", "snapshot": { ... } }
-```
+- state colours, connections, and names that shrink with the model,
+- pan and zoom, and a click to select,
+- Init, Start, Halt, Reset, stepping back and forward, going back to a typed time, speed on a logarithmic slider, and time mode,
+- a banner for errors,
+- an inspector with state, why an object is blocked or stopped, process times, waiting predecessors and statistics, plus Pause, forced failure and process time changes on Stations,
+- a mark for each intervention on a strip under the top bar; going back past one asks first,
+- MUs drawn in the objects that hold them when zoomed in and slow enough to follow, and otherwise a count.
 
-### StateRow fields
+Its logic is in plain Rust, tested without a window:
 
-```rust
-pub struct StateRow {
-    pub id: u32,
-    pub typ: String,         // "Station", "Source", "Drain", "Unknown"
-    pub content: String,     // "MU<n>" or "-"
-    pub state: String,       // "Process", "Blocked", "Idle", or "-"
-    pub interruption: String, // "-", "Failed", or "Paused"
-    pub rem_time: u128,      // remaining processing time in milliseconds
-    pub blocked: String,     // comma-separated blocked predecessor IDs or "-"
-}
-```
+- `ui/src/view.rs` — the view state: from the `ModelDescription`, the session's observations and wall time, it works out what is drawn, which controls are offered and whether frames are needed. A halted window draws nothing once things settle.
+- `ui/src/camera.rs` — where the view looks and how close.
+- `ui/src/marks.rs` — the interventions made, mirroring the session's log.
+- `ui/src/main.rs` — Bevy and egui, drawing only what the view state says. Panels are plain functions taking `&mut egui::Ui`.
 
-The renderer only counts down `rem_time` when `interruption == "-"`; a failing or paused station's displayed remaining time is frozen until the interruption clears.
-
-## External renderer
-
-The external renderer is a second binary (`crabsim-renderer`) that:
-
-1. Connects to the simulator via TCP on a port chosen by the simulator.
-2. Receives newline-delimited JSON messages.
-3. Displays: header, topology string, live state table.
-4. Paces display: `1 sim-second = 1/speed wall-seconds`. At `speed = -1` (unpaced), renders immediately until the last event then holds open.
-
-### Launch sequence
-
-When `CRABSIM_RENDERER=1`:
-1. Simulator binds a random local TCP port.
-2. Spawns `crabsim-renderer --connect <ip>:<port> --speed <factor>`.
-   - On Linux: direct `Command::new(renderer_prog)`.
-   - On Windows: `PowerShell Start-Process` (maximized) or `cmd /C start /MAX`.
-3. Accepts the single inbound connection.
-4. Immediately sends the topology message.
-
-The renderer binary path is resolved relative to the current executable (same directory). If the renderer binary is missing, the simulator silently continues without it.
-
-## In-place console mode
-
-When `live_inplace = true`, the simulator:
-1. Prints an ANSI anchor marker on the first snapshot.
-2. On subsequent snapshots, moves the cursor back to the anchor and overwrites the previous table.
-
-This gives a live-updating dashboard in the terminal without scroll.
+The rules from ADR 0006: the engine never depends on Bevy, Bevy's ECS stays in the UI crate, and the Picture has no Bevy types.
 
 ## Code references
 
-- `Simulator::print_materialflow_state`, `print_network_topology` — `src/simulator.rs`
-- `StateSnapshot`, `StateRow`, `StateVisualizer` — `src/visualization/state.rs`
-- `TopologyVisualizer`, `render_network_topology` — `src/visualization/topology.rs`
-- Renderer spawn logic — `src/lib.rs` (`run_demo`)
+- `LiveSession`, `Observation`, `SessionSettings`, `TimeMode`, `Clock` — `src/live_session.rs`
+- `Picture`, `ObjectPicture` — `src/picture.rs`
+- `ViewState` — `ui/src/view.rs`
+- ADR 0002 (read-ahead session), ADR 0006 (UI technology) — `docs/adr/`
 </script>
 
-<script type="text/markdown" id="page-guides-running-the-demo">
+<script type="text/markdown" id="page-guides-running-crabsim">
 ---
-title: Running the Demo
+title: Running crabsim
 section: guides
 related:
   - configuration-flags
-  - visualization-and-renderer
+  - live-session-and-ui
 ---
 
-# Running the Demo
+# Running crabsim
 
-## Three modes
+There are three ways to run a model: the headless CLI, the UI, and a `SimulationRun` in your own code. All three run the demo model from `src/demo.rs` today. A model file comes with model as data.
 
-### Plain (default)
+## Headless CLI
 
-Prints a new state table to stdout after each event.
-
-```bash
-RUST_LOG=info cargo run --bin crabsim
-```
-
-### In-place
-
-Rewrites the same table in the terminal using ANSI escape sequences — gives a live-updating dashboard.
+Runs the demo model with a seed for a simulated length, then prints each object's statistics, each Drain's throughput and mean lead time, and how many events it ran in how long.
 
 ```bash
-# Via CLI flag
-RUST_LOG=info cargo run --bin crabsim -- --inplace
-
-# Via env var
-CRABSIM_LIVE_INPLACE=1 RUST_LOG=info cargo run --bin crabsim
+cargo run --release --bin crabsim
+cargo run --release --bin crabsim -- --seed 7 --length 365d
 ```
 
-### External renderer window
+`--length` is written as the UI shows time: `90`, `1:30`, `8:00:00` or `30d 12:00:00`. The same seed always gives the same statistics. A run error still prints the statistics up to it, then exits with failure. Build in release for long lengths: a debug build is about ten times slower.
 
-Spawns a second terminal running `crabsim-renderer`, connected via TCP, displaying the simulation at a configurable playback speed.
+## UI
 
 ```bash
-# At 5× speed, hold window open 1s after finish
-RUST_LOG=info cargo run --bin crabsim -- --renderer-window --speed 5 --hold 1
-
-# Via env vars
-CRABSIM_RENDERER=1 CRABSIM_RENDERER_SPEED=5 CRABSIM_RENDERER_HOLD=1 RUST_LOG=info cargo run --bin crabsim
+cargo run -p crabsim-ui --profile ui
 ```
 
-Use `--speed -1` for unpaced mode: renders each simulation second immediately (fast-forward) then enters hold-open.
+The `ui` profile is optimised without LTO, so it rebuilds in seconds. The first build compiles Bevy and takes several minutes. See [Live Session & UI](../architecture/live-session-and-ui.md) for what it shows.
+
+## In your own code
+
+```rust
+let mut run = crabsim::demo::model().build(seed);
+run.init()?;
+run.advance_to(SimTime::from_secs(86_400)).map_err(|failure| failure.error)?;
+let state = run.state();   // each object's ObjectState and statistics
+```
+
+Turn on recording (`run.set_recording(Recording::ALL)`) to get occurrences back from each advance. A headless run records nothing by default.
 
 ## Logging
 
-`run_demo()` calls `env_logger::init()`. Control verbosity via `RUST_LOG`:
+The engine logs every event at `info` level through `env_logger`, which the CLI starts. Set `RUST_LOG` to see it, but only for short runs: the demo model logs about 42,000 events a simulated day, and 15.5 million a year.
 
 | Value | Effect |
 |---|---|
-| `info` | MU moves, exit times, simulation runtime |
-| `debug` | Blocked predecessor registration details |
-| `crabsim=debug` | Debug only for this crate |
+| `info` | Every event, MU moves and exits |
+| `debug` | Also each refused successor |
+| `crabsim=debug` | The same, for this crate only |
 
-## Build first
+The UI filters this logging out, because Bevy's logger would otherwise print it.
+
+## Benchmark
 
 ```bash
-cargo build
+cargo bench --bench reference
 ```
 
-The renderer binary (`crabsim-renderer`) is built alongside the main binary. Both must be built before using renderer window mode. `cargo run` builds automatically.
-
-## After the run
-
-The demo prints simulation runtime in milliseconds and the exit interval list from the drain:
-
-```
-simulation runtime: 1.23 ms (renderer=false, launcher=n/a)
-```
+About a minute. It runs a copy of the demo model and 429 copies side by side (6,006 objects), and reports events per second, simulated time per wall second and peak memory. The baseline is in `docs/design/first-profile.md`.
 </script>
 
-<script type="text/markdown" id="page-guides-adding-a-new-station-type">
+<script type="text/markdown" id="page-guides-adding-a-new-object-type">
 ---
-title: Adding a New Station Type
+title: Adding a New Object Type
 section: guides
 related:
   - material-flow-objects
@@ -1136,131 +1149,97 @@ related:
   - writing-tests
 ---
 
-# Adding a New Station Type
+# Adding a New Object Type
 
-This guide walks through adding a new type of material flow object — for example, a station that buffers multiple MUs, or one with variable processing time.
+How to add a new kind of material-flow object, such as a conveyor. Read [Material Flow Objects](../architecture/material-flow-objects.md) first, and check the agreed design in `docs/agents/handoff.md`: Station capacity, for example, is agreed as a setting on Station rather than a new type (ADR 0001).
 
-## Step 1: Define the struct
+## 1. The struct
 
-Your struct needs a `BaseObject` and fields for whatever state it tracks.
+Hold a `BaseObject`, everything the object does, and what Reset returns it to. Successors and waiting predecessors are ids. It must be `Clone`, because a clone of a run is a checkpoint.
 
 ```rust
-pub struct BufferStation {
+#[derive(Clone)]
+pub struct Conveyor {
     pub base: BaseObject,
-    pub capacity: usize,
-    pub queue: VecDeque<MoveableUnit>,
-    pub succ: Vec<Rc<RefCell<dyn MaterialFlow>>>,
+    pub succ: Vec<u32>,
     pub succ_pointer: usize,
     pub blockedlist: Vec<u32>,
-    pub proc_time: Duration,
+    pub statistics: StatisticsKeeper,
+    // ...
 }
 ```
 
-## Step 2: Implement EventInterface
+## 2. EventInterface
 
 ```rust
-impl EventInterface for BufferStation {
-    fn init(&mut self) -> Result<Vec<EventTemplate>, InitError> {
-        Ok(Vec::new())  // no initial events unless you pre-load MUs
-    }
-
+impl EventInterface for Conveyor {
+    fn init(&mut self, context: &mut EventContext) -> Result<Vec<EventTemplate>, InitError> { ... }
     fn execute_event(
         &mut self,
-        simulator: &mut Simulator,
+        context: &mut EventContext,
         eventtype: &EventType,
+        others: &mut OtherObjects<'_>,
     ) -> Result<Option<Vec<EventTemplate>>, RunTimeError> {
-        match eventtype {
-            EventType::MUExit => { /* move front of queue to successor */ }
-            EventType::BlockedRetry => { /* retry if exit allowed */ }
-            _ => return Err(RunTimeError {}),
-        }
+        let outcome = self.handle_event(context, eventtype, others);
+        self.update_statistics(context.time);   // after everything it handles
+        outcome
     }
-
+    fn reset(&mut self) { ... }                  // every field back to the default state
+    fn report(&self, now: SimTime) -> ObjectState { ... }
+    fn clear_statistics(&mut self, now: SimTime) { self.statistics.clear(now); }
     fn get_object_id(&self) -> &u32 { &self.base.object_id }
     fn set_object_id(&mut self, id: u32) { self.base.object_id = id; }
     fn set_random_seed(&mut self, seed: u64) { self.base.random_seed = seed; }
-    fn as_any(&self) -> &dyn std::any::Any { self }
 }
 ```
 
-## Step 3: Implement MaterialFlow
+- Record what happens through `context.record(OccurrenceKind::...)`, and get new MU ids from `context.new_mu_id()`.
+- Reach other objects only through `others.get(id)` and `others.get_mut(id)`.
+- Return an error for an event the object doesn't handle.
+
+## 3. StopCtrl and MaterialFlow
+
+`StopCtrl` is `todo!()` on every type today; stops work through events (see [Event Types](../reference/event-types.md)). For `MaterialFlow`:
 
 ```rust
-impl MaterialFlow for BufferStation {
-    fn is_entrance_allowed(&self) -> bool {
-        self.queue.len() < self.capacity
-    }
-    fn is_exit_allowed(&self) -> bool {
-        !self.queue.is_empty()
-    }
-    fn process_mu_entrance(&mut self, mu: MoveableUnit) -> Result<Option<EventTemplate>, MaterialflowError> {
-        self.queue.push_back(mu);
-        // schedule processing if first item
-        if self.queue.len() == 1 {
-            return Ok(Some(EventTemplate {
-                eventtype: EventType::MUExit,
-                exec_time: self.proc_time,
-                object_id: self.base.object_id,
-                seq: 0,
-            }));
-        }
-        Ok(None)
-    }
-    fn process_mu_exit(&mut self) -> Result<Option<EventTemplate>, MaterialflowError> { Ok(None) }
-    fn add_blocked(&mut self, id: u32) { self.blockedlist.push(id); }
+impl MaterialFlow for Conveyor {
+    fn is_entrance_allowed(&self) -> bool { ... }
+    fn is_exit_allowed(&self) -> bool { ... }
+    fn process_mu_entrance(&mut self, mu: MoveableUnit, context: &mut EventContext)
+        -> Result<Option<EventTemplate>, MaterialflowError> { ... }
+    fn add_blocked(&mut self, id: u32) { list_blocked(&mut self.blockedlist, id); }
+    fn remove_blocked(&mut self, id: u32) { self.blockedlist.retain(|&listed| listed != id); }
     fn notify_blocked_predecessors(&mut self) -> Result<Option<Vec<EventTemplate>>, MaterialflowError> {
-        let events: Vec<_> = self.blockedlist.drain(..)
-            .map(|id| EventTemplate {
-                eventtype: EventType::BlockedRetry,
-                exec_time: Duration::ZERO,
-                object_id: id,
-                seq: 0,
-            })
-            .collect();
-        Ok(if events.is_empty() { None } else { Some(events) })
+        Ok(retries_for_blocked(&mut self.blockedlist, self.base.object_id))
     }
-    fn as_any(&mut self) -> &mut dyn std::any::Any { self }
 }
 ```
 
-## Step 4: Implement SuccessorContainer
+## 4. SuccessorContainer, if it has successors
 
-Required if your type has successors (so `try_to_move_to_successor` can use it).
+So that `try_to_move_to_successor` and `retry_move_to_successor` can move its MUs: `successors`, `succ_pointer`, `succ_pointer_mut`, `take_content(now)`, `clear_content_and_idle` and `statistics_mut`.
 
-```rust
-impl SuccessorContainer for BufferStation {
-    fn successors(&self) -> &Vec<Rc<RefCell<dyn MaterialFlow>>> { &self.succ }
-    fn succ_pointer(&self) -> usize { self.succ_pointer }
-    fn succ_pointer_mut(&mut self) -> &mut usize { &mut self.succ_pointer }
-    fn take_content(&mut self) -> Option<MoveableUnit> { self.queue.pop_front() }
-    fn clear_content_and_idle(&mut self) { self.queue.clear(); }
-}
-```
+## 5. Wire it in
 
-## Step 5: Expose in mod.rs
+1. Expose it in `src/materialflow_objects/mod.rs`.
+2. Add a variant to `ModelObject` and to the `on_the_object!` macro in `src/materialflow_objects/model_object.rs`.
+3. Add an `ObjectKind` variant, and handle it in `ModelDescription::kind` and `successors`, and in `Dimensions::default_for`.
+4. Add an `add_` method to `ModelDescription`, and include its successors in `connect` if it has any.
 
-Add a `pub use` in `src/materialflow_objects/mod.rs`:
+## Rules to keep
 
-```rust
-pub use crate::materialflow_objects::buffer_station::BufferStation;
-```
+- Send retries whenever the object frees up room, or waiting predecessors are never woken.
+- On `BlockedRetry`, do nothing unless `is_exit_allowed()` and there is an MU to move, then offer it only to `from` with `retry_move_to_successor`.
+- An event the heap can't cancel must be recognisable as stale when it fires, as `ExitTicket` does for Stations.
+- Keep the per-event path cheap: no allocation where it can be avoided, and measure with the benchmark.
+- Add reset tests in `tests/simulation_run.rs`. A same-seed replay can't catch leftover events, because they land on the replay's own event times.
 
-## Step 6: Register and wire
+## Code references
 
-```rust
-let buf = Rc::new(RefCell::new(BufferStation::new(...)));
-simulator.register_material_flow(buf.clone());
-
-// wire successors and predecessors
-buf.borrow_mut().succ = vec![next_station.clone()];
-next_station.borrow_mut().pred = vec![buf.clone()];
-```
-
-## Rules to preserve
-
-- Call `notify_blocked_predecessors()` whenever your object frees up space, otherwise blocked predecessors will never be woken.
-- In `BlockedRetry`, check `is_exit_allowed()` first and return `Ok(None)` if `false` — this prevents moving MUs out of an object that hasn't finished processing.
-- Keep `seq = 0` in returned `EventTemplate`s — the `EventController` overwrites it with the real sequence number at scheduling time.
+- Traits and helpers — `src/materialflow_objects/flows.rs`
+- `ModelObject`, `on_the_object!` — `src/materialflow_objects/model_object.rs`
+- `ModelDescription` — `src/model.rs`
+- A full example — `SingleStation` in `src/materialflow_objects/station.rs`
 </script>
 
 <script type="text/markdown" id="page-guides-writing-tests">
@@ -1268,119 +1247,81 @@ next_station.borrow_mut().pred = vec![buf.clone()];
 title: Writing Tests
 section: guides
 related:
-  - simulator-and-event-controller
+  - simulation-run
   - material-flow-objects
   - blocked-retry
 ---
 
 # Writing Tests
 
-Tests live in `src/lib.rs` under `#[cfg(test)]`. All tests use the same pattern: build a small network, run the simulation, assert on drain exits.
+Tests go through the engine's seams, never into an object's insides:
 
-## Minimal setup pattern
-
-```rust
-let mut simulator = Simulator::new();
-let mut eventcontroller = EventController::new(Some(Duration::from_secs_f64(1000.0)));
-
-let default_fp = FailureProfile::new(
-    1.0,                                    // 1.0 = 100% available (no failures); fraction, not percentage
-    Distribution::CONSTANT { value: 0.0 },  // MTTR distribution (MTBF derived automatically)
-    0,                                      // seed
-);
-
-let station = Rc::new(RefCell::new(SingleStation::new(
-    0,
-    Duration::from_secs_f64(10.0),
-    default_fp.clone(),
-    None,
-    Vec::new(),  // succ — wire after creation
-    Vec::new(),  // pred
-)));
-let source = Rc::new(RefCell::new(Source::new(0, Duration::from_secs_f64(5.0), vec![station.clone()])));
-let drain = Rc::new(RefCell::new(Drain::new(0, vec![station.clone()])));
-
-station.borrow_mut().succ = vec![drain.clone()];
-
-simulator.register_material_flow(source.clone());
-simulator.register_material_flow(station.clone());
-simulator.register_material_flow(drain.clone());
-simulator.add_drain(drain.clone());
-
-eventcontroller.init(&mut simulator);
-let sim = eventcontroller.run(simulator).unwrap();
-```
-
-## Asserting on exits
-
-```rust
-let exits = &sim.drains[0].borrow().exits;      // Vec<Duration> — timestamps
-let exit_ids = &sim.drains[0].borrow().exit_ids; // Vec<u32> — MU ids in arrival order
-
-assert!(!exit_ids.is_empty());
-
-// FIFO check: IDs should be sequential from 1
-for (i, &id) in exit_ids.iter().enumerate() {
-    assert_eq!(id as usize, i + 1);
-}
-
-// Throughput check
-assert!(exits.len() >= expected_count);
-```
-
-## Manually scheduling an event
-
-Use this to set up a specific mid-simulation state, e.g., a busy station that finishes at a known time:
-
-```rust
-let b_id = simulator.register_material_flow(station_b.clone());
-
-eventcontroller.add_event(
-    Duration::from_secs_f64(100.0),
-    EventTemplate {
-        eventtype: EventType::MUExit,
-        exec_time: Duration::ZERO,
-        object_id: b_id,
-        seq: 0,
-    },
-);
-```
-
-Always store the return value of `register_material_flow` when you need the assigned `object_id` for manual event scheduling.
-
-## Testing blocked/retry behaviour
-
-Pre-configure a station as busy and locked to test the blocked/retry path:
-
-```rust
-let mut busy = SingleStation::new(0, Duration::from_secs_f64(75.0), fp.clone(), None, Vec::new(), Vec::new());
-busy.content = Some(MoveableUnit { id: 9999, location_id: 0 });
-busy.entrancelocked = true;
-busy.state = ProcessState::Processing;
-let station_b = Rc::new(RefCell::new(busy));
-```
-
-Then schedule its `MUExit` manually to trigger the retry flow at a known time.
-
-## Behaviours tests must preserve
-
-When refactoring core scheduling or movement logic, keep these test guarantees intact:
-
-| Test | What it verifies |
+| File | What it tests |
 |---|---|
-| `drain_fifo_order` | MU IDs arrive at drain in creation order |
-| `ordering_across_stations_preserved` | FIFO preserved across a linear chain |
-| `ordering_across_parallel_stations_preserved` | FIFO preserved across parallel branches |
-| `station_becomes_blocked_when_no_successor_accepts` | Predecessor goes Blocked when all successors deny |
-| `blocked_retry_while_predecessor_processing_does_not_move_mu` | BlockedRetry is no-op when station is Processing |
-| `blocked_retry_full_flow` | End-to-end blocked/retry reaches the drain |
-| `blockedlist_dedup` | Inherent `add_blocked` method deduplicates |
-| `source_continues_producing_after_blocked_retry` | Source creates ≥3 MUs after a blocked-retry cycle |
-| `no_duplicate_random_seeds_after_init` | Each registered object receives a unique random seed after `init()` |
-| `failure_blocks_mu_exit` | A `Failed` station ignores `MUExit` events (stale events from before failure) |
-| `start_failure_schedules_end_failure` | `StartFailure` transitions to `Failed` and schedules an `EndFailure` |
-| `failure_interrupts_processing_and_resumes` | Failure mid-processing resumes with remaining proc time after repair |
-| `failure_on_idle_station_blocks_entrance_and_recovers` | Failure on idle station blocks entrance; `EndFailure` restores it and schedules next `StartFailure` |
+| `tests/simulation_run.rs` | Behaviour at the run's interface: Init, advance, Reset, then read occurrences and state |
+| `tests/live_session.rs` | Commands in and observations out, with a fake clock, and the `Picture` against the run's own state |
+| `tests/cli.rs` | The CLI's binary, end to end |
+| `src/` unit tests | What can't be seen from outside: a failure part way through an event (`RecordsThenFails`), and in `live_session.rs` the buffer limit and thinning |
+| `ui/tests/` | The UI's view state against a real live session on a fake clock, with no window |
+
+## A run test
+
+Build the model through `ModelDescription`, turn recording on if you read occurrences, and assert on occurrences and state:
+
+```rust
+let mut model = ModelDescription::new();
+let source = model.add_source(secs(5));
+let station = model.add_station(secs(10), no_failures(0.0));
+let drain = model.add_drain();
+model.connect(source, station);
+model.connect(station, drain);
+
+let mut run = model.build(0);
+run.set_recording(Recording::ALL);
+run.init().unwrap();
+let occurrences = run.advance_to(secs(100)).unwrap();
+
+assert_eq!(exit_ids(&occurrences), vec![1, 2, 3, ...]);
+assert_eq!(statistics_of(&run, drain).mus_in, 9);
+```
+
+`tests/simulation_run.rs` has helpers for this: `secs`, `no_failures`, `station`, `preloaded_station`, `recorded`, `exit_times`, `exit_ids`, `statistics_of`. Tests use `availability = 1.0` unless they exercise failures.
+
+To set up a particular moment, give a Station a starting MU (`add_station_holding`) or queue an event from outside with `schedule_event`, such as `EventType::PauseOn` at a known time.
+
+## A session test
+
+Use the fake clock: move it, then `sync`, which blocks until the session has handled earlier commands and shown time has reached the clock. Read observations from `session.observations()` and feed them to a `Picture` to compare with the run's own state.
+
+## Rules
+
+- **Check the test can fail.** Break the code on purpose and watch the test go red. This keeps finding tests that never exercised the rule they were named after.
+- **Reset tests:** every new field needs one. A same-seed replay can't detect events left over after Reset, because they land on the replay's own event times.
+- **No speed or timing assertions.** The benchmark measures speed. Tests check what can be observed, such as a headless run returning no occurrences.
+- **Determinism:** the same seed gives identical results. `seq` order is load-bearing, so a refactor of scheduling must keep every occurrence identical; compare hashes of all occurrences and the final state against `master` before trusting it.
+
+## Behaviours to keep
+
+| Test | What it guards |
+|---|---|
+| `a_source_feeds_a_drain_in_order`, `order_is_preserved_across_stations` | MUs leave in the order they were created |
+| `a_station_blocks_when_no_successor_accepts` | Refused everywhere means Blocked |
+| `a_retry_while_the_predecessor_is_working_does_not_move_its_mu` | A retry to a busy object does nothing |
+| `the_longest_waiting_predecessor_retries_first` | Retry order |
+| `a_retry_only_offers_the_successor_that_sent_it` | Nothing overtakes those waiting |
+| `failure_moves_completion_time_later` | Completion time includes time stopped |
+| `a_pause_is_not_a_failure_and_counts_as_paused_time` | Pause and failure are separate |
+| `reset_returns_the_exact_state_from_before_init` | Reset is complete |
+| `a_seed_gives_identical_results_every_time` | Determinism |
+| `machine_level_times_add_up_at_any_time_on_the_demo_model` | Statistics stay consistent |
+| `the_demo_model_runs_far_past_fifteen_simulated_years` | No false zero-time loop. Ignored by default: `cargo test --release --test simulation_run -- --ignored --nocapture the_demo_model` |
+
+## Code references
+
+- Run tests and helpers — `tests/simulation_run.rs`
+- Session tests — `tests/live_session.rs`
+- CLI tests — `tests/cli.rs`
+- `RecordsThenFails` — `src/materialflow_objects/records_then_fails.rs`
 </script>
 
 <script type="text/markdown" id="page-reference-event-types">
@@ -1390,93 +1331,87 @@ section: reference
 related:
   - discrete-event-simulation
   - blocked-retry
-  - simulator-and-event-controller
+  - simulation-run
 ---
 
 # Event Types
 
-Defined in `src/event.rs` as `pub enum EventType`.
+Defined in `src/event.rs` as `pub enum EventType`. Events are engine internals: views never see them, only the occurrences objects record.
 
-## Active event types
+## In use
 
-### MUExit
+### MUExit(ExitTicket)
 
-**Fires when:** processing is complete and the object should try to move its MU to a successor.
+**Fires when** an object is done with its MU: a Source's interval or a Station's process time is up.
 
-**Who emits it:**
-- `Source::create_mu()` — schedules itself after `proc_time` to signal the new MU is ready to move.
-- `SingleStation::process_mu_entrance()` — schedules itself after `proc_time` to signal processing complete.
+**Scheduled by** `Source::create_mu` and a Station's `start_work`, or on resuming after a stop, for the remaining process time.
 
-**What happens on dispatch:**
-1. `try_to_move_to_successor` is called.
-2. If a successor accepts: predecessor goes Idle, `notify_blocked_predecessors()` fires.
-3. If all successors deny: predecessor goes Blocked, stays locked.
+**On a Station:** ignored if the Station is stopped or the ticket is stale (its `stop_count` differs, or it names another MU). Otherwise it records `WorkFinished` and tries `try_to_move_to_successor`. Moved: Idle, entrance unlocked, retries sent to waiting predecessors. Refused everywhere: Blocked.
 
-### BlockedRetry
+**On a Source:** tries the move, and creates the next MU once this one has gone.
 
-**Fires when:** a successor that previously denied entrance has just freed up, and is notifying its blocked predecessors to retry.
+`ExitTicket { mu_id, stop_count }` exists because the heap can't cancel events.
 
-**Who emits it:** `SingleStation::notify_blocked_predecessors()` — one event per `object_id` in `blockedlist`, at `exec_time = 0` (immediate).
+### BlockedRetry { from }
 
-**What happens on dispatch:**
-1. `is_exit_allowed()` is checked first. Returns `false` if `ProcessState::Processing` — the retry is a **no-op**.
-2. If exit allowed: `try_to_move_to_successor` is called. If successful, predecessor goes Idle.
+**Fires when** the successor `from` has room, at the same time, ahead of every other event at that time.
 
-### StartFailure
+**Scheduled by** `notify_blocked_predecessors`, through `retries_for_blocked`: one per waiting predecessor, longest-waiting first.
 
-**Fires when:** a station's next failure is due (scheduled by `FailureProfile`).
+**On dispatch:** nothing if the object can't exit (working or stopped) or is empty. Otherwise `retry_move_to_successor` offers the MU to `from` only.
 
-**Who emits it:**
-- `SingleStation::init()` — if `failure_profile.active`, schedules the first `StartFailure` at time-to-next-failure.
-- `EndFailure` handler — schedules the next failure cycle after repair.
+### StartFailure and EndFailure
 
-**What happens on dispatch:**
-1. Sets `interruption = InterruptionState::Failed`.
-2. If station was `Processing`, saves `remain_proc_time` into `interrupted_remain_proc_time`.
-3. Schedules `EndFailure` after MTTR (sampled from `dist_sampler_mttr`).
+Random failures on a Station with an active `FailureProfile`.
 
-### EndFailure
+- `StartFailure`: scheduled first by `init`, then by each `EndFailure`. Discarded if already failed. Begins a `Failure` interruption, counts a failure and schedules `EndFailure` after a sampled repair time.
+- `EndFailure`: ends the interruption, schedules the next `StartFailure`, and resumes the Station if no other interruption is active.
 
-**Fires when:** the repair period expires.
+### ForceFailureOn and ForceFailureOff
 
-**Who emits it:** `StartFailure` handler, after sampling MTTR.
+A failure the user starts and ends by hand, scheduled from outside the model (`schedule_event`), which is what the live session does. It has its own flag, so random failures carry on underneath. It counts as a failure in statistics.
 
-**What happens on dispatch:**
-1. Clears `interruption` back to `InterruptionState::None`.
-2. Schedules the next `StartFailure` (if profile still active).
-3. If `interrupted_remain_proc_time` is set: resumes processing, schedules `MUExit` with the saved remaining time.
-4. If station was `Blocked` when failure hit: retries `try_to_move_to_successor`.
-5. If station was `Idle`: notifies blocked predecessors they can push MUs again.
+### PauseOn and PauseOff
 
-## Defined but not yet active
+A planned stop, scheduled from outside the model. It doesn't count against availability.
+
+Only the first interruption of a stop freezes a Station's work, and only the last to end resumes it, however the three kinds overlap.
+
+## Defined but unused
 
 | Type | Status |
 |---|---|
-| `MUEntrance` | Defined; entrance is handled directly via `process_mu_entrance()` from `try_to_move_to_successor`, not via a scheduled event |
-| `Finished` | Defined; not dispatched in current implementation |
+| `MUEntrance` | A move calls `process_mu_entrance` directly, with no event |
+| `Finished` | Never scheduled |
 
 ## EventTemplate
 
 ```rust
 pub struct EventTemplate {
     pub eventtype: EventType,
-    pub exec_time: Duration,  // relative offset from current time when scheduling
-    pub object_id: u32,       // which object receives the event
-    pub seq: u64,             // set to 0 by objects; overwritten by EventController
+    pub exec_time: SimTime,  // from now
+    pub object_id: u32,      // who gets it
 }
 ```
 
 ## ScheduledEvent
 
 ```rust
-pub struct ScheduledEvent {
-    pub time: Duration,       // absolute simulation time (current_time + exec_time)
-    pub template: EventTemplate,
-    pub seq: u64,             // for FIFO tiebreaking — assigned by EventController
+pub struct ScheduledEvent {   // 32 bytes, on the per-event path
+    pub time: SimTime,        // now + exec_time
+    pub seq: u64,             // assigned by the run, for FIFO order
+    pub object_id: u32,
+    pub eventtype: EventType,
 }
 ```
 
-Ordering: earlier time wins; equal time → lower seq wins.
+Order: earliest time first; at one time, `BlockedRetry` first; then lowest `seq`.
+
+## Code references
+
+- `EventType`, `EventTemplate`, `ScheduledEvent`, `ExitTicket` — `src/event.rs`
+- Station handling — `SingleStation::handle_event` in `src/materialflow_objects/station.rs`
+- Source handling — `src/materialflow_objects/source.rs`
 </script>
 
 <script type="text/markdown" id="page-reference-configuration-flags">
@@ -1484,50 +1419,58 @@ Ordering: earlier time wins; equal time → lower seq wins.
 title: Configuration Flags
 section: reference
 related:
-  - running-the-demo
-  - visualization-and-renderer
+  - running-crabsim
+  - live-session-and-ui
 ---
 
 # Configuration Flags
 
-## CLI flags
+## CLI
 
-Parsed by `clap` in `src/main.rs`. All flags set the corresponding env var before calling `run_demo()`.
+Parsed by `clap` in `src/main.rs`.
 
-| Flag | Env var set | Default | Effect |
-|---|---|---|---|
-| `--inplace` / `-i` | `CRABSIM_LIVE_INPLACE=1` | off | Redraw state table in-place using ANSI |
-| `--renderer-window` | `CRABSIM_RENDERER=1` | off | Spawn external renderer window |
-| `--speed <f>` | `CRABSIM_RENDERER_SPEED=<f>` | `5.0` | Renderer pacing: sim-seconds per wall-second. `-1` = unpaced |
-| `--hold <s>` | `CRABSIM_RENDERER_HOLD=<s>` | `1` | Seconds to hold renderer window open after simulation ends |
-| `--renderer-launcher <l>` | `CRABSIM_RENDERER_LAUNCHER=<l>` | `powershell` (Windows) | Windows only: `powershell` or `cmd` |
-
-## Environment variables
-
-Can be set directly without using the CLI. `run_demo()` reads these after `clap` may have set them.
-
-| Variable | Values | Effect |
+| Flag | Default | Effect |
 |---|---|---|
-| `CRABSIM_LIVE_INPLACE` | `1` (or any non-empty, non-`0` value) | Enable in-place terminal rendering |
-| `CRABSIM_RENDERER` | `1` (or any non-empty, non-`0` value) | Spawn and connect external renderer |
-| `CRABSIM_RENDERER_SPEED` | float string, e.g. `5` or `-1` | Renderer playback speed factor |
-| `CRABSIM_RENDERER_HOLD` | integer string, seconds | Hold renderer open after last event |
-| `CRABSIM_RENDERER_LAUNCHER` | `powershell` or `cmd` | Windows renderer launch method |
-| `RUST_LOG` | `info`, `debug`, `crabsim=debug`, etc. | Controls `env_logger` output level |
+| `--seed <N>` | `0` | Seed for the run's random numbers. The same seed gives the same results |
+| `--length <TIME>` | `1d` | Simulated length, written as the UI shows time: `90`, `1:30`, `8:00:00`, `30d 12:00:00`. Anything else is refused |
 
-## Env var precedence
+The CLI runs the demo model. It takes a model file once models can be saved.
 
-CLI flags **set** env vars, so if both a CLI flag and env var are present, the CLI flag wins (it overwrites the env var before `run_demo()` reads it).
+## Environment
 
-## Endtime
+| Variable | Effect |
+|---|---|
+| `RUST_LOG` | `env_logger` level, such as `info`, `debug` or `crabsim=debug`. Per-event logging slows a run down a lot |
 
-The simulation endtime is hardcoded in `run_demo()`:
+## Cargo profiles
 
-```rust
-EventController::new(Some(Duration::from_secs_f64(3_600.0)))
-```
+| Profile | Use |
+|---|---|
+| `dev` | Tests. Dependencies are optimised even here, because Bevy is slow without |
+| `release` | The CLI and the benchmark: thin LTO and one codegen unit, about 11% faster than the default. `panic` stays `unwind`, because `LiveSession` catches panics |
+| `ui` | The UI day to day: release without LTO, so it rebuilds in seconds |
 
-To change the simulated duration, edit this value in `src/lib.rs`. Tests each set their own endtime via `eventcontroller.endtime = Some(...)`.
+The Rust version is pinned in `rust-toolchain.toml`.
+
+## Live session settings
+
+`SessionSettings`, fixed when a session is created except the time mode and `reset_keeps_changes`, which have commands:
+
+| Setting | Default | Effect |
+|---|---|---|
+| `buffer_instants` | 100,000 | How many instants the run may compute ahead of what has been released |
+| `checkpoint_spacing` | 100,000 events | How far apart checkpoints are |
+| `checkpoint_budget_bytes` | 256 MB | Memory for checkpoints. Past it, every other one in the older half goes |
+| `time_mode` | `Continuous` | Or `Skipping`, where no gap between instants takes longer than a set wall time (`TimeMode::SKIPPING`: 0.25 s) |
+| `reset_keeps_changes` | off | Whether Reset keeps changed process times as the new default state |
+
+A session starts halted at speed 1. The UI sets 60 times real time.
+
+## Code references
+
+- `Opts` — `src/main.rs`
+- `SessionSettings`, `TimeMode` — `src/live_session.rs`
+- Profiles — `Cargo.toml`
 </script>
 
 <!-- ═══════════════════════ JAVASCRIPT ═══════════════════════ -->
@@ -1539,7 +1482,7 @@ const PAGES = {
   'index': { title: 'Home', section: null, related: [] },
   'concepts/discrete-event-simulation': {
     title: 'Discrete-Event Simulation', section: 'concepts',
-    related: ['architecture/simulator-and-event-controller', 'reference/event-types'],
+    related: ['architecture/simulation-run', 'reference/event-types'],
   },
   'concepts/material-flow-model': {
     title: 'Material Flow Model', section: 'concepts',
@@ -1551,43 +1494,43 @@ const PAGES = {
   },
   'concepts/blocked-retry': {
     title: 'Blocked Retry Semantics', section: 'concepts',
-    related: ['reference/event-types', 'architecture/simulator-and-event-controller', 'architecture/material-flow-objects'],
+    related: ['reference/event-types', 'architecture/simulation-run', 'architecture/material-flow-objects'],
   },
   'architecture/overview': {
     title: 'Architecture Overview', section: 'architecture',
-    related: ['architecture/simulator-and-event-controller', 'architecture/material-flow-objects', 'concepts/discrete-event-simulation'],
+    related: ['architecture/simulation-run', 'architecture/material-flow-objects', 'architecture/live-session-and-ui'],
   },
-  'architecture/simulator-and-event-controller': {
-    title: 'Simulator & EventController', section: 'architecture',
+  'architecture/simulation-run': {
+    title: 'Simulation Run', section: 'architecture',
     related: ['concepts/discrete-event-simulation', 'architecture/material-flow-objects', 'reference/event-types'],
   },
   'architecture/material-flow-objects': {
     title: 'Material Flow Objects', section: 'architecture',
     related: ['concepts/material-flow-model', 'concepts/blocked-retry', 'concepts/moveable-units'],
   },
-  'architecture/visualization-and-renderer': {
-    title: 'Visualization & Renderer', section: 'architecture',
-    related: ['architecture/simulator-and-event-controller', 'reference/configuration-flags'],
+  'architecture/live-session-and-ui': {
+    title: 'Live Session & UI', section: 'architecture',
+    related: ['architecture/simulation-run', 'guides/running-crabsim', 'reference/configuration-flags'],
   },
-  'guides/running-the-demo': {
-    title: 'Running the Demo', section: 'guides',
-    related: ['reference/configuration-flags', 'architecture/visualization-and-renderer'],
+  'guides/running-crabsim': {
+    title: 'Running crabsim', section: 'guides',
+    related: ['reference/configuration-flags', 'architecture/live-session-and-ui'],
   },
-  'guides/adding-a-new-station-type': {
-    title: 'Adding a New Station Type', section: 'guides',
+  'guides/adding-a-new-object-type': {
+    title: 'Adding a New Object Type', section: 'guides',
     related: ['architecture/material-flow-objects', 'concepts/blocked-retry', 'guides/writing-tests'],
   },
   'guides/writing-tests': {
     title: 'Writing Tests', section: 'guides',
-    related: ['architecture/simulator-and-event-controller', 'architecture/material-flow-objects', 'concepts/blocked-retry'],
+    related: ['architecture/simulation-run', 'architecture/material-flow-objects', 'concepts/blocked-retry'],
   },
   'reference/event-types': {
     title: 'Event Types', section: 'reference',
-    related: ['concepts/discrete-event-simulation', 'concepts/blocked-retry', 'architecture/simulator-and-event-controller'],
+    related: ['concepts/discrete-event-simulation', 'concepts/blocked-retry', 'architecture/simulation-run'],
   },
   'reference/configuration-flags': {
     title: 'Configuration Flags', section: 'reference',
-    related: ['guides/running-the-demo', 'architecture/visualization-and-renderer'],
+    related: ['guides/running-crabsim', 'architecture/live-session-and-ui'],
   },
 };
 

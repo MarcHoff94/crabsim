@@ -25,6 +25,50 @@ use std::{
 /// How long a running session waits for a command before it looks at the clock again.
 const TICK: Duration = Duration::from_millis(16);
 
+/// PROTOTYPE ONLY, never merged: counters for finding where paced time goes.
+pub mod probe {
+    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+    pub static WAITED_MICROS: AtomicU64 = AtomicU64::new(0);
+    pub static WAITS: AtomicU64 = AtomicU64::new(0);
+    pub static SLEEPS: AtomicU64 = AtomicU64::new(0);
+    pub static RELEASES: AtomicU64 = AtomicU64::new(0);
+    pub static CAPPED_RELEASES: AtomicU64 = AtomicU64::new(0);
+    pub static BUFFER_FULL: AtomicU64 = AtomicU64::new(0);
+    pub static EMPTY_RELEASES: AtomicU64 = AtomicU64::new(0);
+    pub static COMPUTE_MICROS: AtomicU64 = AtomicU64::new(0);
+    pub static COMPUTE_MAX_MICROS: AtomicU64 = AtomicU64::new(0);
+    pub static COMPUTES: AtomicU64 = AtomicU64::new(0);
+    pub static RELEASE_MICROS: AtomicU64 = AtomicU64::new(0);
+    pub static SLEEP_MICROS: AtomicU64 = AtomicU64::new(0);
+    pub static BUFFER_AT_WAIT: AtomicU64 = AtomicU64::new(0);
+    pub static INSTANTS_COMPUTED: AtomicU64 = AtomicU64::new(0);
+    pub fn max(counter: &AtomicU64, value: u64) {
+        counter.fetch_max(value, Relaxed);
+    }
+    pub fn add(counter: &AtomicU64, by: u64) {
+        counter.fetch_add(by, Relaxed);
+    }
+    pub fn report() -> String {
+        format!(
+            "waited {} ms in {} waits, {} sleeps ({} ms), {} releases ({} capped, {} empty, {} ms), buffer full {} times; {} computes, {} ms, longest {} us, {} instants computed; mean buffer at a wait {}",
+            WAITED_MICROS.load(Relaxed) / 1000,
+            WAITS.load(Relaxed),
+            SLEEPS.load(Relaxed),
+            SLEEP_MICROS.load(Relaxed) / 1000,
+            RELEASES.load(Relaxed),
+            CAPPED_RELEASES.load(Relaxed),
+            EMPTY_RELEASES.load(Relaxed),
+            RELEASE_MICROS.load(Relaxed) / 1000,
+            BUFFER_FULL.load(Relaxed),
+            COMPUTES.load(Relaxed),
+            COMPUTE_MICROS.load(Relaxed) / 1000,
+            COMPUTE_MAX_MICROS.load(Relaxed),
+            INSTANTS_COMPUTED.load(Relaxed),
+            BUFFER_AT_WAIT.load(Relaxed) / WAITS.load(Relaxed).max(1),
+        )
+    }
+}
+
 /// How many events a session computes before it checks for commands again.
 const EVENTS_PER_SLICE: usize = 1_000;
 
@@ -568,7 +612,11 @@ impl<'a, C: Clock> SessionThread<'a, C> {
                 other => other.ok(),
             }
         } else if self.pace.is_some() || backlogged {
-            match self.commands.recv_timeout(TICK) {
+            probe::add(&probe::SLEEPS, 1);
+            let slept = Instant::now();
+            let got = self.commands.recv_timeout(TICK);
+            probe::add(&probe::SLEEP_MICROS, slept.elapsed().as_micros() as u64);
+            match got {
                 Err(RecvTimeoutError::Timeout) => return NextCommand::None,
                 other => other.ok(),
             }
@@ -588,8 +636,20 @@ impl<'a, C: Clock> SessionThread<'a, C> {
         } else if let Some(command) = self.deferred.pop_front() {
             self.apply(command);
         } else {
+            let started = Instant::now();
+            let before = self.buffer.len();
+            let could = self.can_compute();
             self.compute_some();
+            if could {
+                let took = started.elapsed().as_micros() as u64;
+                probe::add(&probe::COMPUTES, 1);
+                probe::add(&probe::COMPUTE_MICROS, took);
+                probe::max(&probe::COMPUTE_MAX_MICROS, took);
+                probe::add(&probe::INSTANTS_COMPUTED, self.buffer.len().saturating_sub(before) as u64);
+            }
+            let started = Instant::now();
             self.release();
+            probe::add(&probe::RELEASE_MICROS, started.elapsed().as_micros() as u64);
             self.take_steps();
         }
     }
@@ -942,11 +1002,14 @@ impl<'a, C: Clock> SessionThread<'a, C> {
         if complete > 0 || self.stopped.is_some() || self.run.next_event_time().is_none() {
             if let (Some(since), Some(pace)) = (self.waiting_since.take(), &mut self.pace) {
                 pace.wall += now.saturating_sub(since);
+                probe::add(&probe::WAITED_MICROS, now.saturating_sub(since).as_micros() as u64);
+                probe::add(&probe::WAITS, 1);
             }
         }
         self.skip_long_gap();
         // While halted, only what was done at shown time from outside can be due.
-        let limit = self.target().unwrap_or(self.shown);
+        // PROTOTYPE FIX: one clock reading per release.
+        let limit = self.pace.map(|pace| pace.target(now, self.speed)).unwrap_or(self.shown);
 
         let mut released = Vec::new();
         let mut instants = 0;
@@ -959,12 +1022,25 @@ impl<'a, C: Clock> SessionThread<'a, C> {
         if self.pace.is_some() && instants < INSTANTS_PER_RELEASE {
             // Releasing opened the next gap, so shown time jumps over it now rather than later.
             self.skip_long_gap();
-            let limit = self.target().unwrap_or(limit);
+            let limit = self.pace.map(|pace| pace.target(now, self.speed)).unwrap_or(limit);
             let reached = self.next_unreleased().map_or(limit, |next| next.min(limit));
             self.shown = self.shown.max(reached);
             if reached < limit && self.stopped.is_none() {
+                if self.waiting_since.is_none() {
+                    probe::add(&probe::BUFFER_AT_WAIT, self.buffer.len() as u64);
+                }
                 self.waiting_since.get_or_insert(now);
             }
+        }
+        probe::add(&probe::RELEASES, 1);
+        if instants == INSTANTS_PER_RELEASE {
+            probe::add(&probe::CAPPED_RELEASES, 1);
+        }
+        if complete >= self.settings.buffer_instants {
+            probe::add(&probe::BUFFER_FULL, 1);
+        }
+        if released.is_empty() {
+            probe::add(&probe::EMPTY_RELEASES, 1);
         }
         if !released.is_empty() {
             self.observe(Observation::Occurrences(released));

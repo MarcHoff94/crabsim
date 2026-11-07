@@ -1,0 +1,22 @@
+# THROWAWAY PROTOTYPE, never merged: it answers whether Bevy with bevy_egui holds up for the UI.
+# See docs/agents/handoff.md, "UI design", "The prototype". Delete freely.
+[package]
+name = "crabsim-ui-prototype"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Its own workspace, so the engine's build and lock file stay untouched.
+[workspace]
+
+[dependencies]
+crabsim = { path = ".." }
+bevy = "=0.20.1"
+bevy_egui = "=0.43.1"
+
+# Bevy is slow unoptimised, so optimise dependencies even in debug builds.
+[profile.dev.package."*"]
+opt-level = 3
+
+# The default release profile: with the engine's thin LTO and one codegen unit, a one-line change
+# took 1 min 53 s to rebuild.

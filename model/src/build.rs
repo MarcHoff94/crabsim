@@ -1,7 +1,7 @@
 //! Building a valid model into the engine's `ModelDescription`, with every instance's values
-//! worked out, so a run never sees classes or files.
+//! worked out from its chain of classes, so a run never sees classes or files.
 
-use crate::{Failures, Model, RepairTime};
+use crate::{Attribute, Failures, Model, Origin, RepairTime};
 use crabsim::random_numbers::Distribution;
 use crabsim::{FailureProfile, ModelDescription, SimTime};
 use std::collections::HashMap;
@@ -10,9 +10,10 @@ pub(crate) fn build(model: &Model) -> ModelDescription {
     let mut description = ModelDescription::new();
     // Starting MUs are numbered in file order, from 1. The run hands out later ids above them.
     let mut next_mu = 1;
-    for instance in &model.instances {
-        let attributes = &instance.attributes;
-        let id = match instance.class.as_str() {
+    for (index, instance) in model.instances.iter().enumerate() {
+        let resolved = model.resolve(index).expect("checked: every instance's chain of classes is sound");
+        let attributes = &resolved.attributes;
+        let id = match resolved.built_in {
             "Source" => description.add_source(attributes.interval.expect("checked: a Source has an interval")),
             "Station" => {
                 let process_time = attributes.process_time.unwrap_or(SimTime::ZERO);
@@ -35,7 +36,8 @@ pub(crate) fn build(model: &Model) -> ModelDescription {
         if let Some(position) = instance.position {
             description.set_position(id, position);
         }
-        if let Some(dimensions) = attributes.dimensions {
+        // A built-in default size is what the description gives an object without one anyway.
+        if let Some(dimensions) = attributes.dimensions.filter(|_| resolved.origin(Attribute::Dimensions) != &Origin::BuiltIn) {
             description.set_dimensions(id, dimensions);
         }
     }

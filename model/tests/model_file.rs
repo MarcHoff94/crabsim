@@ -1,7 +1,7 @@
 //! Model files at their seam: text in, a model, its problems or a run out.
 
 use crabsim::{demo, ModelDescription, OccurrenceKind, Recording, SimTime, SimulationRun};
-use crabsim_model::{load, Instance, Model, Problem};
+use crabsim_model::{load, Attribute, Class, Instance, Model, Origin, Problem};
 use serde_json::{json, Value};
 
 fn secs(s: u64) -> SimTime {
@@ -132,7 +132,8 @@ fn milliseconds_and_days_survive_saving() {
 /// The benchmark's large model: 429 copies of the demo side by side, each with its own names.
 fn copies_of_the_demo(copies: usize) -> Model {
     let demo = load(&demo_file()).unwrap();
-    let mut model = Model { description: Some(format!("{copies} copies of the demo model")), instances: Vec::new() };
+    let mut model =
+        Model { description: Some(format!("{copies} copies of the demo model")), classes: demo.classes.clone(), instances: Vec::new() };
     for copy in 0..copies {
         let rename = |name: &str| format!("Copy {copy} / {name}");
         for instance in &demo.instances {
@@ -238,7 +239,7 @@ fn every_problem_comes_back_at_once_in_file_order() {
     assert_eq!(
         found(&text),
         vec![
-            "/instances/0: a Source needs an `interval`: the time between creating an MU and offering it on",
+            "/instances/0: a Source needs an `interval`: the time between creating an MU and offering it on. Set it on the instance or one of its classes",
             "/instances/0/successors/0: no instance is called `Nowhere`",
             "/instances/1/attributes/proces_time: unknown attribute `proces_time`",
             "/instances/1/attributes/starting_mus: a Station can start with 0 or 1 MUs, until Stations have a capacity",
@@ -266,13 +267,6 @@ fn a_file_that_isnt_json_or_has_the_wrong_version_is_refused() {
     assert_found(&json!({ "format_version": 2, "instances": [] }).to_string(), "/format_version", "format version 2 isn't supported");
     assert_found(&json!({ "format_version": 1 }).to_string(), "", "`instances` is missing");
     assert_found(&json!({ "format_version": 1, "instances": [], "seed": 3 }).to_string(), "/seed", "unknown field `seed`");
-}
-
-#[test]
-fn derived_classes_wait_for_the_next_slice() {
-    let text = json!({ "format_version": 1, "classes": [{ "name": "CNC mill", "parent": "Station" }], "instances": [] }).to_string();
-    assert_found(&text, "/classes/0", "derived classes aren't supported yet");
-    assert_found(&file(json!([{ "name": "M", "class": "CNC mill" }])), "/instances/0/class", "unknown class `CNC mill`");
 }
 
 #[test]
@@ -371,4 +365,167 @@ fn problems_can_be_sent_as_json() {
         as_json,
         json!([{ "pointer": "/instances/0/successors", "name": "Out", "message": "a Drain takes MUs out of the model, so it can't have successors" }])
     );
+}
+
+// ---------- Classes and inheritance ----------
+
+/// A file with these classes and instances.
+fn with_classes(classes: Value, instances: Value) -> String {
+    json!({ "format_version": 1, "classes": classes, "instances": instances }).to_string()
+}
+
+/// Mills: a Mill, a CNC mill derived from it, and instances of both.
+fn mills() -> String {
+    with_classes(
+        json!([
+            // A child may come before its parent.
+            { "name": "CNC mill", "parent": "Mill", "attributes": { "process_time": "45", "description": "5-axis" } },
+            { "name": "Mill", "parent": "Station", "attributes": {
+                "process_time": "30",
+                "failures": { "availability": 0.95, "repair_time": { "constant": "2:00" } } } },
+        ]),
+        json!([
+            { "name": "In", "class": "Source", "successors": ["A", "B", "C"], "attributes": { "interval": "5" } },
+            { "name": "A", "class": "CNC mill", "successors": ["Out"] },
+            { "name": "B", "class": "CNC mill", "successors": ["Out"], "attributes": { "process_time": "50" } },
+            { "name": "C", "class": "Mill", "successors": ["Out"] },
+            { "name": "Out", "class": "Drain" },
+        ]),
+    )
+}
+
+#[test]
+fn values_are_inherited_through_a_chain_of_classes_and_say_where_they_come_from() {
+    let model = load(&mills()).unwrap();
+    let class = |name: &str| Origin::Class(name.to_string());
+
+    let a = model.resolve(1).unwrap();
+    assert_eq!(a.built_in, "Station");
+    assert_eq!(a.attributes.process_time, Some(secs(45)));
+    assert_eq!(a.origin(Attribute::ProcessTime), &class("CNC mill"));
+    assert_eq!(a.attributes.failures.as_ref().map(|f| f.availability), Some(0.95));
+    assert_eq!(a.origin(Attribute::Failures), &class("Mill"));
+    assert_eq!(a.attributes.description.as_deref(), Some("5-axis"));
+    assert_eq!(a.attributes.starting_mus, Some(0));
+    assert_eq!(a.origin(Attribute::StartingMus), &Origin::BuiltIn);
+    assert_eq!(a.origin(Attribute::Dimensions), &Origin::BuiltIn);
+
+    let b = model.resolve(2).unwrap();
+    assert_eq!((b.attributes.process_time, b.origin(Attribute::ProcessTime)), (Some(secs(50)), &Origin::Instance), "set here, so cut");
+    assert_eq!(b.origin(Attribute::Failures), &class("Mill"), "cut only for what it sets");
+
+    let c = model.resolve(3).unwrap();
+    assert_eq!((c.attributes.process_time, c.origin(Attribute::ProcessTime)), (Some(secs(30)), &class("Mill")));
+    assert_eq!((c.attributes.description.clone(), c.origin(Attribute::Description)), (None, &Origin::BuiltIn));
+}
+
+#[test]
+fn a_class_change_reaches_exactly_the_instances_that_inherit_it() {
+    // 20 CNC mills, of which two set their own process time.
+    let mut instances = vec![json!({ "name": "In", "class": "Source", "attributes": { "interval": "1" },
+        "successors": (0..20).map(|i| format!("Mill {i}")).collect::<Vec<_>>() })];
+    for i in 0..20 {
+        let own = if i == 3 || i == 11 { json!({ "process_time": "7" }) } else { json!({}) };
+        instances.push(json!({ "name": format!("Mill {i}"), "class": "CNC mill", "successors": ["Out"], "attributes": own }));
+    }
+    instances.push(json!({ "name": "Out", "class": "Drain" }));
+    let classes = json!([{ "name": "CNC mill", "parent": "Station", "attributes": { "process_time": "45" } }]);
+    let mut model = load(&with_classes(classes, json!(instances))).unwrap();
+
+    model.classes[0].attributes.process_time = Some(secs(60));
+
+    let mut run = model.to_description().build(0);
+    run.init().unwrap();
+    let times: Vec<u64> = run.state().objects[1..=20].iter().map(|o| o.process_time.unwrap().as_secs()).collect();
+    let expected: Vec<u64> = (0..20).map(|i| if i == 3 || i == 11 { 7 } else { 60 }).collect();
+    assert_eq!(times, expected);
+}
+
+#[test]
+fn a_required_value_can_come_from_a_class() {
+    let classes = json!([{ "name": "Feeder", "parent": "Source", "attributes": { "interval": "5" } }]);
+    let instances = json!([
+        { "name": "In", "class": "Feeder", "successors": ["Out"] },
+        { "name": "Out", "class": "Drain" },
+    ]);
+    assert!(load(&with_classes(classes, instances)).is_ok());
+    let unset = with_classes(json!([{ "name": "Feeder", "parent": "Source" }]), json!([{ "name": "In", "class": "Feeder" }]));
+    assert_found(&unset, "/instances/0", "Set it on the instance or one of its classes");
+}
+
+#[test]
+fn class_problems_are_reported_with_the_class() {
+    let text = with_classes(
+        json!([
+            { "name": "Loop A", "parent": "Loop B" },
+            { "name": "Loop B", "parent": "Loop A" },
+            { "name": "Orphan", "parent": "Nothing" },
+            { "name": "Station", "parent": "Station" },
+            { "name": "Exit", "parent": "Drain", "attributes": { "process_time": "10" } },
+            { "name": "Exit", "parent": "Drain" },
+            { "name": "Flaky", "parent": "Station", "attributes": { "failures": { "availability": 1.5, "repair_time": { "constant": "1:00" } } } },
+            { "name": " Padded", "parent": "Station" },
+        ]),
+        json!([
+            { "name": "L", "class": "Loop A" },
+            { "name": "M", "class": "Machine" },
+        ]),
+    );
+    assert_eq!(
+        found(&text),
+        vec![
+            "/classes/0/parent: the classes derive from each other in a circle: Loop A \u{2192} Loop B \u{2192} Loop A",
+            "/classes/1/parent: the classes derive from each other in a circle: Loop B \u{2192} Loop A \u{2192} Loop B",
+            "/classes/2/parent: unknown class `Nothing`",
+            "/classes/3/name: `Station` is a built-in class",
+            "/classes/3/parent: a class can't derive from itself",
+            "/classes/4/attributes/process_time: a Drain has no attribute `process_time`",
+            "/classes/5/name: class 4 already has this name",
+            "/classes/6/attributes/failures/availability: an availability must be above 0 and below 1, not 1.5: leave out `failures` for one that never fails",
+            "/classes/7/name: a name can't start or end with spaces",
+            "/instances/1/class: unknown class `Machine`",
+        ]
+    );
+    assert_eq!(problems(&text)[0].name.as_deref(), Some("Loop A"));
+}
+
+#[test]
+fn classes_and_instances_are_separate_namespaces() {
+    let text = with_classes(json!([{ "name": "Out", "parent": "Drain" }]), json!([{ "name": "Out", "class": "Out" }]));
+    assert!(load(&text).is_ok());
+}
+
+#[test]
+fn the_endless_source_check_follows_inherited_values() {
+    let text = with_classes(
+        json!([
+            { "name": "Feeder", "parent": "Source", "attributes": { "interval": "0" } },
+            { "name": "Trigger", "parent": "Station" },
+        ]),
+        json!([
+            { "name": "In", "class": "Feeder", "successors": ["T"] },
+            { "name": "T", "class": "Trigger", "successors": ["Out"] },
+            { "name": "Out", "class": "Drain" },
+        ]),
+    );
+    assert_found(&text, "/instances/0", "reaches Drain `Out` through zero-time objects (T)");
+}
+
+#[test]
+fn a_model_with_classes_round_trips() {
+    let model = load(&mills()).unwrap();
+    let saved = model.save();
+    assert!(saved.find("\"classes\"").unwrap() < saved.find("\"instances\"").unwrap(), "classes are saved first");
+    assert_eq!(load(&saved).unwrap(), model, "the classes keep the order they were written in");
+    assert_eq!(load(&saved).unwrap().save(), saved);
+}
+
+#[test]
+fn a_class_built_in_code_is_checked_like_one_in_a_file() {
+    let mut model = Model::default();
+    model.classes.push(Class::new("Mill", "Station"));
+    model.instances.push(Instance::new("A", "Mill"));
+    assert_eq!(model.check(), vec![]);
+    model.classes[0].parent = "Mill".into();
+    assert_eq!(model.check().len(), 1);
 }

@@ -2,12 +2,15 @@
 //! fed in as the window would feed them, and what would be drawn read back out.
 
 use crabsim::{
-    demo, Clock, Dimensions, FailureProfile, LiveSession, ModelDescription, Observation, Position, SessionStatus,
-    SimTime,
+    demo, Clock, Dimensions, FailureProfile, LiveSession, ModelDescription, Observation, Position, RunError,
+    SessionError, SessionStatus, SimTime, TimeMode,
 };
 use crabsim::random_numbers::Distribution;
 use crabsim_ui::camera::Camera;
-use crabsim_ui::view::{format_time, label_size, Control, Point, Rect, Shade, ViewState, MAX_LABEL_PIXELS, MIN_LABEL_PIXELS};
+use crabsim_ui::view::{
+    format_time, label_size, parse_time, Control, JumpProblem, Point, Rect, Shade, ViewState, DEFAULT_SPEED,
+    MAX_LABEL_PIXELS, MAX_SPEED, MIN_LABEL_PIXELS, MIN_SPEED,
+};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -311,4 +314,174 @@ fn names_shrink_with_the_model_and_go_only_when_too_small_to_read() {
     assert!(at(15.0 / 1.5).is_some_and(|size| size >= MIN_LABEL_PIXELS));
     assert_eq!(at(5.0), None, "too small to read");
     assert_eq!(at(500.0), Some(MAX_LABEL_PIXELS), "no bigger than the panels' text when close up");
+}
+
+// ---------- Time controls ----------
+
+fn shown_at(view: &mut ViewState, shown_secs: u64, wall_secs: f64) {
+    view.observe(&Observation::ShownTime(SimTime::from_secs(shown_secs)), Duration::from_secs_f64(wall_secs));
+}
+
+#[test]
+fn speed_starts_at_60_times_real_time_and_stays_within_its_range() {
+    let mut view = ViewState::new(&demo::model());
+    assert_eq!(DEFAULT_SPEED, 60.0);
+    assert_eq!(view.speed(), DEFAULT_SPEED);
+    assert_eq!(view.set_speed(1e12), MAX_SPEED);
+    assert_eq!(view.set_speed(0.0), MIN_SPEED);
+    assert_eq!(view.set_speed(f64::NAN), MIN_SPEED);
+    assert_eq!(view.set_speed(3_600.0), 3_600.0);
+    assert_eq!(view.speed(), 3_600.0);
+}
+
+#[test]
+fn time_mode_starts_continuous_and_can_skip_gaps() {
+    let mut view = ViewState::new(&demo::model());
+    assert_eq!(view.time_mode(), TimeMode::Continuous);
+    view.set_time_mode(TimeMode::SKIPPING);
+    assert_eq!(view.time_mode(), TimeMode::SKIPPING);
+}
+
+#[test]
+fn the_achieved_speed_shows_only_while_playback_falls_behind() {
+    let mut view = ViewState::new(&demo::model());
+    view.observe(&Observation::Status(SessionStatus::Advancing), Duration::from_secs(10));
+    shown_at(&mut view, 30, 10.5);
+    assert_eq!(view.achieved_speed(), None, "too soon to tell");
+    for second in 1..=3 {
+        shown_at(&mut view, 60 * second, 10.0 + second as f64);
+    }
+    assert_eq!(view.achieved_speed(), None, "keeping up at 60 times");
+    for second in 4..=6 {
+        shown_at(&mut view, 180 + 30 * (second - 3), 10.0 + second as f64);
+    }
+    assert_eq!(view.achieved_speed(), Some(30.0), "half the speed asked for over the last 2 s");
+    view.observe(&Observation::Status(SessionStatus::Halted), Duration::from_secs(17));
+    assert_eq!(view.achieved_speed(), None, "nothing to achieve while halted");
+}
+
+#[test]
+fn a_new_speed_starts_measuring_afresh() {
+    let mut view = ViewState::new(&demo::model());
+    view.observe(&Observation::Status(SessionStatus::Advancing), Duration::ZERO);
+    for second in 1..=3 {
+        shown_at(&mut view, 30 * second, second as f64);
+    }
+    assert_eq!(view.achieved_speed(), Some(30.0));
+    view.set_speed(30.0);
+    assert_eq!(view.achieved_speed(), None);
+    shown_at(&mut view, 100, 3.5);
+    assert_eq!(view.achieved_speed(), None, "too soon to tell at the new speed");
+}
+
+#[test]
+fn skipping_ahead_of_the_speed_is_not_falling_behind() {
+    let mut view = ViewState::new(&demo::model());
+    view.observe(&Observation::Status(SessionStatus::Advancing), Duration::ZERO);
+    for second in 1..=3 {
+        shown_at(&mut view, 600 * second, second as f64);
+    }
+    assert_eq!(view.achieved_speed(), None);
+}
+
+#[test]
+fn a_session_on_time_keeps_up() {
+    let mut watched = Watched::demo();
+    watched.session.set_speed(DEFAULT_SPEED).unwrap();
+    watched.session.start().unwrap();
+    for second in 1..=4 {
+        watched.at(second);
+    }
+    assert_eq!(watched.view.shown_time(), "00:04:00");
+    assert_eq!(watched.view.achieved_speed(), None);
+}
+
+#[test]
+fn stepping_is_offered_once_initialised_and_forward_only_while_halted() {
+    let mut watched = Watched::demo();
+    watched.frame();
+    assert!(!watched.view.allows(Control::StepForward), "Init comes first");
+    assert!(!watched.view.allows(Control::StepBack));
+    watched.session.step_forward().unwrap();
+    watched.frame();
+    assert!(watched.view.allows(Control::StepForward));
+    assert!(watched.view.allows(Control::StepBack));
+    // The first instant after Init is the Source's first MU, at 5 s.
+    watched.session.step_forward().unwrap();
+    watched.frame();
+    assert_eq!(watched.view.shown_time(), "00:00:05");
+    watched.session.step_back().unwrap();
+    watched.frame();
+    assert_eq!(watched.view.shown_time(), "00:00:00");
+    watched.session.start().unwrap();
+    watched.frame();
+    assert!(!watched.view.allows(Control::StepForward));
+    assert!(watched.view.allows(Control::StepBack), "stepping back halts the run there");
+}
+
+#[test]
+fn a_jump_goes_only_to_an_earlier_time() {
+    let mut watched = Watched::demo();
+    assert_eq!(watched.view.jump_target("0"), Err(JumpProblem::NotInitialised));
+    watched.session.start().unwrap();
+    watched.at(12);
+    watched.session.halt().unwrap();
+    watched.frame();
+    let view = &watched.view;
+    assert_eq!(view.jump_target("00:00:05"), Ok(SimTime::from_secs(5)));
+    assert_eq!(view.jump_target("00:00:12"), Ok(SimTime::from_secs(12)), "the instant on screen");
+    assert_eq!(view.jump_target("0:20"), Err(JumpProblem::NotEarlier));
+    assert_eq!(view.jump_target("soon"), Err(JumpProblem::NotATime));
+    watched.session.go_back(SimTime::from_secs(5)).unwrap();
+    watched.frame();
+    assert_eq!(watched.view.shown_time(), "00:00:05");
+    assert_eq!(watched.view.status(), SessionStatus::Halted);
+}
+
+#[test]
+fn times_are_typed_as_they_are_shown() {
+    let secs = |s: u64| Some(SimTime::from_secs(s));
+    assert_eq!(parse_time("90"), secs(90));
+    assert_eq!(parse_time("1:30"), secs(90));
+    assert_eq!(parse_time(" 01:02:03 "), secs(3_723));
+    assert_eq!(parse_time("2d 01:00:00"), secs(2 * 86_400 + 3_600));
+    assert_eq!(parse_time("3d"), secs(3 * 86_400));
+    assert_eq!(parse_time("00:00:12.5"), Some(SimTime::from_millis(12_500)));
+    assert_eq!(parse_time(&format_time(SimTime::from_secs(400 * 86_400 + 59))), secs(400 * 86_400 + 59));
+    assert_eq!(parse_time("1:60"), None, "60 seconds is a minute");
+    assert_eq!(parse_time("1:2:3:4"), None);
+    assert_eq!(parse_time("-5"), None);
+    assert_eq!(parse_time(""), None);
+}
+
+#[test]
+fn a_refused_command_shows_until_the_next_command() {
+    let mut view = ViewState::new(&demo::model());
+    let refused = SessionError::NotInThePast { to: SimTime::from_secs(20), shown: SimTime::from_secs(12) };
+    view.observe(&Observation::Error(refused), Duration::ZERO);
+    assert!(view.error().is_some());
+    assert!(!view.run_failed());
+    view.commanded(Duration::from_secs(1));
+    assert_eq!(view.error(), None);
+}
+
+#[test]
+fn a_run_error_stays_and_going_back_is_still_offered() {
+    let model = demo::model();
+    let mut view = ViewState::new(&model);
+    let mut run = model.build(0);
+    run.init().unwrap();
+    view.observe(&Observation::State(run.state()), Duration::ZERO);
+    view.observe(&Observation::Status(SessionStatus::Failed), Duration::ZERO);
+    let error = RunError::ZeroTimeLoop { time: SimTime::from_secs(7) };
+    view.observe(&Observation::Error(SessionError::Run(error)), Duration::ZERO);
+    view.commanded(Duration::from_secs(1));
+    assert!(view.run_failed());
+    assert!(view.error().is_some(), "a run error stays until Reset or going back");
+    assert!(!view.allows(Control::Start));
+    assert!(!view.allows(Control::StepForward));
+    assert!(view.allows(Control::StepBack));
+    assert!(view.allows(Control::Reset));
+    view.observe(&Observation::State(run.state()), Duration::from_secs(2));
+    assert_eq!(view.error(), None);
 }

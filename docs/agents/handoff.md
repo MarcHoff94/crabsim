@@ -2,7 +2,7 @@
 
 Written 2026-11-07 at the end of a working session, and updated the same day after the UI design session and after steps 1 to 5 of the UI's order of work. Read this first, then check it against the code and git, because it describes a moment in time.
 
-**UI stage 1 is under way, in four slices, on `feat/ui-stage-1`.** Slice 1 is built: the demo drawn with state colours, pan and zoom, and Init, Start, Halt and Reset. Next is slice 2. See step 6 of the UI's "Order of work" below.
+**UI stage 1 is under way, in four slices.** Slices 1 and 2 are built: the demo drawn with state colours, pan and zoom, the run controls, speed, time mode, stepping, going back to a time and the error banner. Next is slice 3, the inspector and interventions. See step 6 of the UI's "Order of work" below.
 
 ## Start here
 
@@ -234,8 +234,8 @@ All built in PR 21, as planned except where noted. The benchmark gave identical 
 5. ✅ The engine additions above, with names, positions and dimensions on `ModelDescription` (PR 21).
 6. ⬜ UI stage 1, as described under "UI stage 1" above. Start from the prototype's code on `prototype/ui-bevy`, which already drains a session into a picture each frame, draws 6,006 objects with state colours, keeps a halted window idle, drags from a palette, moves objects and selects them. Keep the rules under "Technology": panels as plain functions of an egui UI, and no Bevy types outside the UI crate. Test the UI's logic through a view state with no window, as spec issue 3 describes. Built in four slices, each one runnable:
    1. ✅ The first working version: the view state (`ui/src/view.rs`) and camera, tested without a window, the demo laid out by hand in `demo::model()`, a live session drained every frame, objects drawn to size as flat meshes with state colours, connections, names, pan and zoom, and Init, Start, Halt, Reset and shown time. A halted window uses no CPU once settled, and a running one about 0.26 cores, capped at about 60 frames a second. **Known problem:** in about 1 launch in 7, a thread kept a core busy before the first Init or Start, until a burst of frames. 3 s of frames at startup made it rarer, and the cause wasn't found. Names shrink and grow with the model, up to 16 pixels, and go only below 5 pixels: the owner asked for this after trying it, instead of the prototype's rule of no names below 25 pixels per metre.
-   2. ⬜ Time controls: speed on a logarithmic slider with the achieved speed, time mode, step forward and back, jump to a time, the run-error banner, and intervention marks with confirmation before going back past them.
-   3. ⬜ Inspector and interventions: select by click, state, why blocked, why stopped, process time, statistics and waiting predecessors from `request_state` about twice a second while selected, and Pause, forced failure and process time changes on Stations.
+   2. ✅ Time controls: speed on a logarithmic slider from 0.1 to 1,000,000 times, whose number can be typed, with the speed reached shown in orange when playback falls below 95% of it over the last 2 s. Continuous or skipping gaps, step back and forward, going back to a typed time (as shown time is written, such as `1:30` or `2d 06:00:00`), and an error banner. A run error stays until Reset or going back, and a refused command's error until the next command. At 1,000,000 times the demo kept up, at about 0.4 cores. Intervention marks moved to slice 3, because there are no interventions to mark before it.
+   3. ⬜ Inspector and interventions: select by click, state, why blocked, why stopped, process time, statistics and waiting predecessors from `request_state` about twice a second while selected, Pause, forced failure and process time changes on Stations, and intervention marks on the time display with confirmation before going back past them.
    4. ⬜ MUs drawn in the object that holds them, below the zoom and speed thresholds, and counts above them.
 7. Trim the CLI to the headless version.
 

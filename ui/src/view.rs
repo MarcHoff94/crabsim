@@ -2,7 +2,10 @@
 //! the window draws and which controls it offers. Bevy and egui only draw what it says.
 
 use crate::camera::Camera;
-use crabsim::{ModelDescription, ObjectKind, Observation, Picture, ProcessState, SessionStatus, SimTime, StopCause};
+use crabsim::{
+    ModelDescription, ObjectKind, Observation, Picture, ProcessState, SessionStatus, SimTime, StopCause, TimeMode,
+};
+use std::collections::VecDeque;
 use std::time::Duration;
 
 /// A point on the floor in metres, or on screen in pixels.
@@ -61,7 +64,33 @@ pub enum Control {
     Start,
     Halt,
     Reset,
+    StepBack,
+    StepForward,
 }
+
+/// Why a time typed in to jump to can't be gone to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JumpProblem {
+    /// There is no run to go back in until Init.
+    NotInitialised,
+    NotATime,
+    /// Going back goes to shown time or earlier.
+    NotEarlier,
+}
+
+/// How much simulation time passes per unit of wall time to start with: 60 times real time, which
+/// shows the demo at about 30 events a second.
+pub const DEFAULT_SPEED: f64 = 60.0;
+pub const MIN_SPEED: f64 = 0.1;
+/// A simulated year in about half a minute.
+pub const MAX_SPEED: f64 = 1_000_000.0;
+
+/// How far back the achieved speed is measured, in wall time.
+const ACHIEVED_WINDOW: Duration = Duration::from_secs(2);
+/// The least wall time measured before the achieved speed is shown.
+const ACHIEVED_MINIMUM: Duration = Duration::from_secs(1);
+/// Playback counts as falling behind below this share of the speed asked for.
+const BEHIND: f64 = 0.95;
 
 /// How tall names under objects are on the floor, in metres, so they shrink and grow with the
 /// model as the view zooms.
@@ -93,6 +122,10 @@ pub struct ViewState {
     error: Option<String>,
     /// Wall time until which frames are wanted, however the session stands.
     settle_until: Duration,
+    speed: f64,
+    time_mode: TimeMode,
+    /// Wall time and shown time while advancing, oldest first, over the last `ACHIEVED_WINDOW`.
+    pace: VecDeque<(Duration, SimTime)>,
 }
 
 impl ViewState {
@@ -139,6 +172,9 @@ impl ViewState {
             initialised: false,
             error: None,
             settle_until: STARTUP,
+            speed: DEFAULT_SPEED,
+            time_mode: TimeMode::Continuous,
+            pace: VecDeque::new(),
         }
     }
 
@@ -149,23 +185,97 @@ impl ViewState {
             Observation::State(state) => {
                 self.initialised = state.initialised;
                 self.error = None;
+                // Shown time jumped, as after Reset or going back.
+                self.pace.clear();
             }
             Observation::Status(status) => {
                 self.status = *status;
                 if *status == SessionStatus::Advancing {
                     self.error = None;
                 }
+                self.pace.clear();
             }
             Observation::Error(error) => self.error = Some(error.to_string()),
             Observation::Occurrences(_) | Observation::ShownTime(_) => {}
+        }
+        if self.status == SessionStatus::Advancing {
+            self.note_pace(wall);
         }
         self.settle_until = self.settle_until.max(wall + SETTLE);
     }
 
     /// Notes that the window sent the session a command at wall time `wall`, so the answer gets
-    /// drawn.
+    /// drawn. A refused command's error goes, while a run error stays until Reset or going back.
     pub fn commanded(&mut self, wall: Duration) {
+        if !self.run_failed() {
+            self.error = None;
+        }
         self.settle_until = self.settle_until.max(wall + SETTLE);
+    }
+
+    /// The speed asked for: simulation time per unit of wall time.
+    pub fn speed(&self) -> f64 {
+        self.speed
+    }
+
+    /// Asks for `speed`, kept within `MIN_SPEED` and `MAX_SPEED`, and returns what it became, for
+    /// the session.
+    pub fn set_speed(&mut self, speed: f64) -> f64 {
+        self.speed = if speed.is_nan() { MIN_SPEED } else { speed.clamp(MIN_SPEED, MAX_SPEED) };
+        self.pace.clear();
+        self.speed
+    }
+
+    pub fn time_mode(&self) -> TimeMode {
+        self.time_mode
+    }
+
+    pub fn set_time_mode(&mut self, mode: TimeMode) {
+        self.time_mode = mode;
+        self.pace.clear();
+    }
+
+    /// The speed playback actually reached over the last 2 s of wall time, when it fell behind
+    /// the speed asked for. `None` while it keeps up, while halted, and until a second has passed
+    /// since the speed or anything else changed.
+    pub fn achieved_speed(&self) -> Option<f64> {
+        let (&(first_wall, first_shown), &(last_wall, last_shown)) = (self.pace.front()?, self.pace.back()?);
+        let wall = last_wall.saturating_sub(first_wall);
+        if self.status != SessionStatus::Advancing || wall < ACHIEVED_MINIMUM {
+            return None;
+        }
+        let achieved = last_shown.saturating_sub(first_shown).as_secs_f64() / wall.as_secs_f64();
+        (achieved < BEHIND * self.speed).then_some(achieved)
+    }
+
+    fn note_pace(&mut self, wall: Duration) {
+        let shown = self.picture.shown();
+        match self.pace.back_mut() {
+            // Everything read in one frame shares its wall time.
+            Some(last) if last.0 == wall => last.1 = shown,
+            _ => self.pace.push_back((wall, shown)),
+        }
+        while self.pace.front().is_some_and(|&(oldest, _)| oldest + ACHIEVED_WINDOW < wall) {
+            self.pace.pop_front();
+        }
+    }
+
+    /// Whether the run reported an error, so that only Reset or going back gets it going again.
+    pub fn run_failed(&self) -> bool {
+        self.status == SessionStatus::Failed
+    }
+
+    /// The time to go back to for `typed`, as the jump field takes it: earlier than or at shown
+    /// time, in the form shown time is written.
+    pub fn jump_target(&self, typed: &str) -> Result<SimTime, JumpProblem> {
+        if !self.initialised {
+            return Err(JumpProblem::NotInitialised);
+        }
+        let to = parse_time(typed).ok_or(JumpProblem::NotATime)?;
+        if to > self.picture.shown() {
+            return Err(JumpProblem::NotEarlier);
+        }
+        Ok(to)
     }
 
     /// Every object, indexed by id.
@@ -226,6 +336,9 @@ impl ViewState {
             Control::Start => self.status == SessionStatus::Halted,
             Control::Halt => self.status == SessionStatus::Advancing,
             Control::Reset => self.initialised || failed,
+            Control::StepForward => self.initialised && self.status == SessionStatus::Halted,
+            // Also out of a run error, and while advancing, which halts there.
+            Control::StepBack => self.initialised,
         }
     }
 
@@ -281,6 +394,41 @@ pub fn format_time(time: SimTime) -> String {
     } else {
         format!("{hours:02}:{minutes:02}:{seconds:02}")
     }
+}
+
+/// Simulation time typed as `format_time` writes it: seconds, minutes and seconds, or hours,
+/// minutes and seconds, with days in front as `2d`, and a fraction of a second at the end.
+/// Minutes and seconds after the first field are below 60. `None` if it isn't a time.
+pub fn parse_time(typed: &str) -> Option<SimTime> {
+    let typed = typed.trim();
+    let (days, clock) = match typed.split_once('d') {
+        Some((days, rest)) => (days.trim().parse::<u64>().ok()?, rest.trim()),
+        None => (0, typed),
+    };
+    let mut millis = days.checked_mul(86_400_000)?;
+    if clock.is_empty() {
+        // Days alone, but not nothing at all.
+        return (typed != clock).then_some(SimTime::from_millis(millis));
+    }
+    let fields: Vec<&str> = clock.split(':').collect();
+    if fields.len() > 3 {
+        return None;
+    }
+    let (whole, last) = fields.split_at(fields.len() - 1);
+    let seconds: f64 = last[0].parse().ok().filter(|s: &f64| s.is_finite() && *s >= 0.0)?;
+    if !whole.is_empty() && seconds >= 60.0 {
+        return None;
+    }
+    for (index, field) in whole.iter().enumerate() {
+        let value: u64 = field.parse().ok()?;
+        if index > 0 && value >= 60 {
+            return None;
+        }
+        // The field two from the end is hours, the one before the seconds minutes.
+        let unit = if whole.len() - index == 2 { 3_600_000 } else { 60_000 };
+        millis = millis.checked_add(value.checked_mul(unit)?)?;
+    }
+    millis.checked_add((seconds * 1000.0).round() as u64).map(SimTime::from_millis)
 }
 
 /// How big names under objects are drawn at this camera's zoom, in pixels, or `None` when they

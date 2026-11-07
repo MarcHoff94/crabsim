@@ -798,8 +798,9 @@ model/src/
   lib.rs              Model, Instance, Attributes, Problem, load
   read.rs · check.rs  reading the JSON, then checking what it means
   write.rs · build.rs canonical saving, building a ModelDescription
+  schema.rs           the published JSON Schema, generated with schemars
 cli/src/main.rs       the headless CLI
-models/demo.json      the demo model as a file
+models/demo.json      the demo model as a file, and model-file.schema.json its schema
 ui/src/
   main.rs             Bevy and egui, drawing what the view state says
   view.rs             the view state, plain Rust

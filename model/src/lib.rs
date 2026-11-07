@@ -12,6 +12,7 @@
 mod build;
 mod check;
 mod read;
+pub mod schema;
 mod write;
 
 use crabsim::{Dimensions, ObjectKind, Position, SimTime};
@@ -28,6 +29,8 @@ pub const BUILT_IN_CLASSES: [&str; 4] = ["Source", "Station", "Buffer", "Drain"]
 /// A model, as a file holds it: valid once `load` or `check` finds no problem.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Model {
+    /// The `$schema` a file names, for editors. crabsim keeps it and otherwise ignores it.
+    pub schema: Option<String>,
     /// About the model as a whole.
     pub description: Option<String>,
     /// The model's own classes, in any order.

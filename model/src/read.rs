@@ -27,7 +27,7 @@ pub(crate) struct Broken {
     pub class_attributes: HashSet<(usize, &'static str)>,
 }
 
-const TOP_LEVEL: [&str; 4] = ["format_version", "description", "classes", "instances"];
+const TOP_LEVEL: [&str; 5] = ["$schema", "format_version", "description", "classes", "instances"];
 const INSTANCE: [&str; 5] = ["name", "class", "position", "successors", "attributes"];
 const CLASS: [&str; 3] = ["name", "parent", "attributes"];
 const ATTRIBUTES: [&str; 7] = ["interval", "process_time", "failures", "starting_mus", "capacity", "dimensions", "description"];
@@ -84,6 +84,7 @@ impl Reader {
                 format!("format version {version} isn't supported: this crabsim reads version {FORMAT_VERSION}"),
             ),
         }
+        let schema = fields.get("$schema").and_then(|value| self.text(value, "/$schema", None));
         let description = fields.get("description").and_then(|value| self.text(value, "/description", None));
         let classes = match fields.get("classes") {
             None => Vec::new(),
@@ -104,7 +105,7 @@ impl Reader {
                 Vec::new()
             }
         };
-        Model { description, classes, instances }
+        Model { schema, description, classes, instances }
     }
 
     fn instance(&mut self, index: usize, value: &Value) -> Instance {

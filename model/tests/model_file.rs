@@ -133,7 +133,7 @@ fn milliseconds_and_days_survive_saving() {
 fn copies_of_the_demo(copies: usize) -> Model {
     let demo = load(&demo_file()).unwrap();
     let mut model =
-        Model { description: Some(format!("{copies} copies of the demo model")), classes: demo.classes.clone(), instances: Vec::new() };
+        Model { description: Some(format!("{copies} copies of the demo model")), classes: demo.classes.clone(), ..Model::default() };
     for copy in 0..copies {
         let rename = |name: &str| format!("Copy {copy} / {name}");
         for instance in &demo.instances {

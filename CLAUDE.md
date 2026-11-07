@@ -17,6 +17,12 @@ cargo run --release --bin crabsim -- --seed 7 --length 365d
 # Run a model file
 cargo run --release --bin crabsim -- --model models/demo.json --length 30d
 
+# Write models/model-file.schema.json again after changing the model file format
+cargo test -p crabsim-model --test schema -- --ignored write_the_schema_file
+
+# Write models/model-file.schema.json again after changing the model file format
+cargo test -p crabsim-model --test schema -- --ignored write_the_schema_file
+
 # Run all tests
 cargo test
 
@@ -106,7 +112,7 @@ This is a Rust discrete-event material-flow simulator: the engine is a library (
 
 **Event types** (`src/event.rs`): `MUExit` (processing complete, try to transfer) and `BlockedRetry { from }` (reactive — successor `from` freed up, predecessor retries that successor only). Keeping them distinct preserves scheduling vs. reactive semantics.
 
-**Model files** (`model/`, `crabsim-model`): a model as readable JSON, described in `docs/design/model-file.md`. `load` reads a file and returns the `Model` or every problem in it at once, each with a JSON Pointer, the instance's name and a message, and never panics. It reads the JSON by hand rather than through `serde` derives, so it can keep going after a problem. `Model::save` writes one canonical form, and `Model::to_description` builds the engine's `ModelDescription`, so a run never sees files. Classes derive from a built-in class (Source, Station, Buffer, Drain) or from each other, and classes and instances set only the `attributes` they change. `Model::resolve` works out an instance's values along its chain, with each value's `Origin`: the instance, a named class, or the built-in default. The published JSON Schema is the next slice. `models/demo.json` is the demo model as a file.
+**Model files** (`model/`, `crabsim-model`): a model as readable JSON, described in `docs/design/model-file.md`. `load` reads a file and returns the `Model` or every problem in it at once, each with a JSON Pointer, the instance's name and a message, and never panics. It reads the JSON by hand rather than through `serde` derives, so it can keep going after a problem. `Model::save` writes one canonical form, and `Model::to_description` builds the engine's `ModelDescription`, so a run never sees files. Classes derive from a built-in class (Source, Station, Buffer, Drain) or from each other, and classes and instances set only the `attributes` they change. `Model::resolve` works out an instance's values along its chain, with each value's `Origin`: the instance, a named class, or the built-in default. `models/model-file.schema.json` is the published JSON Schema, generated from mirror types in `model/src/schema.rs` with `schemars`, and `model/tests/schema.rs` keeps it from drifting from the reader: every file the reader accepts must pass it. `models/demo.json` is the demo model as a file.
 
 **Headless CLI** (`cli/`, binary `crabsim`): runs a model file (`--model`) or the built-in demo, with `--seed` (default 0) and `--length` (default `1d`, written as the UI shows time), then prints each object's statistics, each Drain's throughput and mean lead time, and how many events it ran in how long. A run error still prints the statistics up to it, then exits with failure. An invalid model file prints every problem and runs nothing.
 

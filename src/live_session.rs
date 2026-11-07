@@ -911,15 +911,20 @@ impl<'a, C: Clock> SessionThread<'a, C> {
 
     /// The simulation time the clock calls for, if the session is advancing.
     fn target(&self) -> Option<SimTime> {
-        self.pace.map(|pace| pace.target(self.clock.elapsed(), self.speed))
+        self.target_at(self.clock.elapsed())
+    }
+
+    /// The simulation time a reading of the clock calls for, if the session is advancing.
+    fn target_at(&self, now: Duration) -> Option<SimTime> {
+        self.pace.map(|pace| pace.target(now, self.speed))
     }
 
     /// Takes away the rest of a long gap, in the mode that does, so shown time jumps over it. It
     /// looks only at the gap ahead, so asking again changes nothing.
-    fn skip_long_gap(&mut self) {
+    fn skip_long_gap(&mut self, now: Duration) {
         let TimeMode::Skipping { longest_gap } = self.settings.time_mode else { return };
         let Some(next) = self.next_unreleased() else { return };
-        let Some(target) = self.target() else { return };
+        let Some(target) = self.target_at(now) else { return };
         let allowed = SimTime::from_secs_f64(longest_gap.as_secs_f64() * self.speed);
         let gap = next.saturating_sub(target);
         if gap > allowed {
@@ -933,6 +938,11 @@ impl<'a, C: Clock> SessionThread<'a, C> {
     /// waiting for a reader counts and is caught up on afterwards. Time spent waiting for the run
     /// to compute doesn't, so shown time carries on from where it waited. Results depend on none
     /// of this.
+    ///
+    /// It reads the clock once. A second reading would find instants that fell due meanwhile,
+    /// already computed but not yet released, and take them for computing being behind. Shown
+    /// time would then lose the time until the next release, which with a full buffer includes a
+    /// whole wait for commands.
     fn release(&mut self) {
         if self.outbox.is_backlogged() {
             return;
@@ -944,9 +954,9 @@ impl<'a, C: Clock> SessionThread<'a, C> {
                 pace.wall += now.saturating_sub(since);
             }
         }
-        self.skip_long_gap();
+        self.skip_long_gap(now);
         // While halted, only what was done at shown time from outside can be due.
-        let limit = self.target().unwrap_or(self.shown);
+        let limit = self.target_at(now).unwrap_or(self.shown);
 
         let mut released = Vec::new();
         let mut instants = 0;
@@ -958,8 +968,8 @@ impl<'a, C: Clock> SessionThread<'a, C> {
         }
         if self.pace.is_some() && instants < INSTANTS_PER_RELEASE {
             // Releasing opened the next gap, so shown time jumps over it now rather than later.
-            self.skip_long_gap();
-            let limit = self.target().unwrap_or(limit);
+            self.skip_long_gap(now);
+            let limit = self.target_at(now).unwrap_or(limit);
             let reached = self.next_unreleased().map_or(limit, |next| next.min(limit));
             self.shown = self.shown.max(reached);
             if reached < limit && self.stopped.is_none() {

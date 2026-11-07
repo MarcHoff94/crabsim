@@ -12,7 +12,11 @@ use crabsim::{
 };
 use crabsim::random_numbers::Distribution;
 use std::{
-    sync::{mpsc::channel, Arc, Mutex, Once},
+    sync::{
+        atomic::{AtomicU64, Ordering::SeqCst},
+        mpsc::channel,
+        Arc, Mutex, Once,
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -317,6 +321,59 @@ fn simulation_time_follows_the_clock_times_the_speed() {
     watched.session.start().unwrap();
     watched.at(5);
     assert_eq!(watched.time(), secs(20));
+}
+
+/// A clock that moves on a little every time it is read, as a real clock does between two
+/// readings.
+#[derive(Clone, Default)]
+struct SteppingClock(Arc<AtomicU64>);
+
+/// Long enough for several instants of `source_every(secs(1))` at 1,000 times real time to fall
+/// due between two readings, which is what exposed shown time falling behind.
+const STEP_MICROS: u64 = 5_000;
+
+impl SteppingClock {
+    /// What the clock says now, without moving it.
+    fn peek(&self) -> Duration {
+        Duration::from_micros(self.0.load(SeqCst))
+    }
+}
+
+impl Clock for SteppingClock {
+    fn elapsed(&self) -> Duration {
+        Duration::from_micros(self.0.fetch_add(STEP_MICROS, SeqCst))
+    }
+}
+
+#[test]
+fn shown_time_keeps_up_with_a_clock_that_moves_between_readings() {
+    // An instant every simulated second, and at 1,000 times real time each reading of the clock
+    // passes five. The run is far ahead, so instants that fall due while shown time is being
+    // released are already computed, and shown time must not wait for them.
+    let clock = SteppingClock::default();
+    let session = session_on(|| source_every(secs(1)).build(0), clock.clone());
+    session.set_speed(1_000.0).unwrap();
+    session.start().unwrap();
+    let wanted = secs(1_000);
+    let mut shown = SimTime::ZERO;
+    let deadline = Instant::now() + PATIENCE;
+    while shown < wanted && Instant::now() < deadline {
+        for observation in session.observations().try_iter() {
+            if let Observation::ShownTime(time) = observation {
+                shown = time;
+            }
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+    // The clock may have moved on since that report, so this bounds how far behind shown time is.
+    let clock_calls_for = clock.peek().as_secs_f64() * 1_000.0;
+    let kept_up = shown.as_secs_f64() / clock_calls_for;
+    assert!(
+        kept_up > 0.9,
+        "shown time reached {:.0}s while the clock called for {clock_calls_for:.0}s ({:.1}%)",
+        shown.as_secs_f64(),
+        kept_up * 100.0
+    );
 }
 
 #[test]

@@ -15,9 +15,29 @@ rand = "0.9.2"
 name = "reference"
 harness = false
 
+# The engine is the root package and the UI a member crate. The engine is the only default
+# member, so `cargo test` and `cargo bench` here never build the UI or Bevy.
+[workspace]
+members = ["ui"]
+default-members = ["."]
+
 # Measured with the reference benchmark: about 11% less time than the default on the demo model
 # and 7% on the large one. Fat LTO measured the same as thin and takes longer to build.
 # `panic` stays "unwind", because `LiveSession` catches panics to report them.
 [profile.release]
 lto = "thin"
 codegen-units = 1
+
+# For running the UI optimised day to day: with the tuned release profile above, a one-line
+# change in the UI prototype took about 2 minutes to rebuild, and without LTO 7 to 8 s.
+# `cargo run -p crabsim-ui --profile ui`
+[profile.ui]
+inherits = "release"
+lto = false
+codegen-units = 16
+incremental = true
+
+# Bevy is slow unoptimised, so dependencies are optimised in debug builds too. The engine's own
+# dependencies are small, so its tests barely notice.
+[profile.dev.package."*"]
+opt-level = 3

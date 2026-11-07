@@ -7,6 +7,7 @@ pub mod live_session;
 pub mod materialflow_objects;
 pub mod model;
 pub mod observation;
+pub mod picture;
 pub mod random_numbers;
 pub mod simulation_run;
 pub mod statistics;
@@ -25,6 +26,7 @@ pub use crate::live_session::{
 };
 pub use crate::materialflow_objects::{Buffer, Drain, ModelObject, OtherObjects, SingleStation, Source};
 pub use crate::model::ModelDescription;
+pub use crate::picture::{ObjectPicture, Picture};
 pub use crate::observation::{ObjectKind, ObjectState, Occurrence, OccurrenceKind, OccurrenceType, Recording, RunState, StopCause};
 pub use crate::simulation_run::{BoundedAdvance, SimulationRun, ZERO_TIME_EVENT_LIMIT};
 pub use crate::statistics::{DrainStatistics, ObjectStatistics};

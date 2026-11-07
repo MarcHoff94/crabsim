@@ -90,6 +90,60 @@ impl fmt::Debug for SimTime {
     }
 }
 
+/// Simulation time as hours, minutes and seconds, with days in front once there are any.
+pub fn format_time(time: SimTime) -> String {
+    let secs = time.as_secs();
+    let (days, hours, minutes, seconds) = (secs / 86_400, secs / 3_600 % 24, secs / 60 % 60, secs % 60);
+    if days > 0 {
+        format!("{days}d {hours:02}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{hours:02}:{minutes:02}:{seconds:02}")
+    }
+}
+
+/// Simulation time typed as `format_time` writes it: seconds, minutes and seconds, or hours,
+/// minutes and seconds, with days in front as `2d`, and a fraction of a second at the end.
+/// Minutes and seconds after the first field are below 60. `None` if it isn't a time.
+pub fn parse_time(typed: &str) -> Option<SimTime> {
+    let typed = typed.trim();
+    let (days, clock) = match typed.split_once('d') {
+        Some((days, rest)) => (days.trim().parse::<u64>().ok()?, rest.trim()),
+        None => (0, typed),
+    };
+    let mut millis = days.checked_mul(86_400_000)?;
+    if clock.is_empty() {
+        // Days alone, but not nothing at all.
+        return (typed != clock).then_some(SimTime::from_millis(millis));
+    }
+    let fields: Vec<&str> = clock.split(':').collect();
+    if fields.len() > 3 {
+        return None;
+    }
+    let (whole, last) = fields.split_at(fields.len() - 1);
+    let seconds: f64 = last[0].parse().ok().filter(|s: &f64| s.is_finite() && *s >= 0.0)?;
+    if !whole.is_empty() && seconds >= 60.0 {
+        return None;
+    }
+    for (index, field) in whole.iter().enumerate() {
+        let value: u64 = field.parse().ok()?;
+        if index > 0 && value >= 60 {
+            return None;
+        }
+        // The field two from the end is hours, the one before the seconds minutes.
+        let unit = if whole.len() - index == 2 { 3_600_000 } else { 60_000 };
+        millis = millis.checked_add(value.checked_mul(unit)?)?;
+    }
+    millis.checked_add((seconds * 1000.0).round() as u64).map(SimTime::from_millis)
+}
+
+/// As `format_time`, with milliseconds when there are any.
+pub fn format_time_exact(time: SimTime) -> String {
+    match time.subsec_millis() {
+        0 => format_time(time),
+        millis => format!("{}.{millis:03}", format_time(time)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -115,5 +169,28 @@ mod tests {
         assert_eq!(SimTime::from_millis(30_005).to_string(), "30.005");
         assert_eq!(format!("{:8}|", SimTime::from_secs(1)), "1.000   |");
         assert_eq!(format!("{:?}", SimTime::from_millis(1_500)), "1.500s");
+    }
+
+    #[test]
+    fn shown_time_counts_hours_and_days() {
+        assert_eq!(format_time(SimTime::from_millis(59_999)), "00:00:59");
+        assert_eq!(format_time(SimTime::from_secs(3_600 * 5 + 61)), "05:01:01");
+        assert_eq!(format_time(SimTime::from_secs(86_400 * 400 + 3_661)), "400d 01:01:01");
+    }
+
+    #[test]
+    fn times_are_typed_as_they_are_shown() {
+        let secs = |s: u64| Some(SimTime::from_secs(s));
+        assert_eq!(parse_time("90"), secs(90));
+        assert_eq!(parse_time("1:30"), secs(90));
+        assert_eq!(parse_time(" 01:02:03 "), secs(3_723));
+        assert_eq!(parse_time("2d 01:00:00"), secs(2 * 86_400 + 3_600));
+        assert_eq!(parse_time("3d"), secs(3 * 86_400));
+        assert_eq!(parse_time("00:00:12.5"), Some(SimTime::from_millis(12_500)));
+        assert_eq!(parse_time(&format_time(SimTime::from_secs(400 * 86_400 + 59))), secs(400 * 86_400 + 59));
+        assert_eq!(parse_time("1:60"), None, "60 seconds is a minute");
+        assert_eq!(parse_time("1:2:3:4"), None);
+        assert_eq!(parse_time("-5"), None);
+        assert_eq!(parse_time(""), None);
     }
 }

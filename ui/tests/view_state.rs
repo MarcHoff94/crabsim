@@ -8,7 +8,7 @@ use crabsim::{
 use crabsim::random_numbers::Distribution;
 use crabsim_ui::camera::Camera;
 use crabsim_ui::view::{
-    format_time, label_size, parse_time, Control, JumpProblem, Point, Rect, Shade, ViewState, DEFAULT_SPEED,
+    label_size, Control, JumpProblem, Point, Rect, Shade, ViewState, DEFAULT_SPEED,
     MAX_LABEL_PIXELS, MAX_SPEED, MIN_LABEL_PIXELS, MIN_SPEED,
 };
 use std::time::Duration;
@@ -166,13 +166,6 @@ fn reset_returns_to_time_zero_and_offers_init_again() {
     assert!(view.allows(Control::Init));
     assert!(!view.allows(Control::Reset));
     assert_eq!(view.shade(STATION_1), Shade::Idle);
-}
-
-#[test]
-fn shown_time_counts_hours_and_days() {
-    assert_eq!(format_time(SimTime::from_millis(59_999)), "00:00:59");
-    assert_eq!(format_time(SimTime::from_secs(3_600 * 5 + 61)), "05:01:01");
-    assert_eq!(format_time(SimTime::from_secs(86_400 * 400 + 3_661)), "400d 01:01:01");
 }
 
 #[test]
@@ -387,22 +380,6 @@ fn a_jump_goes_only_to_an_earlier_time() {
     watched.frame();
     assert_eq!(watched.view.shown_time(), "00:00:05");
     assert_eq!(watched.view.status(), SessionStatus::Halted);
-}
-
-#[test]
-fn times_are_typed_as_they_are_shown() {
-    let secs = |s: u64| Some(SimTime::from_secs(s));
-    assert_eq!(parse_time("90"), secs(90));
-    assert_eq!(parse_time("1:30"), secs(90));
-    assert_eq!(parse_time(" 01:02:03 "), secs(3_723));
-    assert_eq!(parse_time("2d 01:00:00"), secs(2 * 86_400 + 3_600));
-    assert_eq!(parse_time("3d"), secs(3 * 86_400));
-    assert_eq!(parse_time("00:00:12.5"), Some(SimTime::from_millis(12_500)));
-    assert_eq!(parse_time(&format_time(SimTime::from_secs(400 * 86_400 + 59))), secs(400 * 86_400 + 59));
-    assert_eq!(parse_time("1:60"), None, "60 seconds is a minute");
-    assert_eq!(parse_time("1:2:3:4"), None);
-    assert_eq!(parse_time("-5"), None);
-    assert_eq!(parse_time(""), None);
 }
 
 #[test]

@@ -2,22 +2,22 @@
 
 Written 2026-11-07 at the end of a working session, and updated the same day after the UI design session and after steps 1 to 5 of the UI's order of work. Read this first, then check it against the code and git, because it describes a moment in time.
 
-**UI stage 1 is built,** in four slices merged through PRs 24 to 26 and this one: the demo drawn live with state colours and MUs, pan and zoom, the run controls, speed, time mode, stepping, going back to a time, the error banner, the inspector, interventions on Stations and their marks. Next is step 7 of the UI's "Order of work": trim the CLI to the headless version. See "UI design" below.
+**The UI's order of work is done.** UI stage 1 was built in four slices, PRs 24 to 27: the demo drawn live with state colours and MUs, pan and zoom, the run controls, speed, time mode, stepping, going back to a time, the error banner, the inspector, interventions on Stations and their marks. Step 7 trimmed the CLI to a headless run of the demo, in the PR after 29. Next is model as data with the JSON model file and MCP v1: see "AI-native" and "Possible next steps".
 
 ## Start here
 
 1. Read `CLAUDE.md`.
 2. Read `GLOSSARY.md` and `docs/adr/`.
 3. Read "Agreed design" below. Most of it isn't recorded anywhere else.
-4. Read "UI design" below, ADR 0006 and `docs/design/ui-prototype.md`. The prototype's code on `prototype/ui-bevy` shows working Bevy 0.20 and `bevy_egui` code for most of stage 1. Then start the order of work at step 6.
+4. Read "UI design" below, ADR 0006 and `docs/design/ui-prototype.md`. The prototype's code on `prototype/ui-bevy` shows working Bevy 0.20 and `bevy_egui` code for most of stage 1. Then go on from "Possible next steps".
 
 ## Current state
 
-Checked on 2026-11-07, on Rust 1.99.1: all 279 tests pass, with 1 long-run test ignored (`cargo test --all-targets`).
+Checked on 2026-11-07, on Rust 1.99.1: all 284 engine tests pass, with 1 long-run test ignored (`cargo test --all-targets`), and so do the UI's 51 tests (`cargo test -p crabsim-ui --profile ui`).
 
 | Where | State |
 |---|---|
-| `master` on GitHub | Steps 1 to 6 of the build order, steps 1 to 5 of the UI's order of work, and slices 1 to 3 of UI stage 1, through PR 26 (`df1a7c1`) |
+| `master` on GitHub | Steps 1 to 6 of the build order and the AI-native design, through PR 29 (`f43074d`), with all of the UI's order of work once the headless CLI's PR is merged |
 | `prototype/restore-replay` | The throwaway prototype from build step 5. Keep it, and never merge it |
 | `prototype/ui-bevy` | The throwaway UI prototype from UI step 2, with temporary counters in the session. Keep it, and never merge it |
 | `docs/adr-0006-ui-technology` | Local only and never pushed. Its commit went into PR 20, so it can be deleted |
@@ -194,7 +194,7 @@ If 1 or 3 fails, try eframe. If 2 fails, the problem is in the session, not the 
 ### Structure
 - **Workspace (built):** the engine stays at the repo root with its tests and benchmark, and the UI is the member crate `ui/`, called `crabsim-ui`. `cargo test` and `cargo bench` at the root never build Bevy. Run the UI with `cargo run -p crabsim-ui --profile ui`, a release profile without LTO that rebuilds in seconds.
 - **Picture (built):** `crabsim::Picture` in `src/picture.rs`, logical state only, what is where and since when. Feed it every observation in order. Visual state, such as where a marker is drawn on screen, stays in the UI.
-- **CLI:** a simple headless CLI stays. For now it runs the demo model with a seed and a simulated length, then prints each object's final statistics and how long the run took. Once model as data exists it takes a model file. `--inplace`, the terminal view and the topology text go once UI stage 1 can show the demo.
+- **CLI (built):** a simple headless CLI. It runs the demo model with `--seed` and `--length`, the length written as the UI shows time, then prints each object's final statistics, each Drain's throughput and mean lead time, and how many events it ran in how long. A run error still prints the statistics up to it. Once model as data exists it takes a model file. `--inplace`, `RunView`, the terminal table and the topology text are gone.
 
 ### Model data for the UI
 - **Names and positions (built)** on `ModelDescription`, as optional fields: `set_name`, `set_position`, `set_dimensions`, with getters, `kind` and `object_count`. Stage 1 writes them by hand for the demo, with no automatic layout. Drag and drop will later write the same fields. The run ignores them, so a headless run pays nothing.
@@ -237,7 +237,7 @@ All built in PR 21, as planned except where noted. The benchmark gave identical 
    2. ✅ Time controls: speed on a logarithmic slider from 0.1 to 1,000,000 times, whose number can be typed, with the speed reached shown in orange when playback falls below 95% of it over the last 2 s. Continuous or skipping gaps, step back and forward, going back to a typed time (as shown time is written, such as `1:30` or `2d 06:00:00`), and an error banner. A run error stays until Reset or going back, and a refused command's error until the next command. At 1,000,000 times the demo kept up, at about 0.4 cores. Intervention marks moved to slice 3, because there are no interventions to mark before it.
    3. ✅ Inspector and interventions: a click selects, a drag still pans. The inspector shows type, name, state, contents and work left, why it's blocked (the MU held and each successor's state), why it's stopped (each interruption and since when), process time now and configured, waiting predecessors and statistics. Those last come from `request_state`, at most twice a second while something is selected and only when the last full state may be out of date, so a halted window stays idle. Pause, forced failure and process time on Stations. Each intervention leaves a mark on a strip under the top bar, and going back or stepping back past one asks first, naming what it drops. Stepping back can say exactly how many only if the view saw the last two instants arrive; otherwise it gives an upper bound. **Found on the way:** `request_state` straight after an intervention reported the run before it had handled the intervention's event at shown time, so a Pause was missing from the state. Fixed, with a session test.
    4. ✅ MUs drawn in the object that holds them, as off-white dots 0.5 m across, spread over a grid when there are several. They show from 6 pixels per metre, while halted or advancing at up to 120 times real time. Faster, each object holding MUs shows a count in its middle, where it can be read. A move takes no time, so an MU is drawn in its new holder at once, and after going back where it was then. A Source holds the MU it is working on from Init on, so it shows one too. A halted window with MUs drawn stays idle, at 0.004 cores.
-7. Trim the CLI to the headless version.
+7. ✅ Trim the CLI to the headless version, as described under "Structure". `format_time`, `format_time_exact` and `parse_time` moved from the UI into `crabsim::time`, so the CLI reads a length as the UI does. An end-to-end test runs the binary (`tests/cli.rs`). A simulated year in release ran at 14.1M events/s, a single run, so in line with the baseline.
 
 After that: model as data with the file format and save and load, with the MCP server on top (see "AI-native"), then step 7 of the build order, then drag and drop, configuration forms and the layout image in 2D, then the 3D view. Drag and drop waits for step 7 because forms and the palette depend on what each object can be configured with, and a palette offering Buffer needs Buffer fixed.
 
@@ -345,7 +345,7 @@ The grilling session ended here on 2026-11-07, with nothing left open.
 - **A stopped predecessor loses its place** (from reading): a retry that finds it stopped is used up, so it lists itself again at the back after its repair. The owner may want it to keep its place. Decide when `StopCtrl` is built.
 - **Source with several successors** (from reading): a `BlockedRetry` can move an MU before its interval ends, because `is_exit_allowed` is always true.
 - **Illegal connections panic while running:** an edge into a Source, or a self-loop. `ModelDescription` only rejects a successor on a Drain and ids not in the model, and full validation waits for candidate 3.
-- **Dead code** hidden by `#![allow(dead_code)]`: `MUEntrance`, `Finished`, `exitlocked`, `Paused`, `FailureProfile.mtbf`, and much of `topology.rs`, including `print_network_topology` and its helpers.
+- **Dead code** hidden by `#![allow(dead_code)]`: `MUEntrance`, `Finished`, `exitlocked`, `Paused`, and `FailureProfile.mtbf`.
 
 ## Open housekeeping
 
@@ -371,7 +371,6 @@ The grilling session ended here on 2026-11-07, with nothing left open.
 
 ## Possible next steps
 
-1. **The UI's order of work,** in "UI design". Steps 1 to 5 are done, and so is the session fix the prototype found. Next is step 6: UI stage 1. This is what the owner asked for next.
-2. Model as data with the JSON model file, the `SessionOutput` rename and MCP v1, after UI stage 1. See "AI-native".
-3. Step 7 of the build order.
-4. Run `/update-wiki` when convenient, so the docs stop describing removed code.
+1. Model as data with the JSON model file, the `SessionOutput` rename and MCP v1. See "AI-native". The CLI then takes a model file.
+2. Step 7 of the build order.
+3. Run `/update-wiki` when convenient, so the docs stop describing removed code, including the terminal views and topology text this step removed.

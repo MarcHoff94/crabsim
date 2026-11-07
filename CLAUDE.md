@@ -8,11 +8,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 # Build
 cargo build
 
-# Run demo
-RUST_LOG=info cargo run --bin crabsim
+# Run the demo model headless for a simulated day, then print its statistics
+cargo run --release --bin crabsim
 
-# Run with in-place terminal table
-RUST_LOG=info cargo run --bin crabsim -- --inplace
+# The same with a seed and a simulated length, written as the UI shows time
+cargo run --release --bin crabsim -- --seed 7 --length 365d
 
 # Run all tests
 cargo test
@@ -58,7 +58,7 @@ The design already agreed for this, including what isn't built yet, is in `docs/
 
 ## Architecture
 
-This is a Rust discrete-event material-flow simulator structured as a library (`src/`) with a demo binary (`src/main.rs`), in a Cargo workspace with the UI as a member crate (`ui/`). The engine is the only default member, so `cargo test` and `cargo bench` at the root never build the UI, and the engine never depends on it.
+This is a Rust discrete-event material-flow simulator structured as a library (`src/`) with a headless CLI (`src/main.rs`), in a Cargo workspace with the UI as a member crate (`ui/`). The engine is the only default member, so `cargo test` and `cargo bench` at the root never build the UI, and the engine never depends on it.
 
 **Core engine** (`src/simulation_run.rs`): `SimulationRun` owns the objects (one `Vec<ModelObject>`, indexed by id), clock and event queue (`BinaryHeap<ScheduledEvent>`, 32 bytes per entry). At one simulation time, `BlockedRetry` events run before all others, and a monotonically increasing `seq` preserves FIFO order within each of those two groups. A run only advances when asked and knows nothing about views or pacing:
 - `init` — sets t=0, calls each object's `init` in id order and queues the first events without processing them. Only allowed from the default state.
@@ -70,7 +70,7 @@ This is a Rust discrete-event material-flow simulator structured as a library (`
 
 **Model description** (`src/model.rs`): `ModelDescription` is how a model gets built: `add_source`, `add_station`, `add_station_holding`, `add_buffer` and `add_drain` return ids, `connect` wires them, and `build(seed)` gives a run. One description can build any number of runs. Ids follow the order objects are added, which is also the order Init visits them. It doesn't validate connections yet. It can report each object's `kind` and `successors`, and holds each object's name, `Position` and `Dimensions` in metres, for views. `build` leaves them behind, so they can't change a result, and an object without dimensions gets its type's default size.
 
-**Simulation time** (`src/time.rs`): `SimTime` is a 64-bit count of whole milliseconds, for both points in time and lengths of it. Sampled times are rounded to the nearest millisecond. Wall time stays a `std::time::Duration`, so the compiler keeps the two apart.
+**Simulation time** (`src/time.rs`): `SimTime` is a 64-bit count of whole milliseconds, for both points in time and lengths of it. Sampled times are rounded to the nearest millisecond. Wall time stays a `std::time::Duration`, so the compiler keeps the two apart. `format_time`, `format_time_exact` and `parse_time` write and read it as people do, such as `1:30` or `2d 06:00:00`, the same way in the UI and the CLI.
 
 **Live session** (`src/live_session.rs`): `LiveSession` owns a thread on which a builder closure creates the whole run. The run computes ahead as fast as it can into a bounded buffer, and the clock releases what it computed, so everything the user sees follows shown time while the run is at a later computed time. One thread alternates between computing a slice and releasing. Commands go in (`start`, `halt`, `reset`, `set_speed`, `set_time_mode`, `go_back`, `step_forward`, `step_back`, `set_reset_keeps_changes`, `request_state`, `pause`, `resume`, `force_failure`, `end_forced_failure`, `set_process_time`, `clear_statistics`) and `Observation`s come out (occurrences, shown time, state, status changes, errors). A full state comes only at Init, after Reset, after going back and on request. It takes wall time from a `Clock`. Sending never blocks the session thread: past `OBSERVATION_BACKLOG_LIMIT` unread observations the session stops releasing until they are read, keeps handling commands and drops nothing. Tests use a fake clock with `sync`, which blocks until the session has handled earlier commands and shown time has reached the clock. It returns `Backlogged` instead when observations need reading first, and `SyncTimedOut` at its deadline. It knows nothing about any UI technology.
 
@@ -103,14 +103,11 @@ This is a Rust discrete-event material-flow simulator structured as a library (`
 
 **Event types** (`src/event.rs`): `MUExit` (processing complete, try to transfer) and `BlockedRetry { from }` (reactive — successor `from` freed up, predecessor retries that successor only). Keeping them distinct preserves scheduling vs. reactive semantics.
 
-**Visualization** (`src/visualization/`):
-- `mod.rs` — the `RunView` trait and `advance_with_view`, which advances a run and shows each result to a view.
-- `terminal.rs` — `render_table` and the in-place `InPlaceTerminalView`.
-- `topology.rs` — ASCII topology text, meant to be replaced by the UI.
+**Headless CLI** (`src/main.rs`): runs the demo model with `--seed` (default 0) and `--length` (default `1d`, written as the UI shows time), then prints each object's statistics, each Drain's throughput and mean lead time, and how many events it ran in how long. A run error still prints the statistics up to it, then exits with failure. It takes a model file once models can be saved.
 
-**Demo** (`src/demo.rs`): the example model behind `--inplace`, the default run and the UI. `model()` gives its description, with a name and a hand-written position for every object.
+**Demo** (`src/demo.rs`): the example model behind the CLI and the UI. `model()` gives its description, with a name and a hand-written position for every object.
 
-**Tests** (`tests/`): `simulation_run.rs` tests behaviour at the run's interface: Init, advance, Reset, then read occurrences and state. `views.rs` tests the view adapters. `live_session.rs` tests commands in and observations out, with a fake clock, and checks the `Picture` against the run's own state. Tests build models through `ModelDescription`. A failure part way through an event can't happen in a real object, so the few tests of it are unit tests in `src/`, using `RecordsThenFails`, a `#[cfg(test)]` variant of `ModelObject`. What can't be seen from outside a session, such as the buffer limit and thinning, is unit tested in `src/live_session.rs`.
+**Tests** (`tests/`): `simulation_run.rs` tests behaviour at the run's interface: Init, advance, Reset, then read occurrences and state. `cli.rs` runs the CLI's binary end to end. `live_session.rs` tests commands in and observations out, with a fake clock, and checks the `Picture` against the run's own state. Tests build models through `ModelDescription`. A failure part way through an event can't happen in a real object, so the few tests of it are unit tests in `src/`, using `RecordsThenFails`, a `#[cfg(test)]` variant of `ModelObject`. What can't be seen from outside a session, such as the buffer limit and thinning, is unit tested in `src/live_session.rs`.
 
 **Benchmark** (`benches/reference.rs`): runs a copy of the demo model, and 429 copies of it side by side (6,006 objects), and reports speed and peak memory. `cargo test --all-targets` runs it without `--bench`, and then it only checks that the copy still matches the demo model.
 

@@ -1,16 +1,10 @@
-//! A small example model, run from the command line.
+//! A small example model, run by the headless CLI and drawn by the UI.
 
 use crate::flows::FailureProfile;
 use crate::model::{ModelDescription, Position};
 use crate::random_numbers::Distribution;
 use crate::simulation_run::SimulationRun;
 use crate::time::SimTime;
-use crate::visualization::terminal::{render_table, InPlaceTerminalView};
-use crate::visualization::topology::TopologyVisualizer;
-use crate::visualization::advance_with_view;
-use std::time::Instant;
-
-const RUN_LENGTH: SimTime = SimTime::from_secs(3_600);
 
 /// The example model, built into a run.
 pub fn build_model(seed: u64) -> SimulationRun {
@@ -75,23 +69,4 @@ pub fn model() -> ModelDescription {
         model.connect(from, to);
     }
     model
-}
-
-/// Runs the example model for an hour of simulation time and prints the result.
-pub fn run_demo(inplace: bool) -> Result<(), crate::error::RunError> {
-    let _ = env_logger::try_init();
-
-    let mut run = build_model(0);
-    let topology = TopologyVisualizer::render_network_topology(run.objects());
-    run.init()?;
-
-    let start = Instant::now();
-    if inplace {
-        advance_with_view(&mut run, RUN_LENGTH, &mut InPlaceTerminalView::new(topology))?;
-    } else {
-        run.advance_to(RUN_LENGTH).map_err(|failure| failure.error)?;
-        println!("{topology}{}", render_table(&run.state()));
-    }
-    println!("simulation runtime: {:.2} ms", start.elapsed().as_secs_f64() * 1000.0);
-    Ok(())
 }

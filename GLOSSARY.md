@@ -16,11 +16,11 @@ The first step of every simulation run: time is set to 0, every object's init is
 The control that begins or continues advancing time, doing Init first if it has not happened yet.
 
 **Halt**:
-The control that stops shown time advancing while everything the user sees stays exactly as it is. Start continues from there.
+The control that stops shown time advancing while everything the user sees stays exactly as it is. Start continues from there. An MU already gliding to its new object finishes the glide, since the move itself has already happened.
 _Avoid_: Pause, Stop (those happen to a material-flow object)
 
 **Reset**:
-The control that returns every object to its default state, ready for a new simulation run. The objects stay in the model. This fixed part cannot be changed, and users may later add their own behaviour after it.
+The control that returns every object to its default state, ready for a new simulation run. The objects stay in the model. If the user chose to keep changes, settings changed by interventions, such as a process time, first become the new default state, while momentary interventions such as a Pause are dropped. This fixed part cannot be changed, and users may later add their own behaviour after it.
 _Avoid_: Init, delete, clear
 
 **Headless run**:
@@ -38,6 +38,10 @@ Running many replications at the same time across CPU cores. Each simulation run
 
 **Live session**:
 A simulation run controlled while it goes, on its own thread. It takes Start, Halt, Reset and a speed, and reports occurrences, state, its status and errors.
+
+**Picture**:
+What the user currently knows about a simulation run at shown time, rebuilt from a full state and occurrences. It says what is where and since when, and nothing about how that is drawn.
+_Avoid_: Layout image (a picture of the real site)
 
 **Instant**:
 One point in simulation time and everything that happens at it. Instants are as far apart as the events make them.
@@ -64,6 +68,16 @@ How much shown time passes per unit of wall time in a live session. Changing it 
 
 **Zero-time loop**:
 Events that keep happening without simulation time advancing. A simulation run reports it as an error rather than looping forever.
+
+**View**:
+One way of drawing a model and its picture. The 2D view is for building and debugging, and the 3D view is for showing and watching. Both show the same model.
+
+**Layout image**:
+An image of the real site, placed under the model at a known scale, so objects can be positioned on it. It has no effect on results.
+_Avoid_: Picture (what the user knows about a run)
+
+**Dimensions**:
+An object's real size in metres: length, width and height, plus its rotation around the vertical axis. They are visual only and have no effect on results. MU moves stay instant whatever the distance.
 
 **Default state**:
 The state a material-flow object is in before a simulation run's Init, as configured by the user, including any starting MUs.
@@ -142,8 +156,12 @@ _Avoid_: Process time (a Buffer does no work)
 A cause that stops a material-flow object: a failure or a pause. Interruptions can overlap.
 
 **Failure**:
-An unplanned interruption whose timing is random. Failures and pauses are independent of each other.
+An unplanned interruption whose timing is random, unless the user forces it. Failures and pauses are independent of each other.
 _Avoid_: Breakdown, fault
+
+**Forced failure**:
+A failure the user starts and ends by hand, as an intervention, to see what happens if an object breaks down now. It counts as a failure against availability, and random failures carry on underneath it.
+_Avoid_: Pause (planned, and does not count against availability)
 
 **Pause**:
 A planned interruption commanded from outside, such as a shift break or scheduled maintenance. It does not count against availability.

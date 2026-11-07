@@ -16,7 +16,7 @@ The first step of every simulation run: time is set to 0, every object's init is
 The control that begins or continues advancing time, doing Init first if it has not happened yet.
 
 **Halt**:
-The control that stops shown time advancing while everything the user sees stays exactly as it is. Start continues from there. An MU already gliding to its new object finishes the glide, since the move itself has already happened.
+The control that stops shown time advancing while everything the user sees stays exactly as it is. Start continues from there.
 _Avoid_: Pause, Stop (those happen to a material-flow object)
 
 **Reset**:
@@ -123,7 +123,7 @@ A Station's work on each MU begins when that MU enters.
 ### Moving MUs
 
 **Move**:
-An MU passing from one material-flow object to the next. It takes no simulation time.
+An MU passing from one material-flow object to the next. It takes no simulation time, so it is shown as an instant jump. Transport that takes time would be its own material-flow object, such as a conveyor.
 
 **Push**:
 The object holding a finished MU sends it to a successor that can accept it. This is the current flow concept.

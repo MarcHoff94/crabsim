@@ -13,11 +13,12 @@ rand = "0.9.2"
 name = "reference"
 harness = false
 
-# The engine is the root package, with member crates for model files (`model/`), the headless CLI
-# (`cli/`) and the UI (`ui/`). The UI is the only member that isn't a default one, so `cargo test`
-# and `cargo bench` here never build Bevy. The engine depends on none of them (ADR 0009).
+# The engine is the root package, with member crates for model files (`model/`), the operation
+# catalogue (`catalogue/`), the headless CLI (`cli/`), the MCP server (`mcp/`) and the UI (`ui/`). The
+# UI and the MCP server aren't default members, so `cargo test` and `cargo bench` here never build
+# Bevy or tokio. The engine depends on none of them (ADR 0009).
 [workspace]
-members = ["model", "catalogue", "cli", "ui"]
+members = ["model", "catalogue", "cli", "mcp", "ui"]
 default-members = [".", "model", "catalogue", "cli"]
 
 # Measured with the reference benchmark: about 11% less time than the default on the demo model

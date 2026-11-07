@@ -35,6 +35,7 @@ How the main components are structured and why.
 - [Simulation Run](architecture/simulation-run.md)
 - [Material Flow Objects](architecture/material-flow-objects.md)
 - [Live Session & UI](architecture/live-session-and-ui.md)
+- [Operation Catalogue](architecture/operation-catalogue.md)
 
 ### Guides
 How to do common tasks.

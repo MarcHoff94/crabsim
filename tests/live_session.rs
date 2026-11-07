@@ -1182,6 +1182,7 @@ enum Done {
     Pause(u32),
     Resume(u32),
     Clear,
+    SetProcessTime(u32, SimTime),
 }
 
 fn direct_state(done: &[(u64, Done)], t: u64) -> RunState {
@@ -1198,6 +1199,7 @@ fn direct(done: &[(u64, Done)], t: u64) -> (Vec<Occurrence>, RunState) {
             Done::Pause(id) => run.schedule_event(secs(*at), EventType::PauseOn, *id).unwrap(),
             Done::Resume(id) => run.schedule_event(secs(*at), EventType::PauseOff, *id).unwrap(),
             Done::Clear => run.clear_statistics(),
+            Done::SetProcessTime(id, time) => run.set_process_time(*id, *time).unwrap(),
         }
     }
     occurrences.extend(run.advance_to(secs(t)).unwrap());
@@ -1581,11 +1583,48 @@ fn only_a_station_can_be_paused_so_far() {
     assert_eq!(
         watched.look().errors,
         vec![
-            SessionError::CannotPause(0),
-            SessionError::CannotPause(2),
-            SessionError::CannotPause(0),
+            SessionError::NotAStation(0),
+            SessionError::NotAStation(2),
+            SessionError::NotAStation(0),
             SessionError::Run(RunError::UnknownObject(99)),
         ]
+    );
+}
+
+#[test]
+fn a_process_time_change_takes_effect_at_shown_time_and_replays() {
+    let mut watched = Watched::new(line_with_random_failures);
+    watched.session.start().unwrap();
+    watched.at(1_000);
+    watched.look();
+    watched.session.set_process_time(STATION, secs(3)).unwrap();
+    watched.at(2_000);
+    watched.look_without_errors();
+    let done = [(1_000, Done::SetProcessTime(STATION, secs(3)))];
+    assert_eq!(watched.state_now(), direct_state(&done, 2_000));
+
+    // Going back past the change replays it from the log.
+    watched.session.go_back(secs(1_500)).unwrap();
+    watched.look_without_errors();
+    assert_eq!(watched.state_now(), direct_state(&done, 1_500));
+
+    // Going back before it removes it.
+    watched.session.go_back(secs(500)).unwrap();
+    watched.look_without_errors();
+    assert_eq!(watched.state_now(), direct_state(&[], 500));
+}
+
+#[test]
+fn only_a_station_has_a_process_time_to_change_in_a_session() {
+    let mut watched = Watched::new(line_with_random_failures);
+    watched.session.start().unwrap();
+    watched.look();
+    watched.session.set_process_time(0, secs(3)).unwrap();
+    watched.session.set_process_time(2, secs(3)).unwrap();
+    watched.session.set_process_time(99, secs(3)).unwrap();
+    assert_eq!(
+        watched.look().errors,
+        vec![SessionError::NotAStation(0), SessionError::NotAStation(2), SessionError::Run(RunError::UnknownObject(99))]
     );
 }
 

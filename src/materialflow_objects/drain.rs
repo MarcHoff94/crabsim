@@ -57,6 +57,7 @@ impl EventInterface for Drain {
             successors: Vec::new(),
             capacity: 0,
             process_time: None,
+            configured_process_time: None,
             statistics: self.statistics.read(now),
         }
     }

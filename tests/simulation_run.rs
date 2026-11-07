@@ -2175,6 +2175,82 @@ fn a_pause_draws_no_random_numbers() {
     assert_eq!(failures(&occurrences), failures(&expected));
 }
 
+// ---------- Changing a process time ----------
+
+/// Source every 30 s -> Station of 20 s -> Drain, with no failures. The first MU reaches the
+/// Station at t=30 and finishes at t=50, the second arrives at t=60.
+fn slow_line() -> (SimulationRun, u32) {
+    let mut model = ModelDescription::new();
+    let src = source(&mut model, 30);
+    let st = station(&mut model, 20);
+    let dr = drain(&mut model);
+    model.connect(src, st);
+    model.connect(st, dr);
+    (recorded(model.build(0)), st)
+}
+
+#[test]
+fn a_new_process_time_applies_from_the_next_mu() {
+    let (mut run, st) = slow_line();
+    run.init().unwrap();
+    run.advance_to(secs(40)).unwrap();
+    run.set_process_time(st, secs(5)).unwrap();
+    let occurrences = run.advance_to(secs(100)).unwrap();
+    let at_station: Vec<(SimTime, OccurrenceKind)> = occurrences
+        .into_iter()
+        .filter(|o| match o.kind {
+            OccurrenceKind::WorkStarted { at, .. } | OccurrenceKind::WorkFinished { at, .. } => at == st,
+            OccurrenceKind::MuMoved { from, .. } => from == st,
+            _ => false,
+        })
+        .map(|o| (o.time, o.kind))
+        .collect();
+    assert_eq!(
+        at_station,
+        vec![
+            // The MU in work keeps its 20 s.
+            (secs(50), OccurrenceKind::WorkFinished { mu_id: 1, at: st }),
+            (secs(50), OccurrenceKind::MuMoved { mu_id: 1, from: st, to: st + 1 }),
+            (secs(60), OccurrenceKind::WorkStarted { mu_id: 2, at: st, duration: secs(5) }),
+            (secs(65), OccurrenceKind::WorkFinished { mu_id: 2, at: st }),
+            (secs(65), OccurrenceKind::MuMoved { mu_id: 2, from: st, to: st + 1 }),
+            (secs(90), OccurrenceKind::WorkStarted { mu_id: 3, at: st, duration: secs(5) }),
+            (secs(95), OccurrenceKind::WorkFinished { mu_id: 3, at: st }),
+            (secs(95), OccurrenceKind::MuMoved { mu_id: 3, from: st, to: st + 1 }),
+        ]
+    );
+}
+
+#[test]
+fn state_reports_the_current_and_the_configured_process_time() {
+    let (mut run, st) = slow_line();
+    run.init().unwrap();
+    run.set_process_time(st, secs(5)).unwrap();
+    let state = run.state();
+    assert_eq!(object(&state, st).process_time, Some(secs(5)));
+    assert_eq!(object(&state, st).configured_process_time, Some(secs(20)));
+    assert_eq!(object(&state, st - 1).configured_process_time, None);
+}
+
+#[test]
+fn reset_returns_to_the_configured_process_time() {
+    let (mut run, st) = slow_line();
+    run.init().unwrap();
+    run.advance_to(secs(40)).unwrap();
+    run.set_process_time(st, secs(5)).unwrap();
+    run.reset();
+    assert_eq!(object(&run.state(), st).process_time, Some(secs(20)));
+}
+
+#[test]
+fn only_a_station_has_a_process_time_to_change() {
+    let (mut run, st) = slow_line();
+    run.init().unwrap();
+    assert_eq!(run.set_process_time(st - 1, secs(5)), Err(RunError::NotAStation(st - 1)));
+    assert_eq!(run.set_process_time(st + 1, secs(5)), Err(RunError::NotAStation(st + 1)));
+    assert_eq!(run.set_process_time(99, secs(5)), Err(RunError::UnknownObject(99)));
+}
+
 // ---------- Advancing by events, and clones ----------
 
 #[test]

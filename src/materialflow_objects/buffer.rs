@@ -230,6 +230,7 @@ impl EventInterface for Buffer {
             successors: self.succ.clone(),
             capacity: self.statistics.capacity(),
             process_time: None,
+            configured_process_time: None,
             statistics: self.statistics.read(now),
         }
     }

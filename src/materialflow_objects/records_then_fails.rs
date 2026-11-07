@@ -46,6 +46,7 @@ impl EventInterface for RecordsThenFails {
             successors: Vec::new(),
             capacity: 0,
             process_time: None,
+            configured_process_time: None,
             statistics: Default::default(),
         }
     }

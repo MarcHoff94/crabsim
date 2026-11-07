@@ -79,6 +79,20 @@ impl SimulationRun {
         self.statistics_since = self.time;
     }
 
+    /// Changes how long a Station works on each MU from now on. The MU in work keeps its time,
+    /// and the next MU uses the new one. Reset returns to the configured process time. It
+    /// schedules nothing, so it costs nothing per event.
+    pub fn set_process_time(&mut self, id: u32, process_time: SimTime) -> Result<(), RunError> {
+        match self.objects.get_mut(id as usize) {
+            Some(ModelObject::Station(station)) => {
+                station.proc_time = process_time;
+                Ok(())
+            }
+            Some(_) => Err(RunError::NotAStation(id)),
+            None => Err(RunError::UnknownObject(id)),
+        }
+    }
+
     /// Sets time to 0, calls every object's init in id order and queues the first events.
     /// Nothing is processed yet, including events due at t=0.
     pub fn init(&mut self) -> Result<Vec<Occurrence>, RunError> {

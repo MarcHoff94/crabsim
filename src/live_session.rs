@@ -144,8 +144,8 @@ pub enum SessionError {
     ResetRequired,
     /// A speed has to be positive and finite.
     InvalidSpeed(f64),
-    /// Only a Station can be paused so far.
-    CannotPause(u32),
+    /// Only a Station can be paused or have its process time changed, so far.
+    NotAStation(u32),
     /// Going back goes to shown time or earlier.
     NotInThePast { to: SimTime, shown: SimTime },
     /// The session thread panicked and has ended. Only a new session can continue.
@@ -165,7 +165,7 @@ impl fmt::Display for SessionError {
             SessionError::Run(error) => write!(f, "{error}"),
             SessionError::ResetRequired => write!(f, "the simulation run reported an error; reset it or go back first"),
             SessionError::InvalidSpeed(speed) => write!(f, "{speed} is not a speed: it has to be positive and finite"),
-            SessionError::CannotPause(id) => write!(f, "object {id} can't be paused: only a Station can so far"),
+            SessionError::NotAStation(id) => write!(f, "object {id} is not a Station, and only a Station can do this so far"),
             SessionError::NotInThePast { to, shown } => write!(f, "can't go back to {to}s: shown time is {shown}s"),
             SessionError::Panicked(message) => write!(f, "the live session panicked: {message}"),
             SessionError::Backlogged => write!(f, "too many observations are unread; read them first"),
@@ -183,6 +183,7 @@ enum Action {
     Pause(u32),
     Resume(u32),
     ClearStatistics,
+    SetProcessTime(u32, SimTime),
 }
 
 enum Command {
@@ -301,6 +302,13 @@ impl LiveSession {
     /// Ends a pause at shown time, on the same terms as `pause`.
     pub fn resume(&self, object_id: u32) -> Result<(), SessionError> {
         self.send(Command::Intervene(Action::Resume(object_id)))
+    }
+
+    /// Changes a Station's process time at shown time, without a Halt. The MU in work keeps its
+    /// time and the next MU uses the new one. The computed future is gone, and Reset or going
+    /// back behind it undoes it.
+    pub fn set_process_time(&self, object_id: u32, process_time: SimTime) -> Result<(), SessionError> {
+        self.send(Command::Intervene(Action::SetProcessTime(object_id, process_time)))
     }
 
     /// Starts statistics afresh at shown time, such as at the end of a warm-up. Going back behind
@@ -476,6 +484,7 @@ fn apply_action(run: &mut SimulationRun, action: Action) {
         Action::Pause(id) => run.schedule_event(at, EventType::PauseOn, id).expect("the run has been initialised"),
         Action::Resume(id) => run.schedule_event(at, EventType::PauseOff, id).expect("the run has been initialised"),
         Action::ClearStatistics => run.clear_statistics(),
+        Action::SetProcessTime(id, time) => run.set_process_time(id, time).expect("checked to be a Station"),
     }
 }
 
@@ -731,11 +740,11 @@ impl<'a, C: Clock> SessionThread<'a, C> {
             self.observe(Observation::Error(SessionError::ResetRequired));
             return;
         }
-        if let Action::Pause(id) | Action::Resume(id) = action {
+        if let Action::Pause(id) | Action::Resume(id) | Action::SetProcessTime(id, _) = action {
             match self.run.object(id) {
                 Some(ModelObject::Station(_)) => {}
                 Some(_) => {
-                    self.observe(Observation::Error(SessionError::CannotPause(id)));
+                    self.observe(Observation::Error(SessionError::NotAStation(id)));
                     return;
                 }
                 None => {
@@ -743,6 +752,8 @@ impl<'a, C: Clock> SessionThread<'a, C> {
                     return;
                 }
             }
+        }
+        if let Action::Pause(id) | Action::Resume(id) = action {
             if self.is_paused_in_log(id) == matches!(action, Action::Pause(_)) {
                 return;
             }

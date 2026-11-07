@@ -13,6 +13,8 @@ use crate::flows::{
 pub struct SingleStation {
 	pub base: BaseObject,
 	pub proc_time: SimTime,
+	/// The process time in the default state. Reset returns `proc_time` to it.
+	pub configured_proc_time: SimTime,
 	pub completion_time: Option<SimTime>,
 	pub interrupted_remain_proc_time: Option<SimTime>,
 	pub stop_count: u32,
@@ -42,6 +44,7 @@ impl SingleStation {
 		SingleStation {
 			base: BaseObject { object_id, random_seed: 0 },
 			proc_time,
+			configured_proc_time: proc_time,
 			completion_time: None,
 			interrupted_remain_proc_time: None,
 			stop_count: 0,
@@ -394,6 +397,7 @@ impl EventInterface for SingleStation {
 		outcome
 	}
 	fn reset(&mut self) {
+		self.proc_time = self.configured_proc_time;
 		self.content = self.starting_content.clone();
 		self.completion_time = None;
 		self.interrupted_remain_proc_time = None;
@@ -424,6 +428,7 @@ impl EventInterface for SingleStation {
 			successors: self.succ.clone(),
 			capacity: self.statistics.capacity(),
 			process_time: Some(self.proc_time),
+			configured_process_time: Some(self.configured_proc_time),
 			statistics: self.statistics.read(now),
 		}
 	}

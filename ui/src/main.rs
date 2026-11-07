@@ -19,7 +19,7 @@ use crabsim::{LiveSession, SessionStatus, SimTime, TimeMode, WallClock, demo};
 use crabsim_ui::camera::Camera as ViewCamera;
 use crabsim_ui::view::{
     Control, DEFAULT_SPEED, Details, Inspection, Intervention, JumpProblem, MAX_SPEED, MIN_SPEED, Mark, Point,
-    Shade, StepBackLoss, ViewState, format_time, format_time_exact, label_size, parse_time,
+    MU_METRES, Shade, StepBackLoss, ViewState, format_time, format_time_exact, label_size, parse_time,
 };
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -88,6 +88,7 @@ fn main() {
                 canvas_input.run_if(not(egui_wants_any_pointer_input)),
                 place_camera,
                 draw_connections,
+                place_mus,
             )
                 .chain(),
         )
@@ -128,6 +129,7 @@ enum GoingBack {
 /// A press that moves less than this, in logical pixels, is a click rather than a drag.
 const CLICK_SLOP: f32 = 4.0;
 const SELECTION: Color = Color::srgb(1.0, 1.0, 1.0);
+const MU_COLOUR: Color = Color::srgb(0.96, 0.96, 0.93);
 
 /// A `LiveSession` holds a `Receiver`, which can be sent between threads but not shared.
 #[derive(Resource)]
@@ -144,11 +146,20 @@ struct Scene {
 #[derive(Component)]
 struct WorldCamera;
 
+/// Entities drawing MUs, reused from frame to frame: the first `shown` are visible.
+#[derive(Resource)]
+struct MuPool {
+    entities: Vec<Entity>,
+    shown: usize,
+    mesh: Handle<Mesh>,
+    material: Handle<StandardMaterial>,
+}
+
 fn setup(
     mut commands: Commands,
     ui: Res<Ui>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut material_assets: ResMut<Assets<StandardMaterial>>,
 ) {
     commands.spawn((
         Camera3d::default(),
@@ -159,7 +170,7 @@ fn setup(
     let materials: HashMap<Shade, Handle<StandardMaterial>> = SHADES
         .iter()
         .map(|&shade| {
-            (shade, materials.add(StandardMaterial { base_color: shade_colour(shade), unlit: true, ..default() }))
+            (shade, material_assets.add(StandardMaterial { base_color: shade_colour(shade), unlit: true, ..default() }))
         })
         .collect();
     // Objects of the same size share a mesh.
@@ -180,6 +191,12 @@ fn setup(
         .collect();
     let count = ui.view.objects().len();
     commands.insert_resource(Scene { entities, drawn: vec![Shade::Unknown; count], materials });
+    commands.insert_resource(MuPool {
+        entities: Vec::new(),
+        shown: 0,
+        mesh: meshes.add(Circle::new(MU_METRES as f32 / 2.0)),
+        material: material_assets.add(StandardMaterial { base_color: MU_COLOUR, unlit: true, ..default() }),
+    });
 }
 
 /// Reads every observation waiting, every frame: past a backlog the session stops releasing.
@@ -297,6 +314,45 @@ fn request_details(session: Res<Session>, mut ui: ResMut<Ui>, time: Res<Time<Rea
     }
 }
 
+
+/// Draws each MU in the object that holds it, when the view state says MUs are shown, reusing
+/// the entities from the frame before. Only what changed touches the ECS.
+fn place_mus(
+    mut commands: Commands,
+    ui: Res<Ui>,
+    mut pool: ResMut<MuPool>,
+    mut drawn: Query<(&mut Transform, &mut Visibility)>,
+) {
+    let markers = ui.camera.map(|camera| ui.view.mu_markers(&camera)).unwrap_or_default();
+    let pool = &mut *pool;
+    for (index, marker) in markers.iter().enumerate() {
+        let at = Vec3::new(marker.at.x as f32, marker.at.y as f32, 0.2);
+        match pool.entities.get(index) {
+            Some(&entity) => {
+                if let Ok((mut transform, mut visibility)) = drawn.get_mut(entity) {
+                    if transform.translation != at {
+                        transform.translation = at;
+                    }
+                    if *visibility != Visibility::Inherited {
+                        *visibility = Visibility::Inherited;
+                    }
+                }
+            }
+            None => {
+                let entity = commands
+                    .spawn((Mesh3d(pool.mesh.clone()), MeshMaterial3d(pool.material.clone()), Transform::from_translation(at)))
+                    .id();
+                pool.entities.push(entity);
+            }
+        }
+    }
+    for &entity in pool.entities.iter().take(pool.shown).skip(markers.len()) {
+        if let Ok((_, mut visibility)) = drawn.get_mut(entity) {
+            *visibility = Visibility::Hidden;
+        }
+    }
+    pool.shown = markers.len();
+}
 fn draw_connections(mut gizmos: Gizmos, ui: Res<Ui>) {
     for connection in ui.view.connections() {
         let start = Vec3::new(connection.start.x as f32, connection.start.y as f32, 0.0);
@@ -714,7 +770,8 @@ fn statistics_rows(details: &Details) -> Vec<(&'static str, String)> {
     rows
 }
 
-/// Each object's name under it, `text_size` pixels tall, clipped to the canvas.
+/// Each object's name under it, and counts of MUs where they aren't drawn, `text_size` pixels
+/// tall, clipped to the canvas.
 fn labels(ctx: &egui::Context, view: &ViewState, camera: &ViewCamera, canvas: egui::Rect, text_size: f32) {
     let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Middle, egui::Id::new("labels"))).with_clip_rect(canvas);
     let size = Point { x: canvas.width() as f64, y: canvas.height() as f64 };
@@ -726,6 +783,13 @@ fn labels(ctx: &egui::Context, view: &ViewState, camera: &ViewCamera, canvas: eg
         let at = egui::pos2(canvas.min.x + at.x as f32, canvas.min.y + at.y as f32 + text_size / 4.0);
         let font = egui::FontId::proportional(text_size);
         painter.text(at, egui::Align2::CENTER_TOP, &object.name, font, egui::Color32::LIGHT_GRAY);
+    }
+    // Where MUs can't be followed, each holder shows how many it holds, in its middle.
+    for (id, count) in view.counts(camera) {
+        let at = camera.to_screen(view.objects()[id as usize].centre, size);
+        let at = egui::pos2(canvas.min.x + at.x as f32, canvas.min.y + at.y as f32);
+        let font = egui::FontId::proportional(text_size);
+        painter.text(at, egui::Align2::CENTER_CENTER, count.to_string(), font, egui::Color32::from_gray(15));
     }
 }
 

@@ -1,136 +1,163 @@
 # crabsim
 
-A compact Rust discrete-event material-flow simulator (library + demo binary) with a separate live renderer.
+A discrete-event simulator for any material flow, such as a factory line, written in Rust. A model is made of Sources, Stations, Buffers and Drains that create, work on, hold and take out moveable units (MUs). Stations fail at random, can be paused or forced to fail, and keep statistics such as busy, blocked and failed time, lead time and throughput.
 
-It models Moveable Units (MUs) produced by a `Source`, processed by one or more `SingleStation`s, and consumed by a `Drain`. A central `Simulator` holds the registered objects and an `EventController` advances time via a priority queue with FIFO tiebreaking.
+crabsim exists to simulate long periods as fast as possible: a year of the demo model takes about 1.2 seconds, at about 13 million events per second, and a run's memory stays flat however long it is. A live session can also play a run at a chosen speed, step forward and back through it, and take interventions while it plays, for a UI to show.
 
+**Status:** the engine and live session work. The UI is under way: it will be a Bevy application with egui panels (ADR 0006), and so far it only opens a window. A throwaway prototype shows what it will do: see "Trying the UI prototype" below. Buffer's movement is known to be broken, so models don't use it yet. The plan is in `docs/agents/handoff.md` and in [spec issue 3](https://github.com/MarcHoff94/crabsim/issues/3).
 
-## Quick Start (Windows PowerShell)
+## Requirements
 
-```powershell
-# Build
-cargo build --manifest-path C:\Users\marcu\projects\crabsim\Cargo.toml
+Rust, installed through [rustup](https://rustup.rs). The repo pins its Rust version in `rust-toolchain.toml`, so rustup fetches the right one by itself the first time you build. On Windows you also need the Visual Studio C++ build tools, which the rustup installer offers.
 
-# Run demo (prints state snapshots after each event)
-$env:RUST_LOG = 'info'
-cargo run --manifest-path C:\Users\marcu\projects\crabsim\Cargo.toml --bin crabsim
+## Quick start
 
-# Run demo with in-place table updates in this terminal
-$env:RUST_LOG = 'info'
-# via CLI: inplace mode
-cargo run --manifest-path C:\Users\marcu\projects\crabsim\Cargo.toml --bin crabsim -- --inplace
-# or env var
-$env:CRABSIM_LIVE_INPLACE = '1'
-cargo run --manifest-path C:\Users\marcu\projects\crabsim\Cargo.toml --bin crabsim
+The commands are for Windows PowerShell, one per line. Run them in the repo's folder.
 
-# Run demo with external renderer window (maximized) at 5x speed
-$env:RUST_LOG = 'info'
-# via CLI: renderer window at 5x speed, hold 1s after finish
-cargo run --manifest-path C:\Users\marcu\projects\crabsim\Cargo.toml --bin crabsim -- --renderer-window --speed 5 --hold 1
-# or env vars
-$env:CRABSIM_RENDERER = '1'
-$env:CRABSIM_RENDERER_SPEED = '5'
-$env:CRABSIM_RENDERER_HOLD = '1'
-cargo run --manifest-path C:\Users\marcu\projects\crabsim\Cargo.toml --bin crabsim
-
-# Run tests
-cargo test --manifest-path C:\Users\marcu\projects\crabsim\Cargo.toml
-
-# Run tests with logs
-$env:RUST_LOG = 'info'
-cargo test --manifest-path C:\Users\marcu\projects\crabsim\Cargo.toml -- --nocapture
-```
-
-Notes:
-- Demo calls `crabsim::run_demo()` which initializes `env_logger` so `RUST_LOG` controls runtime logs.
-- Renderer window on Windows launches maximized.
-- CLI flags: `--inplace`, `--renderer-window`, `--speed <factor|-1>`, `--hold <seconds>`.
-- Env vars: `CRABSIM_LIVE_INPLACE`, `CRABSIM_RENDERER`, `CRABSIM_RENDERER_SPEED`, `CRABSIM_RENDERER_HOLD`.
-
-
-## Architecture Overview
-
-- `Simulator` (`src/simulator.rs`): Authoritative registry of material-flow objects and drains. Assigns object IDs on registration and prints a text snapshot after each event via `print_materialflow_state`. When a renderer is connected, it sends JSON snapshots and the static topology.
-- `EventController` (`src/simulator.rs`): Discrete-event engine with a `BinaryHeap<ScheduledEvent>`. Uses a monotonically increasing sequence (`seq`) to preserve FIFO order for events scheduled at the same time.
-- Material-flow objects (`src/materialflow_objects/`):
-	- `Source`: creates MUs at a configured processing interval and attempts to transfer them to successors.
-	- `SingleStation`: processes one MU at a time and forwards it. Tracks entrance/exit locks, blocked state, and blocked predecessors.
-	- `Drain`: consumes MUs, records exit times and IDs.
-- Movement semantics (`src/materialflow_objects/flows.rs`):
-	- `try_to_move_to_successor` (round-robin by default) attempts to transfer an MU from a predecessor to the first successor that accepts entrance, advancing `succ_pointer` and recording blocked predecessors when denied.
-	- Events: `MUExit` (processing-complete transfer attempt) and `BlockedRetry` (successor notified it freed up). They are distinct to preserve scheduling vs. reactive retry semantics.
-
-
-## Visualization
-
-- Topology visualizer (`src/visualization/topology.rs`):
-	- `print_network_topology(...)` prints the ASCII network topology locally.
-	- `render_network_topology(...) -> String` returns a string with branches and connectors for the renderer.
-- State visualizer (`src/visualization/state.rs`):
-	- Snapshot structs (`StateRow`, `StateSnapshot`) and helpers to collect and render state tables.
-	- Supports in-place redraw in the same terminal via ANSI/VT sequences.
-
-## External Renderer
-
-- Binary `crabsim-renderer` (built alongside the demo) displays:
-	- Header, static topology string, then the live state table.
-	- It consumes newline-delimited JSON messages from the simulator:
-		- `{ "kind": "topology", "text": "..." }`
-		- `{ "kind": "snapshot", "snapshot": { ... } }`
-	- Pacing: 1 simulated second maps to `1 / speed` wall seconds; use `CRABSIM_RENDERER_SPEED` to adjust.
-	- Unpaced mode: set `--speed -1` to render each simulation second immediately until the final event, then the renderer enters hold-open.
-	- Unpaced mode: set `--speed -1` to render each simulation second immediately (fast-forward) until the final event, then hold-open per `--hold`.
-- Launching:
-	- Set `CRABSIM_RENDERER=1` to auto-spawn and connect.
-	- On Windows, the renderer opens as a maximized console window.
-
-## Logging
-- Uses `log` + `env_logger`. Control verbosity via `RUST_LOG` (e.g., `info`, `crabsim=debug`).
-
-
-## Tests and Guarantees
-
-Unit tests live in `src/lib.rs` and cover:
-
-- Ordering across stations and across parallel branches
-- Blocked retry semantics and dedup behavior
-- Drain FIFO ordering and throughput characteristics
-
-Run with:
+Run the tests:
 
 ```powershell
-cargo test --manifest-path C:\Users\marcu\projects\crabsim\Cargo.toml
-$env:RUST_LOG = 'info'; cargo test --manifest-path C:\Users\marcu\projects\crabsim\Cargo.toml -- --nocapture
+cargo test
 ```
 
+Run the demo model for a simulated hour and print each object's state:
 
-## Project Layout
+```powershell
+cargo run --bin crabsim
+```
 
-- `Cargo.toml` — dependencies (`splay_tree`, `log`, `env_logger`) and metadata.
-- `src/lib.rs` — public API, re-exports, `run_demo()` and unit tests.
-- `src/main.rs` — binary entrypoint that invokes `run_demo()`.
-- `src/simulator.rs` — `Simulator`, `EventController`, scheduling, state printing, and renderer JSON emission.
-- `src/materialflow_objects/` — concrete types and movement traits:
-	- `flows.rs` — traits (`MaterialFlow`, `EventInterface`, `SuccessorContainer`), `MoveableUnit`, strategies, and `try_to_move_to_successor`.
-	- `source.rs`, `station.rs`, `drain.rs` — implementations.
-	- `src/visualization/` — topology and state rendering helpers used by both console and renderer.
+The same, with the table updating in place in the terminal:
 
+```powershell
+cargo run --bin crabsim -- --inplace
+```
 
-## Extending
+Run the benchmark, which takes about a minute and reports events per second, simulated time per wall second and peak memory:
 
-- Add a new material-flow type by implementing `EventInterface` + `MaterialFlow`, exposing it in `materialflow_objects::mod`, registering with `Simulator`, and wiring successors (`Rc<RefCell<dyn MaterialFlow>>`).
-- Preserve `EventController` seq tiebreaking to keep deterministic tests.
-- Keep `try_to_move_to_successor` semantics (advance `succ_pointer`, record blocked predecessors, return event when appropriate).
+```powershell
+cargo bench --bench reference
+```
 
-If you want a small CLI (e.g., `clap`) to toggle log level or runtime options, or structured logs via `tracing`, open an issue and we can add it without changing default behavior.
+Open the UI, which so far is only a window. The first build takes several minutes:
 
-## Troubleshooting
+```powershell
+cargo run -p crabsim-ui --profile ui
+```
 
-- Renderer window doesn’t appear:
-	- Ensure `CRABSIM_RENDERER='1'` is set before `cargo run`.
-	- Check PowerShell execution: the demo uses `Start-Process` and falls back to `cmd /C start /MAX`.
-	- Verify Windows allows console VT sequences (for in-place mode) — modern terminals do; classic `cmd` also works.
-- No topology in renderer:
-	- The simulator sends topology immediately after connecting; ensure the renderer is running and connected.
-- Too fast/slow updates:
-	- Adjust `CRABSIM_RENDERER_SPEED` (e.g., `1` for realtime, `5` for faster).
+The engine logs every event at `info` level. To see that while running the demo or the tests, set `RUST_LOG` first:
+
+```powershell
+$env:RUST_LOG = 'info'
+```
+
+## Trying the UI prototype
+
+The prototype is throwaway code on the branch `prototype/ui-bevy`, never to be merged. It drew 6,006 objects at hundreds of frames per second and drove a real live session, to settle the UI's technology. Its results are in `docs/design/ui-prototype.md`.
+
+It needs a clean working tree, because it switches branches. Commit or stash your changes first.
+
+1. Switch to the prototype's branch and go into its folder:
+
+   ```powershell
+   git switch prototype/ui-bevy
+   ```
+
+   ```powershell
+   cd ui-prototype
+   ```
+
+2. Start it. This one runs a real session of 429 copies of the demo line, zoomed in on one copy, at 60 times real time, so you can watch MUs move:
+
+   ```powershell
+   cargo run --release -- --mode session --render meshes --speed 60 --close
+   ```
+
+   The first build takes about 5 minutes, unless a build is already on disk.
+
+3. When you're done, close the window and go back:
+
+   ```powershell
+   cd ..
+   ```
+
+   ```powershell
+   git switch master
+   ```
+
+**In the window:**
+- Drag with the right or middle mouse button to pan, and use the wheel to zoom.
+- Click an object to select it and see it in the inspector, or drag it to move it.
+- Drag a button from the palette on the left into the model to add an object.
+- Use Start and Halt in the top bar.
+
+The top bar shows frames per second, shown time and the speed achieved.
+
+**Other ways to run it**, each after `cargo run --release --`:
+
+| Options | What it shows |
+|---|---|
+| `--mode session --render meshes --speed 3600` | The whole model at 1 simulated hour per second, with states as colours |
+| `--mode scale --render sprites` | A stress test with no simulation: 6,006 objects changing colour and 5,000 gliding markers |
+| `--mode scale --render meshes --close` | The same stress test zoomed in, with labels |
+| `--mode windowless --speed 3600 --seconds 10` | The session alone, with no window, printing the speed it reached |
+
+More options:
+- **`--render sprites` or `--render meshes`:** sprites, or flat meshes under a 3D camera.
+- **`--lines N`:** copies of the demo line.
+- **`--markers N`:** the most MUs drawn at once.
+- **`--seconds N`:** quit after that long and print frame times.
+- **`--halt-after N`:** halt after that long.
+- **`--screenshot path.png`:** save a screenshot, with `--seconds`.
+- **`--vsync`:** ask for vsync.
+
+In this version MUs jump straight to their next object, because a move takes no simulation time. The gliding markers in the stress test stand in for a future conveyor.
+
+## Using it as a library
+
+A headless run, which records nothing and keeps memory flat:
+
+```rust
+use crabsim::random_numbers::Distribution;
+use crabsim::{FailureProfile, ModelDescription, SimTime};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut model = ModelDescription::new();
+    let source = model.add_source(SimTime::from_secs(5));
+    // Available 90% of the time, with repairs taking 60 s on average.
+    let failures = FailureProfile::new(0.9, Distribution::ERLANG { mean: 60_000.0, k: 2 }, 0);
+    let station = model.add_station(SimTime::from_secs(4), failures);
+    let drain = model.add_drain();
+    model.connect(source, station);
+    model.connect(station, drain);
+
+    let mut run = model.build(42);
+    run.init()?;
+    run.advance_to(SimTime::from_secs(365 * 86_400))?;
+    let state = run.state();
+    println!("{} MUs left the model", state.objects[drain as usize].statistics.mus_in);
+    Ok(())
+}
+```
+
+The same seed always gives the same result. For a run to watch, `LiveSession` takes commands, such as `start`, `halt`, `set_speed`, `go_back`, `step_back` and `pause`, and sends back observations, which `Picture` turns into what a UI shows. `CLAUDE.md` describes all of it.
+
+## Project layout
+
+- `src/` is the engine:
+  - **`simulation_run.rs`:** a run you can advance, reset and read.
+  - **`model.rs`:** builds a model.
+  - **`live_session.rs`:** plays a run on a clock.
+  - **`picture.rs`:** what a UI shows.
+  - **`statistics.rs`:** statistics.
+  - **`materialflow_objects/`:** Sources, Stations, Buffers and Drains.
+- `src/main.rs` is the demo's command line.
+- `ui/` is the UI, a Bevy application.
+- `tests/` holds the behaviour tests, and `benches/reference.rs` the benchmark.
+- `docs/` holds the decisions (`adr/`), design notes and measurements (`design/`), and the handoff for whoever works on it next (`agents/handoff.md`).
+- `GLOSSARY.md` defines the terms, such as Halt, Stop, Pause and Interruption, which mean different things here.
+
+## More
+
+- **`CLAUDE.md`:** how the code is built and the conventions to keep.
+- **`docs/agents/handoff.md`:** the agreed design, including what isn't built yet, and the order of work.
+- **`docs/design/first-profile.md`:** the current performance baseline.

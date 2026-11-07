@@ -17,8 +17,8 @@ harness = false
 # (`cli/`) and the UI (`ui/`). The UI is the only member that isn't a default one, so `cargo test`
 # and `cargo bench` here never build Bevy. The engine depends on none of them (ADR 0009).
 [workspace]
-members = ["model", "cli", "ui"]
-default-members = [".", "model", "cli"]
+members = ["model", "catalogue", "cli", "ui"]
+default-members = [".", "model", "catalogue", "cli"]
 
 # Measured with the reference benchmark: about 11% less time than the default on the demo model
 # and 7% on the large one. Fat LTO measured the same as thin and takes longer to build.

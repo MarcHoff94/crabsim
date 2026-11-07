@@ -278,5 +278,15 @@ An AI that uses crabsim through its operations, either from a harness outside cr
 One thing crabsim can do for a person or an agent, such as validating a model or starting a simulation run. Anything a person can do is an operation an agent can use too.
 _Avoid_: Tool (the word one agent protocol uses for an operation), command (what a live session takes)
 
+**Models folder**:
+The one folder whose model files crabsim's operations may touch, given when the MCP server or the CLI starts. It also holds crabsim's own `.crabsim` folder, with the results store. A folder holding source code is refused.
+
+**Job**:
+A simulation run started through the operation catalogue: the observations of one experiment, run in the background with an id, such as `run-3`, that can be asked for its status, cancelled and read.
+_Avoid_: Task, batch
+
+**Results store**:
+The database in a models folder that keeps every job's settings, the model it ran and its results, for people and agents alike, until they are forgotten.
+
 **Skill**:
 Written instructions that teach an agent one kind of task with crabsim's operations, such as finding the bottleneck of a model.

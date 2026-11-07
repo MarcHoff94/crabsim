@@ -7,6 +7,8 @@ section: guides
 ## Facts
 - CLI: `cargo run --release --bin crabsim -- --seed 7 --length 365d` runs the demo headless (or a model file with `--model models/demo.json`) and prints per-object statistics, Drain throughput and lead time, events and wall time
 - `--length` uses the UI's time syntax (`90`, `1:30`, `8:00:00`, `30d 12:00:00`); defaults: seed 0, length `1d`
+- Experiments: `crabsim run --models <folder> --model line.json --length 30d --observations 10`, then `runs`, `results <run>`, `query "<sql>"`; results kept in `<folder>/.crabsim/results.sqlite`
+- MCP server: `cargo build --release -p crabsim-mcp`, run as `crabsim-mcp --models <folder>` over stdio
 - UI: `cargo run -p crabsim-ui --profile ui` (first build several minutes)
 - In code: `demo::model().build(seed)`, `init`, `advance_to`, `state`; `set_recording(Recording::ALL)` for occurrences
 - Benchmark: `cargo bench --bench reference` (about a minute; demo and 6,006 objects)
@@ -17,4 +19,4 @@ section: guides
 - A run error still prints statistics, then exits with failure
 
 ## Code locations
-- CLI — `cli/src/main.rs`; model files — `model/`, `models/demo.json`; demo — `src/demo.rs`; benchmark — `benches/reference.rs`
+- CLI — `cli/src/main.rs`; MCP server — `mcp/src/main.rs`; catalogue — `catalogue/`; model files — `model/`, `models/demo.json`; demo — `src/demo.rs`; benchmark — `benches/reference.rs`

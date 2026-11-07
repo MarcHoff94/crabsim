@@ -5,6 +5,7 @@ related:
   - simulation-run
   - material-flow-objects
   - live-session-and-ui
+  - operation-catalogue
 ---
 
 # Architecture Overview
@@ -17,17 +18,21 @@ crabsim is a Cargo workspace:
 |---|---|---|
 | `crabsim` | root | The engine, a library. It depends on none of the others |
 | `crabsim-model` | `model/` | Model files: reading, checking, saving, and building them into a `ModelDescription` (ADR 0009) |
-| `crabsim-cli` | `cli/` | The headless CLI, binary `crabsim` |
+| `crabsim-catalogue` | `catalogue/` | The operation catalogue: every capability as an operation, runs as jobs, the results store (ADR 0007, 0010) |
+| `crabsim-cli` | `cli/` | The headless CLI, binary `crabsim`, and people's front-end on the catalogue |
+| `crabsim-mcp` | `mcp/` | The MCP server over stdio, binary `crabsim-mcp`, agents' front-end on the catalogue |
 | `crabsim-ui` | `ui/` | The UI, a Bevy application (ADR 0006) |
 
-The UI is the only member that isn't a default one, so `cargo test` and `cargo bench` at the root never build Bevy.
+The UI and the MCP server aren't default members, so `cargo test` and `cargo bench` at the root never build Bevy or tokio.
 
 ## Layers
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
 │  Front-ends                                                  │
-│  headless CLI (cli/) · UI (ui/, Bevy + egui)                 │
+│  headless CLI (cli/) · MCP server (mcp/) · UI (ui/)          │
+├──────────────────────────────────────────────────────────────┤
+│  Operation catalogue (catalogue/): operations, jobs, store   │
 ├──────────────────────────────────────────────────────────────┤
 │  Model files (model/): JSON in, ModelDescription out         │
 ├──────────────────────────────────────────────────────────────┤
@@ -107,7 +112,14 @@ model/src/
   read.rs · check.rs  reading the JSON, then checking what it means
   write.rs · build.rs canonical saving, building a ModelDescription
   schema.rs           the published JSON Schema, generated with schemars
-cli/src/main.rs       the headless CLI
+catalogue/src/
+  lib.rs              Catalogue, Operation, operations() and call()
+  folder.rs           the models folder and its scope rules
+  model_files.rs      validate, list, read, write, copy, delete
+  jobs.rs · results.rs runs as jobs, reading results
+  store.rs            the SQLite results store, query_results
+cli/src/main.rs       the headless CLI and its subcommands
+mcp/src/main.rs       the MCP server
 models/demo.json      the demo model as a file, and model-file.schema.json its schema
 ui/src/
   main.rs             Bevy and egui, drawing what the view state says

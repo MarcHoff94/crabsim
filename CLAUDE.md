@@ -17,6 +17,10 @@ cargo run --release --bin crabsim -- --seed 7 --length 365d
 # Run a model file
 cargo run --release --bin crabsim -- --model models/demo.json --length 30d
 
+# Run an experiment of 5 observations, keep it in the models folder's results store, then list the runs
+cargo run --release --bin crabsim -- run --models my-models --model line.json --length 30d --observations 5
+cargo run --release --bin crabsim -- runs --models my-models
+
 # Write models/model-file.schema.json again after changing the model file format
 cargo test -p crabsim-model --test schema -- --ignored write_the_schema_file
 
@@ -34,6 +38,12 @@ cargo test --release --test simulation_run -- --ignored --nocapture the_demo_mod
 
 # Run the benchmark (about a minute)
 cargo bench --bench reference
+
+# Build the MCP server, then run it as `crabsim-mcp --models <folder>` from a harness, over stdio
+cargo build --release -p crabsim-mcp
+
+# Run the MCP server's end-to-end test
+cargo test -p crabsim-mcp
 
 # Run the UI (a Bevy application, ADR 0006), optimised without LTO so it rebuilds quickly
 cargo run -p crabsim-ui --profile ui
@@ -64,7 +74,7 @@ The design already agreed for this, including what isn't built yet, is in `docs/
 
 ## Architecture
 
-This is a Rust discrete-event material-flow simulator: the engine is a library (`src/`) at the root of a Cargo workspace, with member crates for model files (`model/`, `crabsim-model`), the headless CLI (`cli/`, `crabsim-cli`, binary `crabsim`) and the UI (`ui/`, `crabsim-ui`). The UI is the only member that isn't a default one, so `cargo test` and `cargo bench` at the root never build Bevy. The engine depends on none of them (ADR 0009).
+This is a Rust discrete-event material-flow simulator: the engine is a library (`src/`) at the root of a Cargo workspace, with member crates for model files (`model/`, `crabsim-model`), the operation catalogue (`catalogue/`, `crabsim-catalogue`), the headless CLI (`cli/`, `crabsim-cli`, binary `crabsim`), the MCP server (`mcp/`, `crabsim-mcp`) and the UI (`ui/`, `crabsim-ui`). The UI and the MCP server aren't default members, so `cargo test` and `cargo bench` at the root never build Bevy or tokio. The engine depends on none of them (ADR 0009).
 
 **Core engine** (`src/simulation_run.rs`): `SimulationRun` owns the objects (one `Vec<ModelObject>`, indexed by id), clock and event queue (`BinaryHeap<ScheduledEvent>`, 32 bytes per entry). At one simulation time, `BlockedRetry` events run before all others, and a monotonically increasing `seq` preserves FIFO order within each of those two groups. A run only advances when asked and knows nothing about views or pacing:
 - `init` — sets t=0, calls each object's `init` in id order and queues the first events without processing them. Only allowed from the default state.
@@ -111,7 +121,11 @@ This is a Rust discrete-event material-flow simulator: the engine is a library (
 
 **Model files** (`model/`, `crabsim-model`): a model as readable JSON, described in `docs/design/model-file.md`. `load` reads a file and returns the `Model` or every problem in it at once, each with a JSON Pointer, the instance's name and a message, and never panics. It reads the JSON by hand rather than through `serde` derives, so it can keep going after a problem. `Model::save` writes one canonical form, and `Model::to_description` builds the engine's `ModelDescription`, so a run never sees files. Classes derive from a built-in class (Source, Station, Buffer, Drain) or from each other, and classes and instances set only the `attributes` they change. `Model::resolve` works out an instance's values along its chain, with each value's `Origin`: the instance, a named class, or the built-in default. `models/model-file.schema.json` is the published JSON Schema, generated from mirror types in `model/src/schema.rs` with `schemars`, and `model/tests/schema.rs` keeps it from drifting from the reader: every file the reader accepts must pass it. `models/demo.json` is the demo model as a file.
 
-**Headless CLI** (`cli/`, binary `crabsim`): runs a model file (`--model`) or the built-in demo, with `--seed` (default 0) and `--length` (default `1d`, written as the UI shows time), then prints each object's statistics, each Drain's throughput and mean lead time, and how many events it ran in how long. A run error still prints the statistics up to it, then exits with failure. An invalid model file prints every problem and runs nothing.
+**Operation catalogue** (`catalogue/`, `crabsim-catalogue`): every capability as an operation with a name, a description for agents, a typed input and output deriving `schemars::JsonSchema`, and an `Effect` (read-only, additive, destructive), described in `docs/design/operation-catalogue.md` (ADR 0007). Front-ends use only `Catalogue::operations` and `Catalogue::call(name, JSON)`. Failures are an `OperationError` with a `kind`, a message and, for an invalid model, every problem. A catalogue is opened on one models folder (`folder.rs`), which refuses a folder holding source code, and every path an operation is given must stay inside it after following links, and out of crabsim's own `.crabsim` there. `model_files.rs` has the model file operations. `store.rs` is the results store, an SQLite database in `.crabsim/results.sqlite` (ADR 0010), opened on first use, with `query_results` on a read-only connection capped in rows and time. `jobs.rs` runs experiments as jobs (`start_run`, `run_status`, `cancel_run`) on a pool of one thread per core, each running one observation from start to end in chunks of events, checking its cancel flag between them, with jobs taking turns for free threads. Observation k gets `observation_seed(seed, k)`, `splitmix64(seed + k)`. A run error fails only its observation, and each observation's figures go into the store when it ends. `results.rs` reads them (`run_results`: the mean, a 95% interval, minimum and maximum, by default every Drain and the 10 most blocked and failed objects) and has `label_run` and `forget_run`. Its tests (`catalogue/tests/`) call operations as JSON, the way an agent does, on temporary models folders.
+
+**Headless CLI** (`cli/`, binary `crabsim`): without a subcommand, runs a model file (`--model`) or the built-in demo, with `--seed` (default 0) and `--length` (default `1d`, written as the UI shows time), then prints each object's statistics, each Drain's throughput and mean lead time, and how many events it ran in how long. A run error still prints the statistics up to it, then exits with failure. An invalid model file prints every problem and runs nothing. With a models folder it is people's front-end on the catalogue, calling operations through `call`: `run` starts an experiment, shows its progress and prints its results, `runs` lists the runs newest first, `results` prints a run's results and `query` runs SQL, with tables in `cli/src/tables.rs`.
+
+**MCP server** (`mcp/`, binary `crabsim-mcp`): agents' front-end on the catalogue, over stdio with `rmcp` pinned to `=3.9.0` and tokio. It offers every operation as a tool with its description, schemas and hints from its `Effect`, returns outputs as structured content and failures as tool results marked as errors, and runs each call on a blocking thread. It refuses to start on a folder holding source code. `mcp/tests/stdio.rs` speaks JSON-RPC to its binary by hand.
 
 **Demo** (`src/demo.rs`): the example model behind the CLI and the UI. `model()` gives its description, with a name and a hand-written position for every object.
 

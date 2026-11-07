@@ -1,0 +1,22 @@
+[package]
+name = "crabsim-catalogue"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "crabsim's operation catalogue: every capability as an operation, for the MCP server, the CLI and later the UI (ADR 0007)"
+
+[dependencies]
+crabsim = { path = ".." }
+crabsim-model = { path = "../model" }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+# The same pinned version as `crabsim-model`, so operation schemas and the model file's schema agree.
+schemars = "=1.2.3"
+# The results store, with SQLite compiled in so nothing has to be installed (ADR 0010).
+rusqlite = { version = "0.41", default-features = false, features = ["bundled", "hooks", "limits"] }
+# The hash of each run's canonical model text.
+sha2 = "0.11"
+log = "0.4"
+
+[dev-dependencies]
+jsonschema = { version = "0.60", default-features = false }

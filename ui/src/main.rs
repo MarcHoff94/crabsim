@@ -15,15 +15,15 @@ use bevy::{
     winit::{UpdateMode, WinitSettings},
 };
 use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui, input::egui_wants_any_pointer_input};
-use crabsim::{LiveSession, SessionStatus, WallClock, demo};
+use crabsim::{LiveSession, SessionStatus, SimTime, TimeMode, WallClock, demo};
 use crabsim_ui::camera::Camera as ViewCamera;
-use crabsim_ui::view::{Control, Point, Shade, ViewState, label_size};
+use crabsim_ui::view::{
+    Control, DEFAULT_SPEED, JumpProblem, MAX_SPEED, MIN_SPEED, Point, Shade, ViewState, label_size,
+};
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::Duration;
 
-/// 60 times real time, which shows the demo at about 30 events a second.
-const DEFAULT_SPEED: f64 = 60.0;
 const SEED: u64 = 0;
 const BACKGROUND: Color = Color::srgb(0.10, 0.11, 0.13);
 const CONNECTION: Color = Color::srgba(0.65, 0.67, 0.75, 0.6);
@@ -66,7 +66,7 @@ fn main() {
         )
         .add_plugins(EguiPlugin::default())
         .insert_resource(WinitSettings::desktop_app())
-        .insert_resource(Ui { view, camera: None, camera_moved: false, canvas: None })
+        .insert_resource(Ui { view, camera: None, camera_moved: false, canvas: None, jump_text: String::new() })
         .insert_resource(Session(Mutex::new(session)))
         .add_systems(Startup, setup)
         .add_systems(
@@ -96,6 +96,8 @@ struct Ui {
     camera_moved: bool,
     /// The canvas between the panels, in logical pixels from the window's top-left corner.
     canvas: Option<egui::Rect>,
+    /// What has been typed into the field for going back to a time.
+    jump_text: String,
 }
 
 /// A `LiveSession` holds a `Receiver`, which can be sent between threads but not shared.
@@ -255,29 +257,45 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
         "root".into(),
         egui::UiBuilder::new().layer_id(egui::LayerId::background()).max_rect(ctx.viewport_rect()),
     );
-    let mut chosen = None;
-    let top = egui::Panel::top("top bar").show(&mut root, |panel| chosen = top_bar(panel, &ui.view));
+    let ui = &mut *ui;
+    let mut request = None;
+    let top = egui::Panel::top("top bar").show(&mut root, |panel| request = top_bar(panel, &ui.view, &mut ui.jump_text));
+    let mut bottom_of_bars = top.response.rect.bottom();
+    if let Some(error) = ui.view.error() {
+        let banner = egui::Panel::top("error banner")
+            .frame(egui::Frame::new().fill(egui::Color32::from_rgb(120, 25, 25)).inner_margin(6.0))
+            .show(&mut root, |panel| error_banner(panel, error, ui.view.run_failed()));
+        bottom_of_bars = banner.response.rect.bottom();
+    }
     let right = egui::Panel::right("inspector").exact_size(INSPECTOR_WIDTH).show(&mut root, inspector);
     let canvas = egui::Rect::from_min_max(
-        egui::pos2(ctx.viewport_rect().left(), top.response.rect.bottom()),
+        egui::pos2(ctx.viewport_rect().left(), bottom_of_bars),
         egui::pos2(right.response.rect.left(), ctx.viewport_rect().bottom()),
     );
     ui.canvas = Some(canvas);
 
-    if let Some(control) = chosen {
+    if let Some(request) = request {
         let session = session.0.lock().expect("the session lock is never poisoned");
-        let sent = match control {
+        let sent = match request {
             // A step forward from before Init does Init, and nothing else.
-            Control::Init => session.step_forward(),
-            Control::Start => session.start(),
-            Control::Halt => session.halt(),
-            Control::Reset => session.reset(),
+            Request::Control(Control::Init) => session.step_forward(),
+            Request::Control(Control::Start) => session.start(),
+            Request::Control(Control::Halt) => session.halt(),
+            Request::Control(Control::Reset) => session.reset(),
+            Request::Control(Control::StepForward) => session.step_forward(),
+            Request::Control(Control::StepBack) => session.step_back(),
+            Request::Speed(speed) => session.set_speed(ui.view.set_speed(speed)),
+            Request::TimeMode(mode) => {
+                ui.view.set_time_mode(mode);
+                session.set_time_mode(mode)
+            }
+            Request::GoBack(to) => session.go_back(to),
         };
         let wall = time.elapsed();
+        ui.view.commanded(wall);
         if let Err(error) = sent {
             ui.view.observe(&crabsim::Observation::Error(error), wall);
         }
-        ui.view.commanded(wall);
     }
 
     if let Some((camera, size)) = ui.camera.and_then(|camera| Some((camera, label_size(&camera)?))) {
@@ -286,31 +304,95 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
     Ok(())
 }
 
-/// The run controls and shown time. Returns the control clicked, if any.
-fn top_bar(ui: &mut egui::Ui, view: &ViewState) -> Option<Control> {
-    let mut chosen = None;
-    ui.horizontal(|ui| {
+/// What the top bar asks the session for.
+enum Request {
+    Control(Control),
+    Speed(f64),
+    TimeMode(TimeMode),
+    GoBack(SimTime),
+}
+
+/// The run controls, shown time, going back to a time, speed and time mode. `jump_text` is what
+/// has been typed into the field for going back. Returns what was asked for, if anything.
+fn top_bar(ui: &mut egui::Ui, view: &ViewState, jump_text: &mut String) -> Option<Request> {
+    let mut request = None;
+    ui.horizontal_wrapped(|ui| {
+        let mut button = |ui: &mut egui::Ui, control: Control, label: &str| {
+            if ui.add_enabled(view.allows(control), egui::Button::new(label)).clicked() {
+                request = Some(Request::Control(control));
+            }
+        };
         for (control, label) in
             [(Control::Init, "Init"), (Control::Start, "Start"), (Control::Halt, "Halt"), (Control::Reset, "Reset")]
         {
-            if ui.add_enabled(view.allows(control), egui::Button::new(label)).clicked() {
-                chosen = Some(control);
-            }
+            button(ui, control, label);
         }
         ui.separator();
-        ui.label(egui::RichText::new(view.shown_time()).monospace().size(16.0));
+        button(ui, Control::StepBack, "Step back");
+        button(ui, Control::StepForward, "Step forward");
         ui.separator();
+        ui.label(egui::RichText::new(view.shown_time()).monospace().size(16.0));
         ui.label(match view.status() {
             SessionStatus::Advancing => "Running",
             SessionStatus::Halted => "Halted",
             SessionStatus::Failed => "Run error",
         });
-        if let Some(error) = view.error() {
-            ui.separator();
-            ui.colored_label(egui::Color32::from_rgb(240, 80, 80), error);
+        ui.separator();
+
+        ui.label("Go back to");
+        let field = ui.add(egui::TextEdit::singleline(jump_text).desired_width(90.0).hint_text(view.shown_time()));
+        let target = view.jump_target(jump_text);
+        let go = ui.add_enabled(target.is_ok(), egui::Button::new("Go")).on_disabled_hover_text(match target {
+            Err(JumpProblem::NotInitialised) => "Init first",
+            Err(JumpProblem::NotATime) => "Type a time such as 1:30, 02:00:00 or 1d 06:00:00",
+            Err(JumpProblem::NotEarlier) => "Only an earlier time than the one shown",
+            Ok(_) => "",
+        });
+        let entered = field.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+        if let (true, Ok(to)) = (go.clicked() || entered, target) {
+            request = Some(Request::GoBack(to));
+            jump_text.clear();
+        }
+        ui.separator();
+
+        let mut speed = view.speed();
+        let slider = egui::Slider::new(&mut speed, MIN_SPEED..=MAX_SPEED)
+            .logarithmic(true)
+            .suffix("×")
+            .max_decimals(1)
+            .text("speed");
+        if ui.add(slider).changed() {
+            request = Some(Request::Speed(speed));
+        }
+        if let Some(achieved) = view.achieved_speed() {
+            ui.colored_label(egui::Color32::from_rgb(240, 170, 60), format!("reaching {achieved:.0}×"))
+                .on_hover_text("Playback can't keep up with the speed asked for");
+        }
+        ui.separator();
+
+        for (mode, label, hint) in [
+            (TimeMode::Continuous, "Continuous", "Shown time passes at the speed throughout"),
+            (TimeMode::SKIPPING, "Skip gaps", "No gap between instants takes longer than a quarter of a second"),
+        ] {
+            if ui.selectable_label(view.time_mode() == mode, label).on_hover_text(hint).clicked() && view.time_mode() != mode {
+                request = Some(Request::TimeMode(mode));
+            }
         }
     });
-    chosen
+    request
+}
+
+/// The last error the session reported. A run error says how to get going again.
+fn error_banner(ui: &mut egui::Ui, error: &str, run_failed: bool) {
+    ui.horizontal_wrapped(|ui| {
+        ui.colored_label(egui::Color32::WHITE, error);
+        if run_failed {
+            ui.colored_label(
+                egui::Color32::from_rgb(255, 210, 210),
+                "Reset, step back or go back to an earlier time to continue.",
+            );
+        }
+    });
 }
 
 fn inspector(ui: &mut egui::Ui) {

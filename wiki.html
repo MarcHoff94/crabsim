@@ -1031,8 +1031,8 @@ A headless run needs none of this. A live session plays a run on a clock for som
 `LiveSession` (`src/live_session.rs`, ADR 0002) owns a thread on which a builder closure creates the whole run. It knows nothing about any UI technology.
 
 - **Read-ahead:** the run computes ahead as fast as it can into a bounded buffer of instants, and the clock releases what it computed. Everything the user sees follows **shown time**, while the run is at a later **computed time**. One thread alternates between computing a slice and releasing.
-- **Commands in:** `start`, `halt`, `reset`, `set_speed`, `set_time_mode`, `go_back`, `step_forward`, `step_back`, `set_reset_keeps_changes`, `request_state`, `pause`, `resume`, `force_failure`, `end_forced_failure`, `set_process_time`, `clear_statistics`.
-- **Observations out:** `Occurrences`, `ShownTime`, `State`, `Status` and `Error`. A full state comes only at Init, after Reset, after going back and on request. A session records everything, because its observers rebuild what they show from occurrences.
+- **Commands in:** `start`, `halt`, `reset`, `set_speed`, `set_time_mode`, `go_back`, `step_forward`, `step_back`, `locate_step_back`, `set_reset_keeps_changes`, `request_state`, `pause`, `resume`, `force_failure`, `end_forced_failure`, `set_process_time`, `clear_statistics`.
+- **Observations out:** `Occurrences`, `ShownTime`, `State`, `Status`, `Error`, and `StepBackTarget`, which answers `locate_step_back` with where stepping back would go, changing nothing. A full state comes only at Init, after Reset, after going back and on request. A session records everything, because its observers rebuild what they show from occurrences.
 - **Time modes:** `Continuous`, or `Skipping`, where no gap between instants takes longer than a set wall time (0.25 s to start with). Results don't depend on it.
 - **Interventions** (Pause, forced failure, a process time, clearing statistics) take effect at shown time and discard the computed future. They go in an intervention log, so the same seed and the same log give the same result.
 - **Backlog:** sending never blocks the session thread. Past `OBSERVATION_BACKLOG_LIMIT` (256) unread observations it stops releasing until they are read, keeps handling commands and drops nothing. A UI drains the channel every frame.
@@ -1055,7 +1055,7 @@ A checkpoint is a clone of the run plus how much of the intervention log is in i
 - Init, Start, Halt, Reset, stepping back and forward, going back to a typed time, speed on a logarithmic slider, and time mode,
 - a banner for errors,
 - an inspector with state, why an object is blocked or stopped, process times, waiting predecessors and statistics, plus Pause, forced failure and process time changes on Stations,
-- a mark for each intervention on a strip under the top bar; going back past one asks first,
+- a mark for each intervention on a strip under the top bar; going back past one asks first, naming each it drops. Stepping back asks only on the step that drops one: if the view didn't see the instant it goes to, it halts and asks the session (`locate_step_back`) before deciding,
 - MUs drawn in the objects that hold them when zoomed in and slow enough to follow, and otherwise a count.
 
 Its logic is in plain Rust, tested without a window:

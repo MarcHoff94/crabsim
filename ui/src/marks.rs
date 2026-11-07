@@ -38,29 +38,15 @@ pub struct Mark {
     settled: bool,
 }
 
-/// How many interventions stepping back would drop. Stepping back goes to the instant before the
-/// one on screen, which the view knows only if it saw that instant arrive.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StepBackLoss {
-    Exactly(usize),
-    /// The instant stepping back goes to isn't known, so this counts every mark there is.
-    UpTo(usize),
-}
-
-impl StepBackLoss {
-    pub fn count(self) -> usize {
-        match self {
-            StepBackLoss::Exactly(count) | StepBackLoss::UpTo(count) => count,
-        }
-    }
-}
-
 #[derive(Debug, Default)]
 pub(crate) struct Marks {
     marks: Vec<Mark>,
     /// The last two instants seen, latest first. An instant is a time with occurrences, as the
     /// session counts them for stepping.
     instants: [Option<SimTime>; 2],
+    /// The session's last answer to where stepping back goes: from that shown time, to that
+    /// instant, or nowhere.
+    located: Option<(SimTime, Option<SimTime>)>,
 }
 
 impl Marks {
@@ -74,6 +60,11 @@ impl Marks {
     }
 
     pub(crate) fn saw_occurrences(&mut self, occurrences: &[Occurrence]) {
+        // New occurrences can make shown time an instant, such as a Pause where nothing else
+        // happened, which moves where stepping back goes.
+        if !occurrences.is_empty() {
+            self.located = None;
+        }
         for occurrence in occurrences {
             if self.instants[0] != Some(occurrence.time) {
                 self.instants = [Some(occurrence.time), self.instants[0]];
@@ -114,10 +105,19 @@ impl Marks {
         self.marks.iter().filter(|mark| mark.at > to).count()
     }
 
-    pub(crate) fn lost_stepping_back(&self) -> StepBackLoss {
-        match self.instants[1] {
-            Some(before) => StepBackLoss::Exactly(self.lost_going_back(before)),
-            None => StepBackLoss::UpTo(self.marks.len()),
+    /// The session's answer to `locate_step_back`.
+    pub(crate) fn saw_step_back_target(&mut self, shown: SimTime, to: Option<SimTime>) {
+        self.located = Some((shown, to));
+    }
+
+    /// Where stepping back from shown time `shown` goes, if the view knows: the instant before
+    /// the one on screen, or `Some(None)` from the first instant. The view knows it if it saw that
+    /// instant arrive, or if the session said so for this shown time.
+    pub(crate) fn step_back_target(&self, shown: SimTime) -> Option<Option<SimTime>> {
+        match (self.located, self.instants[1]) {
+            (Some((at, to)), _) if at == shown => Some(to),
+            (_, Some(before)) => Some(Some(before)),
+            _ => None,
         }
     }
 }

@@ -36,6 +36,10 @@ Observation *k* gets `splitmix64(seed + k)` (`observation_seed`), so the experim
 
 `<models folder>/.crabsim/results.sqlite`, opened on first use in WAL mode, so a CLI and an MCP server can share it (ADR 0010). Tables `runs`, `observations` and a long, thin `statistics`, one row per figure, written once per observation at its end. `run_results` gives the mean, a 95% interval (Student's *t*), minimum and maximum over the observations, by default for every Drain and the 10 most blocked and 10 most failed objects. `query_results` runs one `SELECT` on a read-only connection with no attached databases, capped at 1,000 rows and 5 seconds.
 
+## Interrupted runs
+
+A crashed or killed process can't mark its runs finished. So each catalogue holds an exclusive lock on `.crabsim/processes/<id>.lock` while it lives, and every run records that id in `runs.process`. The operating system releases a lock however its process ends, so another process that can take the lock knows the run's process is gone, and marks the run `interrupted`, keeping the observations it finished. This happens when a catalogue opens the store, and in `run_status`, `cancel_run` and `forget_run`. A run another live process is running can be neither cancelled nor forgotten from here.
+
 ## Performance
 
 Nothing here touches the per-event path: a run is built from a `ModelDescription` as before, and the pool adds one check per chunk of events.
@@ -48,5 +52,6 @@ Nothing here touches the per-event path: a run is built from a `ModelDescription
 - Model file operations — `catalogue/src/model_files.rs`
 - Jobs, the pool, `observation_seed` — `catalogue/src/jobs.rs`
 - `run_results`, `label_run`, `forget_run`, `STATISTICS` — `catalogue/src/results.rs`
-- `Store`, `query_results` — `catalogue/src/store.rs`
+- `Store`, `Store::sweep`, `query_results` — `catalogue/src/store.rs`
+- `ProcessLock`, `is_alive` — `catalogue/src/process.rs`
 - MCP server — `mcp/src/main.rs`; CLI subcommands — `cli/src/main.rs`, `cli/src/tables.rs`

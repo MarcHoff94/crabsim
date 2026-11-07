@@ -204,12 +204,12 @@ Discrete-event material-flow simulator in Rust, built for speed. Engine library 
 - `query_results` can't write, attach a database, return more than 1,000 rows or run past 5 s
 
 #### Pitfalls
-- A run left queued or running when its process ended stays so in the store
+- A run whose process ended first is marked `interrupted` (lock files in `.crabsim/processes/`, `runs.process`, tables version 2), when the store opens and in run_status, cancel_run and forget_run
 - Seeds are TEXT in the store: they use all 64 bits
 - Debug test builds run the engine unoptimised: keep test runs short
 
 #### Code locations
-- `catalogue/src/`: `lib.rs` (Catalogue, Operation), `error.rs`, `folder.rs`, `model_files.rs`, `jobs.rs`, `results.rs`, `store.rs`
+- `catalogue/src/`: `lib.rs` (Catalogue, Operation), `error.rs`, `folder.rs`, `model_files.rs`, `jobs.rs`, `results.rs`, `store.rs`, `process.rs`
 - `mcp/src/main.rs`; `cli/src/main.rs`, `cli/src/tables.rs`; design in `docs/design/operation-catalogue.md`
 
 ## GUIDES

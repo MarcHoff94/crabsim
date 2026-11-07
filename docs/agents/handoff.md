@@ -18,14 +18,14 @@ Written 2026-11-07 at the end of a working session, and updated the same day aft
 
 ## Current state
 
-Checked on 2026-11-07, on Rust 1.99.1, on the branch of the third catalogue PR: all 376 tests of the default members pass (engine, `crabsim-model`, `crabsim-catalogue` and `crabsim-cli`), with 2 ignored: the long run, and the test that writes the schema file again (`cargo test --all-targets`). The MCP server's 2 tests pass (`cargo test -p crabsim-mcp`). The UI's 55 tests passed when last run (`cargo test -p crabsim-ui --profile ui`).
+Checked on 2026-11-07, on Rust 1.99.1, after the interrupted-runs change: all 382 tests of the default members pass (engine, `crabsim-model`, `crabsim-catalogue` and `crabsim-cli`), with 2 ignored: the long run, and the test that writes the schema file again (`cargo test --all-targets`). The MCP server's 2 tests pass (`cargo test -p crabsim-mcp`). The UI's 55 tests passed when last run (`cargo test -p crabsim-ui --profile ui`).
 
 | Where | State |
 |---|---|
 | `master` on GitHub | Steps 1 to 6 of the build order, all of the UI's order of work, and steps 1 and 2 of the AI-native order of work, through PR 36 (`2e55dd9`), with this handoff once its PR is merged |
 | `prototype/restore-replay` | The throwaway prototype from build step 5. Keep it, and never merge it |
 | `prototype/ui-bevy` | The throwaway UI prototype from UI step 2, with temporary counters in the session. Keep it, and never merge it |
-| `feat/operation-catalogue`, `feat/runs-as-jobs`, `feat/mcp-server` | Slice 1 of issue 37, stacked in that order, one PR each, waiting for review |
+| `feat/interrupted-runs` | Interrupted runs, waiting for review. Slice 1 of issue 37 is merged, PRs 39 to 41 |
 | Other branches | None: every merged branch was deleted on 2026-11-07, locally and on GitHub, with the app's worktrees |
 
 The owner merges PRs on GitHub themselves, so fetch before assuming local `master` is current. The repo has no CI, so a local test run is the only check.
@@ -311,7 +311,8 @@ Decided with the owner on 2026-11-07 in a design round, and written up as [spec 
 - **People, not only agents:** the owner was clear that jobs and results are for people too. The CLI covers that until the UI's results views, which are planned in issue 37's Further Notes: a list of runs, side-by-side comparison with intervals, the model coloured by a figure, an object's figures across runs, and CSV export.
 - **Recorded:** `docs/design/operation-catalogue.md`, ADR 0010 for SQLite as the results store, and the glossary words Models folder, Job and Results store.
 - **Built in slice 1, and what it settled beyond the spec:** inputs carry a model as the file's text, with the model file's schema as `contentSchema`, so a harness never refuses a draft `write_model` must save. Effects are read-only, additive or destructive, and MCP's hints follow from them. Seeds are stored as text, since they use all 64 bits. The default summary leaves out objects with a blocked or failed share of 0. `cancel_run` returns once nothing of the run runs, and observations that ended keep their results. A failed observation gives no figures. `forget_run` is refused while a run is still running here, and run numbers are never reused.
-- **Known limits:** a run left queued or running when its process ended stays so in the store, and only the process that started a run can cancel it. `list_models` doesn't follow links into folders. Statistics come from what today's objects keep, so Buffers and per-MU figures wait for later.
+- **Interrupted runs:** a run whose process ended first is marked `interrupted`, found through the lock file each catalogue holds in `.crabsim/processes/` (tables version 2). Agreed with the owner on 2026-11-07 after slice 1.
+- **Known limits:** only the process that started a run can cancel it. `list_models` doesn't follow links into folders. Statistics come from what today's objects keep, so Buffers and per-MU figures wait for later.
 - **Later slices of the catalogue:** 2, building and attributes; 3, `describe_model`, the graph operations and exports. Then skills, experiments and studies, and live-session operations.
 
 ### Classes (decided, not built)

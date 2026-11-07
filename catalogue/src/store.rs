@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 pub const STORE_FILE: &str = "results.sqlite";
 
 /// The tables' version, kept in SQLite's `user_version`. A change to the tables raises it.
-const TABLES_VERSION: i64 = 1;
+const TABLES_VERSION: i64 = 2;
 
 /// The most rows `query_results` returns.
 pub const QUERY_ROW_LIMIT: usize = 1_000;
@@ -41,7 +41,8 @@ CREATE TABLE IF NOT EXISTS runs (
     crabsim_version TEXT NOT NULL,
     started TEXT NOT NULL,
     finished TEXT,
-    state TEXT NOT NULL
+    state TEXT NOT NULL,
+    process TEXT
 );
 CREATE TABLE IF NOT EXISTS observations (
     run TEXT NOT NULL,
@@ -71,7 +72,7 @@ macro_rules! tables_description {
     () => {
         concat!(
             "Tables: ",
-            "runs(id TEXT such as 'run-3', model_path, model_text: the canonical model file the run used, model_hash: SHA-256 of model_text so equal hashes mean the same model, seed TEXT, length_s, warm_up_s, observations, label, source: 'mcp' or 'cli', crabsim_version, started and finished: UTC ISO 8601, state: queued|running|done|failed|cancelled). ",
+            "runs(id TEXT such as 'run-3', model_path, model_text: the canonical model file the run used, model_hash: SHA-256 of model_text so equal hashes mean the same model, seed TEXT, length_s, warm_up_s, observations, label, source: 'mcp' or 'cli', crabsim_version, started and finished: UTC ISO 8601, state: queued|running|done|failed|cancelled|interrupted, process: the lock id of the crabsim process that ran it). ",
             "observations(run, number from 1, seed TEXT: the observation's own seed, events, wall_time_s, error, error_time_s: simulated seconds). ",
             "statistics(run, observation, object: instance name, class, built_in_class: Source|Station|Buffer|Drain, statistic, value REAL), one row per figure of an observation that ran to its end. ",
             "Statistics: mus_in, mus_out, working_share, blocked_share, idle_share, failed_share, paused_share (each 0 to 1 of the time measured after the warm-up), failures, availability (0 to 1), and for Drains throughput_per_hour and mean_lead_time_s. Times are in seconds. ",
@@ -97,19 +98,52 @@ impl Store {
         std::fs::create_dir_all(crabsim_folder)
             .map_err(|error| OperationError::run_error(format!("the results store's folder can't be made: {error}")))?;
         let path = crabsim_folder.join(STORE_FILE);
-        let connection = Connection::open(&path)?;
+        let mut connection = Connection::open(&path)?;
         connection.busy_timeout(Duration::from_secs(10))?;
         connection.pragma_update(None, "journal_mode", "WAL")?;
         connection.pragma_update(None, "foreign_keys", "ON")?;
-        let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        // One process at a time creates or upgrades the tables.
+        let transaction = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let version: i64 = transaction.pragma_query_value(None, "user_version", |row| row.get(0))?;
         if version > TABLES_VERSION {
             return Err(OperationError::run_error(format!(
                 "the results store was written by a newer crabsim (tables version {version}, this one knows {TABLES_VERSION})"
             )));
         }
-        connection.execute_batch(TABLES)?;
-        connection.pragma_update(None, "user_version", TABLES_VERSION)?;
+        transaction.execute_batch(TABLES)?;
+        // Version 1 had no `process` column: its runs' processes are unknown.
+        if version == 1 {
+            transaction.execute_batch("ALTER TABLE runs ADD COLUMN process TEXT")?;
+        }
+        transaction.pragma_update(None, "user_version", TABLES_VERSION)?;
+        transaction.commit()?;
         Ok(Store { connection, path })
+    }
+
+    /// Marks interrupted every run still queued or running whose process has ended, keeping the
+    /// observations it finished. A run of the first tables' version has no process recorded, so
+    /// any process but its own counts it as ended. `own` is this process's lock id.
+    pub(crate) fn sweep(&self, own: &str) -> rusqlite::Result<()> {
+        let crabsim_folder = self.path.parent().expect("the store is in a folder");
+        let processes = self
+            .connection
+            .prepare("SELECT DISTINCT process FROM runs WHERE state IN ('queued', 'running')")?
+            .query_map([], |row| row.get::<_, Option<String>>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        for process in processes {
+            let ended = match &process {
+                None => true,
+                Some(id) => id != own && !crate::process::is_alive(crabsim_folder, id),
+            };
+            if ended {
+                self.connection.execute(
+                    "UPDATE runs SET state = 'interrupted', finished = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                     WHERE state IN ('queued', 'running') AND process IS ?1",
+                    [&process],
+                )?;
+            }
+        }
+        Ok(())
     }
 
     pub fn connection(&self) -> &Connection {

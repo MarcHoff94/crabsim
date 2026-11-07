@@ -54,6 +54,9 @@ pub enum RunState {
     Failed,
     /// Cancelled before every observation ended.
     Cancelled,
+    /// Its process ended before the run did, such as in a crash. The observations that ended
+    /// keep their results.
+    Interrupted,
 }
 
 impl RunState {
@@ -64,6 +67,7 @@ impl RunState {
             RunState::Done => "done",
             RunState::Failed => "failed",
             RunState::Cancelled => "cancelled",
+            RunState::Interrupted => "interrupted",
         }
     }
 
@@ -73,12 +77,13 @@ impl RunState {
             "running" => RunState::Running,
             "done" => RunState::Done,
             "failed" => RunState::Failed,
-            _ => RunState::Cancelled,
+            "cancelled" => RunState::Cancelled,
+            _ => RunState::Interrupted,
         }
     }
 
     fn is_finished(self) -> bool {
-        matches!(self, RunState::Done | RunState::Failed | RunState::Cancelled)
+        matches!(self, RunState::Done | RunState::Failed | RunState::Cancelled | RunState::Interrupted)
     }
 }
 
@@ -515,8 +520,8 @@ impl Operation for StartRun {
 
         let store = catalogue.store()?;
         store.connection().execute(
-            "INSERT INTO runs (model_path, model_text, model_hash, seed, length_s, warm_up_s, observations, label, source, crabsim_version, started, state)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'queued')",
+            "INSERT INTO runs (model_path, model_text, model_hash, seed, length_s, warm_up_s, observations, label, source, crabsim_version, started, state, process)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'queued', ?11)",
             params![
                 input.model,
                 canonical,
@@ -528,6 +533,7 @@ impl Operation for StartRun {
                 input.label,
                 catalogue.source().name(),
                 env!("CARGO_PKG_VERSION"),
+                catalogue.process_id(),
             ],
         )?;
         let id = format!("run-{}", store.connection().last_insert_rowid());
@@ -577,7 +583,7 @@ pub struct RunStatusOutput {
 
 impl Operation for RunStatus {
     const NAME: &'static str = "run_status";
-    const DESCRIPTION: &'static str = "Tells how a run stands: queued, running, done, failed or cancelled, how many of its observations have ended, and the simulated time each running observation has reached, so a slow run can be told from a stuck one. A run is done once every observation ended and at least one ran to its end, and failed only if every observation failed.";
+    const DESCRIPTION: &'static str = "Tells how a run stands: queued, running, done, failed, cancelled, or interrupted when the process running it ended first, how many of its observations have ended, and the simulated time each running observation has reached, so a slow run can be told from a stuck one. A run is done once every observation ended and at least one ran to its end, and failed only if every observation failed.";
     const EFFECT: Effect = Effect::ReadOnly;
     type Input = RunInput;
     type Output = RunStatusOutput;
@@ -590,7 +596,7 @@ impl Operation for RunStatus {
 /// A run's status, from this process's job if there is one, and otherwise from the store.
 fn status(catalogue: &Catalogue, id: &str, progress: Option<Progress>) -> Result<RunStatusOutput, OperationError> {
     let number = run_number(id)?;
-    let store = catalogue.store()?;
+    let store = catalogue.swept_store()?;
     let stored = store
         .connection()
         .query_row(

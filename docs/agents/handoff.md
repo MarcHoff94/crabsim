@@ -1,12 +1,12 @@
 # crabsim handoff
 
-Written 2026-11-07 at the end of a working session, and updated the same day after the UI design session and after steps 1 to 5 of the UI's order of work. Read this first, then check it against the code and git, because it describes a moment in time.
+Written 2026-11-07 at the end of a working session, and updated the same day after the UI design session, after steps 1 to 5 of the UI's order of work, and after MCP v1 was merged. Read this first, then check it against the code and git, because it describes a moment in time.
 
 **The UI's order of work is done.** UI stage 1 was built in four slices, PRs 24 to 27: the demo drawn live with state colours and MUs, pan and zoom, the run controls, speed, time mode, stepping, going back to a time, the error banner, the inspector, interventions on Stations and their marks. Step 7 trimmed the CLI to a headless run of the demo, in PR 30. Next is model as data with the JSON model file and MCP v1: see "AI-native" and "Possible next steps".
 
-**The model file is complete, and the operation catalogue is designed.** Issue 28's steps 1 and 2 are merged: the `SessionOutput` rename (PR 33), and the model file in three slices (PRs 34 to 36): `crabsim-model` reads, checks and saves model files with classes and inheritance, `models/demo.json` is the demo as a file, the CLI runs model files from `cli/` (ADR 0009), and `models/model-file.schema.json` is the published schema. The design is in `docs/design/model-file.md`.
+**The model file is complete.** Issue 28's steps 1 and 2 are merged: the `SessionOutput` rename (PR 33), and the model file in three slices (PRs 34 to 36): `crabsim-model` reads, checks and saves model files with classes and inheritance, `models/demo.json` is the demo as a file, the CLI runs model files from `cli/` (ADR 0009), and `models/model-file.schema.json` is the published schema. The design is in `docs/design/model-file.md`.
 
-**Slice 1 of [spec issue 37](https://github.com/MarcHoff94/crabsim/issues/37), "MCP v1", is built,** in three stacked PRs waiting for the owner's review: the operation catalogue with model file operations and the SQLite results store, then runs as jobs with results and the CLI's subcommands, then the MCP server. The design is in `docs/design/operation-catalogue.md`, and SQLite as the store in ADR 0010. See "AI-native" below, and "Possible next steps".
+**MCP v1, slice 1 of [spec issue 37](https://github.com/MarcHoff94/crabsim/issues/37), is merged:** the operation catalogue with model file operations and the SQLite results store (PR 39), runs as jobs with results and the CLI's subcommands (PR 40), and the MCP server (PR 41). Then PR 42 marked runs interrupted when their process ends first. The design is in `docs/design/operation-catalogue.md`, and SQLite as the store in ADR 0010. Issue 37's status section records what was settled while building. See "AI-native" below, and "Possible next steps".
 
 ## Start here
 
@@ -14,19 +14,19 @@ Written 2026-11-07 at the end of a working session, and updated the same day aft
 2. Read `GLOSSARY.md` and `docs/adr/`.
 3. Read "Agreed design" below. Most of it isn't recorded anywhere else.
 4. Read "UI design" below, ADR 0006 and `docs/design/ui-prototype.md` when working on the UI.
-5. For the next step, read "AI-native" below, ADR 0007 to 0009, `docs/design/model-file.md` and spec issue 37 (`gh issue view 37`). Then go on from "Possible next steps".
+5. For the next step, read "AI-native" below, ADR 0007 to 0010, `docs/design/model-file.md`, `docs/design/operation-catalogue.md`, and spec issues 28 and 37 (`gh issue view 28`). Then go on from "Possible next steps".
 
 ## Current state
 
-Checked on 2026-11-07, on Rust 1.99.1, after the interrupted-runs change: all 382 tests of the default members pass (engine, `crabsim-model`, `crabsim-catalogue` and `crabsim-cli`), with 2 ignored: the long run, and the test that writes the schema file again (`cargo test --all-targets`). The MCP server's 2 tests pass (`cargo test -p crabsim-mcp`). The UI's 55 tests passed when last run (`cargo test -p crabsim-ui --profile ui`).
+Checked on 2026-11-07, on Rust 1.99.1, on the branch of PR 42, which is what `master` now holds: all 382 tests of the default members pass (engine, `crabsim-model`, `crabsim-catalogue` and `crabsim-cli`), with 2 ignored: the long run, and the test that writes the schema file again (`cargo test --all-targets`). The MCP server's 2 tests pass (`cargo test -p crabsim-mcp`). The UI's 55 tests passed when last run (`cargo test -p crabsim-ui --profile ui`).
 
 | Where | State |
 |---|---|
-| `master` on GitHub | Steps 1 to 6 of the build order, all of the UI's order of work, and steps 1 and 2 of the AI-native order of work, through PR 36 (`2e55dd9`), with this handoff once its PR is merged |
+| `master` on GitHub | Steps 1 to 6 of the build order, all of the UI's order of work, steps 1 and 2 of the AI-native order of work, and slice 1 of its steps 3 and 4 (MCP v1), through PR 42 (`a6a2db7`), with this handoff once its PR is merged |
 | `prototype/restore-replay` | The throwaway prototype from build step 5. Keep it, and never merge it |
 | `prototype/ui-bevy` | The throwaway UI prototype from UI step 2, with temporary counters in the session. Keep it, and never merge it |
-| `feat/interrupted-runs` | Interrupted runs, waiting for review. Slice 1 of issue 37 is merged, PRs 39 to 41 |
-| Other branches | None: every merged branch was deleted on 2026-11-07, locally and on GitHub, with the app's worktrees |
+| Merged branches still on GitHub | `docs/catalogue-handoff`, `feat/operation-catalogue`, `feat/runs-as-jobs`, `feat/mcp-server`, `feat/interrupted-runs`, and the older `feat/headless-cli` and `feat/model-schema`. All merged: safe to delete |
+| Worktree | `crabsim-catalogue`, beside the repository, where MCP v1 was built. Remove it with `git worktree remove ../crabsim-catalogue` once nothing in it is needed |
 
 The owner merges PRs on GitHub themselves, so fetch before assuming local `master` is current. The repo has no CI, so a local test run is the only check.
 
@@ -36,6 +36,7 @@ The owner merges PRs on GitHub themselves, so fetch before assuming local `maste
 - **2026-11-06:** performance became the first design pillar, and steps 1 to 6 of the build order were designed and built. See "Build order".
 - **2026-11-07:** the UI was designed in a grilling session, with technology research, and the target scale went up to 6,000 objects. Then steps 1 to 5 of the UI's order of work were built: Rust 1.99.1 and a new baseline, the Bevy prototype, ADR 0006, the workspace and the Picture, and the engine additions for stage 1. The prototype found a live-session bug that lost about 30% of shown time at high load, fixed in PR 19. After trying the prototype, the owner decided MUs move instantly in the UI. See "UI design". Later that day, AI-native became the second design pillar, in another grilling session. See "AI-native".
 - **2026-11-07, later:** the owner tried the UI and found the step-back warning asked on every step, fixed in PR 32. Then issue 28's first steps: the `SessionOutput` rename, the model file designed in a round and built in three slices, and a design round for the operation catalogue and MCP v1, written up as spec issue 37.
+- **2026-11-07, at night:** slice 1 of issue 37 was built test-first through `call(name, JSON)` in three stacked PRs, 39 to 41, each test checked to be able to fail. The owner then asked how runs left by a crashed process get cleaned up, chose lock files and an `interrupted` state in a short round, and that was PR 42.
 
 ## Agreed design
 
@@ -394,6 +395,7 @@ Done on 2026-11-07: the wiki was rewritten against today's code, with four pages
 
 ## Possible next steps
 
-1. **Review and merge slice 1 of spec issue 37,** the three stacked PRs, in order. Then try `crabsim-mcp` from a real harness, such as Claude Code, on a models folder outside the repository.
-2. Slices 2 and 3 of the catalogue, then crabsim's first skills, as issue 28's order of work says.
-3. Step 7 of the build order.
+1. **Try `crabsim-mcp` from a real harness,** such as Claude Code, on a models folder outside the repository. Nothing has driven it yet but its end-to-end test, so this is the first check that the descriptions and results suit an agent.
+2. **Slice 2 of the catalogue:** building and attribute operations, as issue 37's Out of Scope lists them. Then slice 3, `describe_model`, graph operations and exports, then crabsim's first skills, as issue 28's order of work says. Each slice wants its own design round first.
+3. Issue 28's step 2 left the benchmark's 6,006-object model built in code rather than as a file, which needs unique names for the 429 copies.
+4. Step 7 of the build order.

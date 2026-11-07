@@ -93,6 +93,16 @@ impl SimulationRun {
         }
     }
 
+    /// Makes what changed during the run part of the default state, so Reset keeps it. So far
+    /// that is each Station's process time.
+    pub fn keep_changes_as_default(&mut self) {
+        for object in &mut self.objects {
+            if let ModelObject::Station(station) = object {
+                station.configured_proc_time = station.proc_time;
+            }
+        }
+    }
+
     /// Sets time to 0, calls every object's init in id order and queues the first events.
     /// Nothing is processed yet, including events due at t=0.
     pub fn init(&mut self) -> Result<Vec<Occurrence>, RunError> {

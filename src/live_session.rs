@@ -98,6 +98,9 @@ pub struct SessionSettings {
     /// goes, so the whole run stays reachable and only long jumps take longer.
     pub checkpoint_budget_bytes: u64,
     pub time_mode: TimeMode,
+    /// Whether Reset keeps settings changed during the run, such as a process time, as the new
+    /// default state. Momentary interventions, such as a Pause, go either way.
+    pub reset_keeps_changes: bool,
 }
 
 impl Default for SessionSettings {
@@ -107,6 +110,7 @@ impl Default for SessionSettings {
             checkpoint_spacing: 100_000,
             checkpoint_budget_bytes: 256_000_000,
             time_mode: TimeMode::Continuous,
+            reset_keeps_changes: false,
         }
     }
 }
@@ -203,6 +207,8 @@ enum Command {
     SetTimeMode(TimeMode),
     GoBack(SimTime),
     StepForward,
+    StepBack,
+    SetResetKeepsChanges(bool),
     RequestState,
     Intervene(Action),
     Sync(Sender<Result<(), SessionError>>),
@@ -294,6 +300,20 @@ impl LiveSession {
     /// there is no next instant.
     pub fn step_forward(&self) -> Result<(), SessionError> {
         self.send(Command::StepForward)
+    }
+
+    /// Goes back to the instant before the one on screen, which is the last instant at or before
+    /// shown time, and leaves the session halted there, as `go_back` does. It finds that instant
+    /// by replaying from the nearest checkpoint, so it costs about as much as going back, and
+    /// nothing has to remember past instants. From the first instant it does nothing.
+    pub fn step_back(&self) -> Result<(), SessionError> {
+        self.send(Command::StepBack)
+    }
+
+    /// Whether Reset keeps changed settings, such as a process time, as the new default state.
+    /// It is read when Reset is handled, and is off to start with.
+    pub fn set_reset_keeps_changes(&self, keep: bool) -> Result<(), SessionError> {
+        self.send(Command::SetResetKeepsChanges(keep))
     }
 
     /// Asks for a full state at shown time, statistics included. It comes from a copy of the run,
@@ -653,6 +673,8 @@ impl<'a, C: Clock> SessionThread<'a, C> {
             Command::SetSpeed(speed) => self.set_speed(speed),
             Command::SetTimeMode(mode) => self.settings.time_mode = mode,
             Command::GoBack(to) => self.go_back(to),
+            Command::StepBack => self.step_back(),
+            Command::SetResetKeepsChanges(keep) => self.settings.reset_keeps_changes = keep,
             Command::StepForward => {
                 if self.pace.is_none() && self.status != SessionStatus::Failed {
                     self.steps_wanted += 1;
@@ -716,7 +738,24 @@ impl<'a, C: Clock> SessionThread<'a, C> {
     }
 
     fn reset(&mut self) {
+        // What to keep comes from the log, which holds what is true at shown time, rather than
+        // from the run, which may be ahead or on its way back.
+        let mut kept: Vec<(u32, SimTime)> = Vec::new();
+        if self.settings.reset_keeps_changes {
+            for &(_, action) in &self.log {
+                if let Action::SetProcessTime(id, time) = action {
+                    kept.retain(|&(other, _)| other != id);
+                    kept.push((id, time));
+                }
+            }
+        }
         self.run.reset();
+        if self.settings.reset_keeps_changes {
+            for (id, time) in kept {
+                self.run.set_process_time(id, time).expect("only logged for a Station");
+            }
+            self.run.keep_changes_as_default();
+        }
         self.pace = None;
         self.waiting_since = None;
         self.shown = SimTime::ZERO;
@@ -743,6 +782,58 @@ impl<'a, C: Clock> SessionThread<'a, C> {
             }
         }
         self.speed = speed;
+    }
+
+    fn step_back(&mut self) {
+        if !self.run.is_initialised() {
+            self.observe(Observation::Error(SessionError::Run(RunError::NotInitialised)));
+        } else if let Some(to) = self.instant_before_shown() {
+            self.go_back(to);
+        }
+    }
+
+    /// The instant before the last instant at or before shown time, with Init's t=0 the
+    /// earliest. An instant is a time with occurrences, as in the buffer and for stepping
+    /// forward, so an event that records nothing, such as a stale exit, makes none. A copy of the
+    /// nearest checkpoint replays up to shown time, applying logged interventions as a replay
+    /// does, and notes each instant it passes. A checkpoint's own time may or may not be one, so
+    /// if the copy sees fewer than two, an earlier checkpoint tries again.
+    fn instant_before_shown(&self) -> Option<SimTime> {
+        let shown = self.shown;
+        for checkpoint in self.checkpoints.iter().rev().filter(|c| c.run.time() <= shown) {
+            let mut run = checkpoint.run.clone();
+            run.set_recording(Recording::ALL);
+            let mut actions = self.log[checkpoint.log_len..].iter().filter(|(at, _)| *at <= shown).peekable();
+            // Init's checkpoint is the start, and t=0 the earliest instant.
+            let mut last = (run.events_processed() == 0).then_some(SimTime::ZERO);
+            let mut before = None;
+            'replay: loop {
+                let stop = actions.peek().map_or(shown, |&&(at, _)| at);
+                while let Some(time) = run.next_event_time().filter(|&time| time <= stop) {
+                    match run.step() {
+                        Ok(occurrences) if occurrences.is_empty() => {}
+                        Ok(_) if last != Some(time) => {
+                            before = last;
+                            last = Some(time);
+                        }
+                        Ok(_) => {}
+                        Err(_) => break 'replay,
+                    }
+                }
+                match actions.next() {
+                    Some(&(at, action)) => {
+                        // Logged at a time the run has reached, with every event before it done.
+                        let _ = run.advance_to(at);
+                        apply_action(&mut run, action);
+                    }
+                    None => break,
+                }
+            }
+            if before.is_some() {
+                return before;
+            }
+        }
+        None
     }
 
     fn go_back(&mut self, to: SimTime) {

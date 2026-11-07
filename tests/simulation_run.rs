@@ -2394,6 +2394,19 @@ fn reset_returns_to_the_configured_process_time() {
 }
 
 #[test]
+fn kept_changes_become_the_default_state() {
+    let (mut run, st) = slow_line();
+    run.init().unwrap();
+    run.advance_to(secs(40)).unwrap();
+    run.set_process_time(st, secs(5)).unwrap();
+    run.keep_changes_as_default();
+    run.reset();
+    let state = run.state();
+    assert_eq!(object(&state, st).process_time, Some(secs(5)));
+    assert_eq!(object(&state, st).configured_process_time, Some(secs(5)));
+}
+
+#[test]
 fn only_a_station_has_a_process_time_to_change() {
     let (mut run, st) = slow_line();
     run.init().unwrap();

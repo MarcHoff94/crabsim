@@ -1192,10 +1192,15 @@ fn direct_state(done: &[(u64, Done)], t: u64) -> RunState {
 }
 
 fn direct(done: &[(u64, Done)], t: u64) -> (Vec<Occurrence>, RunState) {
+    direct_at(done, secs(t))
+}
+
+/// The same run without a session, with what was done up to `t` done to it directly.
+fn direct_at(done: &[(u64, Done)], t: SimTime) -> (Vec<Occurrence>, RunState) {
     let mut run = line_with_random_failures();
     run.set_recording(Recording::ALL);
     let mut occurrences = run.init().unwrap();
-    for (at, what) in done {
+    for (at, what) in done.iter().filter(|(at, _)| secs(*at) <= t) {
         occurrences.extend(run.advance_to(secs(*at)).unwrap());
         match what {
             Done::Pause(id) => run.schedule_event(secs(*at), EventType::PauseOn, *id).unwrap(),
@@ -1206,8 +1211,15 @@ fn direct(done: &[(u64, Done)], t: u64) -> (Vec<Occurrence>, RunState) {
             Done::EndForcedFailure(id) => run.schedule_event(secs(*at), EventType::ForceFailureOff, *id).unwrap(),
         }
     }
-    occurrences.extend(run.advance_to(secs(t)).unwrap());
+    occurrences.extend(run.advance_to(t).unwrap());
     (occurrences, run.state())
+}
+
+/// Every instant up to `t`, with t=0 as the earliest, from a direct run.
+fn instants_until(done: &[(u64, Done)], t: u64) -> Vec<SimTime> {
+    let mut times: Vec<SimTime> = std::iter::once(SimTime::ZERO).chain(direct(done, t).0.iter().map(|o| o.time)).collect();
+    times.dedup();
+    times
 }
 
 /// The Station in `line_with_random_failures`.
@@ -1681,6 +1693,147 @@ fn only_a_station_has_a_process_time_to_change_in_a_session() {
         watched.look().errors,
         vec![SessionError::NotAStation(0), SessionError::NotAStation(2), SessionError::Run(RunError::UnknownObject(99))]
     );
+}
+
+// ---------- Reset keeping changes ----------
+
+#[test]
+fn reset_returns_to_the_configured_process_time_by_default() {
+    let mut watched = Watched::new(line_with_random_failures);
+    watched.session.start().unwrap();
+    watched.at(1_000);
+    watched.look();
+    watched.session.set_process_time(STATION, secs(3)).unwrap();
+    watched.at(1_100);
+    watched.look_without_errors();
+    watched.session.reset().unwrap();
+    watched.look_without_errors();
+    assert_eq!(watched.state.as_ref().unwrap().objects[STATION as usize].process_time, Some(secs(8)));
+}
+
+#[test]
+fn reset_can_keep_a_changed_process_time_and_drops_the_rest() {
+    let mut watched = Watched::new(line_with_random_failures);
+    watched.session.set_reset_keeps_changes(true).unwrap();
+    watched.session.start().unwrap();
+    watched.at(1_000);
+    watched.look();
+    watched.session.set_process_time(STATION, secs(3)).unwrap();
+    watched.session.pause(STATION).unwrap();
+    watched.session.force_failure(STATION).unwrap();
+    watched.at(1_100);
+    watched.look_without_errors();
+    watched.session.reset().unwrap();
+    watched.look_without_errors();
+    let state = watched.state.clone().unwrap();
+    assert_eq!(state.time, SimTime::ZERO);
+    let station = &state.objects[STATION as usize];
+    assert_eq!((station.process_time, station.configured_process_time), (Some(secs(3)), Some(secs(3))));
+    assert_eq!(station.interruptions, vec![]);
+
+    // A second Reset with the setting off keeps the new default.
+    watched.session.set_reset_keeps_changes(false).unwrap();
+    watched.session.start().unwrap();
+    watched.at(1_200);
+    watched.look_without_errors();
+    watched.session.reset().unwrap();
+    watched.look_without_errors();
+    assert_eq!(watched.state.as_ref().unwrap().objects[STATION as usize].process_time, Some(secs(3)));
+}
+
+#[test]
+fn a_change_dropped_by_going_back_is_not_kept() {
+    let mut watched = Watched::new(line_with_random_failures);
+    watched.session.set_reset_keeps_changes(true).unwrap();
+    watched.session.start().unwrap();
+    watched.at(1_000);
+    watched.look();
+    watched.session.set_process_time(STATION, secs(3)).unwrap();
+    watched.at(1_100);
+    watched.look_without_errors();
+    watched.session.go_back(secs(500)).unwrap();
+    watched.session.reset().unwrap();
+    watched.look_without_errors();
+    assert_eq!(watched.state.as_ref().unwrap().objects[STATION as usize].process_time, Some(secs(8)));
+}
+
+// ---------- Stepping back ----------
+
+#[test]
+fn stepping_back_goes_to_the_instant_before_the_one_shown() {
+    let mut watched = Watched::new(line_with_random_failures);
+    watched.session.start().unwrap();
+    watched.at(600);
+    watched.look();
+    watched.session.pause(STATION).unwrap();
+    watched.at(1_000);
+    watched.look();
+    watched.session.halt().unwrap();
+    watched.look_without_errors();
+    let done = [(600, Done::Pause(STATION))];
+    let instants = instants_until(&done, 1_000);
+    // The last instant at or before shown time is the one on screen, so the first step goes to
+    // the one before it.
+    for &expected in instants.iter().rev().skip(1).take(8) {
+        watched.session.step_back().unwrap();
+        watched.look_without_errors();
+        assert_eq!(watched.shown, expected);
+        assert_eq!(watched.state.clone().unwrap(), direct_at(&done, expected).1, "after stepping back to {expected}");
+    }
+}
+
+#[test]
+fn stepping_back_from_a_checkpoint_uses_an_earlier_one() {
+    // A session computes in slices of 1,000 events and checks for a checkpoint after each, so
+    // with a spacing that small, one lands at the end of every slice. Going back to where the
+    // first slice ended puts shown time on a checkpoint, from which no earlier instant can be
+    // seen, so stepping back has to use Init's.
+    let mut direct_run = line_with_random_failures();
+    direct_run.init().unwrap();
+    direct_run.advance_events(1_000).unwrap();
+    let checkpoint_time = direct_run.time();
+    let after = checkpoint_time.as_secs() + 1_000;
+
+    let settings = SessionSettings { checkpoint_spacing: 1, ..SessionSettings::default() };
+    let mut watched = Watched::with_settings(line_with_random_failures, settings);
+    watched.session.start().unwrap();
+    watched.at(after);
+    watched.session.halt().unwrap();
+    watched.look_without_errors();
+    watched.session.go_back(checkpoint_time).unwrap();
+    watched.look_without_errors();
+
+    let instants: Vec<SimTime> = instants_until(&[], after).into_iter().filter(|&t| t <= checkpoint_time).collect();
+    for &expected in instants.iter().rev().skip(1).take(3) {
+        watched.session.step_back().unwrap();
+        watched.look_without_errors();
+        assert_eq!(watched.shown, expected);
+        assert_eq!(watched.state.clone().unwrap(), direct_at(&[], expected).1);
+    }
+}
+
+#[test]
+fn stepping_back_while_advancing_halts() {
+    let mut watched = Watched::new(line_with_random_failures);
+    watched.session.start().unwrap();
+    watched.at(500);
+    watched.look();
+    watched.session.step_back().unwrap();
+    let seen = watched.look();
+    assert_eq!(seen.statuses, vec![SessionStatus::Halted]);
+    assert!(watched.shown < secs(500));
+}
+
+#[test]
+fn stepping_back_from_the_first_instant_does_nothing() {
+    let mut watched = Watched::new(line_with_random_failures);
+    watched.session.start().unwrap();
+    watched.session.halt().unwrap();
+    watched.look();
+    watched.session.step_back().unwrap();
+    let seen = watched.look();
+    assert_eq!(seen.errors, vec![]);
+    assert_eq!(watched.shown, SimTime::ZERO);
 }
 
 #[test]

@@ -13,11 +13,12 @@ Written 2026-11-07 at the end of a working session, and updated the same day aft
 
 ## Current state
 
-Checked on 2026-11-07: `master` at `f64aa16` passes all 247 tests, with 1 long-run test ignored (`cargo test --all-targets`).
+Checked on 2026-11-07, on Rust 1.99.1: all 247 tests pass, with 1 long-run test ignored (`cargo test --all-targets`).
 
 | Where | State |
 |---|---|
-| `master` on GitHub | Steps 1 to 6 of the build order, through PR 14, and the first handoff in PR 15 (`fb64ea8`). No PRs are open |
+| `master` on GitHub | Steps 1 to 6 of the build order, through PR 14, and the UI design in PRs 15 and 16 (`96011a5`) |
+| `chore/rust-update-6000-baseline` | Step 1 of the UI's order of work: Rust 1.99.1 pinned, the 6,006-object benchmark and the new baseline |
 | `prototype/restore-replay` | The throwaway prototype from step 5. Keep it, and never merge it |
 | Other branches | Merged, so they can be deleted, though the app's worktrees may be using some |
 
@@ -34,7 +35,7 @@ The owner merges PRs on GitHub themselves, so fetch before assuming local `maste
 The owner decided all of this. Don't reopen it without a reason, and flag it if you need to. **Built** means it's in the code now, and **not built** means it's agreed for later.
 
 ### Performance (built where noted, otherwise not yet)
-Performance is the first thing to weigh in design trade-offs. It is a guideline rather than a hard rule, and `CLAUDE.md` holds the wording and the measuring rules. The target scale is up to 6,000 objects (raised from "a few thousand" on 2026-11-07) and tens of simulated years per run, with no fixed speed target. *Still to do in a later session: the benchmark's large scenario is 2,800 objects (200 copies of the demo), so raise it to about 6,000 (429 copies), re-baseline, and update the figures here and in `CLAUDE.md`.*
+Performance is the first thing to weigh in design trade-offs. It is a guideline rather than a hard rule, and `CLAUDE.md` holds the wording and the measuring rules. The target scale is up to 6,000 objects (raised from "a few thousand" on 2026-11-07) and tens of simulated years per run, with no fixed speed target. The benchmark's large scenario is 6,006 objects (429 copies of the demo) since step 1 of the UI's order of work.
 
 - **Headless run (built):** a plain simulation run with no live session or view, not a separate mode. It gives back its final state and the objects' data, with no reset, including after a run error.
 - **Recording (built)** is a runtime setting on the run for which occurrence kinds to keep, changeable at any time, because replay needs it off and then back on. A run records nothing by default, and a live session records everything.
@@ -130,13 +131,13 @@ The statistics that depend on domain work arrive with step 7.
 
 `ExitTicket` was designed with capacity in mind, because a whole Station stops at once, but that's untested until capacity exists.
 
-**Baseline:** `cargo bench --bench reference`, tuned release profile, no logger and no view, median of 7 runs on the owner's PC. The demo model is 15.5M events per simulated year.
+**Baseline:** `cargo bench --bench reference`, tuned release profile, no logger and no view, Rust 1.99.1, median of 7 repetitions on the owner's PC, measured on 2026-11-07. The demo model is 15.5M events per simulated year.
 
 | Scenario | Events/s | One simulated year | Peak heap |
 |---|---|---|---|
-| Demo model, headless | 12.93M | 1.20 s | Under 0.05 MB, also over 10 years |
-| 2,800 objects, headless | 7.62M | 2 days in 2.23 s | 8.2 MB |
-| Demo model, one advance, occurrences kept | 8.85M | 1.75 s | 2,148 MB |
+| Demo model, headless | 13.23M | 1.17 s | Under 0.05 MB, also over 10 years |
+| 6,006 objects, headless | 6.75M | 2 days in 5.41 s | 16.9 MB |
+| Demo model, one advance, occurrences kept | 9.15M | 1.69 s | 2,148 MB |
 
 **What's left on the per-event path:** the new-events `Vec`, the likely source of most of the remaining 0.86 allocations per event, and statistics, which cost about 7 to 12% of a headless run and haven't been tuned. `docs/design/first-profile.md` has the figures and their limits.
 
@@ -176,7 +177,7 @@ Decided with the owner on 2026-11-07, in a grilling session. Nothing of it is bu
   - Panels are plain functions taking `&mut egui::Ui`, so they could move to eframe. A wrong choice then costs the canvas, not the whole UI.
   - Bevy's version is pinned, and upgraded only when there's a reason.
 - **ADR 0006** records the choice, written once the prototype has settled it.
-- **Toolchain:** Rust 1.91.1 is too old (Bevy 0.20 needs 1.97.1, egui 0.37 needs 1.95). Update to the latest stable, re-run the benchmark for a new baseline, and pin the version in `rust-toolchain.toml`.
+- **Toolchain (done):** Rust 1.91.1 was too old (Bevy 0.20 needs 1.97.1, egui 0.37 needs 1.95). It is now 1.99.1, pinned in `rust-toolchain.toml`, with a new baseline. The update changed no result.
 
 ### The prototype
 Throwaway, on a `prototype/` branch that is never merged, like `prototype/restore-replay`. Its results go in `docs/design/`. It answers four things:
@@ -220,7 +221,7 @@ Each states its cost, as `CLAUDE.md` asks. Where one touches the per-event path,
 - **Configuration in `ObjectState`:** at least a Station's current and configured process time, for the inspector.
 
 ### Order of work
-1. Update Rust, raise the benchmark's large scenario to about 6,000 objects (429 copies of the demo), record the new baseline, and pin the version.
+1. ✅ Update Rust, raise the benchmark's large scenario to about 6,000 objects (429 copies of the demo), record the new baseline, and pin the version. See "After the Rust update and the 6,000-object model" in `docs/design/first-profile.md`.
 2. The prototype, with its results in `docs/design/`.
 3. ADR 0006 for the technology.
 4. The workspace, and the Picture moved into the library.
@@ -251,7 +252,7 @@ All of it is on `LiveSession` in `src/live_session.rs`, and `CLAUDE.md` has the 
 
 Checked on 2026-11-07, on Windows 11:
 
-- **Installed:** Rust 1.91.1 with cargo and rustup, for `x86_64-pc-windows-msvc` only. WebView2 runtime 156, and `gh`.
+- **Installed:** Rust 1.99.1 (stable, and pinned by the repo) with cargo and rustup, for `x86_64-pc-windows-msvc` only. WebView2 runtime 156, and `gh`.
 - **GPU:** AMD Radeon RX 9070 XT, plus the processor's integrated Radeon graphics.
 - **Not installed:** Node, npm, pnpm, bun, `wasm-pack`, `trunk`, Tauri's CLI, and the `wasm32` target. Bevy needs none of these.
 - **No window yet:** `crabsim-renderer` is gone, so nothing draws one.
@@ -288,6 +289,6 @@ Checked on 2026-11-07, on Windows 11:
 
 ## Possible next steps
 
-1. **The UI's order of work,** in "UI design", starting with the Rust update and the 6,000-object baseline, then the prototype. This is what the owner asked for next.
+1. **The UI's order of work,** in "UI design". Step 1, the Rust update and the 6,000-object baseline, is done, so the prototype is next. This is what the owner asked for next.
 2. Step 7 of the build order, after UI stage 1.
 3. Run `/update-wiki` when convenient, so the docs stop describing removed code.

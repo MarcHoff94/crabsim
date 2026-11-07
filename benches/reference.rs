@@ -30,9 +30,9 @@ const HOUR: SimTime = SimTime::from_secs(3_600);
 const DAY: SimTime = SimTime::from_secs(86_400);
 const YEAR: SimTime = SimTime::from_secs(365 * 86_400);
 
-/// Copies of the demo line in the large model, which gives 2,800 objects: the target scale is
-/// up to a few thousand objects.
-const LARGE_MODEL_LINES: usize = 200;
+/// Copies of the demo line in the large model, which gives 6,006 objects: the target scale is
+/// up to 6,000 objects.
+const LARGE_MODEL_LINES: usize = 429;
 
 // ---- Memory ----
 

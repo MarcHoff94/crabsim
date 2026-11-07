@@ -79,7 +79,7 @@ Step 4 made recording opt-in, removed the Drain's lists, and added always-on sta
 
 ### After the read-ahead live session
 
-This is the current baseline. Step 6 rewrote the live session, added Pause on Stations and made a run cloneable. Medians of 7 runs in rotation, as a fresh process each time, with the events and MUs left unchanged.
+Step 6 rewrote the live session, added Pause on Stations and made a run cloneable. Medians of 7 runs in rotation, as a fresh process each time, with the events and MUs left unchanged.
 
 | Scenario | Before | After | Peak heap |
 |---|---|---|---|
@@ -110,6 +110,38 @@ The large model got faster because a session no longer reports a full state afte
 | To near the start | 5.9 ms | 12.5 ms | 386 ms |
 
 So recent history stays within a frame even past the budget, and thinning makes only far jumps slower, as intended.
+
+### After the Rust update and the 6,000-object model
+
+This is the current baseline. Measured on 2026-11-07, for step 1 of the UI's order of work. Rust went from 1.91.1 to 1.99.1, now pinned in `rust-toolchain.toml`, and the large model went from 200 to 429 copies of the demo line, from 2,800 to 6,006 objects, because the target scale is now up to 6,000 objects.
+
+**The compiler alone,** before the large model changed. One benchmark run each, with 5 repetitions per scenario, so treat small differences as noise:
+
+| Scenario | Rust 1.91.1 | Rust 1.99.1 |
+|---|---|---|
+| `demo-headless` | 1.21 s, 12.77M/s | 1.19 s, 13.02M/s |
+| `demo-headless-10y` | 12.12 s, 12.81M/s | 12.04 s, 12.89M/s |
+| `large-headless`, 2,800 objects | 2.25 s, 7.54M/s | 2.26 s, 7.52M/s |
+| `demo-kept` | 1.83 s, 8.49M/s | 1.71 s, 9.08M/s |
+| `demo-dropped` | 1.28 s, 12.14M/s | 1.27 s, 12.18M/s |
+| `large-dropped`, 2,800 objects | 2.74 s, 6.20M/s | 2.67 s, 6.38M/s |
+
+Every scenario gave the same events and MUs left on both compilers, so the update changed no result. Only `demo-kept` moved past the noise, about 7% faster. The flat-memory check in `cargo test --all-targets` now reads 35,800 bytes over both 5 and 20 days, where it read 35,320 on 1.91.1, so it is still flat.
+
+**The new baseline,** on Rust 1.99.1. One benchmark run with 7 repetitions per scenario, medians:
+
+| Scenario | Objects | Simulated | Events/s | Simulated/wall | Wall | Peak heap | Events |
+|---|---|---|---|---|---|---|---|
+| `demo-headless` | 14 | 1 year | 13.23M | 26.9M times | 1.17 s | Under 0.05 MB | 15,501,859 |
+| `demo-headless-10y` | 14 | 10 years | 13.19M | 26.8M times | 11.77 s | Under 0.05 MB | 155,213,269 |
+| `large-headless` | 6,006 | 2 days | 6.75M | 32,000 times | 5.41 s | 16.9 MB | 36,488,865 |
+| `demo-kept` | 14 | 1 year | 9.15M | 18.6M times | 1.69 s | 2,148 MB | 15,501,859 |
+| `demo-dropped` | 14 | 1 year | 11.96M | 24.3M times | 1.30 s | 0.3 MB | 15,501,859 |
+| `large-dropped` | 6,006 | 2 days | 5.63M | 27,000 times | 6.48 s | 75 MB | 36,488,865 |
+
+- **The large model is slower per event than at 2,800 objects:** 6.75M against 7.52M events/s headless, about 10% less. Its objects take about 7 MB at 1,168 bytes each, which still fits in this CPU's 96 MB of L3 cache, so the cause isn't known. It wasn't profiled.
+- **A simulated year of the large model** would take about 16 minutes headless, from 36.5M events per 2 simulated days.
+- **Not measured here:** a live session at 6,000 objects. The UI prototype measures that, on a real clock.
 
 ## Release profile
 

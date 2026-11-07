@@ -275,7 +275,7 @@ Checked on 2026-11-07, on Windows 11:
 
 ## Open housekeeping
 
-- **Stale docs:** the README mentions the removed renderer. 29 files across `wiki/`, `docs/` and the README still name `Simulator`, `EventController` or the renderer. Run `/update-wiki`. `wiki.html` is generated from the wiki.
+- **Stale docs:** the README is up to date as of 2026-11-07, but files across `wiki/` and `docs/` still name `Simulator`, `EventController` or the renderer. Run `/update-wiki`. `wiki.html` is generated from the wiki.
 - **Duplicate wiki:** both `wiki/` and `docs/wiki/` exist. Not decided.
 - **Wiki hook is off on this PC:** `core.hooksPath` is unset. Turning it on with `git config core.hooksPath .githooks` makes every `src/` commit run `claude` in the background.
 - **`crabsim.log` is tracked** in git, and running the demo from the repo root may change it.

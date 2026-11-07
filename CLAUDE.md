@@ -20,9 +20,6 @@ cargo run --release --bin crabsim -- --model models/demo.json --length 30d
 # Write models/model-file.schema.json again after changing the model file format
 cargo test -p crabsim-model --test schema -- --ignored write_the_schema_file
 
-# Write models/model-file.schema.json again after changing the model file format
-cargo test -p crabsim-model --test schema -- --ignored write_the_schema_file
-
 # Run all tests
 cargo test
 

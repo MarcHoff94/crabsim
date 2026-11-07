@@ -52,6 +52,7 @@ impl EventInterface for Drain {
             contents: Vec::new(),
             process: ProcessState::Idle,
             stop: None,
+            interruptions: Vec::new(),
             remaining: None,
             blocked_predecessors: self.blockedlist.clone(),
             successors: Vec::new(),

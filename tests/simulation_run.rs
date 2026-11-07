@@ -2175,6 +2175,157 @@ fn a_pause_draws_no_random_numbers() {
     assert_eq!(failures(&occurrences), failures(&expected));
 }
 
+// ---------- Forced failure ----------
+
+fn force_failure_at(run: &mut SimulationRun, at: u64, object_id: u32) {
+    run.schedule_event(secs(at), EventType::ForceFailureOn, object_id).unwrap();
+}
+
+fn end_forced_failure_at(run: &mut SimulationRun, at: u64, object_id: u32) {
+    run.schedule_event(secs(at), EventType::ForceFailureOff, object_id).unwrap();
+}
+
+#[test]
+fn a_forced_failure_stops_a_station_until_it_is_ended() {
+    // MU 1 enters at t=10. Forced to fail from t=20 to t=500: 10 + 60 + 480 = 550.
+    let (mut run, st, _) = line(0.0);
+    run.init().unwrap();
+    force_failure_at(&mut run, 20, st);
+    run.advance_to(secs(400)).unwrap();
+    let state = run.state();
+    assert_eq!(object(&state, st).stop, Some(StopCause::ForcedFailure));
+    assert_eq!(object(&state, st).remaining, Some(secs(50)));
+    end_forced_failure_at(&mut run, 500, st);
+    assert_eq!(exit_times(&run.advance_to(secs(600)).unwrap()), vec![550.0]);
+}
+
+#[test]
+fn a_forced_failure_counts_as_a_failure() {
+    let (mut run, st, _) = line(0.0);
+    run.init().unwrap();
+    force_failure_at(&mut run, 20, st);
+    end_forced_failure_at(&mut run, 50, st);
+    run.advance_to(secs(60)).unwrap();
+    let s = statistics_of(&run, st);
+    assert_eq!(s.time_failed, secs(30));
+    assert_eq!(s.time_paused, SimTime::ZERO);
+    assert_eq!((s.failures, s.pauses, s.stops), (1, 0, 1));
+    assert!(s.achieved_availability().unwrap() < 1.0, "a forced failure counts against availability");
+    assert_times_add_up(&run);
+}
+
+fn random_failures(occurrences: &[Occurrence]) -> Vec<Occurrence> {
+    occurrences
+        .iter()
+        .filter(|o| {
+            matches!(
+                o.kind,
+                OccurrenceKind::InterruptionBegan { cause: StopCause::Failure, .. }
+                    | OccurrenceKind::InterruptionEnded { cause: StopCause::Failure, .. }
+            )
+        })
+        .cloned()
+        .collect()
+}
+
+#[test]
+fn random_failures_carry_on_underneath_a_forced_failure() {
+    // The random failures begin and end at the same times with or without a forced failure,
+    // including those that fall due during it. One that did so used to end them for good.
+    let model = line_with_random_failures();
+    let mut plain = recorded(model.build(1));
+    plain.init().unwrap();
+    let without = plain.advance_to(secs(10_000)).unwrap();
+    let mut forced = recorded(model.build(1));
+    forced.init().unwrap();
+    force_failure_at(&mut forced, 1_000, 1);
+    end_forced_failure_at(&mut forced, 3_000, 1);
+    let with = forced.advance_to(secs(10_000)).unwrap();
+
+    let during = random_failures(&without).iter().filter(|o| o.time > secs(1_000) && o.time < secs(3_000)).count();
+    assert!(during > 0, "the test needs a random failure during the forced one");
+    assert_eq!(random_failures(&with), random_failures(&without));
+}
+
+#[test]
+fn a_forced_failure_overlapping_a_random_failure_is_one_stop() {
+    // A random failure from t=20 to 30 and a forced one from t=25 to 35: one stop of 15 s.
+    let (mut run, st, _) = line(10_000.0);
+    run.init().unwrap();
+    fail_at(&mut run, 20, st);
+    force_failure_at(&mut run, 25, st);
+    end_forced_failure_at(&mut run, 35, st);
+    run.advance_to(secs(27)).unwrap();
+    let state = run.state();
+    assert_eq!(object(&state, st).stop, Some(StopCause::Failure), "a random failure is reported over a forced one");
+    assert_eq!(object(&state, st).interruptions, vec![StopCause::Failure, StopCause::ForcedFailure]);
+    run.advance_to(secs(32)).unwrap();
+    assert_eq!(object(&run.state(), st).stop, Some(StopCause::ForcedFailure));
+    // MU 1 entered at t=10, so it leaves at 10 + 60 + 15.
+    assert_eq!(exit_times(&run.advance_to(secs(100)).unwrap()), vec![85.0]);
+    let s = statistics_of(&run, st);
+    assert_eq!(s.time_failed, secs(15));
+    assert_eq!((s.failures, s.stops), (2, 1));
+    assert_times_add_up(&run);
+}
+
+#[test]
+fn state_lists_every_active_interruption() {
+    let (mut run, st, _) = line(10_000.0);
+    run.init().unwrap();
+    fail_at(&mut run, 20, st);
+    force_failure_at(&mut run, 21, st);
+    pause_at(&mut run, 22, st);
+    run.advance_to(secs(25)).unwrap();
+    let state = run.state();
+    assert_eq!(object(&state, st).interruptions, vec![StopCause::Failure, StopCause::ForcedFailure, StopCause::Pause]);
+    assert_eq!(object(&state, st - 1).interruptions, vec![]);
+}
+
+#[test]
+fn forcing_twice_or_ending_what_is_not_forced_does_nothing() {
+    let (mut run, st, _) = line(0.0);
+    run.init().unwrap();
+    end_forced_failure_at(&mut run, 15, st);
+    force_failure_at(&mut run, 20, st);
+    force_failure_at(&mut run, 25, st);
+    end_forced_failure_at(&mut run, 30, st);
+    end_forced_failure_at(&mut run, 40, st);
+    let occurrences = run.advance_to(secs(100)).unwrap();
+    let forced: Vec<(f64, OccurrenceKind)> = occurrences
+        .iter()
+        .filter(|o| {
+            matches!(
+                o.kind,
+                OccurrenceKind::InterruptionBegan { cause: StopCause::ForcedFailure, .. }
+                    | OccurrenceKind::InterruptionEnded { cause: StopCause::ForcedFailure, .. }
+            )
+        })
+        .map(|o| (o.time.as_secs_f64(), o.kind.clone()))
+        .collect();
+    assert_eq!(
+        forced,
+        vec![
+            (20.0, OccurrenceKind::InterruptionBegan { object_id: st, cause: StopCause::ForcedFailure }),
+            (30.0, OccurrenceKind::InterruptionEnded { object_id: st, cause: StopCause::ForcedFailure }),
+        ]
+    );
+    assert_eq!(exit_times(&occurrences), vec![80.0]);
+}
+
+#[test]
+fn reset_ends_a_forced_failure() {
+    let (mut run, st, _) = line(0.0);
+    run.init().unwrap();
+    force_failure_at(&mut run, 20, st);
+    run.advance_to(secs(30)).unwrap();
+    run.reset();
+    run.init().unwrap();
+    run.advance_to(secs(30)).unwrap();
+    assert_eq!(object(&run.state(), st).stop, None);
+    assert_eq!(object(&run.state(), st).interruptions, vec![]);
+}
+
 // ---------- Changing a process time ----------
 
 /// Source every 30 s -> Station of 20 s -> Drain, with no failures. The first MU reaches the

@@ -101,7 +101,7 @@ impl MachineState {
     /// For a Station or Source: failed, paused, busy, blocked, idle.
     pub fn of(interruption: &InterruptionState, process: &ProcessState) -> MachineState {
         match (interruption, process) {
-            (InterruptionState::Failed, _) => MachineState::Failed,
+            (InterruptionState::Failed | InterruptionState::ForcedFailed, _) => MachineState::Failed,
             (InterruptionState::Paused, _) => MachineState::Paused,
             (InterruptionState::None, ProcessState::Processing) => MachineState::Busy,
             (InterruptionState::None, ProcessState::Blocked) => MachineState::Blocked,

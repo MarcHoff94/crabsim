@@ -71,6 +71,9 @@ pub enum EventType {
     EndFailure,
     PauseOn,
     PauseOff,
+    /// The user forces a Station to fail, or ends that.
+    ForceFailureOn,
+    ForceFailureOff,
 }
 
 /// An event an object wants to happen, `exec_time` from now.

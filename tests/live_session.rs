@@ -1183,6 +1183,8 @@ enum Done {
     Resume(u32),
     Clear,
     SetProcessTime(u32, SimTime),
+    ForceFailure(u32),
+    EndForcedFailure(u32),
 }
 
 fn direct_state(done: &[(u64, Done)], t: u64) -> RunState {
@@ -1200,6 +1202,8 @@ fn direct(done: &[(u64, Done)], t: u64) -> (Vec<Occurrence>, RunState) {
             Done::Resume(id) => run.schedule_event(secs(*at), EventType::PauseOff, *id).unwrap(),
             Done::Clear => run.clear_statistics(),
             Done::SetProcessTime(id, time) => run.set_process_time(*id, *time).unwrap(),
+            Done::ForceFailure(id) => run.schedule_event(secs(*at), EventType::ForceFailureOn, *id).unwrap(),
+            Done::EndForcedFailure(id) => run.schedule_event(secs(*at), EventType::ForceFailureOff, *id).unwrap(),
         }
     }
     occurrences.extend(run.advance_to(secs(t)).unwrap());
@@ -1615,6 +1619,57 @@ fn a_process_time_change_takes_effect_at_shown_time_and_replays() {
 }
 
 #[test]
+fn a_forced_failure_takes_effect_at_shown_time_and_replays() {
+    let mut watched = Watched::new(line_with_random_failures);
+    watched.session.start().unwrap();
+    watched.at(1_000);
+    watched.look();
+    watched.session.force_failure(STATION).unwrap();
+    let seen = watched.look();
+    let forced = Occurrence { time: secs(1_000), kind: OccurrenceKind::InterruptionBegan { object_id: STATION, cause: StopCause::ForcedFailure } };
+    assert!(seen.occurrences.contains(&forced), "{:?}", seen.occurrences);
+    watched.at(1_500);
+    watched.look();
+    watched.session.end_forced_failure(STATION).unwrap();
+    watched.at(2_000);
+    watched.look_without_errors();
+    let done = [(1_000, Done::ForceFailure(STATION)), (1_500, Done::EndForcedFailure(STATION))];
+    assert_eq!(watched.state_now(), direct_state(&done, 2_000));
+
+    watched.session.go_back(secs(1_200)).unwrap();
+    watched.look_without_errors();
+    assert_eq!(watched.state_now(), direct_state(&done[..1], 1_200));
+}
+
+#[test]
+fn forcing_what_is_already_forced_does_nothing_in_a_session() {
+    let mut watched = Watched::new(line_with_random_failures);
+    watched.session.start().unwrap();
+    watched.at(1_000);
+    watched.look();
+    watched.session.end_forced_failure(STATION).unwrap();
+    watched.session.force_failure(STATION).unwrap();
+    watched.session.force_failure(STATION).unwrap();
+    watched.at(1_100);
+    watched.look_without_errors();
+    assert_eq!(watched.state_now(), direct_state(&[(1_000, Done::ForceFailure(STATION))], 1_100));
+}
+
+#[test]
+fn only_a_station_can_be_forced_to_fail_so_far() {
+    let mut watched = Watched::new(line_with_random_failures);
+    watched.session.start().unwrap();
+    watched.look();
+    watched.session.force_failure(0).unwrap();
+    watched.session.end_forced_failure(2).unwrap();
+    watched.session.force_failure(99).unwrap();
+    assert_eq!(
+        watched.look().errors,
+        vec![SessionError::NotAStation(0), SessionError::NotAStation(2), SessionError::Run(RunError::UnknownObject(99))]
+    );
+}
+
+#[test]
 fn only_a_station_has_a_process_time_to_change_in_a_session() {
     let mut watched = Watched::new(line_with_random_failures);
     watched.session.start().unwrap();
@@ -1772,9 +1827,17 @@ struct Drawn {
     successors: Vec<u32>,
 }
 
+/// Which interruption a picture test switches on and off.
+#[derive(Clone, Copy)]
+enum Toggle {
+    Pause,
+    ForcedFailure,
+}
+
 /// Plays a session through `steps`, with the picture fed from everything it reports but the
 /// states asked for here, and compares the picture with the run's own state at each step.
-fn assert_picture_rebuilds(build: fn() -> SimulationRun, steps: &[u64], actions: &[(u64, u32)]) {
+/// Each action switches `toggle` on or off in turn.
+fn assert_picture_rebuilds(build: fn() -> SimulationRun, steps: &[u64], actions: &[(u64, u32)], toggle: Toggle) {
     let mut watched = Watched::new(build);
     watched.session.start().unwrap();
     watched.look();
@@ -1789,10 +1852,11 @@ fn assert_picture_rebuilds(build: fn() -> SimulationRun, steps: &[u64], actions:
         while let Some(&(at, id)) = next_action.filter(|(at, _)| *at <= step) {
             watched.at(at);
             watched.look();
-            if paused {
-                watched.session.resume(id).unwrap();
-            } else {
-                watched.session.pause(id).unwrap();
+            match (toggle, paused) {
+                (Toggle::Pause, false) => watched.session.pause(id).unwrap(),
+                (Toggle::Pause, true) => watched.session.resume(id).unwrap(),
+                (Toggle::ForcedFailure, false) => watched.session.force_failure(id).unwrap(),
+                (Toggle::ForcedFailure, true) => watched.session.end_forced_failure(id).unwrap(),
             }
             paused = !paused;
             next_action = pending.next();
@@ -1837,7 +1901,7 @@ fn assert_picture_rebuilds(build: fn() -> SimulationRun, steps: &[u64], actions:
 
 #[test]
 fn the_picture_rebuilds_from_occurrences_with_random_failures() {
-    assert_picture_rebuilds(line_with_random_failures, &[1, 9, 10, 18, 77, 500, 1_234, 5_000, 12_345, 20_000], &[]);
+    assert_picture_rebuilds(line_with_random_failures, &[1, 9, 10, 18, 77, 500, 1_234, 5_000, 12_345, 20_000], &[], Toggle::Pause);
 }
 
 #[test]
@@ -1846,7 +1910,54 @@ fn the_picture_rebuilds_from_occurrences_with_pauses_overlapping_failures() {
         line_with_random_failures,
         &[100, 300, 700, 1_000, 1_001, 2_500, 4_000, 8_000],
         &[(200, STATION), (250, STATION), (600, STATION), (1_500, STATION), (3_000, STATION), (6_000, STATION)],
+        Toggle::Pause,
     );
+}
+
+#[test]
+fn the_picture_rebuilds_from_occurrences_with_forced_failures_overlapping_random_ones() {
+    assert_picture_rebuilds(
+        line_with_random_failures,
+        &[100, 300, 700, 1_000, 1_001, 2_500, 4_000, 8_000],
+        &[(200, STATION), (250, STATION), (600, STATION), (1_500, STATION), (3_000, STATION), (6_000, STATION)],
+        Toggle::ForcedFailure,
+    );
+}
+
+/// Source every 10 s -> Station of 8 s that never fails -> Drain.
+fn reliable_line() -> SimulationRun {
+    let mut model = ModelDescription::new();
+    let src = model.add_source(secs(10));
+    let st = model.add_station(secs(8), FailureProfile::new(1.0, Distribution::CONSTANT { value: 0.0 }, 0));
+    let dr = model.add_drain();
+    model.connect(src, st);
+    model.connect(st, dr);
+    model.build(0)
+}
+
+#[test]
+fn a_picture_taken_while_interruptions_overlap_keeps_them_all() {
+    // Going back lands where a forced failure and a pause overlap. The state reports the
+    // failure as its stop, but the picture must know about the pause too.
+    let mut watched = Watched::new(reliable_line);
+    watched.session.start().unwrap();
+    watched.at(100);
+    watched.look();
+    watched.session.force_failure(STATION).unwrap();
+    watched.at(110);
+    watched.look();
+    watched.session.pause(STATION).unwrap();
+    watched.at(130);
+    watched.look();
+    watched.session.halt().unwrap();
+    watched.session.go_back(secs(120)).unwrap();
+    watched.look_without_errors();
+
+    watched.session.end_forced_failure(STATION).unwrap();
+    watched.look_without_errors();
+    let pictured = watched.picture.object(STATION).unwrap().stop();
+    assert_eq!(pictured, Some(StopCause::Pause));
+    assert_eq!(watched.state_now().objects[STATION as usize].stop, Some(StopCause::Pause));
 }
 
 /// A blocking model: Source -> slow Station -> slower Station -> Drain, all with failures.
@@ -1865,7 +1976,7 @@ fn blocking_line() -> SimulationRun {
 
 #[test]
 fn the_picture_rebuilds_from_occurrences_with_blocking() {
-    assert_picture_rebuilds(blocking_line, &[1, 2, 5, 11, 40, 333, 1_000, 2_500, 7_777], &[]);
+    assert_picture_rebuilds(blocking_line, &[1, 2, 5, 11, 40, 333, 1_000, 2_500, 7_777], &[], Toggle::Pause);
 }
 
 #[test]
@@ -1875,6 +1986,7 @@ fn the_picture_rebuilds_from_occurrences_on_the_demo_model() {
         || crabsim::demo::build_model(3),
         &[1, 7, 60, 301, 1_000, 3_600, 3_601, 10_000, 40_000],
         &[(500, 3), (900, 3), (3_000, 3), (20_000, 3)],
+        Toggle::Pause,
     );
 }
 

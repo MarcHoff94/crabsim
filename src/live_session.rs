@@ -144,7 +144,7 @@ pub enum SessionError {
     ResetRequired,
     /// A speed has to be positive and finite.
     InvalidSpeed(f64),
-    /// Only a Station can be paused or have its process time changed, so far.
+    /// Only a Station can be paused, forced to fail or have its process time changed, so far.
     NotAStation(u32),
     /// Going back goes to shown time or earlier.
     NotInThePast { to: SimTime, shown: SimTime },
@@ -184,6 +184,15 @@ enum Action {
     Resume(u32),
     ClearStatistics,
     SetProcessTime(u32, SimTime),
+    ForceFailure(u32),
+    EndForcedFailure(u32),
+}
+
+/// An interruption the user switches on and off.
+#[derive(Clone, Copy)]
+enum Switch {
+    Pause,
+    ForcedFailure,
 }
 
 enum Command {
@@ -302,6 +311,19 @@ impl LiveSession {
     /// Ends a pause at shown time, on the same terms as `pause`.
     pub fn resume(&self, object_id: u32) -> Result<(), SessionError> {
         self.send(Command::Intervene(Action::Resume(object_id)))
+    }
+
+    /// Forces a Station to fail at shown time, without a Halt, until `end_forced_failure`. It
+    /// counts as a failure, and random failures carry on underneath it. The computed future is
+    /// gone, and Reset or going back behind it undoes it. Forcing what is already forced does
+    /// nothing.
+    pub fn force_failure(&self, object_id: u32) -> Result<(), SessionError> {
+        self.send(Command::Intervene(Action::ForceFailure(object_id)))
+    }
+
+    /// Ends a forced failure at shown time, on the same terms as `force_failure`.
+    pub fn end_forced_failure(&self, object_id: u32) -> Result<(), SessionError> {
+        self.send(Command::Intervene(Action::EndForcedFailure(object_id)))
     }
 
     /// Changes a Station's process time at shown time, without a Halt. The MU in work keeps its
@@ -485,6 +507,8 @@ fn apply_action(run: &mut SimulationRun, action: Action) {
         Action::Resume(id) => run.schedule_event(at, EventType::PauseOff, id).expect("the run has been initialised"),
         Action::ClearStatistics => run.clear_statistics(),
         Action::SetProcessTime(id, time) => run.set_process_time(id, time).expect("checked to be a Station"),
+        Action::ForceFailure(id) => run.schedule_event(at, EventType::ForceFailureOn, id).expect("the run has been initialised"),
+        Action::EndForcedFailure(id) => run.schedule_event(at, EventType::ForceFailureOff, id).expect("the run has been initialised"),
     }
 }
 
@@ -740,7 +764,12 @@ impl<'a, C: Clock> SessionThread<'a, C> {
             self.observe(Observation::Error(SessionError::ResetRequired));
             return;
         }
-        if let Action::Pause(id) | Action::Resume(id) | Action::SetProcessTime(id, _) = action {
+        if let Action::Pause(id)
+        | Action::Resume(id)
+        | Action::SetProcessTime(id, _)
+        | Action::ForceFailure(id)
+        | Action::EndForcedFailure(id) = action
+        {
             match self.run.object(id) {
                 Some(ModelObject::Station(_)) => {}
                 Some(_) => {
@@ -753,19 +782,28 @@ impl<'a, C: Clock> SessionThread<'a, C> {
                 }
             }
         }
-        if let Action::Pause(id) | Action::Resume(id) = action {
-            if self.is_paused_in_log(id) == matches!(action, Action::Pause(_)) {
-                return;
-            }
+        // Switching on what is already on, or off what is off, changes nothing.
+        let already = match action {
+            Action::Pause(id) => self.is_on_in_log(id, Switch::Pause),
+            Action::Resume(id) => !self.is_on_in_log(id, Switch::Pause),
+            Action::ForceFailure(id) => self.is_on_in_log(id, Switch::ForcedFailure),
+            Action::EndForcedFailure(id) => !self.is_on_in_log(id, Switch::ForcedFailure),
+            Action::ClearStatistics | Action::SetProcessTime(..) => false,
+        };
+        if already {
+            return;
         }
         self.abandon_future_and_replay_to(self.shown, AfterReplay::Intervene(action));
     }
 
-    /// The log holds nothing after shown time, so its last word on an object is the current one.
-    fn is_paused_in_log(&self, id: u32) -> bool {
-        self.log.iter().rev().find_map(|&(_, action)| match action {
-            Action::Pause(paused) if paused == id => Some(true),
-            Action::Resume(resumed) if resumed == id => Some(false),
+    /// Whether an interruption the user switches is on for an object. The log holds nothing after
+    /// shown time, so its last word on an object is the current one.
+    fn is_on_in_log(&self, id: u32, switch: Switch) -> bool {
+        self.log.iter().rev().find_map(|&(_, action)| match (switch, action) {
+            (Switch::Pause, Action::Pause(on)) | (Switch::ForcedFailure, Action::ForceFailure(on)) if on == id => Some(true),
+            (Switch::Pause, Action::Resume(off)) | (Switch::ForcedFailure, Action::EndForcedFailure(off)) if off == id => {
+                Some(false)
+            }
             _ => None,
         }) == Some(true)
     }

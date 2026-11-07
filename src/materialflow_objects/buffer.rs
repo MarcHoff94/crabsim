@@ -225,6 +225,7 @@ impl EventInterface for Buffer {
             contents: self.content.iter().map(|mu| mu.id).collect(),
             process: self.state.clone(),
             stop: self.interruption.cause(),
+            interruptions: self.interruption.cause().into_iter().collect(),
             remaining: None,
             blocked_predecessors: self.blockedlist.clone(),
             successors: self.succ.clone(),

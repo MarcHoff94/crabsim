@@ -28,6 +28,9 @@ pub struct SingleStation {
 	pub exitlocked: bool,
 	pub state: ProcessState,
 	failed: bool,
+	/// Forced to fail by the user. Kept apart from `failed`, so random failures carry on
+	/// underneath: each random failure schedules the next only when it ends.
+	forced: bool,
 	paused: bool,
 	pub statistics: StatisticsKeeper,
 }
@@ -58,6 +61,7 @@ impl SingleStation {
 			exitlocked: false,
 			state: ProcessState::Idle,
 			failed: false,
+			forced: false,
 			paused: false,
 			statistics: StatisticsKeeper::new(1),
 		}
@@ -200,7 +204,27 @@ impl SingleStation {
 						object_id: self.base.object_id,
 					});
 				}
-				if !self.paused {
+				if !self.is_stopped() {
+					self.end_stop(context, others, &mut events)?;
+				}
+				if events.is_empty() { Ok(None) } else { Ok(Some(events)) }
+			}
+			&EventType::ForceFailureOn => {
+				if !self.forced {
+					self.begin_interruption(StopCause::ForcedFailure, context);
+					self.forced = true;
+					self.statistics.count_failure();
+				}
+				Ok(None)
+			}
+			&EventType::ForceFailureOff => {
+				if !self.forced {
+					return Ok(None);
+				}
+				self.forced = false;
+				context.record(OccurrenceKind::InterruptionEnded { object_id: self.base.object_id, cause: StopCause::ForcedFailure });
+				let mut events: Vec<EventTemplate> = Vec::new();
+				if !self.is_stopped() {
 					self.end_stop(context, others, &mut events)?;
 				}
 				if events.is_empty() { Ok(None) } else { Ok(Some(events)) }
@@ -220,7 +244,7 @@ impl SingleStation {
 				self.paused = false;
 				context.record(OccurrenceKind::InterruptionEnded { object_id: self.base.object_id, cause: StopCause::Pause });
 				let mut events: Vec<EventTemplate> = Vec::new();
-				if !self.failed {
+				if !self.is_stopped() {
 					self.end_stop(context, others, &mut events)?;
 				}
 				if events.is_empty() { Ok(None) } else { Ok(Some(events)) }
@@ -290,18 +314,30 @@ impl SingleStation {
 		Ok(())
 	}
 	pub fn is_stopped(&self) -> bool {
-		self.failed || self.paused
+		self.failed || self.forced || self.paused
 	}
 	pub fn is_paused(&self) -> bool {
 		self.paused
 	}
-	/// What the station reports while stopped. Failed wins over paused, as in the statistics.
+	/// What the station reports while stopped: the most serious active interruption, so a
+	/// failure, random or forced, wins over a pause, as in the statistics.
 	fn interruption(&self) -> InterruptionState {
-		match (self.failed, self.paused) {
-			(true, _) => InterruptionState::Failed,
-			(false, true) => InterruptionState::Paused,
-			(false, false) => InterruptionState::None,
+		if self.failed {
+			InterruptionState::Failed
+		} else if self.forced {
+			InterruptionState::ForcedFailed
+		} else if self.paused {
+			InterruptionState::Paused
+		} else {
+			InterruptionState::None
 		}
+	}
+	/// Every active interruption, most serious first.
+	fn interruptions(&self) -> Vec<StopCause> {
+		[(self.failed, StopCause::Failure), (self.forced, StopCause::ForcedFailure), (self.paused, StopCause::Pause)]
+			.into_iter()
+			.filter_map(|(active, cause)| active.then_some(cause))
+			.collect()
 	}
 	/// Tells the statistics what the station ended up doing.
 	fn update_statistics(&mut self, now: SimTime) {
@@ -408,6 +444,7 @@ impl EventInterface for SingleStation {
 		self.exitlocked = false;
 		self.state = ProcessState::Idle;
 		self.failed = false;
+		self.forced = false;
 		self.paused = false;
 		self.statistics.reset();
 	}
@@ -423,6 +460,7 @@ impl EventInterface for SingleStation {
 			contents: self.content.iter().map(|mu| mu.id).collect(),
 			process: self.state.clone(),
 			stop: self.interruption().cause(),
+			interruptions: self.interruptions(),
 			remaining,
 			blocked_predecessors: self.blockedlist.clone(),
 			successors: self.succ.clone(),

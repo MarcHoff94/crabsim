@@ -12,12 +12,10 @@ pub mod random_numbers;
 pub mod simulation_run;
 pub mod statistics;
 pub mod time;
-pub mod visualization;
 
 pub use crate::materialflow_objects::flows; // keep single module re-export
 pub use crate::materialflow_objects::flows::{BaseObject, FailureProfile, MoveableUnit, ProcessState};
 
-pub use crate::demo::run_demo;
 pub use crate::error::{AdvanceFailure, InitError, MaterialflowError, RunError, RunTimeError};
 pub use crate::event::{EventContext, EventTemplate, EventType, ExitTicket};
 pub use crate::live_session::{

@@ -4,7 +4,7 @@ A discrete-event simulator for any material flow, such as a factory line, writte
 
 crabsim exists to simulate long periods as fast as possible: a year of the demo model takes about 1.2 seconds, at about 13 million events per second, and a run's memory stays flat however long it is. A live session can also play a run at a chosen speed, step forward and back through it, and take interventions while it plays, for a UI to show.
 
-**Status:** the engine and live session work. The UI is under way: it will be a Bevy application with egui panels (ADR 0006), and so far it only opens a window. A throwaway prototype shows what it will do: see "Trying the UI prototype" below. Buffer's movement is known to be broken, so models don't use it yet. The plan is in `docs/agents/handoff.md` and in [spec issue 3](https://github.com/MarcHoff94/crabsim/issues/3).
+**Status:** the engine and live session work. The UI's first stage works: a Bevy application with egui panels (ADR 0006) that plays the demo model live in 2D, with the run controls, stepping back and forward, interventions on Stations and an inspector. Building models in it comes later. Buffer's movement is known to be broken, so models don't use it yet. The plan is in `docs/agents/handoff.md` and in [spec issue 3](https://github.com/MarcHoff94/crabsim/issues/3).
 
 ## Requirements
 
@@ -20,16 +20,16 @@ Run the tests:
 cargo test
 ```
 
-Run the demo model for a simulated hour and print each object's state:
+Run the demo model headless for a simulated day, then print each object's statistics and how long the run took:
 
 ```powershell
-cargo run --bin crabsim
+cargo run --release --bin crabsim
 ```
 
-The same, with the table updating in place in the terminal:
+The same with a seed and a simulated length, written as the UI shows time, such as `1:30`, `8:00:00` or `30d 12:00:00`:
 
 ```powershell
-cargo run --bin crabsim -- --inplace
+cargo run --release --bin crabsim -- --seed 7 --length 365d
 ```
 
 Run the benchmark, which takes about a minute and reports events per second, simulated time per wall second and peak memory:
@@ -38,7 +38,7 @@ Run the benchmark, which takes about a minute and reports events per second, sim
 cargo bench --bench reference
 ```
 
-Open the UI, which so far is only a window. The first build takes several minutes:
+Open the UI, which plays the demo model live. The first build takes several minutes:
 
 ```powershell
 cargo run -p crabsim-ui --profile ui
@@ -150,7 +150,7 @@ The same seed always gives the same result. For a run to watch, `LiveSession` ta
   - **`picture.rs`:** what a UI shows.
   - **`statistics.rs`:** statistics.
   - **`materialflow_objects/`:** Sources, Stations, Buffers and Drains.
-- `src/main.rs` is the demo's command line.
+- `src/main.rs` is the headless command line.
 - `ui/` is the UI, a Bevy application.
 - `tests/` holds the behaviour tests, and `benches/reference.rs` the benchmark.
 - `docs/` holds the decisions (`adr/`), design notes and measurements (`design/`), and the handoff for whoever works on it next (`agents/handoff.md`).

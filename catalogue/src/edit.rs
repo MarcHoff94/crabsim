@@ -486,6 +486,7 @@ impl Operation for EditModel {
 
     fn run(catalogue: &Catalogue, input: EditModelInput) -> Result<EditModelOutput, OperationError> {
         let (file, text) = read_file(catalogue, &input.path)?;
+        let _editing = crate::editing::before_change(catalogue, &input.path)?;
         let model = crabsim_model::load(&text).map_err(|problems| {
             let mut error = OperationError::invalid_model(&format!("`{}`", input.path), &problems);
             error.message = format!("{}, so edit_model can't change it: fix it with write_model first", error.message);

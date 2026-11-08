@@ -26,6 +26,16 @@ struct Opts {
     /// code, such as a Cargo.toml, a .git or .rs files.
     #[arg(long)]
     models: PathBuf,
+    /// How long an agent's right to change a model file, or its place waiting for one, lasts
+    /// unused, written as the UI shows time, such as `10:00` for 10 minutes.
+    #[arg(long, default_value = "10:00", value_parser = timeout)]
+    edit_timeout: std::time::Duration,
+}
+
+fn timeout(typed: &str) -> Result<std::time::Duration, String> {
+    crabsim::time::parse_time(typed)
+        .map(|time| std::time::Duration::from_millis(time.as_millis()))
+        .ok_or_else(|| "not a time: write it as 90, 1:30 or 10:00".to_string())
 }
 
 /// What a harness shows its agent about the server as a whole.
@@ -41,8 +51,11 @@ struct Server {
 
 impl Server {
     fn new(catalogue: Catalogue) -> Server {
+        // The user's own operations, such as controlling the edit queue, are never offered to an
+        // agent (ADR 0011).
         let tools = catalogue
             .operations()
+            .filter(|operation| !operation.user_only)
             .map(|operation| {
                 let annotations = match operation.effect {
                     Effect::ReadOnly => ToolAnnotations::new().read_only(true).open_world(false),
@@ -75,7 +88,10 @@ impl ServerHandler for Server {
 
     /// Runs the operation on a thread where blocking is fine. A failed operation is a tool
     /// result marked as an error, holding the error as JSON, so the agent reads it.
-    async fn call_tool(&self, request: CallToolRequestParams, _context: RequestContext<RoleServer>) -> Result<CallToolResponse, ErrorData> {
+    async fn call_tool(&self, request: CallToolRequestParams, context: RequestContext<RoleServer>) -> Result<CallToolResponse, ErrorData> {
+        if let Some(peer) = context.peer.peer_info() {
+            self.catalogue.set_client_name(&peer.client_info.name);
+        }
         let catalogue = Arc::clone(&self.catalogue);
         let name = request.name.to_string();
         let input = Value::Object(request.arguments.unwrap_or_default());
@@ -94,7 +110,9 @@ fn main() -> ExitCode {
     // Logging goes to stderr: stdout carries the protocol.
     let _ = env_logger::Builder::from_default_env().target(env_logger::Target::Stderr).try_init();
     let opts = Opts::parse();
-    let catalogue = match Catalogue::open(Settings::new(&opts.models, Source::Mcp)) {
+    let mut settings = Settings::new(&opts.models, Source::Mcp);
+    settings.edit_timeout = opts.edit_timeout;
+    let catalogue = match Catalogue::open(settings) {
         Ok(catalogue) => catalogue,
         Err(error) => {
             eprintln!("crabsim-mcp can't start: {error}");

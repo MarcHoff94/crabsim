@@ -19,6 +19,7 @@ pub(crate) fn entries() -> Vec<Entry> {
         entry::<ModelFileFormat>(),
     ];
     entries.extend(crate::edit::entries());
+    entries.extend(crate::editing::entries());
     entries.extend(crate::jobs::entries());
     entries.extend(crate::results::entries());
     entries.extend(crate::store::entries());
@@ -225,6 +226,7 @@ impl Operation for WriteModel {
 
     fn run(catalogue: &Catalogue, input: WriteModelInput) -> Result<WriteModelOutput, OperationError> {
         let file = catalogue.folder().model_file(&input.path)?;
+        let _editing = crate::editing::before_change(catalogue, &input.path)?;
         if file.is_dir() {
             return Err(OperationError::invalid_input(format!("`{}` is a folder", input.path)));
         }
@@ -310,6 +312,7 @@ impl Operation for DeleteModel {
 
     fn run(catalogue: &Catalogue, input: PathInput) -> Result<DeleteModelOutput, OperationError> {
         let (file, _) = read_file(catalogue, &input.path)?;
+        let _editing = crate::editing::before_change(catalogue, &input.path)?;
         std::fs::remove_file(&file).map_err(|error| OperationError::run_error(format!("`{}` can't be deleted: {error}", input.path)))?;
         Ok(DeleteModelOutput { deleted: input.path })
     }

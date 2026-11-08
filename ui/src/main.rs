@@ -4,11 +4,10 @@
 //! `crabsim_ui::workspace`, both tested without a window. UI stage 1 is described in
 //! docs/agents/handoff.md, "UI design", and stage 2 in spec issue 63.
 //!
-//! cargo run -p crabsim-ui --profile ui
 //! cargo run -p crabsim-ui --profile ui -- --models <folder>
 //!
-//! With a models folder, the window lists its model files and runs the one clicked. Without one,
-//! or when another window has the folder, it runs the built-in demo.
+//! The window lists the folder's model files and runs the one clicked. The repository's `models`
+//! folder holds the demo model, `demo.json`.
 //!
 //! Drag with any mouse button to pan, and use the wheel to zoom.
 
@@ -27,19 +26,24 @@ use crabsim_ui::view::{
     Control, DEFAULT_SPEED, Details, EndTimeProblem, Inspection, Intervention, JumpProblem, MAX_SPEED, MIN_SPEED, Mark,
     Point, MU_METRES, Shade, StepBack, ViewState, format_time, format_time_exact, label_size, parse_time,
 };
-use crabsim_ui::workspace::{ModelChange, Workspace};
+use crabsim_ui::attributes::{Form, RepairKind};
+use crabsim_ui::workspace::{AttributeView, ModelChange, Refusal, ValueFrom, Workspace};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 #[derive(Parser)]
-#[command(name = "crabsim-ui", about = "crabsim's window: runs models live and draws them in 2D")]
+#[command(
+    name = "crabsim-ui",
+    about = "crabsim's window: runs model files live and draws them in 2D",
+    after_help = "Example: crabsim-ui --models models"
+)]
 struct Opts {
-    /// A models folder whose model files to list and run. It must not hold source code. Without
-    /// one, the window runs the built-in demo model.
+    /// The models folder whose model files to list and run, such as the repository's `models`.
+    /// It must not hold source code.
     #[arg(long)]
-    models: Option<PathBuf>,
+    models: PathBuf,
 }
 
 const BACKGROUND: Color = Color::srgb(0.10, 0.11, 0.13);
@@ -66,7 +70,7 @@ const SHADES: [Shade; 7] =
 
 fn main() {
     let opts = Opts::parse();
-    let workspace = Workspace::open(opts.models.as_deref());
+    let workspace = Workspace::open(&opts.models);
     let view = ViewState::new(workspace.description());
     let session = workspace.session(WallClock::new());
     session.set_speed(DEFAULT_SPEED).expect("a positive speed");
@@ -100,6 +104,9 @@ fn main() {
             end_text: String::new(),
             replacing: None,
             rebuild_scene: false,
+            attributes: None,
+            forms: HashMap::new(),
+            refused: None,
         })
         .insert_resource(Session(Mutex::new(session)))
         .insert_resource(WatchedFile(Arc::new(Mutex::new(None))))
@@ -154,6 +161,28 @@ struct Ui {
     replacing: Option<String>,
     /// The view changed model or seed, so the objects are drawn afresh.
     rebuild_scene: bool,
+    /// The selected instance's attributes, read from the model file, and for which object.
+    attributes: Option<(u32, Result<Vec<AttributeView>, String>)>,
+    /// The fields for each attribute of the selected instance, by attribute.
+    forms: HashMap<String, Form>,
+    /// The last change refused, for its attribute: why, and the change to make anyway if an agent
+    /// holds the file.
+    refused: Option<(String, Refusal, Option<AttributeChange>)>,
+}
+
+/// A change to one attribute of the selected instance, asked for in the inspector.
+#[derive(Clone)]
+enum AttributeChange {
+    Set(String, serde_json::Value),
+    Restore(String),
+}
+
+impl AttributeChange {
+    fn attribute(&self) -> &str {
+        match self {
+            AttributeChange::Set(attribute, _) | AttributeChange::Restore(attribute) => attribute,
+        }
+    }
 }
 
 /// A way of going back that waits for confirmation, and the time it goes to.
@@ -528,12 +557,47 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
         ui.process_time_text = (ui.view.selected(), String::new());
     }
     let inspection = ui.view.inspection();
+    // The selected instance's attributes, read again when the selection or the model changes.
+    let selected = ui.view.selected();
+    if selected.is_none() {
+        ui.attributes = None;
+    }
+    if let Some(id) = selected.filter(|&id| ui.attributes.as_ref().is_none_or(|(read, _)| *read != id)) {
+        let name = ui.view.objects()[id as usize].name.clone();
+        let read = if ui.workspace.opened().is_some() { ui.workspace.attributes(&name) } else { Err("No model file is open".to_string()) };
+        if let Ok(attributes) = &read {
+            ui.forms = attributes.iter().map(|view| (view.attribute.clone(), Form::new(&view.attribute, view.value.as_ref()))).collect();
+        }
+        ui.attributes = Some((id, read));
+        ui.refused = None;
+    }
+    let editable = ui.view.reloads_now();
     let mut intervention = None;
+    let mut attribute_change = None;
     let right = egui::Panel::right("inspector").exact_size(INSPECTOR_WIDTH).show(&mut root, |panel| {
         egui::ScrollArea::vertical().show(panel, |panel| {
             intervention = inspector(panel, inspection.as_ref(), &mut ui.process_time_text.1);
+            if let Some((_, attributes)) = &ui.attributes {
+                attribute_change = attributes_section(panel, attributes, &mut ui.forms, editable, ui.refused.as_ref());
+            }
         });
     });
+    if let (Some((change, take_over)), Some(id)) = (attribute_change, selected) {
+        let name = ui.view.objects()[id as usize].name.clone();
+        let done = match &change {
+            AttributeChange::Set(attribute, value) => ui.workspace.set_attribute(&name, attribute, value.clone(), take_over),
+            AttributeChange::Restore(attribute) => ui.workspace.restore(&name, attribute, take_over),
+        };
+        ui.refused = match done {
+            // The window picks up the saved file next frame and rebuilds the model.
+            Ok(()) => None,
+            Err(refusal) => {
+                let again = matches!(refusal, Refusal::NotEditor(_)).then(|| change.clone());
+                Some((change.attribute().to_string(), refusal, again))
+            }
+        };
+        ui.view.commanded(wall);
+    }
     let mut chosen = None;
     let mut panel_error = None;
     let mut left_edge = ctx.viewport_rect().left();
@@ -643,6 +707,16 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
         }
     }
 
+    if !ui.view.has_model() {
+        let hint = if ui.workspace.has_folder() { "Choose a model from the list on the left" } else { "No models folder is open" };
+        ctx.layer_painter(egui::LayerId::new(egui::Order::Middle, egui::Id::new("no model"))).text(
+            canvas.center(),
+            egui::Align2::CENTER_CENTER,
+            hint,
+            egui::FontId::proportional(18.0),
+            egui::Color32::from_gray(150),
+        );
+    }
     if let Some((camera, size)) = ui.camera.and_then(|camera| Some((camera, label_size(&camera)?))) {
         labels(&ctx, &ui.view, &camera, canvas, size as f32);
     }
@@ -675,7 +749,12 @@ fn open_model(ui: &mut Ui, session: &Session, path: &str, wall: Duration) {
 /// time mode and end time. A new model is fitted into the canvas, and the same one keeps the view
 /// where it was.
 fn replace_session(ui: &mut Ui, session: &Session, new_model: bool, wall: Duration) {
-    let view = ViewState::with_settings_of(ui.workspace.description(), &ui.view);
+    let mut view = ViewState::with_settings_of(ui.workspace.description(), &ui.view);
+    // The same model, reloaded or with another seed, keeps the object selected, found by its name.
+    if !new_model {
+        let name = ui.view.selected().map(|id| ui.view.objects()[id as usize].name.clone());
+        view.select(name.and_then(|name| view.objects().iter().find(|object| object.name == name).map(|object| object.id)));
+    }
     let fresh = ui.workspace.session(WallClock::new());
     let settled = fresh
         .set_speed(view.speed())
@@ -684,6 +763,9 @@ fn replace_session(ui: &mut Ui, session: &Session, new_model: bool, wall: Durati
     *session.0.lock().expect("the session lock is never poisoned") = fresh;
     ui.view = view;
     ui.pending = None;
+    ui.attributes = None;
+    ui.forms.clear();
+    ui.refused = None;
     ui.seed_text = ui.workspace.seed().to_string();
     if new_model {
         ui.camera_moved = false;
@@ -802,7 +884,7 @@ fn top_bar(
 ) -> Option<Request> {
     let mut request = None;
     ui.horizontal_wrapped(|ui| {
-        ui.label(egui::RichText::new(workspace.opened().unwrap_or("Demo model")).strong());
+        ui.label(egui::RichText::new(workspace.opened().unwrap_or("No model open")).strong());
         ui.label("seed");
         let seed_field = ui
             .add_enabled(view.allows_seed(), egui::TextEdit::singleline(seed_text).desired_width(70.0))
@@ -1083,6 +1165,119 @@ fn inspector(ui: &mut egui::Ui, inspection: Option<&Inspection>, process_time_te
             }
         });
         ui.label(egui::RichText::new(format!("as of {}", format_time_exact(details.as_of))).weak().small());
+    }
+    asked
+}
+
+/// An attribute's name as people read it.
+fn attribute_label(attribute: &str) -> &str {
+    match attribute {
+        "interval" => "Interval",
+        "process_time" => "Process time",
+        "failures" => "Failures",
+        "starting_mus" => "Starting MUs",
+        "capacity" => "Capacity",
+        "dimensions" => "Dimensions",
+        "description" => "Description",
+        other => other,
+    }
+}
+
+/// Every attribute of the selected instance, its value and where it comes from. Before Init or
+/// after Reset each can be changed, saved to the model file, and each set on the instance can be
+/// restored on its own. Returns the change asked for, and whether it takes over from an agent.
+fn attributes_section(
+    ui: &mut egui::Ui,
+    attributes: &Result<Vec<AttributeView>, String>,
+    forms: &mut HashMap<String, Form>,
+    editable: bool,
+    refused: Option<&(String, Refusal, Option<AttributeChange>)>,
+) -> Option<(AttributeChange, bool)> {
+    ui.add_space(8.0);
+    ui.separator();
+    ui.label(egui::RichText::new("Attributes").strong());
+    let attributes = match attributes {
+        Ok(attributes) => attributes,
+        Err(error) => {
+            ui.label(egui::RichText::new(error).weak());
+            return None;
+        }
+    };
+    if !editable {
+        ui.label(egui::RichText::new("Change them before Init or after Reset. During a run, use the interventions above.").weak().small());
+    }
+    let mut asked = None;
+    for view in attributes {
+        ui.add_space(4.0);
+        let from = match &view.from {
+            ValueFrom::Instance => "set here".to_string(),
+            ValueFrom::Class(class) => format!("from class {class}"),
+            ValueFrom::BuiltIn => "built in".to_string(),
+            ValueFrom::NotSet => "not set".to_string(),
+        };
+        ui.horizontal(|row| {
+            row.label(egui::RichText::new(attribute_label(&view.attribute)).strong());
+            row.label(egui::RichText::new(&from).weak().small());
+            if editable && view.from == ValueFrom::Instance {
+                let restore = row.small_button("Restore").on_hover_text("Take this attribute alone back to its class's value");
+                if restore.clicked() {
+                    asked = Some((AttributeChange::Restore(view.attribute.clone()), false));
+                }
+            }
+        });
+        let Some(form) = forms.get_mut(&view.attribute) else { continue };
+        if view.attribute == "failures" && view.value.is_none() && !editable {
+            ui.label("Never fails");
+            continue;
+        }
+        let mut commit = false;
+        ui.add_enabled_ui(editable, |fields| {
+            if let Some(kind) = form.repair {
+                egui::ComboBox::from_id_salt(("repair", &view.attribute)).selected_text(kind.name()).show_ui(fields, |menu| {
+                    for choice in RepairKind::ALL {
+                        if menu.selectable_label(kind == choice, choice.name()).clicked() && kind != choice {
+                            form.set_repair(choice);
+                        }
+                    }
+                });
+            }
+            egui::Grid::new(("fields", &view.attribute)).num_columns(2).spacing([8.0, 2.0]).show(fields, |grid| {
+                for part in form.parts.iter_mut().filter(|part| !part.label.is_empty() || form.repair.is_none()) {
+                    grid.label(part.label);
+                    let field = grid.add(egui::TextEdit::singleline(&mut part.text).desired_width(120.0));
+                    commit |= field.lost_focus();
+                    grid.end_row();
+                }
+            });
+        });
+        let waiting = !form.matches(view.value.as_ref());
+        if editable && waiting {
+            match form.value() {
+                Ok(value) => {
+                    let apply = ui.small_button("Apply").on_hover_text("Saves it to the model file, cutting its inheritance");
+                    if commit || apply.clicked() {
+                        asked = Some((AttributeChange::Set(view.attribute.clone(), value), false));
+                    }
+                }
+                Err(problem) => {
+                    ui.colored_label(egui::Color32::from_rgb(240, 120, 120), problem);
+                }
+            }
+        }
+        if let Some((_, refusal, again)) = refused.filter(|(attribute, _, _)| *attribute == view.attribute) {
+            ui.colored_label(egui::Color32::from_rgb(240, 120, 120), refusal.to_string());
+            match (refusal, again) {
+                (Refusal::NotEditor(_), Some(change)) => {
+                    if ui.small_button("Change anyway").on_hover_text("Make this one change while the agent keeps its right").clicked() {
+                        asked = Some((change.clone(), true));
+                    }
+                }
+                (Refusal::ChangedOutside(_), _) => {
+                    ui.label(egui::RichText::new("Adopt the file in the Models panel first.").weak());
+                }
+                _ => {}
+            }
+        }
     }
     asked
 }

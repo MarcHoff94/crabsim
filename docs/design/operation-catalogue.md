@@ -217,7 +217,7 @@ On 2026-11-08 an agent in Claude Code used `crabsim-mcp` alone, without crabsim'
 - `crabsim graph <kind> --models <folder> <--model path | --run run-3> ...`: `query_model`, one subcommand per kind with the same names (`neighbours`, `upstream`, `downstream`, `paths`, `subgraph-around`, `find-instances`, `class-tree`). The model is `--model`, as for `run`, in all three of slice 3's commands, since they choose between a file and a run, and `graph`'s questions take names as plain arguments, such as `crabsim graph paths --models m --model line.json Source Drain`. `find-instances` takes each condition as `--where "process_time > 0:30"`, split at its first operator, with a whole number as a number and anything else as text. Lists print as tables, paths with `->`, and the class tree indented.
 - `crabsim export --models <folder> <--model path | --run run-3> --format cypher|neo4j-csv|graphml`: `export_model`, printing each file written and its size.
 
-Without a subcommand, `crabsim` behaves exactly as before: one run, printed, nothing saved. That suits a bigger machine running long runs with no models folder.
+Without a subcommand, `crabsim --model <file>` makes one run, printed, nothing saved. The model file is required: since UI stage 2 neither front-end runs a built-in model. That suits a bigger machine running long runs with no models folder.
 
 ## The MCP server
 

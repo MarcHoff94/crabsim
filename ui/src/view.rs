@@ -510,8 +510,16 @@ impl ViewState {
         format_time(self.picture.shown())
     }
 
-    /// Whether a control would do anything now.
+    /// Whether there is a model to run: the window shows none until one is chosen.
+    pub fn has_model(&self) -> bool {
+        !self.objects.is_empty()
+    }
+
+    /// Whether a control would do anything now. None does without a model.
     pub fn allows(&self, control: Control) -> bool {
+        if !self.has_model() {
+            return false;
+        }
         let failed = self.status == SessionStatus::Failed;
         match control {
             Control::Init => !self.initialised && !failed,

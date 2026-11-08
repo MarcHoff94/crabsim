@@ -66,7 +66,7 @@ cargo bench --bench reference -- --reps 9 --scenario demo-dropped
 **AI-native** comes second: anything a person can do with crabsim, an AI agent can do too, through the same operations: build a model, run it, read the results, manage models. No feature exists only behind a mouse. Like performance, it is a guideline that can be overruled case by case with real reasoning. See ADR 0007.
 
 - **One operation catalogue:** every capability is an operation with typed input, typed output and a description, offered to agents through front-ends. The MCP server is the first, and in-app agents with the user's own LLM endpoint come later on the same catalogue.
-- **Models are readable text** that agents may write directly, and operations validate, run and read them.
+- **Models are readable text,** changed only through operations: in the UI, the CLI or an agent's harness. One editor changes a model file at a time, and the user controls the edit queue, which is the pillar's first deliberate exception: agents can't control it over MCP (ADR 0011).
 - **Every attribute can change during a run,** as an intervention, so a person or agent can experiment with a running model (ADR 0008).
 - **Agents act from outside a simulation run,** as a user does. AI decisions inside a run are a possible later opt-in that keeps runs reproducible through a decision log. See `docs/design/ai-decisions-in-runs.md`.
 

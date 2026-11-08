@@ -160,6 +160,10 @@ On 2026-11-08 an agent in Claude Code used `crabsim-mcp` alone, without crabsim'
 - `crabsim runs --models <folder>`: lists runs, newest first.
 - `crabsim results --models <folder> <run> [--object ...] [--class ...] [--values]`: the `run_results` summary, as tables, with every observation in a table of its own with `--values`.
 - `crabsim query --models <folder> "<sql>"`: `query_results`, as a table.
+- `crabsim edit --models <folder> <path> <changes.json | -> [--expected-hash] [--take-over]`: `edit_model` with the changes from a file or stdin. A person using the CLI is the user, so `--take-over` makes this one change while an agent holds the right, which the agent keeps.
+- `crabsim attributes --models <folder> <path> <name> [--class]`: `get_attributes`, as a table.
+- `crabsim adopt --models <folder> <path>`: `adopt_model`.
+- `crabsim queue show|take|release|give|move|remove|block|unblock --models <folder> ...`: the user's controls of the edit queue, each printing the queue after. They're grouped under `queue`, where issue 45 had `crabsim take` and `crabsim release` at the top level.
 
 Without a subcommand, `crabsim` behaves exactly as before: one run, printed, nothing saved. That suits a bigger machine running long runs with no models folder.
 

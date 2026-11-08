@@ -5,6 +5,9 @@
 //! With a models folder it is people's front-end on the operation catalogue, the same one agents
 //! use through the MCP server: `run` starts an experiment and waits for it, `runs` lists the runs
 //! in the results store, `results` prints a run's results and `query` queries the store with SQL.
+//! `edit` changes a model with a batch of changes, `attributes` shows an object's values and where
+//! they come from, `adopt` accepts a file changed outside crabsim, and `queue` shows and controls
+//! who may change a model: the person using the CLI is the user, who controls the edit queue.
 
 mod tables;
 
@@ -101,6 +104,104 @@ enum Command {
         /// Such as "SELECT id, label, state FROM runs".
         sql: String,
     },
+    /// Changes a model file with a batch of changes, all or nothing, as edit_model does: a JSON
+    /// list such as [{"change": "set_attribute", "target": {"instance": "Mill 1"},
+    /// "attribute": "process_time", "value": "0:45"}].
+    Edit {
+        #[arg(long)]
+        models: PathBuf,
+        /// The model file, such as `line.json`.
+        path: String,
+        /// A file holding the changes as JSON, or `-` to read them from stdin.
+        changes: String,
+        /// The hash of the file as you read it: refused if it changed since.
+        #[arg(long)]
+        expected_hash: Option<String>,
+        /// Make this change even while an agent holds the editor right, which it keeps.
+        #[arg(long)]
+        take_over: bool,
+    },
+    /// Shows every attribute of an instance or class, its value and where it comes from.
+    Attributes {
+        #[arg(long)]
+        models: PathBuf,
+        /// The model file, such as `line.json`.
+        path: String,
+        /// The instance's name, or the class's with --class.
+        name: String,
+        /// The name is a class's.
+        #[arg(long)]
+        class: bool,
+    },
+    /// Accepts a model file changed outside crabsim, such as by a text editor or git, as it is,
+    /// so crabsim may change it again.
+    Adopt {
+        #[arg(long)]
+        models: PathBuf,
+        /// The model file, such as `line.json`.
+        path: String,
+    },
+    /// Shows who may change model files and who waits, and controls it, as the user.
+    Queue {
+        #[command(subcommand)]
+        action: QueueAction,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum QueueAction {
+    /// Shows a model file's editor and queue, or every file's, and the blocked agents.
+    Show {
+        #[arg(long)]
+        models: PathBuf,
+        path: Option<String>,
+    },
+    /// Takes the right to change a model file, from any agent, until `queue release`.
+    Take {
+        #[arg(long)]
+        models: PathBuf,
+        path: String,
+    },
+    /// Gives back the right to change a model file, to the first waiting agent.
+    Release {
+        #[arg(long)]
+        models: PathBuf,
+        path: String,
+    },
+    /// Gives the right to change a model file to a waiting agent, such as `agent-3`, now.
+    Give {
+        #[arg(long)]
+        models: PathBuf,
+        path: String,
+        agent: String,
+    },
+    /// Moves a waiting agent to another place in a model file's queue, 0 first.
+    Move {
+        #[arg(long)]
+        models: PathBuf,
+        path: String,
+        agent: String,
+        place: usize,
+    },
+    /// Takes an agent out of a model file's queue, or its right away if it edits.
+    Remove {
+        #[arg(long)]
+        models: PathBuf,
+        path: String,
+        agent: String,
+    },
+    /// Blocks an agent session from changing models in the folder until unblocked.
+    Block {
+        #[arg(long)]
+        models: PathBuf,
+        agent: String,
+    },
+    /// Lets a blocked agent claim and change models again.
+    Unblock {
+        #[arg(long)]
+        models: PathBuf,
+        agent: String,
+    },
 }
 
 fn length(typed: &str) -> Result<SimTime, String> {
@@ -143,6 +244,41 @@ fn main() -> ExitCode {
             print!("{}", tables::query(&result));
             Ok(true)
         }),
+        Some(Command::Edit { models, path, changes, expected_hash, take_over }) => catalogue(&models).and_then(|catalogue| {
+            let text = if changes == "-" {
+                let mut text = String::new();
+                std::io::Read::read_to_string(&mut std::io::stdin(), &mut text).map(|_| text)
+            } else {
+                std::fs::read_to_string(&changes)
+            }
+            .map_err(|error| OperationError::invalid_input(format!("the changes can't be read from `{changes}`: {error}")))?;
+            let changes: Value = serde_json::from_str(&text).map_err(|error| OperationError::invalid_input(format!("the changes aren't JSON: {error}")))?;
+            let mut input = json!({ "path": path, "changes": changes });
+            if let Some(expected_hash) = expected_hash {
+                input["expected_hash"] = json!(expected_hash);
+            }
+            catalogue.set_take_over(take_over);
+            let edited = catalogue.call("edit_model", input).map_err(|mut error| {
+                if error.kind == crabsim_catalogue::ErrorKind::NotEditor {
+                    error.message += ". Or give --take-over to make this one change while the agent keeps its right";
+                }
+                error
+            })?;
+            print!("{}", tables::edited(&edited));
+            Ok(true)
+        }),
+        Some(Command::Attributes { models, path, name, class }) => catalogue(&models).and_then(|catalogue| {
+            let target = if class { json!({ "class": name }) } else { json!({ "instance": name }) };
+            let got = catalogue.call("get_attributes", json!({ "path": path, "target": target }))?;
+            print!("{}", tables::attributes(&name, &got));
+            Ok(true)
+        }),
+        Some(Command::Adopt { models, path }) => catalogue(&models).and_then(|catalogue| {
+            let adopted = catalogue.call("adopt_model", json!({ "path": path }))?;
+            print!("{}", tables::adopted(&adopted));
+            Ok(true)
+        }),
+        Some(Command::Queue { action }) => queue(action),
     };
     match outcome {
         Ok(true) => ExitCode::SUCCESS,
@@ -152,6 +288,41 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// The user's controls of the edit queue, each one operation, then the queue as it is after.
+fn queue(action: QueueAction) -> Result<bool, OperationError> {
+    let (models, operation, input, path) = match action {
+        QueueAction::Show { models, path } => {
+            let input = path.as_ref().map_or_else(|| json!({}), |path| json!({ "path": path }));
+            let catalogue = catalogue(&models)?;
+            let queue = catalogue.call("get_edit_queue", input)?;
+            print!("{}", tables::queue(&queue));
+            return Ok(true);
+        }
+        QueueAction::Take { models, path } => (models, "take_model", json!({ "path": path }), path),
+        QueueAction::Release { models, path } => (models, "release_model", json!({ "path": path }), path),
+        QueueAction::Give { models, path, agent } => (models, "give_model", json!({ "path": path, "agent": agent }), path),
+        QueueAction::Move { models, path, agent, place } => (models, "move_in_queue", json!({ "path": path, "agent": agent, "place": place }), path),
+        QueueAction::Remove { models, path, agent } => (models, "remove_from_queue", json!({ "path": path, "agent": agent }), path),
+        QueueAction::Block { models, agent } => {
+            let catalogue = catalogue(&models)?;
+            catalogue.call("block_agent", json!({ "agent": agent }))?;
+            println!("{agent} is blocked from changing models in this folder");
+            return Ok(true);
+        }
+        QueueAction::Unblock { models, agent } => {
+            let catalogue = catalogue(&models)?;
+            catalogue.call("unblock_agent", json!({ "agent": agent }))?;
+            println!("{agent} may claim and change models again");
+            return Ok(true);
+        }
+    };
+    let catalogue = catalogue(&models)?;
+    catalogue.call(operation, input)?;
+    let queue = catalogue.call("get_edit_queue", json!({ "path": path }))?;
+    print!("{}", tables::queue(&json!({ "files": [{ "path": path, "editor": queue["editor"], "queue": queue["queue"] }], "blocked": queue["blocked"] })));
+    Ok(true)
 }
 
 fn catalogue(models: &std::path::Path) -> Result<Catalogue, OperationError> {

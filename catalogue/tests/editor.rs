@@ -288,3 +288,17 @@ fn write_model_and_delete_model_follow_the_same_rules() {
     b.ok("validate_model", json!({ "path": "line.json" }));
     b.ok("copy_model", json!({ "from": "line.json", "to": "copy.json" }));
 }
+
+#[test]
+fn a_take_over_lets_the_user_change_past_an_agent_which_keeps_its_right() {
+    let folder = Folder::new("take-over");
+    let (a, b, user) = (folder.agent(), folder.agent(), folder.user());
+    a.claim("working");
+    assert_eq!(user.change().unwrap_err()["kind"], "not_editor");
+    user.catalogue.set_take_over(true);
+    user.change().unwrap();
+    assert_eq!(user.queue()["editor"]["agent"], a.id(), "the agent keeps its right");
+    a.change().unwrap();
+    b.catalogue.set_take_over(true);
+    assert_eq!(b.change().unwrap_err()["kind"], "not_editor", "an agent can't take over");
+}

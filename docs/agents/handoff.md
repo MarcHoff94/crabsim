@@ -1,6 +1,6 @@
 # crabsim handoff
 
-Written 2026-11-07 at the end of a working session, and updated the same day after the UI design session, after steps 1 to 5 of the UI's order of work, and after MCP v1 was merged. Read this first, then check it against the code and git, because it describes a moment in time.
+Written 2026-11-07 at the end of a working session, and updated the same day after the UI design session, after steps 1 to 5 of the UI's order of work, and after MCP v1 was merged, then on 2026-11-08 after slice 2's design round. Read this first, then check it against the code and git, because it describes a moment in time.
 
 **The UI's order of work is done.** UI stage 1 was built in four slices, PRs 24 to 27: the demo drawn live with state colours and MUs, pan and zoom, the run controls, speed, time mode, stepping, going back to a time, the error banner, the inspector, interventions on Stations and their marks. Step 7 trimmed the CLI to a headless run of the demo, in PR 30. Next is model as data with the JSON model file and MCP v1: see "AI-native" and "Possible next steps".
 
@@ -8,24 +8,26 @@ Written 2026-11-07 at the end of a working session, and updated the same day aft
 
 **MCP v1, slice 1 of [spec issue 37](https://github.com/MarcHoff94/crabsim/issues/37), is merged:** the operation catalogue with model file operations and the SQLite results store (PR 39), runs as jobs with results and the CLI's subcommands (PR 40), and the MCP server (PR 41). Then PR 42 marked runs interrupted when their process ends first. The design is in `docs/design/operation-catalogue.md`, and SQLite as the store in ADR 0010. Issue 37's status section records what was settled while building. See "AI-native" below, and "Possible next steps".
 
+**Next: slice 2 of the catalogue, [spec issue 45](https://github.com/MarcHoff94/crabsim/issues/45),** designed with the owner on 2026-11-08 after a first trial of `crabsim-mcp` over stdio, which found a schema bug (fixed in PR 44) and results too large for a harness. Slice 2 is `edit_model` and `get_attributes`, an editor per model file with an edit queue the user controls, changes from outside detected and adopted, and the trial's fixes. Models now change only through crabsim's operations (ADR 0011, replacing that point of ADR 0007). Build it in four PRs, starting with the trial's fixes, then try `crabsim-mcp` from a real harness.
+
 ## Start here
 
 1. Read `CLAUDE.md`.
 2. Read `GLOSSARY.md` and `docs/adr/`.
 3. Read "Agreed design" below. Most of it isn't recorded anywhere else.
 4. Read "UI design" below, ADR 0006 and `docs/design/ui-prototype.md` when working on the UI.
-5. For the next step, read "AI-native" below, ADR 0007 to 0010, `docs/design/model-file.md`, `docs/design/operation-catalogue.md`, and spec issues 28 and 37 (`gh issue view 28`). Then go on from "Possible next steps".
+5. For the next step, read "AI-native" below, ADR 0007 to 0011, `docs/design/model-file.md`, `docs/design/operation-catalogue.md`, and spec issues 28, 37 and 45 (`gh issue view 45`). Then go on from "Possible next steps".
 
 ## Current state
 
-Checked on 2026-11-07, on Rust 1.99.1, on the branch of PR 42, which is what `master` now holds: all 382 tests of the default members pass (engine, `crabsim-model`, `crabsim-catalogue` and `crabsim-cli`), with 2 ignored: the long run, and the test that writes the schema file again (`cargo test --all-targets`). The MCP server's 2 tests pass (`cargo test -p crabsim-mcp`). The UI's 55 tests passed when last run (`cargo test -p crabsim-ui --profile ui`).
+Checked on 2026-11-08, on Rust 1.99.1, on the branch of PR 44, which is what `master` now holds: all 383 tests of the default members pass (engine, `crabsim-model`, `crabsim-catalogue` and `crabsim-cli`), with 2 ignored: the long run, and the test that writes the schema file again (`cargo test --all-targets`). The MCP server's 2 tests pass (`cargo test -p crabsim-mcp`). The UI's 55 tests passed when last run (`cargo test -p crabsim-ui --profile ui`).
 
 | Where | State |
 |---|---|
 | `master` on GitHub | Steps 1 to 6 of the build order, all of the UI's order of work, steps 1 and 2 of the AI-native order of work, and slice 1 of its steps 3 and 4 (MCP v1), through PR 42 (`a6a2db7`), with this handoff once its PR is merged |
 | `prototype/restore-replay` | The throwaway prototype from build step 5. Keep it, and never merge it |
 | `prototype/ui-bevy` | The throwaway UI prototype from UI step 2, with temporary counters in the session. Keep it, and never merge it |
-| Merged branches still on GitHub | `docs/catalogue-handoff`, `feat/operation-catalogue`, `feat/runs-as-jobs`, `feat/mcp-server`, `feat/interrupted-runs`, and the older `feat/headless-cli` and `feat/model-schema`. All merged: safe to delete |
+| Merged branches still on GitHub | `docs/catalogue-handoff`, `feat/operation-catalogue`, `feat/runs-as-jobs`, `feat/mcp-server`, `feat/interrupted-runs`, `fix/validate-model-schema`, and the older `feat/headless-cli` and `feat/model-schema`. All merged: safe to delete |
 | Worktree | `crabsim-catalogue`, beside the repository, where MCP v1 was built. Remove it with `git worktree remove ../crabsim-catalogue` once nothing in it is needed |
 
 The owner merges PRs on GitHub themselves, so fetch before assuming local `master` is current. The repo has no CI, so a local test run is the only check.
@@ -37,6 +39,7 @@ The owner merges PRs on GitHub themselves, so fetch before assuming local `maste
 - **2026-11-07:** the UI was designed in a grilling session, with technology research, and the target scale went up to 6,000 objects. Then steps 1 to 5 of the UI's order of work were built: Rust 1.99.1 and a new baseline, the Bevy prototype, ADR 0006, the workspace and the Picture, and the engine additions for stage 1. The prototype found a live-session bug that lost about 30% of shown time at high load, fixed in PR 19. After trying the prototype, the owner decided MUs move instantly in the UI. See "UI design". Later that day, AI-native became the second design pillar, in another grilling session. See "AI-native".
 - **2026-11-07, later:** the owner tried the UI and found the step-back warning asked on every step, fixed in PR 32. Then issue 28's first steps: the `SessionOutput` rename, the model file designed in a round and built in three slices, and a design round for the operation catalogue and MCP v1, written up as spec issue 37.
 - **2026-11-07, at night:** slice 1 of issue 37 was built test-first through `call(name, JSON)` in three stacked PRs, 39 to 41, each test checked to be able to fail. The owner then asked how runs left by a crashed process get cleaned up, chose lock files and an `interrupted` state in a short round, and that was PR 42.
+- **2026-11-08:** `crabsim-mcp` was driven over stdio as a harness drives it, on a models folder outside the repository (`C:\Users\marcu\crabsim-models`). Everything worked, but `validate_model`'s schema required `text` (fixed in PR 44, with a test that every operation's shortest input passes its schema), `run_results` grew to 162 KB for 100 observations, and the tool list cost about 46 KB. The owner then held slice 2's design round before the harness trial, written up as spec issue 45, with ADR 0011 and the glossary's User, Editor and Edit queue.
 
 ## Agreed design
 
@@ -282,7 +285,7 @@ Decided with the owner on 2026-11-07, in a grilling session. AI-native is the se
 ### Decided
 - **The pillar:** anything a person can do with crabsim, an AI agent can do too: build a model, run it, read the results, manage models. It's a guideline like performance, and comes second to it.
 - **One operation catalogue,** in Rust, with typed inputs and outputs and descriptions, offered through front-ends (ADR 0007). The MCP server is the first front-end and the starting point. In-app agents and skills, which call the user's own LLM endpoint with the user's tokens, come second, on the same catalogue.
-- **Models are readable text files** that agents may write directly, with operations to validate, run and read them. This pulls the model file format forward. Changing a model through operations, for example in an open UI, is also wanted, as the alternative when rebuilding from the file would cost too much. The file comes first.
+- **Models are readable text files,** changed only through crabsim's operations: in the UI, the user's main way, in the CLI, or through an agent's harness (ADR 0011, decided on 2026-11-08, replacing the earlier decision that agents write files with their own tools). The user controls who edits: see "Catalogue slice 2" below.
 - **MCP v1:** validate a model file with precise errors, a headless run with seed, length and optional warm-up, the observations of one experiment, and each object's statistics. Live-session control comes later. Designed in detail in spec issue 37: see "Operation catalogue and MCP v1" below.
 - **Where:** a standalone `crabsim-mcp` crate over stdio, a non-default workspace member, so the engine never depends on it. The server inside the UI app, so the owner can watch an agent work, comes later as another front-end.
 - **No LLM inside a simulation run** by default. The owner wants AI decisions inside a run as a later opt-in that accepts its cost. The concerns are in `docs/design/ai-decisions-in-runs.md`.
@@ -315,6 +318,18 @@ Decided with the owner on 2026-11-07 in a design round, and written up as [spec 
 - **Interrupted runs:** a run whose process ended first is marked `interrupted`, found through the lock file each catalogue holds in `.crabsim/processes/` (tables version 2). Agreed with the owner on 2026-11-07 after slice 1.
 - **Known limits:** only the process that started a run can cancel it. `list_models` doesn't follow links into folders. Statistics come from what today's objects keep, so Buffers and per-MU figures wait for later.
 - **Later slices of the catalogue:** 2, building and attributes; 3, `describe_model`, the graph operations and exports. Then skills, experiments and studies, and live-session operations.
+
+### Catalogue slice 2 (designed, not built)
+
+Decided with the owner on 2026-11-08 in a design round of six rounds, and written up as [spec issue 45](https://github.com/MarcHoff94/crabsim/issues/45) with user stories, every decision and the test seams. ADR 0011 holds the decisions that are hard to reverse. The short version:
+
+- **`edit_model { path, changes, expected_hash? }`:** a batch of typed changes to a model file, all or nothing, checked once at the end, refused with every problem if the result is invalid. Instances, connections, classes, attributes and the model's description. `remove_class` is refused while anything depends on it unless `delete_dependents: true`. **`get_attributes`** gives every attribute with its value and origin. Files by path, no interventions yet.
+- **The editor:** one per model file. Agents `claim_model` with a required purpose and wait in the edit queue, polling for now. A one-off change goes through when nobody holds or waits. An agent's right ends on release, when its process ends, or after 10 idle minutes.
+- **The user controls the queue,** in the UI and the CLI, never over MCP: take the right at once, give it, choose who is next, remove, block and unblock an agent session. The user never waits and never times out. This is the AI-native pillar's first deliberate exception.
+- **One person's front-end per models folder:** one UI window, holding `.crabsim/user.lock`. A second window means an independent copy of the folder. While the UI has it, the CLI can only read and run.
+- **Changes from outside** crabsim, or files it has no record of, need `adopt_model` before crabsim changes them.
+- **The trial's fixes:** `run_results` without per-observation values by default, `model_file_format` instead of three copies of the schema, `start_run` defaulting to seed 0 and 10 observations.
+- **The CLI:** `edit`, `attributes`, `adopt` and the queue controls.
 
 ### Classes (decided, not built)
 The owner wants models built in the UI later, by drag and drop, by setting values, and by deriving a class from an existing one or duplicating it and changing it. The terms are in `GLOSSARY.md`: class, instance, derived class, duplicate, inheritance. Class and instance are the words the UI uses too, because users know that much programming.
@@ -359,7 +374,9 @@ An agent should never need to read a whole model: a model of 6,000 objects is pr
 - The MCP server inside the UI, so the owner can watch an agent work.
 - Changing a model's structure during a run.
 - AI decisions inside a run (`docs/design/ai-decisions-in-runs.md`).
-- Shared class libraries and how they're versioned.
+- Shared class libraries and how they're versioned, together with a class library and explorer in the UI, with folders, deriving and duplicating there: its own design round.
+- A built-in crabsim agent the user can opt in to give control of the edit queue, which knows the overall task, delegates to subagents and manages their access to the model, perhaps to parts of it. It would bring the queue's control back in line with the AI-native pillar.
+- The edit queue notifying a waiting agent instead of being polled: a `claim_model` call that stays open with progress notifications, or MCP resource subscriptions.
 - Sub-models: classes made of several objects.
 
 JSON is the only model file format: YAML is out.
@@ -395,7 +412,7 @@ Done on 2026-11-07: the wiki was rewritten against today's code, with four pages
 
 ## Possible next steps
 
-1. **Try `crabsim-mcp` from a real harness,** such as Claude Code, on a models folder outside the repository. Nothing has driven it yet but its end-to-end test, so this is the first check that the descriptions and results suit an agent.
-2. **Slice 2 of the catalogue:** building and attribute operations, as issue 37's Out of Scope lists them. Then slice 3, `describe_model`, graph operations and exports, then crabsim's first skills, as issue 28's order of work says. Each slice wants its own design round first.
-3. Issue 28's step 2 left the benchmark's 6,006-object model built in code rather than as a file, which needs unique names for the 429 copies.
+1. **Slice 2 of the catalogue, [spec issue 45](https://github.com/MarcHoff94/crabsim/issues/45),** in its four PRs: the trial's fixes first, then `edit_model` and `get_attributes` with the benchmark's model as a file, then the editor and edit queue, then the CLI.
+2. **Try `crabsim-mcp` from a real harness,** such as Claude Code, on `C:\Users\marcu\crabsim-models`, after slice 2's first PR, so it runs on the smaller results. Register a copy of the binary rather than the one in `target/`, which a running server locks on Windows. Check what the harness does with MCP progress notifications and resource subscriptions, for the queue's notifications.
+3. Slice 3, `describe_model`, graph operations and exports, then crabsim's first skills, as issue 28's order of work says, each with its own design round first.
 4. Step 7 of the build order.

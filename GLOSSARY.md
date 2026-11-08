@@ -275,8 +275,19 @@ Keeping the occurrences of chosen kinds from a simulation run. It is opt-in, and
 An AI that uses crabsim through its operations, either from a harness outside crabsim, such as a coding assistant, or inside crabsim itself. It acts from outside a simulation run, as a person does.
 
 **Operation**:
-One thing crabsim can do for a person or an agent, such as validating a model or starting a simulation run. Anything a person can do is an operation an agent can use too.
+One thing crabsim can do for a person or an agent, such as validating a model or starting a simulation run. Anything a person can do is an operation an agent can use too. Several changes to one model, such as adding an instance and connecting it, can be made together as one operation, all or nothing.
 _Avoid_: Tool (the word one agent protocol uses for an operation), command (what a live session takes)
+
+**Editor**:
+The user or the one agent currently allowed to change a model file through crabsim's operations. The user can take the editor right at any time. An agent must say what it means to do, and a change asked for by any other agent waits in the edit queue, unless nobody holds or waits for that file.
+_Avoid_: Lock, owner, text editor (a program such as a code editor)
+
+**Edit queue**:
+The agents waiting to become a model file's editor. They come first come, first served unless the user chooses who is next, and the user can remove or block any of them. The editor right passes on when the editor finishes, ends or stays inactive for too long.
+
+**User**:
+The one person working with a models folder, through either the UI or the CLI, who controls its edit queue. Only one UI can have a models folder open at a time: working in a second window means working on an independent copy of the folder.
+_Avoid_: Agent (never a user)
 
 **Models folder**:
 The one folder whose model files crabsim's operations may touch, given when the MCP server or the CLI starts. It also holds crabsim's own `.crabsim` folder, with the results store. A folder holding source code is refused.

@@ -193,7 +193,7 @@ impl Catalogue {
                 }
                 Asker::Agent(process)
             }
-            Source::Cli => Asker::User,
+            Source::Cli | Source::Ui => Asker::User,
         };
         let mut editing = Editing { held, asker, now, key: None, take_over: self.take_over() };
         editing.sweep(&crabsim_folder, self.edit_timeout());
@@ -530,6 +530,7 @@ impl Operation for AdoptModel {
     const NAME: &'static str = "adopt_model";
     const DESCRIPTION: &'static str = "Accepts a model file as it is now, after it was changed outside crabsim, such as by a text editor, a harness's own file tools or git, or when crabsim never saved it. Until then crabsim reads and runs it but won't change it, refusing with changed_outside, so that an outside change is never overwritten or taken in by accident. Look at the file with read_model first, or, for a copy, compare its file_hash with one you trust, such as its source's. It changes nothing in the file, follows the same editor rules as a change, and gives the file's problems, if any: an invalid file is adopted too, so write_model can fix it.";
     const EFFECT: Effect = Effect::Additive;
+    const CHANGES_MODELS: bool = true;
     type Input = PathInput;
     type Output = AdoptModelOutput;
 
@@ -577,6 +578,7 @@ impl Operation for ClaimModel {
     const NAME: &'static str = "claim_model";
     const DESCRIPTION: &'static str = "Asks for the right to change a model file, for several changes in a row: only its editor may change it, through edit_model, write_model or delete_model. Say in `purpose` what you mean to do: the user sees it. Gives `granted`, or `queued` with your place: then ask again from time to time, which keeps your place, until it's granted. The right lasts while you use it, renewed by every change and every claim, and passes on when you call release_model, after 10 minutes without use, or when your session ends. A queued place you don't ask for in as long is dropped too. The user can take the right from you, give it to someone else, reorder the queue or block you, at any time. A single change to a file nobody holds or waits for needs no claim.";
     const EFFECT: Effect = Effect::Additive;
+    const CHANGES_MODELS: bool = true;
     type Input = ClaimModelInput;
     type Output = ClaimModelOutput;
 
@@ -635,6 +637,7 @@ impl Operation for ReleaseModel {
     const NAME: &'static str = "release_model";
     const DESCRIPTION: &'static str = "Gives back the right to change a model file, or your place in its queue, so the next waiting gets it. Call it when you're done changing a file you claimed.";
     const EFFECT: Effect = Effect::Additive;
+    const CHANGES_MODELS: bool = true;
     type Input = PathInput;
     type Output = ReleaseModelOutput;
 
@@ -749,6 +752,7 @@ impl Operation for TakeModel {
     const NAME: &'static str = "take_model";
     const DESCRIPTION: &'static str = "For the user: takes the right to change a model file now, from any agent that holds it, which isn't queued again. The user's right never runs out: release_model gives it back to the first waiting agent.";
     const EFFECT: Effect = Effect::Additive;
+    const CHANGES_MODELS: bool = true;
     const USER_ONLY: bool = true;
     type Input = TakeModelInput;
     type Output = QueueOutput;
@@ -780,6 +784,7 @@ impl Operation for GiveModel {
     const NAME: &'static str = "give_model";
     const DESCRIPTION: &'static str = "For the user: gives the right to change a model file to an agent waiting for it, now, whoever held it. The one who held it isn't queued again.";
     const EFFECT: Effect = Effect::Additive;
+    const CHANGES_MODELS: bool = true;
     const USER_ONLY: bool = true;
     type Input = AgentInFileInput;
     type Output = QueueOutput;
@@ -821,6 +826,7 @@ impl Operation for MoveInQueue {
     const NAME: &'static str = "move_in_queue";
     const DESCRIPTION: &'static str = "For the user: moves an agent waiting for a model file to another place in its queue, 0 first, as dragging it in a list does. The others keep their order.";
     const EFFECT: Effect = Effect::Additive;
+    const CHANGES_MODELS: bool = true;
     const USER_ONLY: bool = true;
     type Input = MoveInQueueInput;
     type Output = QueueOutput;
@@ -854,6 +860,7 @@ impl Operation for RemoveFromQueue {
     const NAME: &'static str = "remove_from_queue";
     const DESCRIPTION: &'static str = "For the user: takes an agent out of a model file's queue, or, if it's the editor, takes its right away, which passes to the first waiting. It may claim again.";
     const EFFECT: Effect = Effect::Additive;
+    const CHANGES_MODELS: bool = true;
     const USER_ONLY: bool = true;
     type Input = AgentInFileInput;
     type Output = QueueOutput;
@@ -912,6 +919,7 @@ impl Operation for BlockAgent {
     const NAME: &'static str = "block_agent";
     const DESCRIPTION: &'static str = "For the user: blocks an agent session from changing models in this folder. It loses any right it holds and its places in queues, and every claim or change it makes is refused as blocked, until unblock_agent or the end of its session.";
     const EFFECT: Effect = Effect::Additive;
+    const CHANGES_MODELS: bool = true;
     const USER_ONLY: bool = true;
     type Input = AgentInput;
     type Output = BlockOutput;
@@ -926,6 +934,7 @@ impl Operation for UnblockAgent {
     const NAME: &'static str = "unblock_agent";
     const DESCRIPTION: &'static str = "For the user: lets a blocked agent claim and change models again. It gets back no right or place it lost.";
     const EFFECT: Effect = Effect::Additive;
+    const CHANGES_MODELS: bool = true;
     const USER_ONLY: bool = true;
     type Input = AgentInput;
     type Output = BlockOutput;

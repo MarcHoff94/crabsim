@@ -30,6 +30,9 @@ pub enum ErrorKind {
     ChangedOutside,
     /// The file isn't the version `expected_hash` names any more: read it again.
     Conflict,
+    /// A crabsim window has the models folder open, so it alone changes models and the edit queue
+    /// there, and no second window may open it.
+    FolderInUse,
 }
 
 /// One thing wrong with a model, as `crabsim-model` reports it.

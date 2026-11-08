@@ -250,6 +250,7 @@ impl Operation for WriteModel {
     const NAME: &'static str = "write_model";
     const DESCRIPTION: &'static str = "Saves a whole model file in the models folder, such as a new model. A file already at the path is refused unless `overwrite` is true: to change a model, edit_model is usually better. A valid model is saved in crabsim's canonical form. A model with problems is saved exactly as given, so work in progress isn't lost, and its problems come back to fix. Only the file's editor may replace it (claim_model), not a file changed outside crabsim until adopt_model, and with `expected_hash` only the version you read.";
     const EFFECT: Effect = Effect::Destructive;
+    const CHANGES_MODELS: bool = true;
     type Input = WriteModelInput;
     type Output = WriteModelOutput;
 
@@ -308,6 +309,7 @@ impl Operation for CopyModel {
     const NAME: &'static str = "copy_model";
     const DESCRIPTION: &'static str = "Copies a model file in the models folder to a new path there, such as to start a variant. Never overwrites: refused if the target already exists. A copy of a file changed outside crabsim is too, as `changed_outside` says, and needs adopt_model before crabsim changes it.";
     const EFFECT: Effect = Effect::Additive;
+    const CHANGES_MODELS: bool = true;
     type Input = CopyModelInput;
     type Output = CopyModelOutput;
 
@@ -353,6 +355,7 @@ impl Operation for DeleteModel {
     const NAME: &'static str = "delete_model";
     const DESCRIPTION: &'static str = "Deletes a model file in the models folder. Files only, never folders. Results of runs of it stay in the results store. Only the file's editor may delete it (claim_model), and not a file changed outside crabsim until adopt_model.";
     const EFFECT: Effect = Effect::Destructive;
+    const CHANGES_MODELS: bool = true;
     type Input = PathInput;
     type Output = DeleteModelOutput;
 

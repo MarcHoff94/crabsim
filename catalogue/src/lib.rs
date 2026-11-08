@@ -13,6 +13,10 @@
 //! What crabsim's operations touch: only `.json` model files inside one models folder, and
 //! crabsim's own `.crabsim` folder there, which holds the results store. Never crabsim's code,
 //! never commands, never the network.
+//!
+//! The user works through the UI or the CLI, and only one at a time changes a folder's models: a
+//! UI's catalogue holds an OS lock on `.crabsim/user.lock` while it lives, a second UI is refused,
+//! and the CLI may only read and run meanwhile (ADR 0011).
 
 mod compare;
 mod edit;
@@ -54,6 +58,8 @@ pub trait Operation {
     /// Only for the user, through the UI or the CLI, such as controlling the edit queue: the MCP
     /// server doesn't offer it, and the catalogue refuses it to an agent (ADR 0011).
     const USER_ONLY: bool = false;
+    /// Changes a model file or the edit queue, which the CLI is refused while a UI has the folder.
+    const CHANGES_MODELS: bool = false;
     /// Always a JSON object.
     type Input: DeserializeOwned + JsonSchema;
     /// Always a JSON object.
@@ -92,6 +98,7 @@ type Handler = fn(&Catalogue, Value) -> Result<Value, OperationError>;
 
 struct Entry {
     info: OperationInfo,
+    changes_models: bool,
     handler: Handler,
 }
 
@@ -105,6 +112,7 @@ fn entry<O: Operation>() -> Entry {
             input_schema: schema_for::<O::Input>(Nulls::Refuse),
             output_schema: schema_for::<O::Output>(Nulls::Allow),
         },
+        changes_models: O::CHANGES_MODELS,
         handler: |catalogue, input| {
             let input: O::Input = serde_json::from_value(input)
                 .map_err(|error| OperationError::invalid_input(format!("the input to `{}` doesn't fit: {error}", O::NAME)))?;
@@ -176,6 +184,8 @@ pub enum Source {
     Mcp,
     /// A person through the command line.
     Cli,
+    /// A person through the UI, which holds the models folder while it is open.
+    Ui,
 }
 
 impl Source {
@@ -183,9 +193,18 @@ impl Source {
         match self {
             Source::Mcp => "mcp",
             Source::Cli => "cli",
+            Source::Ui => "ui",
         }
     }
+
+    /// The user, through the UI or the CLI, rather than an agent.
+    pub fn is_user(self) -> bool {
+        self != Source::Mcp
+    }
 }
+
+/// The file in `.crabsim` a UI holds an OS lock on while it has the models folder open.
+pub const USER_LOCK_FILE: &str = "user.lock";
 
 /// How to open a catalogue.
 #[derive(Debug, Clone)]
@@ -219,6 +238,9 @@ pub struct Catalogue {
     client_name: Mutex<String>,
     /// For the user: changes go through even while an agent holds the right, which keeps it.
     take_over: std::sync::atomic::AtomicBool,
+    /// A UI's hold on the models folder, released when the catalogue is dropped or the process
+    /// ends however it does.
+    _user_lock: Option<std::fs::File>,
     /// This process's lock, taken with the store. Last, so it is dropped last: until its jobs have
     /// stopped, no other process may take their runs for interrupted.
     process: std::sync::OnceLock<process::ProcessLock>,
@@ -226,9 +248,11 @@ pub struct Catalogue {
 
 impl Catalogue {
     /// The catalogue on a models folder. Refused if the folder can't be opened or holds source
-    /// code: see [`ModelsFolder::open`].
+    /// code: see [`ModelsFolder::open`]. A UI's catalogue holds the folder, and is refused with
+    /// `folder_in_use` if another UI already does.
     pub fn open(settings: Settings) -> Result<Catalogue, OperationError> {
         let folder = ModelsFolder::open(&settings.models)?;
+        let user_lock = if settings.source == Source::Ui { Some(hold_folder(&folder)?) } else { None };
         let threads = settings.threads.unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |cores| cores.get()));
         let jobs = jobs::Jobs::new(folder.crabsim_folder(), threads);
         Ok(Catalogue {
@@ -240,6 +264,7 @@ impl Catalogue {
             edit_timeout: settings.edit_timeout,
             client_name: Mutex::new("an agent".to_string()),
             take_over: std::sync::atomic::AtomicBool::new(false),
+            _user_lock: user_lock,
             process: std::sync::OnceLock::new(),
         })
     }
@@ -258,6 +283,12 @@ impl Catalogue {
         if entry.info.user_only && self.source == Source::Mcp {
             return Err(OperationError::invalid_input(format!("`{name}` is only for the user, through the UI or the CLI")));
         }
+        if entry.changes_models && self.source == Source::Cli && ui_holds(&self.folder) {
+            return Err(OperationError::new(
+                ErrorKind::FolderInUse,
+                format!("a crabsim window has this models folder open, so `{name}` is refused here: change models and the edit queue in the window. Reading and running work here"),
+            ));
+        }
         (entry.handler)(self, input)
     }
 
@@ -275,7 +306,7 @@ impl Catalogue {
     }
 
     pub(crate) fn take_over(&self) -> bool {
-        self.source == Source::Cli && self.take_over.load(std::sync::atomic::Ordering::Relaxed)
+        self.source.is_user() && self.take_over.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub(crate) fn client_name(&self) -> String {
@@ -339,6 +370,32 @@ impl Catalogue {
         store.sweep(self.process_id())?;
         Ok(store)
     }
+}
+
+/// Takes the models folder for a UI: an OS lock on `.crabsim/user.lock`, released however the
+/// process ends.
+fn hold_folder(folder: &ModelsFolder) -> Result<std::fs::File, OperationError> {
+    let crabsim = folder.crabsim_folder();
+    let fail = |error: std::io::Error| OperationError::run_error(format!("the models folder can't be held for this window: {error}"));
+    std::fs::create_dir_all(&crabsim).map_err(fail)?;
+    let file = std::fs::File::options().create(true).truncate(false).write(true).open(crabsim.join(USER_LOCK_FILE)).map_err(fail)?;
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(std::fs::TryLockError::WouldBlock) => Err(OperationError::new(
+            ErrorKind::FolderInUse,
+            "another crabsim window has this models folder open. Open a copy of the folder to work on a variant",
+        )),
+        Err(std::fs::TryLockError::Error(error)) => Err(fail(error)),
+    }
+}
+
+/// Whether a UI has the models folder open. If the lock can't be tested, no UI counts as holding
+/// it, so the CLI is never refused by mistake.
+fn ui_holds(folder: &ModelsFolder) -> bool {
+    let Ok(file) = std::fs::File::options().write(true).open(folder.crabsim_folder().join(USER_LOCK_FILE)) else {
+        return false;
+    };
+    matches!(file.try_lock(), Err(std::fs::TryLockError::WouldBlock))
 }
 
 /// The results store, held for one operation.

@@ -507,3 +507,23 @@ fn export_writes_a_model_into_exports_and_says_where() {
     let refused = crabsim(&["export", "--models", models.arg(), "--model", "demo.json", "--format", "dot"]);
     assert!(!refused.status.success());
 }
+
+#[test]
+fn while_a_window_has_the_folder_the_cli_reads_and_runs_but_changes_nothing() {
+    let models = Models::new("ui-holds");
+    std::fs::write(models.0.join("changes.json"), r#"[{ "change": "move_instance", "name": "Drain", "position": { "x": 30, "y": 0 } }]"#).unwrap();
+    ok(&["adopt", "--models", models.arg(), "demo.json"]);
+    let window = crabsim_catalogue::Catalogue::open(crabsim_catalogue::Settings::new(&models.0, crabsim_catalogue::Source::Ui)).unwrap();
+
+    let changes = models.0.join("changes.json");
+    let edit = crabsim(&["edit", "--models", models.arg(), "demo.json", changes.to_str().unwrap()]);
+    assert!(!edit.status.success());
+    assert!(stderr(&edit).contains("window"), "{}", stderr(&edit));
+    let take = crabsim(&["queue", "take", "--models", models.arg(), "demo.json"]);
+    assert!(!take.status.success() && stderr(&take).contains("window"), "{}", stderr(&take));
+    ok(&["attributes", "--models", models.arg(), "demo.json", "Station 1"]);
+    ok(&["describe", "--models", models.arg(), "--model", "demo.json"]);
+
+    drop(window);
+    ok(&["edit", "--models", models.arg(), "demo.json", changes.to_str().unwrap()]);
+}

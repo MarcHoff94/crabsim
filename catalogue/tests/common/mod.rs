@@ -166,6 +166,24 @@ pub fn write_models(folder: &TempFolder) {
     folder.write("small.json", SMALL);
     folder.write("loop.json", LOOP);
     folder.write("long-line.json", &long_line());
+    folder.write("wide-line.json", &wide_line());
+}
+
+/// 28 objects, more than a summary shows whole: a Source, 25 Stations in a row where W5, W12 and
+/// W20 fail far more often than the rest, a slow last Station and a Drain.
+pub fn wide_line() -> String {
+    let mut instances = vec![r#"{"name":"In","class":"Source","successors":["W1"],"attributes":{"interval":"2"}}"#.to_string()];
+    for n in 1..=25 {
+        let next = if n == 25 { "Slow".to_string() } else { format!("W{}", n + 1) };
+        let class = if [5, 12, 20].contains(&n) { "Weak" } else { "Sturdy" };
+        instances.push(format!(r#"{{"name":"W{n}","class":"{class}","successors":["{next}"],"attributes":{{"process_time":"{}"}}}}"#, 1 + n % 3));
+    }
+    instances.push(r#"{"name":"Slow","class":"Station","successors":["Out"],"attributes":{"process_time":"9"}}"#.to_string());
+    instances.push(r#"{"name":"Out","class":"Drain"}"#.to_string());
+    let class = |name: &str, availability: f64| {
+        format!(r#"{{"name":"{name}","parent":"Station","attributes":{{"failures":{{"availability":{availability},"repair_time":{{"erlang":{{"mean":"1:00","k":2}}}}}}}}}}"#)
+    };
+    format!(r#"{{"format_version":1,"classes":[{},{}],"instances":[{}]}}"#, class("Weak", 0.6), class("Sturdy", 0.97), instances.join(","))
 }
 
 /// MUs pass a Gate that often fails, and an MU through it reaches two dummy Stations that pass

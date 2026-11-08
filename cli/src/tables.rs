@@ -61,10 +61,11 @@ fn amount(statistic: &str, value: &Value) -> String {
             let x = number.as_f64().unwrap_or_default();
             if statistic.ends_with("_share") || statistic == "availability" {
                 format!("{:.1} %", x * 100.0)
-            } else if x.fract() == 0.0 {
-                format!("{x:.0}")
+            } else if statistic.ends_with("_s") {
+                crabsim::time::format_time_exact(crabsim::SimTime::from_secs_f64(x))
             } else {
-                format!("{x:.2}")
+                // Results come rounded to 4 significant digits already.
+                format!("{x}")
             }
         }
         other => cell(other),
@@ -131,7 +132,7 @@ pub fn results(results: &Value) -> String {
         text += &format!("\n{} ({}, {}): {}\n", cell(&object["name"]), cell(&object["class"]), cell(&object["built_in_class"]), why.join(", "));
         let mut rows = Vec::new();
         for statistic in crabsim_catalogue::STATISTICS {
-            let key = if statistic == "mean_lead_time_s" { "mean_lead_time" } else { statistic };
+            let key = statistic;
             let Some(figure) = object["figures"].get(key) else { continue };
             let interval = match figure["ci95"].as_array() {
                 Some(bounds) => format!("{} to {}", amount(key, &bounds[0]), amount(key, &bounds[1])),

@@ -62,6 +62,34 @@ fn model_file_format_gives_the_model_files_own_schema_and_a_valid_canonical_exam
     assert!(!model.classes.is_empty(), "the example shows a derived class");
     let validator = jsonschema::validator_for(&format["schema"]).unwrap();
     assert!(validator.is_valid(&serde_json::from_str::<Value>(example).unwrap()), "the example passes the schema");
+    assert!(!format["schema"].to_string().contains("docs/"), "the schema points to nothing an agent can't reach");
+}
+
+/// The trial found an agent guessing how objects behave, so the format says it.
+#[test]
+fn model_file_format_explains_how_each_built_in_class_behaves() {
+    let setup = Setup::new("semantics");
+    let semantics = setup.ok("model_file_format", json!({}))["semantics"].as_str().unwrap().to_string();
+    for part in ["MU", "Source", "Station", "Buffer", "Drain", "round-robin", "blocked", "availability", "position"] {
+        assert!(semantics.contains(part), "the semantics don't mention {part}: {semantics}");
+    }
+}
+
+/// A harness may not show an operation's output schema to the model, so what an output means is
+/// in the description.
+#[test]
+fn descriptions_say_what_their_outputs_mean() {
+    let setup = Setup::new("descriptions");
+    let description = |name: &str| setup.catalogue.operations().find(|o| o.name == name).unwrap().description;
+    for (name, parts) in [
+        ("run_status", &["`here`"][..]),
+        ("run_results", &["added up", "`why`", "busiest", "20 or fewer", "mean_lead_time_s"][..]),
+        ("start_run", &["paired", "position", "10 observations"][..]),
+    ] {
+        for part in parts {
+            assert!(description(name).contains(part), "{name} doesn't say {part}: {}", description(name));
+        }
+    }
 }
 
 /// The model file's schema is about 7 KB, so it comes from `model_file_format` alone rather than

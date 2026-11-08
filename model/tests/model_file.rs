@@ -241,7 +241,7 @@ fn every_problem_comes_back_at_once_in_file_order() {
         vec![
             "/instances/0: a Source needs an `interval`: the time between creating an MU and offering it on. Set it on the instance or one of its classes",
             "/instances/0/successors/0: no instance is called `Nowhere`",
-            "/instances/1/attributes/proces_time: unknown attribute `proces_time`",
+            "/instances/1/attributes/proces_time: unknown attribute `proces_time`: did you mean `process_time`?",
             "/instances/1/attributes/starting_mus: a Station can start with 0 or 1 MUs, until Stations have a capacity",
             "/instances/2/name: instance 1 already has this name",
             "/instances/2/successors: a Drain takes MUs out of the model, so it can't have successors",
@@ -256,8 +256,52 @@ fn a_problem_names_its_instance_and_prints_on_one_line() {
     assert_eq!(problem.name.as_deref(), Some("Station 3"));
     assert_eq!(
         problem.to_string(),
-        "/instances/0/attributes/process_time \"Station 3\": \"1:75\" is not a time: write it as text, such as \"90\", \"1:30\", \"8:00:00\" or \"2d 06:00:00\""
+        "/instances/0/attributes/process_time \"Station 3\": \"1:75\" is not a time, which is written such as \"90\", \"1:30\", \"8:00:00\" or \"2d 06:00:00\""
     );
+}
+
+#[test]
+fn a_time_with_a_unit_letter_or_not_written_as_text_says_so() {
+    let text = file(json!([
+        { "name": "In", "class": "Source", "successors": ["Out"], "attributes": { "interval": "10s" } },
+        { "name": "Mill", "class": "Station", "attributes": { "process_time": 10 } },
+        { "name": "Out", "class": "Drain" },
+    ]));
+    assert_eq!(
+        found(&text),
+        vec![
+            "/instances/0/attributes/interval: \"10s\" is not a time: a time has no unit letters, apart from d for days, and is written such as \"10\", \"0:10\", \"8:00:00\" or \"2d 06:00:00\"",
+            "/instances/1/attributes/process_time: 10 is not a time: write it as text, such as \"90\", \"1:30\", \"8:00:00\" or \"2d 06:00:00\"",
+        ]
+    );
+}
+
+#[test]
+fn a_name_one_or_two_edits_from_a_known_one_gets_a_did_you_mean() {
+    let text = with_classes(
+        json!([
+            { "name": "CNC mill", "parent": "Statin" },
+        ]),
+        json!([
+            { "name": "In", "class": "Source", "succesors": ["Station 2"], "attributes": { "interval": "10" } },
+            { "name": "Station 2", "class": "Statoin", "successors": ["Out"] },
+            { "name": "Station 3", "class": "Station", "successors": ["Otu"], "attributes": { "proces_time": "10" } },
+            { "name": "Out", "class": "Drain" },
+        ]),
+    );
+    assert_eq!(
+        found(&text),
+        vec![
+            "/classes/0/parent: unknown class `Statin` (did you mean `Station`?): its attributes weren't checked",
+            "/instances/0/succesors: unknown field `succesors` in an instance: did you mean `successors`?",
+            "/instances/1/class: unknown class `Statoin` (did you mean `Station`?): its attributes weren't checked",
+            "/instances/2/attributes/proces_time: unknown attribute `proces_time`: did you mean `process_time`?",
+            "/instances/2/successors/0: no instance is called `Otu`: did you mean `Out`?",
+        ]
+    );
+    // Nothing close: no guess.
+    assert_found(&file(json!([{ "name": "M", "class": "Machine" }])), "/instances/0/class", "unknown class `Machine`: its attributes weren't checked");
+    assert!(!found(&file(json!([{ "name": "In", "class": "Source", "successors": ["Elsewhere"], "attributes": { "interval": "10" } }]))).iter().any(|problem| problem.contains("did you mean")));
 }
 
 #[test]
@@ -476,14 +520,14 @@ fn class_problems_are_reported_with_the_class() {
         vec![
             "/classes/0/parent: the classes derive from each other in a circle: Loop A \u{2192} Loop B \u{2192} Loop A",
             "/classes/1/parent: the classes derive from each other in a circle: Loop B \u{2192} Loop A \u{2192} Loop B",
-            "/classes/2/parent: unknown class `Nothing`",
+            "/classes/2/parent: unknown class `Nothing`: its attributes weren't checked",
             "/classes/3/name: `Station` is a built-in class",
             "/classes/3/parent: a class can't derive from itself",
             "/classes/4/attributes/process_time: a Drain has no attribute `process_time`",
             "/classes/5/name: class 4 already has this name",
             "/classes/6/attributes/failures/availability: an availability must be above 0 and below 1, not 1.5: leave out `failures` for one that never fails",
             "/classes/7/name: a name can't start or end with spaces",
-            "/instances/1/class: unknown class `Machine`",
+            "/instances/1/class: unknown class `Machine`: its attributes weren't checked",
         ]
     );
     assert_eq!(problems(&text)[0].name.as_deref(), Some("Loop A"));

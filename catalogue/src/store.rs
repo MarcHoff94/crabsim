@@ -75,7 +75,7 @@ macro_rules! tables_description {
             "runs(id TEXT such as 'run-3', model_path, model_text: the canonical model file the run used, model_hash: SHA-256 of model_text so equal hashes mean the same model, seed TEXT, length_s, warm_up_s, observations, label, source: 'mcp' or 'cli', crabsim_version, started and finished: UTC ISO 8601, state: queued|running|done|failed|cancelled|interrupted, process: the lock id of the crabsim process that ran it). ",
             "observations(run, number from 1, seed TEXT: the observation's own seed, events, wall_time_s, error, error_time_s: simulated seconds). ",
             "statistics(run, observation, object: instance name, class, built_in_class: Source|Station|Buffer|Drain, statistic, value REAL), one row per figure of an observation that ran to its end. ",
-            "Statistics: mus_in, mus_out, working_share, blocked_share, idle_share, failed_share, paused_share (each 0 to 1 of the time measured after the warm-up), failures, availability (0 to 1), and for Drains throughput_per_hour and mean_lead_time_s. Times are in seconds. ",
+            "Statistics: mus_in, mus_out, working_share, blocked_share, idle_share, failed_share, paused_share (each 0 to 1 of the time measured after the warm-up), failures, availability (0 to 1), and for Drains throughput_per_hour and mean_lead_time_s. Times are in seconds. Besides SQLite's own functions, such as avg, min, max and count, there are sqrt, power, ln, exp and log10, for example to work out a standard deviation. ",
             "Example: SELECT object, AVG(value) FROM statistics WHERE run = 'run-3' AND statistic = 'blocked_share' GROUP BY object HAVING AVG(value) > 0.3"
         )
     };
@@ -170,6 +170,7 @@ impl Store {
         connection.set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_ATTACHED, 0)?;
         let deadline = Instant::now() + QUERY_TIME_LIMIT;
         connection.progress_handler(10_000, Some(move || Instant::now() > deadline))?;
+        add_math_functions(&connection)?;
 
         let mut statement = connection.prepare(sql).map_err(|error| OperationError::invalid_input(format!("the query can't be run: {error}")))?;
         if !statement.readonly() {
@@ -197,6 +198,24 @@ impl Store {
         }
         Ok(QueryResultsOutput { columns, rows: out, truncated })
     }
+}
+
+/// `sqrt`, `power`, `ln`, `exp` and `log10`, which the bundled SQLite lacks, so a query can work
+/// out a standard deviation or an interval. Like SQLite's own math functions, they give NULL for
+/// NULL and for a result that isn't a number, such as `sqrt(-1)`.
+fn add_math_functions(connection: &Connection) -> rusqlite::Result<()> {
+    use rusqlite::functions::FunctionFlags;
+    let flags = FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC;
+    let finite = |value: f64| value.is_finite().then_some(value);
+    for (name, function) in [("sqrt", f64::sqrt as fn(f64) -> f64), ("ln", f64::ln), ("exp", f64::exp), ("log10", f64::log10)] {
+        connection.create_scalar_function(name, 1, flags, move |context| Ok(context.get::<Option<f64>>(0)?.and_then(|x| finite(function(x)))))?;
+    }
+    connection.create_scalar_function("power", 2, flags, move |context| {
+        Ok(match (context.get::<Option<f64>>(0)?, context.get::<Option<f64>>(1)?) {
+            (Some(base), Some(exponent)) => finite(base.powf(exponent)),
+            _ => None,
+        })
+    })
 }
 
 fn query_failed(error: rusqlite::Error, deadline: Instant) -> OperationError {

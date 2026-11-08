@@ -102,6 +102,10 @@ Loading returns every problem at once and never panics. Each problem has:
 - the name of the instance or class it is about, when there is one,
 - a plain message.
 
+- a "did you mean" when a mistyped name is one or two edits from a known one (an insertion, deletion, substitution or two letters swapped each count as one, and no more than a third of the name may change), for attributes, fields, classes and successors, such as `unknown attribute proces_time: did you mean process_time?`.
+
+An instance or class whose class is unknown can't have its attributes checked, so the message says they weren't: fixing it may bring up more problems.
+
 They come in file order, as JSON for agents, and one per line on the CLI:
 
 ```

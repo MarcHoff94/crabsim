@@ -499,7 +499,7 @@ pub struct StartRunOutput {
 
 impl Operation for StartRun {
     const NAME: &'static str = "start_run";
-    const DESCRIPTION: &'static str = "Starts an experiment on a model file in the models folder: its observations run in the background, in parallel, one per CPU core, and their results go into the results store. Returns the run's id at once: poll run_status until it's done, then read run_results. The model is read and checked now, and an invalid one is refused with every problem. Later changes to the file don't reach the run. Observation k (from 1) gets the seed splitmix64(seed + k), reported with its results.";
+    const DESCRIPTION: &'static str = "Starts an experiment on a model file in the models folder: its observations run in the background, in parallel, one per CPU core, and their results go into the results store. Returns the run's id at once: poll run_status until it's done, then read run_results. The model is read and checked now, and an invalid one is refused with every problem. Later changes to the file don't reach the run. Observation k (from 1) gets the seed splitmix64(seed + k), reported with its results. Runs with the same seed are paired, even of different models: each object's random numbers come from the seed and the object's position among the model's instances, so a variant that keeps the instance order gets common random numbers, and their difference has a far narrower interval than either alone. 10 observations is a start: run more if an interval is too wide to decide.";
     const EFFECT: Effect = Effect::Additive;
     type Input = StartRunInput;
     type Output = StartRunOutput;
@@ -590,7 +590,7 @@ pub struct RunStatusOutput {
 
 impl Operation for RunStatus {
     const NAME: &'static str = "run_status";
-    const DESCRIPTION: &'static str = "Tells how a run stands: queued, running, done, failed, cancelled, or interrupted when the process running it ended first, how many of its observations have ended, and the simulated time each running observation has reached, so a slow run can be told from a stuck one. A run is done once every observation ended and at least one ran to its end, and failed only if every observation failed.";
+    const DESCRIPTION: &'static str = "Tells how a run stands: queued, running, done, failed, cancelled, or interrupted when the process running it ended first, how many of its observations have ended, and the simulated time each running observation has reached, so a slow run can be told from a stuck one. A run is done once every observation ended and at least one ran to its end, and failed only if every observation failed. `here` says whether this server is running it: a run started by another crabsim process, such as the CLI, shows only what the results store holds, and can't be cancelled from here.";
     const EFFECT: Effect = Effect::ReadOnly;
     type Input = RunInput;
     type Output = RunStatusOutput;

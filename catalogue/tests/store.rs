@@ -27,6 +27,18 @@ fn a_new_store_has_the_documented_tables() {
 }
 
 #[test]
+fn a_query_has_math_functions_for_intervals_and_rates() {
+    let setup = Setup::new("math");
+    let result = setup.ok("query_results", json!({ "sql": "SELECT sqrt(16.0), power(2, 10), ln(exp(1.0)), log10(1000), sqrt(2)" }));
+    let row = result["rows"][0].as_array().unwrap();
+    assert_eq!(&row[..4], [json!(4.0), json!(1024.0), json!(1.0), json!(3.0)]);
+    assert!((row[4].as_f64().unwrap() - std::f64::consts::SQRT_2).abs() < 1e-12);
+    assert_eq!(setup.ok("query_results", json!({ "sql": "SELECT sqrt(-1), sqrt(NULL)" }))["rows"], json!([[null, null]]));
+    let query = setup.catalogue.operations().find(|o| o.name == "query_results").unwrap();
+    assert!(query.description.contains("sqrt, power, ln, exp and log10"), "{}", query.description);
+}
+
+#[test]
 fn a_query_gives_columns_and_rows() {
     let setup = Setup::new("query");
     let result = setup.ok("query_results", json!({ "sql": "-- a comment first\nSELECT 1 AS one, 'two' AS two, 2.5 AS three, NULL AS four" }));

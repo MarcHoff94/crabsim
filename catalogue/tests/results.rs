@@ -29,9 +29,6 @@ fn each_figures_mean_interval_minimum_and_maximum_agree_with_the_observations() 
     for object in results["objects"].as_array().unwrap() {
         let stored = setup.stored(&run, object["name"].as_str().unwrap());
         for (statistic, figure) in object["figures"].as_object().unwrap() {
-            if statistic == "mean_lead_time" {
-                continue;
-            }
             let shown: Vec<f64> = figure["values"].as_array().unwrap().iter().map(number).collect();
             assert_eq!(shown.len(), 5);
             let values: Vec<f64> = (1..=5u64).map(|k| stored[&k][statistic]).collect();
@@ -53,8 +50,8 @@ fn each_figures_mean_interval_minimum_and_maximum_agree_with_the_observations() 
     assert_eq!(names, ["Station 1", "Drain"], "in model order");
     let drain = &results["objects"][1];
     assert!(drain["figures"]["throughput_per_hour"]["mean"].as_f64().unwrap() > 0.0);
-    let lead_time = drain["figures"]["mean_lead_time"]["mean"].as_str().expect("a time, as the UI shows it");
-    assert!(crabsim::time::parse_time(lead_time).is_some(), "{lead_time}");
+    assert!(drain["figures"]["mean_lead_time_s"]["mean"].as_f64().unwrap() > 0.0, "lead time in seconds, named as in the store");
+    assert!(drain["figures"].get("mean_lead_time").is_none());
 }
 
 /// Every number in `value`, with where it is.
@@ -110,9 +107,8 @@ fn figures_that_are_0_in_every_observation_are_left_out() {
         let stored = setup.stored(&run, name);
         let names: BTreeSet<&String> = stored.values().flat_map(|figures| figures.keys()).collect();
         for statistic in names {
-            let key = if statistic == "mean_lead_time_s" { "mean_lead_time" } else { statistic.as_str() };
             let all_zero = stored.values().all(|figures| figures.get(statistic).is_none_or(|value| *value == 0.0));
-            assert_eq!(object["figures"].get(key).is_none(), all_zero, "{statistic} of {name}");
+            assert_eq!(object["figures"].get(statistic).is_none(), all_zero, "{statistic} of {name}");
             left_out += usize::from(all_zero);
         }
     }
@@ -156,53 +152,82 @@ fn a_single_observation_has_no_interval() {
     let figure = &results["objects"][0]["figures"]["mus_in"];
     assert_eq!(figure["ci95"], Value::Null);
     assert_eq!(figure["mean"], figure["min"]);
-    // Nothing is blocked or fails in this model, so its summary is its Drain alone.
+    // A model this small is shown whole.
     let summary = setup.ok("run_results", json!({ "run": run }));
     let names: Vec<&str> = summary["objects"].as_array().unwrap().iter().map(|object| object["name"].as_str().unwrap()).collect();
-    assert_eq!(names, ["Out"]);
+    assert_eq!(names, ["In", "Work", "Out"]);
+    assert!(summary["objects"].as_array().unwrap().iter().all(|object| object["why"] == json!(["all"])));
 }
 
-/// The objects whose mean of `statistic` is highest and above 0, at most 10, by the store's own
-/// arithmetic.
-fn top(setup: &Setup, run: &str, statistic: &str) -> BTreeSet<String> {
+/// The objects whose mean of `statistic` is highest and above `floor`, at most 10, by the store's
+/// own arithmetic.
+fn top(setup: &Setup, run: &str, statistic: &str, floor: f64) -> BTreeSet<String> {
     let sql = format!(
         "SELECT object, avg(value) AS mean FROM statistics WHERE run = '{run}' AND statistic = '{statistic}' GROUP BY object ORDER BY mean DESC"
     );
     let rows = setup.ok("query_results", json!({ "sql": sql }))["rows"].clone();
     let rows: Vec<(String, f64)> = rows.as_array().unwrap().iter().map(|row| (row[0].as_str().unwrap().to_string(), row[1].as_f64().unwrap())).collect();
-    assert!(rows.iter().filter(|(_, mean)| *mean > 0.0).count() > 10, "the test needs more than 10 objects with some {statistic}: {rows:?}");
+    assert!(rows.iter().filter(|(_, mean)| *mean > floor).count() > 10, "the test needs more than 10 objects above {floor} {statistic}: {rows:?}");
     assert!(rows[9].1 > rows[10].1, "the test needs no tie at the 10th place for {statistic}: {rows:?}");
     rows.into_iter().take(10).map(|(name, _)| name).collect()
 }
 
+/// The objects whose failed share's 95% interval lies wholly above that of the median object,
+/// worked out here from each observation's stored figure.
+fn clearly_most_failed(setup: &Setup, run: &str, observations: usize) -> BTreeSet<String> {
+    let sql = format!("SELECT object, value FROM statistics WHERE run = '{run}' AND statistic = 'failed_share' ORDER BY rowid");
+    let rows = setup.ok("query_results", json!({ "sql": sql }))["rows"].clone();
+    let mut values: BTreeMap<String, Vec<f64>> = BTreeMap::new();
+    for row in rows.as_array().unwrap() {
+        values.entry(row[0].as_str().unwrap().to_string()).or_default().push(row[1].as_f64().unwrap());
+    }
+    // t for 4 degrees of freedom, 97.5%.
+    assert_eq!(observations, 5);
+    let interval = |values: &[f64]| {
+        let mean = values.iter().sum::<f64>() / 5.0;
+        let sd = (values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / 4.0).sqrt();
+        (mean, mean - 2.776 * sd / 5f64.sqrt(), mean + 2.776 * sd / 5f64.sqrt())
+    };
+    let mut intervals: Vec<(String, (f64, f64, f64))> = values.iter().map(|(name, values)| (name.clone(), interval(values))).collect();
+    intervals.sort_by(|a, b| a.1 .0.total_cmp(&b.1 .0));
+    let median_high = intervals[intervals.len() / 2].1 .2;
+    let mut above: Vec<(String, f64)> = intervals.into_iter().filter(|(_, (_, low, _))| *low > median_high).map(|(name, (mean, _, _))| (name, mean)).collect();
+    above.sort_by(|a, b| b.1.total_cmp(&a.1));
+    above.into_iter().take(10).map(|(name, _)| name).collect()
+}
+
 #[test]
-fn the_default_summary_holds_every_drain_and_the_ten_most_blocked_and_most_failed() {
+fn the_default_summary_holds_every_drain_the_busiest_the_most_blocked_and_the_clearly_most_failed() {
     let setup = Setup::new("summary");
     write_models(&setup.folder);
-    let run = setup.start(json!({ "model": "long-line.json", "seed": 2, "length": "1d", "observations": 3 }));
+    let run = setup.start(json!({ "model": "wide-line.json", "seed": 2, "length": "1d", "observations": 5 }));
     setup.finished(&run);
     let results = setup.ok("run_results", json!({ "run": run }));
 
-    let blocked = top(&setup, &run, "blocked_share");
-    let failed = top(&setup, &run, "failed_share");
+    let busiest = top(&setup, &run, "working_share", 0.0);
+    let blocked = top(&setup, &run, "blocked_share", 0.01);
+    let failed = clearly_most_failed(&setup, &run, 5);
+    for weak in ["W5", "W12", "W20"] {
+        assert!(failed.contains(weak), "{weak} fails far more often than the rest: {failed:?}");
+    }
     let mut why: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for object in results["objects"].as_array().unwrap() {
         let reasons = object["why"].as_array().unwrap().iter().map(|reason| reason.as_str().unwrap().to_string()).collect();
         why.insert(object["name"].as_str().unwrap().to_string(), reasons);
     }
     let names: BTreeSet<String> = why.keys().cloned().collect();
-    let expected: BTreeSet<String> = blocked.iter().chain(&failed).cloned().chain(["Out".to_string()]).collect();
+    let expected: BTreeSet<String> = busiest.iter().chain(&blocked).chain(&failed).cloned().chain(["Out".to_string()]).collect();
     assert_eq!(names, expected);
+    assert!(names.len() < 28, "not the whole model");
     assert!(why["Out"].contains("drain"));
-    for name in &blocked {
-        assert!(why[name].contains("most_blocked"), "{name}");
-    }
-    for name in &failed {
-        assert!(why[name].contains("most_failed"), "{name}");
+    for (names, reason) in [(&busiest, "busiest"), (&blocked, "most_blocked"), (&failed, "most_failed")] {
+        for name in names {
+            assert!(why[name].contains(reason), "{name} is {reason}: {:?}", why[name]);
+        }
     }
     // In model order.
     let order: Vec<&str> = results["objects"].as_array().unwrap().iter().map(|object| object["name"].as_str().unwrap()).collect();
-    let model = crabsim_model::load(&common::long_line()).unwrap();
+    let model = crabsim_model::load(&common::wide_line()).unwrap();
     let positions: Vec<usize> = order.iter().map(|name| model.instances.iter().position(|i| i.name == *name).unwrap()).collect();
     assert!(positions.windows(2).all(|pair| pair[0] < pair[1]), "{order:?}");
 }

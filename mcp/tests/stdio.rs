@@ -151,8 +151,8 @@ fn an_agent_lists_the_tools_validates_runs_and_reads_results_over_stdio() {
     assert_eq!(content["source"], "mcp");
     assert_eq!(content["observations"], 2);
     assert_eq!(content["failed_observations"], json!([]));
-    assert_eq!(content["objects"][0]["name"], "Out");
-    assert!(content["objects"][0]["figures"]["mus_in"]["mean"].as_f64().unwrap() > 0.0, "{content}");
+    let out = content["objects"].as_array().unwrap().iter().find(|object| object["name"] == "Out").expect("a small model is shown whole");
+    assert!(out["figures"]["mus_in"]["mean"].as_f64().unwrap() > 0.0, "{content}");
     // The text content holds the same, for clients that read only text.
     let text: Value = serde_json::from_str(results["content"][0]["text"].as_str().unwrap()).unwrap();
     assert_eq!(&text, content);

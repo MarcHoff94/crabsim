@@ -73,7 +73,8 @@ fn a_run_left_by_a_store_of_the_first_version_is_interrupted_and_keeps_what_it_f
     let results = setup.ok("run_results", json!({ "run": stuck, "values": true }));
     assert_eq!(results["state"], "interrupted");
     assert!(results["finished"].is_string(), "{results}");
-    assert_eq!(results["objects"][0]["figures"]["mus_in"]["values"], json!([42.0, null]));
+    let out = results["objects"].as_array().unwrap().iter().find(|object| object["name"] == "Out").expect("a small model is shown whole");
+    assert_eq!(out["figures"]["mus_in"]["values"], json!([42.0, null]));
     let columns = setup.ok("query_results", json!({ "sql": "SELECT name FROM pragma_table_info('runs') WHERE name = 'process'" }));
     assert_eq!(columns["rows"], json!([["process"]]), "the tables were upgraded");
     assert_eq!(setup.start(json!({ "model": "small.json", "seed": 1, "length": "1:00", "observations": 1 })), "run-2");

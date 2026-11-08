@@ -407,3 +407,103 @@ fn compare_prints_each_figures_difference_and_whether_it_is_clear() {
     let missing = crabsim(&["compare", "--models", models.arg(), "run-1", "run-9"]);
     assert!(!missing.status.success());
 }
+
+// ---------- describe, graph and export ----------
+
+/// Runs the CLI on a models folder, which must succeed, giving what it printed.
+fn ok(args: &[&str]) -> String {
+    let output = crabsim(args);
+    assert!(output.status.success(), "{args:?} failed: {}", stderr(&output));
+    stdout(&output)
+}
+
+#[test]
+fn describe_prints_a_models_summary_from_a_file_or_a_run() {
+    let models = Models::new("describe");
+    let printed = ok(&["describe", "--models", models.arg(), "--model", "demo.json"]);
+    assert!(printed.contains("14 instances"), "{printed}");
+    assert!(printed.contains("The demo model: a Source"), "the model's description: {printed}");
+    assert!(printed.lines().any(|line| line.contains("Demo station") && line.contains("12")), "instances per class: {printed}");
+    assert!(printed.contains("Sources (1): Source"), "{printed}");
+    assert!(printed.contains("Drains (1): Drain"), "{printed}");
+    assert!(printed.contains("Station 4 (3 successors)"), "the widest branch point: {printed}");
+    assert!(printed.contains("Source reaches Drain past 4 to 6 objects"), "{printed}");
+    assert!(printed.contains("No loops"), "{printed}");
+    assert!(printed.contains("No problems"), "{printed}");
+
+    ok(&["run", "--models", models.arg(), "--model", "demo.json", "--length", "1:00", "--observations", "1"]);
+    let from_run = ok(&["describe", "--models", models.arg(), "--run", "run-1"]);
+    assert!(from_run.contains("14 instances"), "{from_run}");
+
+    let neither = crabsim(&["describe", "--models", models.arg()]);
+    assert!(!neither.status.success());
+    assert!(stderr(&neither).contains("either"), "{}", stderr(&neither));
+}
+
+#[test]
+fn describe_prints_the_problems_of_a_model_with_problems() {
+    let models = Models::new("describe-broken");
+    std::fs::write(models.0.join("broken.json"), r#"{ "format_version": 1, "instances": [ { "name": "In", "class": "Source", "successors": ["Nowhere"] } ] }"#).unwrap();
+    let printed = ok(&["describe", "--models", models.arg(), "--model", "broken.json"]);
+    assert!(printed.contains("2 problems"), "{printed}");
+    assert!(printed.contains("Nowhere"), "{printed}");
+}
+
+#[test]
+fn graph_answers_each_kind_of_question() {
+    let models = Models::new("graph");
+    let graph = |args: &[&str]| {
+        let mut all = vec!["graph"];
+        all.extend_from_slice(&args[..1]);
+        all.extend(["--models", models.arg(), "--model", "demo.json"]);
+        all.extend_from_slice(&args[1..]);
+        ok(&all)
+    };
+
+    let neighbours = graph(&["neighbours", "Station 4"]);
+    assert!(neighbours.contains("Predecessors") && neighbours.contains("Station 3"), "{neighbours}");
+    let successors = neighbours.split("Successors").nth(1).expect("successors listed");
+    assert!(["Station 4a", "Station 4b", "Station 4c"].iter().all(|name| successors.contains(name)), "{neighbours}");
+
+    let upstream = graph(&["upstream", "Drain", "--steps", "1"]);
+    assert!(upstream.lines().any(|line| line.trim_start().starts_with('1') && line.contains("Station 7")), "{upstream}");
+    assert!(upstream.contains("4 instances"), "{upstream}");
+    let downstream = graph(&["downstream", "Station 5"]);
+    assert!(downstream.contains("Station 5c") && downstream.contains("Drain") && !downstream.contains("Station 4"), "{downstream}");
+
+    let paths = graph(&["paths", "Source", "Drain"]);
+    assert!(paths.contains("Shortest: Source -> Station 1 -> Station 2 -> Station 5 -> Station 5a -> Drain"), "{paths}");
+    assert!(paths.contains("6 paths"), "{paths}");
+
+    let around = graph(&["subgraph-around", "Station 2", "--steps", "1"]);
+    assert!(around.contains("Station 1 -> Station 2") && around.contains("Station 2 -> Station 5"), "{around}");
+
+    let found = graph(&["find-instances", "--class", "Demo station", "--where", "process_time > 0:20"]);
+    assert!(found.contains("Station 4") && found.contains("Station 7") && found.contains("2 instances"), "{found}");
+    assert!(found.contains("process_time = 00:00:25"), "the values it matched: {found}");
+    let at_least = graph(&["find-instances", "--where", "process_time >= 0:25"]);
+    assert!(at_least.contains("Station 4") && at_least.contains("2 instances"), "{at_least}");
+
+    let tree = graph(&["class-tree", "--instances"]);
+    let station = tree.lines().position(|line| line.trim_start().starts_with("Station ")).expect("Station listed");
+    let demo = tree.lines().position(|line| line.trim_start().starts_with("Demo station")).expect("Demo station listed");
+    assert!(demo > station && tree.lines().nth(demo).unwrap().starts_with("  "), "Demo station indented below Station: {tree}");
+    assert!(tree.contains("Station 4c"), "instance names with --instances: {tree}");
+
+    let unknown = crabsim(&["graph", "neighbours", "--models", models.arg(), "--model", "demo.json", "Nobody"]);
+    assert!(!unknown.status.success() && stderr(&unknown).contains("Nobody"));
+    let bad_condition = crabsim(&["graph", "find-instances", "--models", models.arg(), "--model", "demo.json", "--where", "process_time soon"]);
+    assert!(!bad_condition.status.success());
+}
+
+#[test]
+fn export_writes_a_model_into_exports_and_says_where() {
+    let models = Models::new("export");
+    let printed = ok(&["export", "--models", models.arg(), "--model", "demo.json", "--format", "graphml"]);
+    assert!(printed.contains("exports/demo.graphml"), "{printed}");
+    assert!(models.0.join("exports").join("demo.graphml").is_file());
+    let csv = ok(&["export", "--models", models.arg(), "--model", "demo.json", "--format", "neo4j-csv"]);
+    assert_eq!(csv.lines().filter(|line| line.contains("exports/demo/")).count(), 5, "{csv}");
+    let refused = crabsim(&["export", "--models", models.arg(), "--model", "demo.json", "--format", "dot"]);
+    assert!(!refused.status.success());
+}

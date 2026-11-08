@@ -8,6 +8,8 @@
 //! `edit` changes a model with a batch of changes, `attributes` shows an object's values and where
 //! they come from, `adopt` accepts a file changed outside crabsim, and `queue` shows and controls
 //! who may change a model: the person using the CLI is the user, who controls the edit queue.
+//! `describe` sums up a model, `graph` asks about its structure, and `export` writes it for graph
+//! tools.
 
 mod tables;
 
@@ -162,6 +164,116 @@ enum Command {
         #[command(subcommand)]
         action: QueueAction,
     },
+    /// Sums up a model: its classes, Sources and Drains, where the flow branches and merges, how
+    /// each Source reaches the Drains, loops, dead ends and problems.
+    Describe {
+        #[command(flatten)]
+        on: WhichModel,
+    },
+    /// Answers a question about a model's structure.
+    Graph {
+        #[command(subcommand)]
+        kind: GraphKind,
+    },
+    /// Writes a model as a graph for other tools into the models folder's `exports` folder,
+    /// replacing an earlier export of it in the same format.
+    Export {
+        #[command(flatten)]
+        on: WhichModel,
+        /// `cypher`, `neo4j-csv` or `graphml`.
+        #[arg(long)]
+        format: String,
+    },
+}
+
+/// Which model `describe`, `graph` and `export` are about: a file, as for `run`, or the model a
+/// run ran.
+#[derive(Args, Debug)]
+struct WhichModel {
+    #[arg(long)]
+    models: PathBuf,
+    /// The model file, such as `line.json`. Or give --run.
+    #[arg(long)]
+    model: Option<String>,
+    /// A run, such as `run-3`: the model it ran.
+    #[arg(long)]
+    run: Option<String>,
+}
+
+#[derive(Subcommand, Debug)]
+enum GraphKind {
+    /// An instance's predecessors and successors.
+    Neighbours {
+        #[command(flatten)]
+        on: WhichModel,
+        name: String,
+    },
+    /// Every instance that can reach this one, nearest first.
+    Upstream {
+        #[command(flatten)]
+        on: WhichModel,
+        name: String,
+        /// At most this many connections away.
+        #[arg(long)]
+        steps: Option<usize>,
+    },
+    /// Every instance this one can reach, nearest first.
+    Downstream {
+        #[command(flatten)]
+        on: WhichModel,
+        name: String,
+        /// At most this many connections away.
+        #[arg(long)]
+        steps: Option<usize>,
+    },
+    /// The routes from one instance to another, shortest first, and how many there are.
+    Paths {
+        #[command(flatten)]
+        on: WhichModel,
+        from: String,
+        to: String,
+    },
+    /// The instances within some connections of one, either way, and the connections between them.
+    SubgraphAround {
+        #[command(flatten)]
+        on: WhichModel,
+        name: String,
+        /// How many connections away, 2 if left out.
+        #[arg(long)]
+        steps: Option<usize>,
+    },
+    /// The instances that meet every criterion given.
+    FindInstances {
+        #[command(flatten)]
+        on: WhichModel,
+        /// Part of the name, ignoring case.
+        #[arg(long)]
+        name_contains: Option<String>,
+        /// Of this class or one derived from it, such as `Station`.
+        #[arg(long)]
+        class: Option<String>,
+        /// Part of the description, ignoring case.
+        #[arg(long)]
+        description_contains: Option<String>,
+        /// A condition such as "process_time > 0:30", with =, <, >, <= or >=. Give it more than
+        /// once for more.
+        #[arg(long = "where")]
+        conditions: Vec<String>,
+        /// An attribute set on the instance itself rather than inherited.
+        #[arg(long)]
+        set_on_instance: Option<String>,
+    },
+    /// The classes from the built-in classes down, or below one class.
+    ClassTree {
+        #[command(flatten)]
+        on: WhichModel,
+        /// Only this class and those derived from it.
+        #[arg(long)]
+        class: Option<String>,
+        /// Also each class's own instances.
+        #[arg(long)]
+        instances: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -307,6 +419,19 @@ fn main() -> ExitCode {
             Ok(true)
         }),
         Some(Command::Queue { action }) => queue(action),
+        Some(Command::Describe { on }) => catalogue(&on.models).and_then(|catalogue| {
+            let described = catalogue.call("describe_model", which(on.model, on.run))?;
+            print!("{}", tables::described(&described));
+            Ok(true)
+        }),
+        Some(Command::Graph { kind }) => graph(kind),
+        Some(Command::Export { on, format }) => catalogue(&on.models).and_then(|catalogue| {
+            let mut input = which(on.model, on.run);
+            input["format"] = json!(format);
+            let exported = catalogue.call("export_model", input)?;
+            print!("{}", tables::exported(&exported));
+            Ok(true)
+        }),
     };
     match outcome {
         Ok(true) => ExitCode::SUCCESS,
@@ -350,6 +475,70 @@ fn queue(action: QueueAction) -> Result<bool, OperationError> {
     catalogue.call(operation, input)?;
     let queue = catalogue.call("get_edit_queue", json!({ "path": path }))?;
     print!("{}", tables::queue(&json!({ "files": [{ "path": path, "editor": queue["editor"], "queue": queue["queue"] }], "blocked": queue["blocked"] })));
+    Ok(true)
+}
+
+/// `path` or `run` as an operation takes them. Neither or both is left for it to refuse.
+fn which(path: Option<String>, run: Option<String>) -> Value {
+    let mut input = json!({});
+    if let Some(path) = path {
+        input["path"] = json!(path);
+    }
+    if let Some(run) = run {
+        input["run"] = json!(run);
+    }
+    input
+}
+
+/// A condition such as `process_time > 0:30`, as `find_instances` takes it.
+fn condition(typed: &str) -> Result<Value, OperationError> {
+    let found = (0..typed.len())
+        .filter(|&at| typed.is_char_boundary(at))
+        .find_map(|at| [">=", "<=", "=", "<", ">"].into_iter().find(|op| typed[at..].starts_with(op)).map(|op| (at, op)));
+    let refused = || {
+        OperationError::invalid_input(format!(
+            "`{typed}` isn't a condition: write it as an attribute, =, <, >, <= or >=, and a value, such as \"process_time > 0:30\""
+        ))
+    };
+    let (at, op) = found.ok_or_else(refused)?;
+    let attribute = typed[..at].trim();
+    let value = typed[at + op.len()..].trim();
+    if attribute.is_empty() || value.is_empty() {
+        return Err(refused());
+    }
+    let value = value.parse::<u64>().map_or_else(|_| json!(value), |number| json!(number));
+    Ok(json!({ "attribute": attribute, "op": op, "value": value }))
+}
+
+/// A question about a model's structure, answered as tables.
+fn graph(kind: GraphKind) -> Result<bool, OperationError> {
+    let (on, query) = match kind {
+        GraphKind::Neighbours { on, name } => (on, json!({ "kind": "neighbours", "name": name })),
+        GraphKind::Upstream { on, name, steps } => (on, json!({ "kind": "upstream", "name": name, "steps": steps })),
+        GraphKind::Downstream { on, name, steps } => (on, json!({ "kind": "downstream", "name": name, "steps": steps })),
+        GraphKind::Paths { on, from, to } => (on, json!({ "kind": "paths", "from": from, "to": to })),
+        GraphKind::SubgraphAround { on, name, steps } => (on, json!({ "kind": "subgraph_around", "name": name, "steps": steps })),
+        GraphKind::FindInstances { on, name_contains, class, description_contains, conditions, set_on_instance } => {
+            let conditions = conditions.iter().map(|typed| condition(typed)).collect::<Result<Vec<_>, _>>()?;
+            let query = json!({
+                "kind": "find_instances",
+                "name_contains": name_contains,
+                "class": class,
+                "description_contains": description_contains,
+                "conditions": if conditions.is_empty() { Value::Null } else { json!(conditions) },
+                "set_on_instance": set_on_instance,
+            });
+            (on, query)
+        }
+        GraphKind::ClassTree { on, class, instances } => (on, json!({ "kind": "class_tree", "class": class, "instances": instances })),
+    };
+    // Options not given are left out, as the operation's schema wants, rather than null.
+    let query: serde_json::Map<String, Value> = query.as_object().expect("a query is an object").iter().filter(|(_, value)| !value.is_null()).map(|(key, value)| (key.clone(), value.clone())).collect();
+    let catalogue = catalogue(&on.models)?;
+    let mut input = which(on.model, on.run);
+    input["query"] = Value::Object(query);
+    let answer = catalogue.call("query_model", input)?;
+    print!("{}", tables::answer(&answer));
     Ok(true)
 }
 

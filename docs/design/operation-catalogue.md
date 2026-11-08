@@ -212,6 +212,9 @@ On 2026-11-08 an agent in Claude Code used `crabsim-mcp` alone, without crabsim'
 - `crabsim attributes --models <folder> <path> <name> [--class]`: `get_attributes`, as a table.
 - `crabsim adopt --models <folder> <path>`: `adopt_model`.
 - `crabsim queue show|take|release|give|move|remove|block|unblock --models <folder> ...`: the user's controls of the edit queue, each printing the queue after. They're grouped under `queue`, where issue 45 had `crabsim take` and `crabsim release` at the top level.
+- `crabsim describe --models <folder> <--model path | --run run-3>`: `describe_model`, as a table of classes and a line for each part of the summary, such as "Source reaches Drain past 4 to 6 objects".
+- `crabsim graph <kind> --models <folder> <--model path | --run run-3> ...`: `query_model`, one subcommand per kind with the same names (`neighbours`, `upstream`, `downstream`, `paths`, `subgraph-around`, `find-instances`, `class-tree`). The model is `--model`, as for `run`, in all three of slice 3's commands, since they choose between a file and a run, and `graph`'s questions take names as plain arguments, such as `crabsim graph paths --models m --model line.json Source Drain`. `find-instances` takes each condition as `--where "process_time > 0:30"`, split at its first operator, with a whole number as a number and anything else as text. Lists print as tables, paths with `->`, and the class tree indented.
+- `crabsim export --models <folder> <--model path | --run run-3> --format cypher|neo4j-csv|graphml`: `export_model`, printing each file written and its size.
 
 Without a subcommand, `crabsim` behaves exactly as before: one run, printed, nothing saved. That suits a bigger machine running long runs with no models folder.
 

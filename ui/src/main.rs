@@ -17,7 +17,7 @@ use bevy::{
     log::LogPlugin,
     prelude::*,
     window::PrimaryWindow,
-    winit::{UpdateMode, WinitSettings},
+    winit::{EventLoopProxyWrapper, UpdateMode, WinitSettings, WinitUserEvent},
 };
 use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui, input::egui_wants_any_pointer_input};
 use clap::Parser;
@@ -27,10 +27,10 @@ use crabsim_ui::view::{
     Control, DEFAULT_SPEED, Details, EndTimeProblem, Inspection, Intervention, JumpProblem, MAX_SPEED, MIN_SPEED, Mark,
     Point, MU_METRES, Shade, StepBack, ViewState, format_time, format_time_exact, label_size, parse_time,
 };
-use crabsim_ui::workspace::Workspace;
+use crabsim_ui::workspace::{ModelChange, Workspace};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 #[derive(Parser)]
@@ -102,10 +102,12 @@ fn main() {
             rebuild_scene: false,
         })
         .insert_resource(Session(Mutex::new(session)))
-        .add_systems(Startup, setup)
+        .insert_resource(WatchedFile(Arc::new(Mutex::new(None))))
+        .add_systems(Startup, (setup, watch_the_open_file))
         .add_systems(
             Update,
             (
+                pick_up_changes,
                 rebuild_scene,
                 drain_session,
                 request_details,
@@ -166,6 +168,61 @@ enum GoingBack {
 const CLICK_SLOP: f32 = 4.0;
 const SELECTION: Color = Color::srgb(1.0, 1.0, 1.0);
 const MU_COLOUR: Color = Color::srgb(0.96, 0.96, 0.93);
+
+/// The model file open, which a thread of its own watches while the window is idle.
+#[derive(Resource)]
+struct WatchedFile(Arc<Mutex<Option<PathBuf>>>);
+
+/// How often the watcher looks at the open file while the window is idle.
+const WATCH_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Wakes the window when the open model file's size or modified time changes, such as when an
+/// agent edits it, so a halted window stays idle until then. While the window draws frames, it
+/// checks the file itself, each frame.
+fn watch_the_open_file(watched: Res<WatchedFile>, proxy: Res<EventLoopProxyWrapper>) {
+    let file = watched.0.clone();
+    let proxy = (**proxy).clone();
+    std::thread::spawn(move || {
+        let mut seen = None;
+        loop {
+            std::thread::sleep(WATCH_INTERVAL);
+            let path = file.lock().expect("the watched path's lock is never poisoned").clone();
+            let stamp = path.and_then(|path| std::fs::metadata(path).ok()).map(|metadata| (metadata.len(), metadata.modified().ok()));
+            if stamp != seen {
+                seen = stamp;
+                if proxy.send_event(WinitUserEvent::WakeUp).is_err() {
+                    return;
+                }
+            }
+        }
+    });
+}
+
+/// Notices that the open model file changed. With no run in progress the window uses the new
+/// model at once, and otherwise it says that Reset will.
+fn pick_up_changes(mut ui: ResMut<Ui>, session: Res<Session>, watched: Res<WatchedFile>, time: Res<Time<Real>>) {
+    let wall = time.elapsed();
+    let ui = &mut *ui;
+    {
+        let file = ui.workspace.watched_file();
+        let mut watching = watched.0.lock().expect("the watched path's lock is never poisoned");
+        if *watching != file {
+            *watching = file;
+        }
+    }
+    match ui.workspace.check() {
+        Some(ModelChange::Changed) if ui.view.reloads_now() => {
+            ui.workspace.apply_pending();
+            replace_session(ui, &session, false, wall);
+        }
+        Some(ModelChange::Changed) => {
+            ui.view.set_model_changed(true);
+            ui.view.commanded(wall);
+        }
+        Some(ModelChange::NowHasProblems) => ui.view.commanded(wall),
+        None => {}
+    }
+}
 
 /// A `LiveSession` holds a `Receiver`, which can be sent between threads but not shared.
 #[derive(Resource)]
@@ -452,6 +509,14 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
             });
         bottom_of_bars = shown.response.rect.bottom();
     }
+    if ui.view.model_changed() {
+        let shown = egui::Panel::top("model changed banner")
+            .frame(egui::Frame::new().fill(egui::Color32::from_rgb(30, 70, 110)).inner_margin(6.0))
+            .show(&mut root, |panel| {
+                panel.colored_label(egui::Color32::WHITE, "The model file changed. The run carries on with the model it started with: Reset to use the new one.");
+            });
+        bottom_of_bars = shown.response.rect.bottom();
+    }
     if let Some(error) = ui.view.error() {
         let banner = egui::Panel::top("error banner")
             .frame(egui::Frame::new().fill(egui::Color32::from_rgb(120, 25, 25)).inner_margin(6.0))
@@ -470,12 +535,17 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
         });
     });
     let mut chosen = None;
+    let mut panel_error = None;
     let mut left_edge = ctx.viewport_rect().left();
     if ui.workspace.has_folder() {
         let left = egui::Panel::left("models").exact_size(MODELS_WIDTH).show(&mut root, |panel| {
-            egui::ScrollArea::vertical().show(panel, |panel| chosen = models_panel(panel, &mut ui.workspace));
+            egui::ScrollArea::vertical().show(panel, |panel| (chosen, panel_error) = models_panel(panel, &mut ui.workspace));
         });
         left_edge = left.response.rect.right();
+    }
+    if let Some(error) = panel_error {
+        ui.view.commanded(wall);
+        ui.view.show_error(error);
     }
     let canvas = egui::Rect::from_min_max(
         egui::pos2(left_edge, bottom_of_bars),
@@ -528,6 +598,12 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
     let request = match request {
         Some(Request::Seed(seed)) => {
             ui.workspace.set_seed(seed);
+            replace_session(ui, &session, false, wall);
+            None
+        }
+        // Reset uses a model that changed during the run: a new session is at its default state.
+        Some(Request::Control(Control::Reset)) if ui.workspace.has_pending() => {
+            ui.workspace.apply_pending();
             replace_session(ui, &session, false, wall);
             None
         }
@@ -646,10 +722,12 @@ fn confirm_replacing(ctx: &egui::Context, ui: &mut Ui) -> Option<String> {
     answer.then_some(path)
 }
 
-/// The folder's model files, each marked with how many problems it has, and why the one last
-/// chosen can't run. Returns the model clicked, if any.
-fn models_panel(ui: &mut egui::Ui, workspace: &mut Workspace) -> Option<String> {
+/// The folder's model files, each marked with how many problems it has, whether the one open was
+/// changed outside crabsim, and why the one last chosen can't run. Returns the model clicked, if
+/// any, and an error to show.
+fn models_panel(ui: &mut egui::Ui, workspace: &mut Workspace) -> (Option<String>, Option<String>) {
     let mut chosen = None;
+    let mut error = None;
     ui.horizontal(|row| {
         row.heading("Models");
         if row.small_button("Refresh").on_hover_text("List the folder's model files again").clicked() {
@@ -671,6 +749,15 @@ fn models_panel(ui: &mut egui::Ui, workspace: &mut Workspace) -> Option<String> 
             chosen = Some(entry.path.clone());
         }
     }
+    if workspace.changed_outside() {
+        ui.add_space(8.0);
+        ui.separator();
+        ui.label(egui::RichText::new("Changed outside crabsim").strong().color(egui::Color32::from_rgb(240, 200, 80)));
+        ui.label(egui::RichText::new("It was written past crabsim, or crabsim never saved it, so neither you nor agents can change it through crabsim until it's adopted. It runs all the same.").weak());
+        if ui.button("Adopt").on_hover_text("Accept the file as it is").clicked() {
+            error = workspace.adopt().err();
+        }
+    }
     if let Some(report) = workspace.problems().cloned() {
         ui.add_space(8.0);
         ui.separator();
@@ -687,7 +774,7 @@ fn models_panel(ui: &mut egui::Ui, workspace: &mut Workspace) -> Option<String> 
             workspace.dismiss_problems();
         }
     }
-    chosen
+    (chosen, error)
 }
 
 /// What to send for a step back the view has decided on: the step itself, a question to the

@@ -263,7 +263,7 @@ After that: model as data with the file format and save and load, with the MCP s
 
 All of it is on `LiveSession` in `src/live_session.rs`, and `CLAUDE.md` has the overview.
 
-- **Commands:** `start`, `halt`, `reset`, `set_speed`, `set_time_mode`, `go_back`, `step_forward`, `step_back`, `locate_step_back`, `set_reset_keeps_changes`, `request_state`, `pause`, `resume`, `force_failure`, `end_forced_failure`, `set_process_time`, `clear_statistics`.
+- **Commands:** `start`, `halt`, `reset`, `set_speed`, `set_time_mode`, `go_back`, `step_forward`, `step_back`, `locate_step_back`, `set_reset_keeps_changes`, `set_end_time`, `request_state`, `pause`, `resume`, `force_failure`, `end_forced_failure`, `set_process_time`, `clear_statistics`.
 - **Session outputs** (`SessionOutput`), read from a channel: `Occurrences`, `ShownTime`, `State`, `Status`, `Error`, and `StepBackTarget` in answer to `locate_step_back`.
 - **Rebuilding the picture:** `crabsim::Picture` takes every observation in order and keeps what the user knows at shown time. One full state at Init, then occurrences give each object's contents, process state, every active interruption and remaining time. `WorkStarted` and `MuCreated` carry durations, so a progress bar needs no further messages. Tests prove this on 3 models: a line with failures, with overlapping pauses or forced failures, a line that blocks, and the full demo. A further test takes a picture while interruptions overlap. Buffer is left out, because its movement is broken.
 - **Model data:** a `ModelDescription` holds names, positions and dimensions in metres. A session builds its run from a closure, so a UI keeps the description beside the session to draw from.

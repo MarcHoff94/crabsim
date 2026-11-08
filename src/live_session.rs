@@ -137,6 +137,9 @@ pub enum SessionOutput {
 pub enum SessionStatus {
     Advancing,
     Halted,
+    /// Halted by itself at the end time, with everything at it done. Start and stepping forward
+    /// are refused until the end time moves later or is cleared.
+    ReachedEnd,
     /// Halted by a run error. Reset or going back gets it going again.
     Failed,
 }
@@ -155,6 +158,10 @@ pub enum SessionError {
     NotAStation(u32),
     /// Going back goes to shown time or earlier.
     NotInThePast { to: SimTime, shown: SimTime },
+    /// Refused, because shown time is at the end time. Move the end time later or clear it first.
+    AtEndTime(SimTime),
+    /// An end time has to be later than shown time. Go back first for an earlier one.
+    EndNotAhead { end: SimTime, shown: SimTime },
     /// The session thread panicked and has ended. Only a new session can continue.
     Panicked(String),
     /// `sync` stopped waiting because too many outputs are unread, so the session won't
@@ -174,6 +181,15 @@ impl fmt::Display for SessionError {
             SessionError::InvalidSpeed(speed) => write!(f, "{speed} is not a speed: it has to be positive and finite"),
             SessionError::NotAStation(id) => write!(f, "object {id} is not a Station, and only a Station can do this so far"),
             SessionError::NotInThePast { to, shown } => write!(f, "can't go back to {to}s: shown time is {shown}s"),
+            SessionError::AtEndTime(end) => {
+                write!(f, "the run has reached its end time, {}: move or clear it to go on", crate::time::format_time_exact(*end))
+            }
+            SessionError::EndNotAhead { end, shown } => write!(
+                f,
+                "the end time has to be later than shown time, {}, not {}: go back first for an earlier one",
+                crate::time::format_time_exact(*shown),
+                crate::time::format_time_exact(*end)
+            ),
             SessionError::Panicked(message) => write!(f, "the live session panicked: {message}"),
             SessionError::Backlogged => write!(f, "too many outputs are unread; read them first"),
             SessionError::SyncTimedOut => write!(f, "the live session did not catch up in time"),
@@ -213,6 +229,7 @@ enum Command {
     StepBack,
     LocateStepBack,
     SetResetKeepsChanges(bool),
+    SetEndTime(Option<SimTime>),
     RequestState,
     Intervene(Action),
     Sync(Sender<Result<(), SessionError>>),
@@ -298,6 +315,14 @@ impl LiveSession {
     /// future is gone, and so is anything done from outside after `to`.
     pub fn go_back(&self, to: SimTime) -> Result<(), SessionError> {
         self.send(Command::GoBack(to))
+    }
+
+    /// Sets the end time, at which the session halts by itself with everything at it done, or
+    /// clears it with `None`. It must be later than shown time. It isn't an intervention: it
+    /// changes when a run stops, not what happens in it, so it isn't logged, and Reset and going
+    /// back keep it, like the speed. Computing never goes past it, so it costs nothing per event.
+    pub fn set_end_time(&self, end: Option<SimTime>) -> Result<(), SessionError> {
+        self.send(Command::SetEndTime(end))
     }
 
     /// While halted, shows the next instant and stays halted. Does nothing while advancing, or if
@@ -569,6 +594,8 @@ struct SessionThread<'a, C> {
     /// Commands that arrived during a replay, in order.
     deferred: VecDeque<Command>,
     steps_wanted: u32,
+    /// Where the session halts by itself. Nothing past it is computed or released.
+    end: Option<SimTime>,
 }
 
 impl<'a, C: Clock> SessionThread<'a, C> {
@@ -601,6 +628,7 @@ impl<'a, C: Clock> SessionThread<'a, C> {
             replay: None,
             deferred: VecDeque::new(),
             steps_wanted: 0,
+            end: None,
         }
     }
 
@@ -687,8 +715,11 @@ impl<'a, C: Clock> SessionThread<'a, C> {
             Command::StepBack => self.step_back(),
             Command::LocateStepBack => self.locate_step_back(),
             Command::SetResetKeepsChanges(keep) => self.settings.reset_keeps_changes = keep,
+            Command::SetEndTime(end) => self.set_end_time(end),
             Command::StepForward => {
-                if self.pace.is_none() && self.status != SessionStatus::Failed {
+                if let Some(end) = self.at_end() {
+                    self.observe(SessionOutput::Error(SessionError::AtEndTime(end)));
+                } else if self.pace.is_none() && self.status != SessionStatus::Failed {
                     self.steps_wanted += 1;
                 }
             }
@@ -707,6 +738,10 @@ impl<'a, C: Clock> SessionThread<'a, C> {
             return;
         }
         if self.pace.is_some() {
+            return;
+        }
+        if let Some(end) = self.at_end() {
+            self.observe(SessionOutput::Error(SessionError::AtEndTime(end)));
             return;
         }
         if !self.ensure_initialised() {
@@ -781,6 +816,41 @@ impl<'a, C: Clock> SessionThread<'a, C> {
         self.steps_wanted = 0;
         self.observe(SessionOutput::State(self.run.state()));
         self.set_status(SessionStatus::Halted);
+    }
+
+    fn set_end_time(&mut self, end: Option<SimTime>) {
+        if let Some(end) = end.filter(|&end| end <= self.shown) {
+            self.observe(SessionOutput::Error(SessionError::EndNotAhead { end, shown: self.shown }));
+            return;
+        }
+        self.end = end;
+        if self.status == SessionStatus::ReachedEnd {
+            self.set_status(SessionStatus::Halted);
+        }
+    }
+
+    /// The end time, if shown time is at it.
+    fn at_end(&self) -> Option<SimTime> {
+        self.end.filter(|&end| self.shown >= end)
+    }
+
+    /// Whether everything at or before the end time has been released, so the session can stop.
+    fn nothing_left_before_the_end(&self, end: SimTime) -> bool {
+        self.shown >= end && self.next_unreleased().is_none_or(|next| next > end)
+    }
+
+    /// `time`, or the end time if that comes first. Never earlier than shown time.
+    fn within_end(&self, time: SimTime) -> SimTime {
+        self.end.map_or(time, |end| time.min(end.max(self.shown)))
+    }
+
+    /// Halts at the end time, which shown time has reached.
+    fn reach_end(&mut self, end: SimTime) {
+        self.shown = self.shown.max(end);
+        self.report_shown_time();
+        self.pace = None;
+        self.waiting_since = None;
+        self.set_status(SessionStatus::ReachedEnd);
     }
 
     fn set_speed(&mut self, speed: f64) {
@@ -1005,7 +1075,7 @@ impl<'a, C: Clock> SessionThread<'a, C> {
     fn can_compute(&self) -> bool {
         self.run.is_initialised()
             && self.stopped.is_none()
-            && self.run.next_event_time().is_some()
+            && self.run.next_event_time().is_some_and(|next| self.end.is_none_or(|end| next <= end))
             && self.complete_instants() < self.settings.buffer_instants
     }
 
@@ -1015,7 +1085,13 @@ impl<'a, C: Clock> SessionThread<'a, C> {
         if !self.can_compute() {
             return;
         }
-        match catch_unwind(AssertUnwindSafe(|| self.run.advance_events(EVENTS_PER_SLICE))) {
+        // With an end time, a slice stops there, so nothing past it is ever computed.
+        let end = self.end;
+        let slice = |run: &mut SimulationRun| match end {
+            Some(end) => run.advance_bounded(end, EVENTS_PER_SLICE).map(|advance| advance.occurrences),
+            None => run.advance_events(EVENTS_PER_SLICE),
+        };
+        match catch_unwind(AssertUnwindSafe(|| slice(&mut self.run))) {
             Ok(Ok(occurrences)) => self.buffer_occurrences(occurrences),
             Ok(Err(failure)) => {
                 self.buffer_occurrences(failure.occurrences);
@@ -1119,8 +1195,9 @@ impl<'a, C: Clock> SessionThread<'a, C> {
             }
         }
         self.skip_long_gap(now);
-        // While halted, only what was done at shown time from outside can be due.
-        let limit = self.target_at(now).unwrap_or(self.shown);
+        // While halted, only what was done at shown time from outside can be due. Nothing past
+        // the end time is released.
+        let limit = self.within_end(self.target_at(now).unwrap_or(self.shown));
 
         let mut released = Vec::new();
         let mut instants = 0;
@@ -1133,7 +1210,7 @@ impl<'a, C: Clock> SessionThread<'a, C> {
         if self.pace.is_some() && instants < INSTANTS_PER_RELEASE {
             // Releasing opened the next gap, so shown time jumps over it now rather than later.
             self.skip_long_gap(now);
-            let limit = self.target_at(now).unwrap_or(limit);
+            let limit = self.target_at(now).map_or(limit, |target| self.within_end(target));
             let reached = self.next_unreleased().map_or(limit, |next| next.min(limit));
             self.shown = self.shown.max(reached);
             if reached < limit && self.stopped.is_none() {
@@ -1147,6 +1224,9 @@ impl<'a, C: Clock> SessionThread<'a, C> {
         let stop_is_due = self.stopped.as_ref().and_then(Stopped::due_at).is_some_and(|at| at <= limit);
         if self.buffer.is_empty() && stop_is_due {
             self.stop_here();
+        }
+        if let Some(end) = self.end.filter(|&end| self.pace.is_some() && self.nothing_left_before_the_end(end)) {
+            self.reach_end(end);
         }
     }
 
@@ -1179,6 +1259,10 @@ impl<'a, C: Clock> SessionThread<'a, C> {
             } else if !self.run.is_initialised() {
                 self.steps_wanted -= 1;
                 self.ensure_initialised();
+            } else if let Some(end) = self.end.filter(|&end| self.buffer.front().is_some_and(|next| next.time > end)) {
+                // The next instant is past the end time, so a step goes to the end time.
+                self.steps_wanted = 0;
+                self.reach_end(end);
             } else if self.complete_instants() > 0 {
                 self.steps_wanted -= 1;
                 let instant = self.buffer.pop_front().expect("checked above");
@@ -1190,6 +1274,10 @@ impl<'a, C: Clock> SessionThread<'a, C> {
                 self.stop_here();
             } else if self.can_compute() {
                 return;
+            } else if let Some(end) = self.end.filter(|&end| self.run.next_event_time().is_some_and(|next| next > end)) {
+                // The next event is past the end time, so a step goes to the end time.
+                self.steps_wanted = 0;
+                self.reach_end(end);
             } else {
                 // No instant is coming.
                 self.steps_wanted = 0;
@@ -1343,6 +1431,19 @@ mod tests {
             assert!((5_000..=5_000 + EVENTS_PER_SLICE + 1).contains(&held), "had {held}");
             assert!(!session.can_compute());
             assert_eq!(session.shown, SimTime::ZERO, "computing ahead shows nothing");
+        });
+    }
+
+    #[test]
+    fn computing_never_goes_past_the_end_time() {
+        with_session(SessionSettings::default(), |session, _| {
+            session.set_end_time(Some(secs(500)));
+            for _ in 0..100 {
+                session.compute_some();
+            }
+            assert!(!session.can_compute(), "everything up to the end time is computed");
+            assert!(session.run.next_event_time().is_some_and(|next| next > secs(500)), "the events at the end time are done");
+            assert!(session.buffer.back().is_some_and(|last| last.time <= secs(500)), "nothing past the end time is computed");
         });
     }
 

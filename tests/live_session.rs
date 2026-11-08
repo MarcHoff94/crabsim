@@ -2252,3 +2252,171 @@ fn going_back_to_the_very_time_of_an_intervention_keeps_it() {
 fn object_stop(state: &RunState) -> Option<StopCause> {
     state.objects.iter().find(|o| o.id == STATION).unwrap().stop
 }
+
+// ---------- End time ----------
+
+/// The state a headless run of the same model has at `t`, for comparing.
+fn headless_at(build: fn() -> SimulationRun, t: SimTime) -> RunState {
+    let mut run = build();
+    run.init().unwrap();
+    run.advance_to(t).unwrap();
+    run.state()
+}
+
+/// A session on `build` with `end` set, started, and given far more wall time than it needs.
+fn run_to_the_end(build: fn() -> SimulationRun, end: SimTime, speed: f64, mode: TimeMode) -> Watched {
+    let mut watched = Watched::with_settings(build, SessionSettings { time_mode: mode, ..SessionSettings::default() });
+    watched.session.set_speed(speed).unwrap();
+    watched.session.set_end_time(Some(end)).unwrap();
+    watched.session.start().unwrap();
+    watched.at(1_000_000);
+    watched
+}
+
+#[test]
+fn the_run_halts_exactly_at_the_end_time_with_everything_at_it_done() {
+    // Events every 10 s, so 30 s falls on an instant and 35 s between two.
+    for end in [secs(30), secs(35)] {
+        let mut watched = run_to_the_end(source_into_drain, end, 1.0, TimeMode::Continuous);
+        let seen = watched.look();
+        assert_eq!(seen.errors, vec![]);
+        assert_eq!(watched.shown, end, "shown time stops exactly at the end time");
+        assert_eq!(seen.statuses, vec![SessionStatus::Advancing, SessionStatus::ReachedEnd]);
+        assert!(seen.occurrences.iter().all(|o| o.time <= end), "nothing after the end time is released");
+        assert_eq!(watched.state_now(), headless_at(source_into_drain, end), "every event at the end time is done, and none after");
+    }
+}
+
+#[test]
+fn the_end_time_is_reached_exactly_at_every_speed_and_in_either_time_mode() {
+    let end = secs(5_000);
+    let expected = headless_at(line_with_random_failures, end);
+    for speed in [1.0, 60.0, 1_000_000.0] {
+        for mode in [TimeMode::Continuous, TimeMode::SKIPPING] {
+            let mut watched = run_to_the_end(line_with_random_failures, end, speed, mode);
+            let seen = watched.look();
+            assert_eq!(seen.errors, vec![], "at {speed}x in {mode:?}");
+            assert_eq!(watched.shown, end, "at {speed}x in {mode:?}");
+            assert_eq!(seen.statuses.last(), Some(&SessionStatus::ReachedEnd), "at {speed}x in {mode:?}");
+            assert_eq!(watched.state_now(), expected, "at {speed}x in {mode:?}");
+        }
+    }
+}
+
+#[test]
+fn start_and_step_forward_at_the_end_time_are_refused() {
+    let mut watched = run_to_the_end(source_into_drain, secs(35), 1.0, TimeMode::Continuous);
+    watched.look();
+    watched.session.start().unwrap();
+    watched.session.step_forward().unwrap();
+    watched.at(2_000_000);
+    let seen = watched.look();
+    assert_eq!(seen.errors, vec![SessionError::AtEndTime(secs(35)), SessionError::AtEndTime(secs(35))]);
+    assert_eq!(seen.occurrences, vec![]);
+    assert_eq!(watched.shown, secs(35));
+}
+
+#[test]
+fn stepping_forward_goes_no_further_than_the_end_time() {
+    let mut watched = Watched::new(source_into_drain);
+    watched.session.set_end_time(Some(secs(35))).unwrap();
+    watched.session.start().unwrap();
+    watched.at(30);
+    watched.session.halt().unwrap();
+    assert_eq!(watched.time(), secs(30));
+    // The next instant is at 40 s, past the end time, so a step goes to the end time.
+    watched.session.step_forward().unwrap();
+    let seen = watched.look();
+    assert_eq!(seen.errors, vec![]);
+    assert_eq!(seen.occurrences, vec![]);
+    assert_eq!(watched.shown, secs(35));
+    assert_eq!(seen.statuses, vec![SessionStatus::ReachedEnd]);
+
+    // The same when the session has already computed past an end time set later.
+    let mut watched = Watched::new(source_into_drain);
+    watched.session.start().unwrap();
+    watched.at(30);
+    watched.session.halt().unwrap();
+    assert_eq!(watched.time(), secs(30));
+    watched.session.set_end_time(Some(secs(35))).unwrap();
+    watched.session.step_forward().unwrap();
+    let seen = watched.look();
+    assert_eq!((seen.errors, seen.occurrences), (vec![], vec![]));
+    assert_eq!(watched.shown, secs(35), "the instant at 40 s was computed, but isn't shown");
+}
+
+#[test]
+fn moving_the_end_time_later_or_clearing_it_lets_the_run_go_on() {
+    let mut watched = run_to_the_end(source_into_drain, secs(35), 1.0, TimeMode::Continuous);
+    watched.look();
+    watched.session.set_end_time(Some(secs(65))).unwrap();
+    let seen = watched.look();
+    assert_eq!(seen.statuses, vec![SessionStatus::Halted], "no longer at the end time");
+    watched.session.start().unwrap();
+    watched.at(3_000_000);
+    assert_eq!(watched.time(), secs(65));
+    assert_eq!(watched.state_now(), headless_at(source_into_drain, secs(65)));
+
+    watched.session.set_end_time(None).unwrap();
+    watched.session.start().unwrap();
+    watched.at(3_000_100);
+    assert_eq!(watched.time(), secs(165), "with no end time, the clock alone decides");
+}
+
+#[test]
+fn an_end_time_not_after_shown_time_is_refused() {
+    let mut watched = Watched::new(source_into_drain);
+    watched.session.set_end_time(Some(SimTime::ZERO)).unwrap();
+    let seen = watched.look();
+    assert_eq!(seen.errors, vec![SessionError::EndNotAhead { end: SimTime::ZERO, shown: SimTime::ZERO }]);
+
+    watched.session.start().unwrap();
+    watched.at(50);
+    watched.session.halt().unwrap();
+    assert_eq!(watched.time(), secs(50));
+    for end in [secs(40), secs(50)] {
+        watched.session.set_end_time(Some(end)).unwrap();
+        let seen = watched.look();
+        assert_eq!(seen.errors, vec![SessionError::EndNotAhead { end, shown: secs(50) }]);
+    }
+    // A refused end time changes nothing: the run still goes on past 50.
+    watched.session.start().unwrap();
+    watched.at(80);
+    assert_eq!(watched.time(), secs(80));
+}
+
+#[test]
+fn reset_and_going_back_keep_the_end_time() {
+    let mut watched = run_to_the_end(source_into_drain, secs(35), 1.0, TimeMode::Continuous);
+    watched.look();
+    watched.session.reset().unwrap();
+    watched.session.start().unwrap();
+    watched.at(2_000_000);
+    assert_eq!(watched.time(), secs(35), "Reset keeps the end time");
+
+    watched.session.go_back(secs(10)).unwrap();
+    assert_eq!(watched.time(), secs(10));
+    watched.session.start().unwrap();
+    watched.at(3_000_000);
+    assert_eq!(watched.time(), secs(35), "going back keeps the end time");
+}
+
+#[test]
+fn an_end_time_before_what_was_computed_ahead_still_stops_the_run_there() {
+    let mut watched = Watched::new(line_with_random_failures);
+    watched.session.start().unwrap();
+    watched.at(10);
+    assert_eq!(watched.time(), secs(10));
+    // The session has computed well past 10 s by now. An end time inside that stops it there.
+    watched.session.set_end_time(Some(secs(25))).unwrap();
+    watched.at(1_000);
+    assert_eq!(watched.time(), secs(25));
+    assert_eq!(watched.state_now(), headless_at(line_with_random_failures, secs(25)));
+
+    // What was computed beyond it is released once the end moves on, and nothing is lost.
+    watched.session.set_end_time(Some(secs(4_000))).unwrap();
+    watched.session.start().unwrap();
+    watched.at(100_000);
+    assert_eq!(watched.time(), secs(4_000));
+    assert_eq!(watched.state_now(), headless_at(line_with_random_failures, secs(4_000)));
+}

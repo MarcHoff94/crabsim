@@ -74,6 +74,10 @@ How far a simulation run has got. In a live session it can be ahead of shown tim
 **Shown time**:
 How far a live session has released results to the user. Everything the user experiences follows it, including Halt and errors.
 
+**End time**:
+A simulation time set on a live session at which the run halts by itself, exactly there, such as 30d. Start is refused there until it is moved or cleared. It isn't an intervention: it changes when a run stops, not what happens in it.
+_Avoid_: Stop time (a stop is an object's state when interrupted)
+
 **Time mode**:
 How shown time passes between instants: continuously at the session's speed, or skipping, where shown time jumps over the rest of a long gap. It changes nothing in the simulation run.
 

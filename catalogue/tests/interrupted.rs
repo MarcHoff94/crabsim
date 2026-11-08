@@ -70,7 +70,7 @@ fn a_run_left_by_a_store_of_the_first_version_is_interrupted_and_keeps_what_it_f
 
     let setup = open(&path);
     assert_eq!(status(&setup, &stuck), json!({ "run": stuck, "state": "interrupted", "observations": 2, "ended": 1, "failed": 0, "running": [], "here": false }));
-    let results = setup.ok("run_results", json!({ "run": stuck }));
+    let results = setup.ok("run_results", json!({ "run": stuck, "values": true }));
     assert_eq!(results["state"], "interrupted");
     assert!(results["finished"].is_string(), "{results}");
     assert_eq!(results["objects"][0]["figures"]["mus_in"]["values"], json!([42.0, null]));

@@ -12,13 +12,19 @@ fn number(amount: &Value) -> f64 {
     amount.as_f64().unwrap_or_else(|| panic!("not a number: {amount}"))
 }
 
+/// Whether `shown` is `exact` as results show it: to 4 significant digits, but never fewer than
+/// its whole number. Either way the rounding is at most 1 part in 2,000.
+fn shown_as(shown: f64, exact: f64) -> bool {
+    (shown - exact).abs() <= 5e-4 * exact.abs() + 1e-12
+}
+
 #[test]
 fn each_figures_mean_interval_minimum_and_maximum_agree_with_the_observations() {
     let setup = Setup::new("figures");
     write_models(&setup.folder);
     let run = setup.start(json!({ "model": "demo.json", "seed": 11, "length": "4:00:00", "observations": 5 }));
     setup.finished(&run);
-    let results = setup.ok("run_results", json!({ "run": run, "objects": ["Drain", "Station 1"] }));
+    let results = setup.ok("run_results", json!({ "run": run, "objects": ["Drain", "Station 1"], "values": true }));
 
     for object in results["objects"].as_array().unwrap() {
         let stored = setup.stored(&run, object["name"].as_str().unwrap());
@@ -26,21 +32,21 @@ fn each_figures_mean_interval_minimum_and_maximum_agree_with_the_observations() 
             if statistic == "mean_lead_time" {
                 continue;
             }
-            let values: Vec<f64> = figure["values"].as_array().unwrap().iter().map(number).collect();
-            assert_eq!(values.len(), 5);
-            for (k, value) in values.iter().enumerate() {
-                assert_eq!(*value, stored[&(k as u64 + 1)][statistic], "{statistic} of observation {}", k + 1);
+            let shown: Vec<f64> = figure["values"].as_array().unwrap().iter().map(number).collect();
+            assert_eq!(shown.len(), 5);
+            let values: Vec<f64> = (1..=5u64).map(|k| stored[&k][statistic]).collect();
+            for (k, value) in shown.iter().enumerate() {
+                assert!(shown_as(*value, values[k]), "{statistic} of observation {}: {value} for {}", k + 1, values[k]);
             }
             let mean = values.iter().sum::<f64>() / 5.0;
             let sd = (values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / 4.0).sqrt();
             // t for 4 degrees of freedom, 97.5%.
             let half = 2.776 * sd / 5f64.sqrt();
-            let close = |a: f64, b: f64| (a - b).abs() <= 1e-9 * b.abs().max(1.0);
-            assert!(close(number(&figure["mean"]), mean), "{statistic} mean");
-            assert!(close(number(&figure["ci95"][0]), mean - half), "{statistic} interval: {figure}");
-            assert!(close(number(&figure["ci95"][1]), mean + half), "{statistic} interval: {figure}");
-            assert_eq!(number(&figure["min"]), values.iter().copied().fold(f64::INFINITY, f64::min), "{statistic} min");
-            assert_eq!(number(&figure["max"]), values.iter().copied().fold(f64::NEG_INFINITY, f64::max), "{statistic} max");
+            assert!(shown_as(number(&figure["mean"]), mean), "{statistic} mean");
+            assert!(shown_as(number(&figure["ci95"][0]), mean - half), "{statistic} interval: {figure}");
+            assert!(shown_as(number(&figure["ci95"][1]), mean + half), "{statistic} interval: {figure}");
+            assert!(shown_as(number(&figure["min"]), values.iter().copied().fold(f64::INFINITY, f64::min)), "{statistic} min");
+            assert!(shown_as(number(&figure["max"]), values.iter().copied().fold(f64::NEG_INFINITY, f64::max)), "{statistic} max");
         }
     }
     let names: Vec<&str> = results["objects"].as_array().unwrap().iter().map(|object| object["name"].as_str().unwrap()).collect();
@@ -49,6 +55,95 @@ fn each_figures_mean_interval_minimum_and_maximum_agree_with_the_observations() 
     assert!(drain["figures"]["throughput_per_hour"]["mean"].as_f64().unwrap() > 0.0);
     let lead_time = drain["figures"]["mean_lead_time"]["mean"].as_str().expect("a time, as the UI shows it");
     assert!(crabsim::time::parse_time(lead_time).is_some(), "{lead_time}");
+}
+
+/// Every number in `value`, with where it is.
+fn numbers<'a>(value: &'a Value, at: String, found: &mut Vec<(String, &'a Value)>) {
+    match value {
+        Value::Number(_) => found.push((at, value)),
+        Value::Array(items) => items.iter().enumerate().for_each(|(k, item)| numbers(item, format!("{at}/{k}"), found)),
+        Value::Object(fields) => fields.iter().for_each(|(key, item)| numbers(item, format!("{at}/{key}"), found)),
+        _ => {}
+    }
+}
+
+#[test]
+fn the_summary_stays_the_same_size_whatever_the_number_of_observations() {
+    let setup = Setup::new("summary-size");
+    write_models(&setup.folder);
+    let summary = |observations: u32| {
+        let run = setup.start(json!({ "model": "demo.json", "seed": 4, "length": "2:00:00", "observations": observations }));
+        setup.finished(&run);
+        (run.clone(), setup.ok("run_results", json!({ "run": run })))
+    };
+    let (_, few) = summary(2);
+    let (many_run, many) = summary(24);
+    for results in [&few, &many] {
+        assert!(results.get("observation_runs").is_none(), "no list of observations by default: {results}");
+        assert_eq!(results["failed_observations"], json!([]));
+        assert!(results["events"].as_u64().unwrap() > 0, "every observation's events, added up");
+        assert!(results["wall_time_s"].as_f64().unwrap() > 0.0);
+        for object in results["objects"].as_array().unwrap() {
+            for (statistic, figure) in object["figures"].as_object().unwrap() {
+                assert!(figure.get("values").is_none(), "{statistic} of {}: no values by default", object["name"]);
+            }
+        }
+    }
+    let (few_size, many_size) = (few["objects"].to_string().len() as f64, many["objects"].to_string().len() as f64);
+    assert!((many_size / few_size - 1.0).abs() < 0.1, "{few_size} bytes for 2 observations, {many_size} for 24");
+
+    let detailed = setup.ok("run_results", json!({ "run": many_run, "values": true }));
+    assert_eq!(detailed["observation_runs"].as_array().unwrap().len(), 24);
+    assert_eq!(detailed["objects"][0]["figures"]["mus_in"]["values"].as_array().unwrap().len(), 24);
+}
+
+#[test]
+fn figures_that_are_0_in_every_observation_are_left_out() {
+    let setup = Setup::new("zeros");
+    write_models(&setup.folder);
+    let run = setup.start(json!({ "model": "demo.json", "seed": 5, "length": "4:00:00", "observations": 3 }));
+    setup.finished(&run);
+    let results = setup.ok("run_results", json!({ "run": run, "objects": ["Source", "Station 1", "Drain"] }));
+    let mut left_out = 0;
+    for object in results["objects"].as_array().unwrap() {
+        let name = object["name"].as_str().unwrap();
+        let stored = setup.stored(&run, name);
+        let names: BTreeSet<&String> = stored.values().flat_map(|figures| figures.keys()).collect();
+        for statistic in names {
+            let key = if statistic == "mean_lead_time_s" { "mean_lead_time" } else { statistic.as_str() };
+            let all_zero = stored.values().all(|figures| figures.get(statistic).is_none_or(|value| *value == 0.0));
+            assert_eq!(object["figures"].get(key).is_none(), all_zero, "{statistic} of {name}");
+            left_out += usize::from(all_zero);
+        }
+    }
+    assert!(left_out > 0, "the test needs a figure that is 0 throughout, such as paused_share");
+}
+
+#[test]
+fn numbers_have_at_most_4_significant_digits_but_keep_their_whole_number() {
+    let setup = Setup::new("rounding");
+    write_models(&setup.folder);
+    let run = setup.start(json!({ "model": "demo.json", "seed": 6, "length": "4:00:00", "observations": 3 }));
+    setup.finished(&run);
+    let results = setup.ok("run_results", json!({ "run": run, "classes": ["Station", "Source", "Drain"], "values": true }));
+    let mut found = Vec::new();
+    numbers(&results["objects"], String::new(), &mut found);
+    let mut fractions = 0;
+    for (at, value) in found {
+        let value = value.as_f64().unwrap();
+        if value.fract() == 0.0 {
+            continue;
+        }
+        fractions += 1;
+        assert!(value.abs() < 1000.0, "{at}: {value} keeps a fraction beyond 4 digits");
+        let digits: String = format!("{}", value.abs()).chars().filter(char::is_ascii_digit).collect();
+        let significant = digits.trim_start_matches('0').len();
+        assert!(significant <= 4, "{at}: {value} has {significant} significant digits");
+    }
+    assert!(fractions > 0);
+    // The store itself keeps every digit.
+    let stored = setup.stored(&run, "Station 1");
+    assert!(stored.values().flat_map(|figures| figures.values()).any(|value| format!("{value}").len() > 8));
 }
 
 #[test]
@@ -143,7 +238,7 @@ fn results_carry_what_reproduces_them() {
     write_models(&setup.folder);
     let run = setup.start(json!({ "model": "small.json", "seed": 9, "length": "1:30:00", "warm_up": "0:30:00", "observations": 2, "label": "check" }));
     setup.finished(&run);
-    let results = setup.ok("run_results", json!({ "run": run }));
+    let results = setup.ok("run_results", json!({ "run": run, "values": true }));
     for (field, value) in [
         ("run", json!(run)),
         ("label", json!("check")),

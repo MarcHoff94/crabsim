@@ -65,9 +65,10 @@ enum Command {
         /// Simulated time at the start of each observation that its statistics leave out.
         #[arg(long)]
         warm_up: Option<String>,
-        /// How many observations, run in parallel, one per CPU core.
-        #[arg(long, default_value_t = 1)]
-        observations: u32,
+        /// How many observations, run in parallel, one per CPU core. 10 if left out, as for
+        /// agents.
+        #[arg(long)]
+        observations: Option<u32>,
         /// A name for the run, such as `baseline`.
         #[arg(long)]
         label: Option<String>,
@@ -89,6 +90,9 @@ enum Command {
         /// A class whose instances to show instead of the summary. Give it more than once for more.
         #[arg(long = "class")]
         classes: Vec<String>,
+        /// Also every observation: its seed, events, wall time and any error.
+        #[arg(long)]
+        values: bool,
     },
     /// Queries the results store with one read-only SQL SELECT.
     Query {
@@ -109,7 +113,10 @@ fn main() -> ExitCode {
     let outcome = match opts.command {
         None => return single_run(&opts.single),
         Some(Command::Run { models, model, seed, length, warm_up, observations, label }) => catalogue(&models).and_then(|catalogue| {
-            let mut input = json!({ "model": model, "seed": seed, "length": length, "observations": observations });
+            let mut input = json!({ "model": model, "seed": seed, "length": length });
+            if let Some(observations) = observations {
+                input["observations"] = json!(observations);
+            }
             if let Some(warm_up) = warm_up {
                 input["warm_up"] = json!(warm_up);
             }
@@ -119,8 +126,8 @@ fn main() -> ExitCode {
             run(&catalogue, input)
         }),
         Some(Command::Runs { models }) => catalogue(&models).and_then(|catalogue| runs(&catalogue)),
-        Some(Command::Results { models, run, objects, classes }) => catalogue(&models).and_then(|catalogue| {
-            let mut input = json!({ "run": run });
+        Some(Command::Results { models, run, objects, classes, values }) => catalogue(&models).and_then(|catalogue| {
+            let mut input = json!({ "run": run, "values": values });
             if !objects.is_empty() {
                 input["objects"] = json!(objects);
             }

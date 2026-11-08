@@ -81,6 +81,20 @@ fn t_quantile(df: usize) -> f64 {
         + (3.0 * z.powi(7) + 19.0 * z.powi(5) + 17.0 * z.powi(3) - 15.0 * z) / (384.0 * n.powi(3))
 }
 
+/// `value` as results show it: to 4 significant digits, but never fewer than its whole number, so
+/// 0.74604 is 0.746, 182.85 is 182.9 and 131650.75 is 131651. The store keeps every digit.
+fn shown(value: f64) -> f64 {
+    if value == 0.0 || !value.is_finite() {
+        return value;
+    }
+    let decimals = 3 - value.abs().log10().floor() as i32;
+    if decimals <= 0 {
+        return value.round();
+    }
+    let scale = 10f64.powi(decimals);
+    (value * scale).round() / scale
+}
+
 /// A number, or a time shown as the UI shows it.
 #[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 #[serde(untagged)]
@@ -100,15 +114,17 @@ pub struct Figure {
     pub min: Amount,
     pub max: Amount,
     /// Each observation's own value, in order from observation 1, null where it has none, such as
-    /// a failed observation.
-    pub values: Vec<Option<Amount>>,
+    /// a failed observation. Only when asked for with `values`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub values: Option<Vec<Option<Amount>>>,
 }
 
 impl Figure {
-    /// The figure from each observation's value, or `None` if no observation has one.
-    fn of(values: &[Option<f64>], show: impl Fn(f64) -> Amount) -> Option<Figure> {
+    /// The figure from each observation's value, with each one's own value if `each`, or `None`
+    /// if no observation has one, or every one has 0.
+    fn of(values: &[Option<f64>], each: bool, show: impl Fn(f64) -> Amount) -> Option<Figure> {
         let present: Vec<f64> = values.iter().flatten().copied().collect();
-        if present.is_empty() {
+        if present.iter().all(|value| *value == 0.0) {
             return None;
         }
         let n = present.len() as f64;
@@ -120,7 +136,8 @@ impl Figure {
         });
         let min = present.iter().copied().fold(f64::INFINITY, f64::min);
         let max = present.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-        Some(Figure { mean: show(mean), ci95, min: show(min), max: show(max), values: values.iter().map(|value| value.map(&show)).collect() })
+        let values = each.then(|| values.iter().map(|value| value.map(&show)).collect());
+        Some(Figure { mean: show(mean), ci95, min: show(min), max: show(max), values })
     }
 }
 
@@ -144,12 +161,13 @@ pub struct ObjectResults {
     pub why: Vec<Why>,
     /// By statistic: mus_in, mus_out, working_share, blocked_share, idle_share, failed_share,
     /// paused_share, failures, availability, and for Drains throughput_per_hour and
-    /// mean_lead_time (as simulated time). Shares and availability are from 0 to 1.
+    /// mean_lead_time (as simulated time). Shares and availability are from 0 to 1. A figure that
+    /// is 0 in every observation is left out.
     pub figures: BTreeMap<String, Figure>,
 }
 
 /// One observation of a run.
-#[derive(Serialize, JsonSchema)]
+#[derive(Clone, Serialize, JsonSchema)]
 pub struct ObservationResults {
     /// From 1.
     pub observation: u32,
@@ -181,8 +199,16 @@ pub struct RunResultsOutput {
     pub crabsim_version: String,
     pub started: String,
     pub finished: Option<String>,
-    /// Every observation that ended, in order.
-    pub observation_runs: Vec<ObservationResults>,
+    /// The events of every observation that ended, added up.
+    pub events: u64,
+    /// The wall time of every observation that ended, added up, in seconds. They run in
+    /// parallel, so the run took less.
+    pub wall_time_s: f64,
+    /// Every observation that ended with a run error, in order, usually none.
+    pub failed_observations: Vec<ObservationResults>,
+    /// Every observation that ended, in order. Only when asked for with `values`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observation_runs: Option<Vec<ObservationResults>>,
     /// The objects asked for, or by default every Drain and the most blocked and most failed
     /// objects, in model order.
     pub objects: Vec<ObjectResults>,
@@ -202,11 +228,16 @@ pub struct RunResultsInput {
     /// Classes whose instances to show instead of the summary: every instance whose chain of
     /// classes includes one of them, built-in classes such as Drain too.
     pub classes: Option<Vec<String>>,
+    /// Also each observation's own value of every figure, and each observation's seed, events
+    /// and wall time. Left out, only the mean, interval, minimum and maximum, so the results
+    /// stay the same size whatever the number of observations.
+    #[serde(default)]
+    pub values: bool,
 }
 
 impl Operation for RunResults {
     const NAME: &'static str = "run_results";
-    const DESCRIPTION: &'static str = "Reads a run's results from the results store: its settings, each observation's seed, events, wall time and any error, and per object every figure's mean over the observations, 95% confidence interval, minimum and maximum, beside each observation's own value. By default a short summary that fits even a 6,000-object model: every Drain, the 10 most blocked and the 10 most failed objects. Give `objects` or `classes` to read exactly those instead. For anything else, such as comparing runs, use query_results.";
+    const DESCRIPTION: &'static str = "Reads a run's results from the results store: its settings, its events and wall time, any observation that failed with its error, and per object every figure's mean over the observations, 95% confidence interval, minimum and maximum, to 4 significant digits. Figures that are 0 in every observation are left out. By default a short summary that fits even a 6,000-object model run 10,000 times: every Drain, the 10 most blocked and the 10 most failed objects. Give `objects` or `classes` to read exactly those instead, and `values` for each observation's own figures and seed. For full precision, or anything else such as comparing runs, use query_results.";
     const EFFECT: Effect = Effect::ReadOnly;
     type Input = RunResultsInput;
     type Output = RunResultsOutput;
@@ -257,6 +288,10 @@ impl Operation for RunResults {
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
+        let events = observation_runs.iter().map(|observation| observation.events).sum();
+        let wall_time_s = shown(observation_runs.iter().map(|observation| observation.wall_time_s).sum());
+        let failed_observations: Vec<ObservationResults> = observation_runs.iter().filter(|observation| observation.error.is_some()).cloned().collect();
+        let observation_runs = input.values.then_some(observation_runs);
 
         // Which objects, and why.
         let mut chosen: Vec<(String, Why)> = Vec::new();
@@ -338,9 +373,9 @@ impl Operation for RunResults {
             for statistic in STATISTICS {
                 let Some(values) = values.get(statistic) else { continue };
                 let figure = if statistic == "mean_lead_time_s" {
-                    Figure::of(values, |secs| Amount::Time(format_time_exact(SimTime::from_secs_f64(secs)))).map(|figure| ("mean_lead_time", figure))
+                    Figure::of(values, input.values, |secs| Amount::Time(format_time_exact(SimTime::from_secs_f64(secs)))).map(|figure| ("mean_lead_time", figure))
                 } else {
-                    Figure::of(values, Amount::Number).map(|figure| (statistic, figure))
+                    Figure::of(values, input.values, |value| Amount::Number(shown(value))).map(|figure| (statistic, figure))
                 };
                 if let Some((key, figure)) = figure {
                     figures.insert(key.to_string(), figure);
@@ -363,6 +398,9 @@ impl Operation for RunResults {
             crabsim_version: version,
             started,
             finished,
+            events,
+            wall_time_s,
+            failed_observations,
             observation_runs,
             objects,
         })

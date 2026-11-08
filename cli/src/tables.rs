@@ -94,7 +94,18 @@ pub fn results(results: &Value) -> String {
         cell(&results["crabsim_version"]),
         cell(&results["model_hash"]).chars().take(12).collect::<String>(),
     );
-    let observations: Vec<Vec<String>> = results["observation_runs"]
+    let failed = results["failed_observations"].as_array().map_or(0, Vec::len);
+    let ended = results["observation_runs"].as_array().map_or_else(|| "".to_string(), |runs| format!("{} of ", runs.len()));
+    text += &format!(
+        "{ended}{} observations ended, {}: {} events and {:.3} s of wall time between them\n",
+        results["observations"],
+        if failed == 0 { "none failed".to_string() } else { format!("{failed} failed") },
+        results["events"],
+        results["wall_time_s"].as_f64().unwrap_or_default(),
+    );
+    // Every observation when asked for, otherwise those that failed.
+    let shown = if results["observation_runs"].is_array() { &results["observation_runs"] } else { &results["failed_observations"] };
+    let observations: Vec<Vec<String>> = shown
         .as_array()
         .into_iter()
         .flatten()
@@ -112,7 +123,9 @@ pub fn results(results: &Value) -> String {
             ]
         })
         .collect();
-    text += &table(&["Observation", "Seed", "Events", "Wall time", "Error"], &observations);
+    if !observations.is_empty() {
+        text += &table(&["Observation", "Seed", "Events", "Wall time", "Error"], &observations);
+    }
     for object in results["objects"].as_array().into_iter().flatten() {
         let why: Vec<String> = object["why"].as_array().into_iter().flatten().map(|why| cell(why).replace('_', " ")).collect();
         text += &format!("\n{} ({}, {}): {}\n", cell(&object["name"]), cell(&object["class"]), cell(&object["built_in_class"]), why.join(", "));

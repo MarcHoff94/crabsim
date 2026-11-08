@@ -1,5 +1,6 @@
 //! Operations on the model files in the models folder: validate, list, read, write, copy and
-//! delete. They touch only `.json` files inside the folder, never `.crabsim`.
+//! delete, and the format they're written in. They touch only `.json` files inside the folder,
+//! never `.crabsim`.
 
 use crate::error::{ErrorKind, ModelProblem, OperationError};
 use crate::{entry, Catalogue, Effect, Entry, Operation};
@@ -15,6 +16,7 @@ pub(crate) fn entries() -> Vec<Entry> {
         entry::<WriteModel>(),
         entry::<CopyModel>(),
         entry::<DeleteModel>(),
+        entry::<ModelFileFormat>(),
     ];
     entries.extend(crate::jobs::entries());
     entries.extend(crate::results::entries());
@@ -22,16 +24,14 @@ pub(crate) fn entries() -> Vec<Entry> {
     entries
 }
 
-/// A model file's text, whose JSON follows the model file's own schema, so an operation's schema
-/// and the model file's can't disagree. The schema rides along as `contentSchema`, which describes
-/// the text without making a harness refuse a draft that doesn't fit it yet.
-pub(crate) fn model_text_schema(generator: &mut SchemaGenerator) -> Schema {
-    let model = generator.subschema_for::<crabsim_model::schema::ModelFile>();
+/// A model file's text. Its schema is about 7 KB, which a harness would carry in every session
+/// for every operation a model passes through, so it comes from `model_file_format` alone, and a
+/// harness never refuses a draft that doesn't fit it yet.
+pub(crate) fn model_text_schema(_: &mut SchemaGenerator) -> Schema {
     schemars::json_schema!({
         "type": "string",
-        "description": "A crabsim model file's text: JSON with `format_version` 1, optional `classes` and `instances`.",
+        "description": "A crabsim model file's text: JSON with `format_version` 1, optional `classes` and `instances`. model_file_format gives its schema and an example.",
         "contentMediaType": "application/json",
-        "contentSchema": model,
     })
 }
 
@@ -62,7 +62,8 @@ pub struct ValidateModel;
 pub struct ValidateModelInput {
     /// A model file in the models folder, such as `line.json`.
     pub path: Option<String>,
-    /// A model file's text, such as a draft not saved yet.
+    /// A model file's text, such as a draft not saved yet. model_file_format gives its schema and
+    /// an example.
     // `schema_with` hides the `Option` from schemars, so `default` is what keeps `text` optional
     // in the schema.
     #[serde(default)]
@@ -165,7 +166,7 @@ pub struct PathInput {
 #[derive(Serialize, JsonSchema)]
 pub struct ReadModelOutput {
     pub path: String,
-    /// The file's text, exactly as it is.
+    /// The file's text, exactly as it is: JSON whose schema model_file_format gives.
     #[schemars(schema_with = "model_text_schema")]
     pub text: String,
 }
@@ -310,5 +311,59 @@ impl Operation for DeleteModel {
         let (file, _) = read_file(catalogue, &input.path)?;
         std::fs::remove_file(&file).map_err(|error| OperationError::run_error(format!("`{}` can't be deleted: {error}", input.path)))?;
         Ok(DeleteModelOutput { deleted: input.path })
+    }
+}
+
+// --- model_file_format ---
+
+pub struct ModelFileFormat;
+
+/// A small model that uses every part of the format an agent starts with: a derived class with
+/// failures, instances that inherit from it or set their own values, positions and connections.
+const EXAMPLE: &str = r#"{
+  "format_version": 1,
+  "description": "A Source, two mills of one class in parallel, an inspection and a Drain",
+  "classes": [
+    {
+      "name": "CNC mill",
+      "parent": "Station",
+      "attributes": {
+        "process_time": "00:00:45",
+        "failures": { "availability": 0.95, "repair_time": { "erlang": { "mean": "00:05:00", "k": 2 } } },
+        "description": "5-axis mill"
+      }
+    }
+  ],
+  "instances": [
+    { "name": "Arrivals", "class": "Source", "position": { "x": 0, "y": 0 }, "successors": ["Mill 1", "Mill 2"], "attributes": { "interval": "00:00:30" } },
+    { "name": "Mill 1", "class": "CNC mill", "position": { "x": 4, "y": 2 }, "successors": ["Inspection"] },
+    { "name": "Mill 2", "class": "CNC mill", "position": { "x": 4, "y": -2 }, "successors": ["Inspection"], "attributes": { "process_time": "00:00:50" } },
+    { "name": "Inspection", "class": "Station", "position": { "x": 8, "y": 0 }, "successors": ["Shipping"], "attributes": { "process_time": "00:00:20" } },
+    { "name": "Shipping", "class": "Drain", "position": { "x": 12, "y": 0 } }
+  ]
+}"#;
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ModelFileFormatInput {}
+
+#[derive(Serialize, JsonSchema)]
+pub struct ModelFileFormatOutput {
+    /// The model file's JSON Schema (draft 2020-12), with every field, attribute and rule.
+    pub schema: serde_json::Value,
+    /// A small valid model in canonical form, as crabsim saves it.
+    pub example: String,
+}
+
+impl Operation for ModelFileFormat {
+    const NAME: &'static str = "model_file_format";
+    const DESCRIPTION: &'static str = "Gives the format of crabsim's model files: their JSON Schema, with every field, attribute and rule, and a small valid example in canonical form. Read it before writing a model. Times are text such as \"90\", \"1:30\" or \"2d 06:00:00\", and an instance or class sets only the attributes it changes from its class.";
+    const EFFECT: Effect = Effect::ReadOnly;
+    type Input = ModelFileFormatInput;
+    type Output = ModelFileFormatOutput;
+
+    fn run(_: &Catalogue, _: ModelFileFormatInput) -> Result<ModelFileFormatOutput, OperationError> {
+        let example = crabsim_model::load(EXAMPLE).expect("the example is a valid model").save();
+        Ok(ModelFileFormatOutput { schema: crabsim_model::schema::schema(), example })
     }
 }

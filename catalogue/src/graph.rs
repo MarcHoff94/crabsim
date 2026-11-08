@@ -61,7 +61,7 @@ pub struct WhichModel {
 }
 
 /// The model's text, and how to name it in a message.
-fn model_text(catalogue: &Catalogue, path: Option<String>, run: Option<String>) -> Result<(String, String), OperationError> {
+pub(crate) fn model_text(catalogue: &Catalogue, path: Option<String>, run: Option<String>) -> Result<(String, String), OperationError> {
     match (path, run) {
         (Some(path), None) => {
             let (_, text) = read_file(catalogue, &path)?;

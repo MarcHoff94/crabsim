@@ -141,6 +141,8 @@ fn the_shortest_inputs_an_operation_accepts_pass_its_input_schema() {
         ("query_model", json!({ "path": "line.json", "query": { "kind": "neighbours", "name": "Mill" } })),
         ("query_model", json!({ "run": "run-1", "query": { "kind": "find_instances" } })),
         ("query_model", json!({ "path": "line.json", "query": { "kind": "class_tree" } })),
+        ("export_model", json!({ "path": "line.json", "format": "cypher" })),
+        ("export_model", json!({ "run": "run-1", "format": "neo4j-csv" })),
         ("compare_runs", json!({ "a": "run-1", "b": "run-2" })),
         ("claim_model", json!({ "path": "line.json", "purpose": "adding a mill" })),
         ("release_model", json!({ "path": "line.json" })),

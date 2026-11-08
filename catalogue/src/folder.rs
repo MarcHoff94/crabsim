@@ -1,12 +1,20 @@
 //! The models folder: the one place crabsim's operations may touch. Model files are named by their
 //! path inside it, and nothing an operation is given can reach outside it, through `..`, an
-//! absolute path or a link, or into crabsim's own `.crabsim` folder there.
+//! absolute path or a link, or into crabsim's own `.crabsim` folder there, or into `exports`,
+//! where `export_model` alone writes, and only graph files.
 
 use crate::error::{ErrorKind, OperationError};
 use std::path::{Component, Path, PathBuf};
 
 /// crabsim's own folder inside the models folder, holding the results store.
 pub const CRABSIM_FOLDER: &str = ".crabsim";
+
+/// The folder inside the models folder where `export_model` writes. Model operations can't reach
+/// it, and nothing else is written there.
+pub const EXPORTS_FOLDER: &str = "exports";
+
+/// The only kinds of file written in `exports`.
+const EXPORT_EXTENSIONS: [&str; 3] = ["cypher", "csv", "graphml"];
 
 /// A models folder that passed the check for source code.
 #[derive(Debug, Clone)]
@@ -62,22 +70,53 @@ impl ModelsFolder {
         self.inside(path, &relative)
     }
 
-    /// `relative` joined to the folder, checked to stay inside it once links are followed.
-    fn inside(&self, path: &str, relative: &Path) -> Result<PathBuf, OperationError> {
-        let full = self.root.join(relative);
-        // The nearest part of the path that exists, followed through any links.
-        let mut existing = full.as_path();
-        let real = loop {
+    /// The export file at `path` inside `exports`, which may not exist yet. `path` must be
+    /// relative, end in `.cypher`, `.csv` or `.graphml`, and stay inside `exports` after following
+    /// links.
+    pub fn export_file(&self, path: &str) -> Result<PathBuf, OperationError> {
+        let relative = relative_path(path)?;
+        if !relative.extension().is_some_and(|extension| EXPORT_EXTENSIONS.iter().any(|allowed| extension.eq_ignore_ascii_case(allowed))) {
+            return Err(OperationError::invalid_input(format!("`{path}` isn't an export: exports end in .cypher, .csv or .graphml")));
+        }
+        let full = self.root.join(EXPORTS_FOLDER).join(&relative);
+        let named = format!("{EXPORTS_FOLDER}/{path}");
+        let real = self.nearest_real(&named, &full)?;
+        // Before the first export there is no `exports` yet, so the nearest real folder is the
+        // models folder itself. Otherwise it must be `exports` or inside it, not a folder a link
+        // in `exports` leads to.
+        let Ok(inside) = real.strip_prefix(&self.root) else { return Err(outside(&named)) };
+        let first = inside.components().next();
+        if first.is_some_and(|first| !is_exports_folder(first.as_os_str())) {
+            return Err(outside(&named));
+        }
+        Ok(full)
+    }
+
+    /// The nearest part of `full` that exists, followed through any links.
+    fn nearest_real(&self, path: &str, full: &Path) -> Result<PathBuf, OperationError> {
+        let mut existing = full;
+        loop {
             match std::fs::canonicalize(existing) {
-                Ok(real) => break real,
+                Ok(real) => return Ok(real),
                 Err(_) => match existing.parent() {
                     Some(parent) => existing = parent,
                     None => return Err(outside(path)),
                 },
             }
-        };
+        }
+    }
+
+    /// `relative` joined to the folder, checked to stay inside it once links are followed.
+    fn inside(&self, path: &str, relative: &Path) -> Result<PathBuf, OperationError> {
+        // As given, so a path into `exports` is refused before it exists too, and after
+        // following links.
+        if relative.components().next().is_some_and(|first| is_exports_folder(first.as_os_str())) {
+            return Err(outside(path));
+        }
+        let full = self.root.join(relative);
+        let real = self.nearest_real(path, &full)?;
         let Ok(inside) = real.strip_prefix(&self.root) else { return Err(outside(path)) };
-        if inside.components().next().is_some_and(|first| is_crabsim_folder(first.as_os_str())) {
+        if inside.components().next().is_some_and(|first| is_crabsim_folder(first.as_os_str()) || is_exports_folder(first.as_os_str())) {
             return Err(outside(path));
         }
         Ok(full)
@@ -114,10 +153,14 @@ fn is_crabsim_folder(name: &std::ffi::OsStr) -> bool {
     name.to_string_lossy().eq_ignore_ascii_case(CRABSIM_FOLDER)
 }
 
+fn is_exports_folder(name: &std::ffi::OsStr) -> bool {
+    name.to_string_lossy().eq_ignore_ascii_case(EXPORTS_FOLDER)
+}
+
 fn outside(path: &str) -> OperationError {
     OperationError::new(
         ErrorKind::OutsideModelsFolder,
-        format!("`{path}` is outside the models folder: name a path inside it, such as `line.json` or `plant/line.json`, without `..`, and not in `.crabsim`"),
+        format!("`{path}` is outside the models folder: name a path inside it, such as `line.json` or `plant/line.json`, without `..`, and not in `.crabsim` or `exports`, which hold crabsim's own files and exports"),
     )
 }
 

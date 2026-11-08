@@ -18,6 +18,7 @@ mod compare;
 mod edit;
 mod editing;
 mod error;
+mod export;
 mod folder;
 mod graph;
 mod jobs;
@@ -28,7 +29,7 @@ mod store;
 
 pub use crate::editing::{EDITING_FILE, EDIT_TIMEOUT};
 pub use crate::error::{ErrorKind, ModelProblem, OperationError};
-pub use crate::folder::{ModelsFolder, CRABSIM_FOLDER};
+pub use crate::folder::{ModelsFolder, CRABSIM_FOLDER, EXPORTS_FOLDER};
 pub use crate::jobs::{observation_seed, RunState, MAX_OBSERVATIONS};
 pub use crate::results::STATISTICS;
 pub use crate::store::{Store, QUERY_ROW_LIMIT, STORE_FILE};

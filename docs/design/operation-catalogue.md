@@ -21,7 +21,7 @@ An operation implements the `Operation` trait: `NAME`, `DESCRIPTION`, `EFFECT` (
 - **Defaults** of an input are in its schema, as `default`, so an agent sees them.
 - **Errors** are structured: a `kind`, a `message` and, for an invalid model, every `problem` as `crabsim-model` reports it (JSON Pointer, name, message). The kinds are `invalid_input`, `invalid_model`, `not_found`, `outside_models_folder`, `already_exists`, `run_error`, and from slice 2 `not_editor`, `blocked`, `changed_outside` and `conflict`. Over MCP they are tool results marked as errors, so the agent reads them, rather than protocol errors its harness would hide.
 - **What an output means is in the description,** not only in the output schema, because a harness may not show output schemas to the model: the first harness trial's agent never saw them, and asked what `here` and a summed `wall_time_s` meant.
-- **Effects** become MCP's hints: read-only for `validate_model`, `list_models`, `read_model`, `model_file_format`, `get_attributes`, `describe_model`, `query_model`, `run_status`, `run_results` and `query_results`, destructive for `write_model`, `edit_model`, `delete_model` and `forget_run`, and neither for the rest.
+- **Effects** become MCP's hints: read-only for `validate_model`, `list_models`, `read_model`, `model_file_format`, `get_attributes`, `describe_model`, `query_model`, `run_status`, `run_results` and `query_results`, destructive for `write_model`, `edit_model`, `delete_model`, `export_model` and `forget_run`, and neither for the rest.
 
 Slice 1's operations, with `model_file_format`, `edit_model` and `get_attributes` from slice 2:
 
@@ -38,6 +38,7 @@ Slice 1's operations, with `model_file_format`, `edit_model` and `get_attributes
 | `get_attributes { path, target }` | Every attribute of an instance or class, with its value and where it comes from |
 | `describe_model { path? , run? }` | A summary of a model whose size doesn't grow with it, also of a model with problems |
 | `query_model { path? , run?, query }` | One of seven questions about a model's structure, named in `query.kind` |
+| `export_model { path? , run?, format }` | Writes the model as a Cypher script, Neo4j's CSV import or GraphML into `exports/`, overwriting an earlier export |
 | `model_file_format {}` | The model file's JSON Schema, how the built-in classes behave, and a small valid example in canonical form |
 | `start_run { model, seed?, length, warm_up?, observations?, label?, wait? }` | Starts a job and returns its id at once, or with `wait` (1 to 60 s) once it ended or the wait is up, with `run_status`'s output. Seed 0 and 10 observations if left out |
 | `run_status { run }` | Queued, running, done, failed, cancelled or interrupted, observations done, and where each running one has reached |
@@ -81,6 +82,21 @@ Slice 3 of the catalogue, spec issue 56, PR 1 of 3 (exports and the CLI follow).
 - **Results and the graph** aren't joined: a query gives names, which an agent passes to `run_results` or `compare_runs` as `objects`. Joining belongs to studies.
 - **The cost,** measured on 2026-11-08 on the same 6,006-object file as `edit_model`, in release, median of 7 calls each on the owner's PC: loading the file is most of every call, with `validate_model` at 22 ms. `describe_model` took 23 ms, and `neighbours`, `upstream`, `downstream`, `paths`, `subgraph_around` and `class_tree` 22 to 23 ms. `find_instances`, which works out every instance's values, took 35 ms. The measurement is an ignored test, `describe_and_query_on_6006_objects` in `catalogue/tests/graph.rs`. It doesn't cover a model with many loops or many routes, where `paths` is bounded by its step limit rather than the model's size.
 
+## Exporting a model: `export_model`
+
+Slice 3, PR 2 of 3. People load a model into graph tools of their own with it. It's in `catalogue/src/export.rs`. It takes `path` or `run`, as `describe_model` does, and refuses a model with problems.
+
+- **One graph in every format,** built once and written three ways:
+  - **Instance nodes,** labelled `Instance` and their built-in class, such as `:Instance:Station`, with `name`, `class`, `stream`, `x`, `y` and `z` if placed, and every resolved value the built-in class has: `interval_s` and `process_time_s` in seconds, `starting_mus`, `capacity`, failures as `availability`, `repair_distribution` and its parameters (`repair_time_s`, `repair_min_s` and `repair_max_s`, `repair_mean_s` and `repair_std_s`, or `repair_mean_s` and `repair_k`), dimensions as `length`, `width`, `height` and `rotation_degrees`, and `description`.
+  - **Class nodes,** labelled `Class`, the four built-in classes too, with `built_in` and the values each class sets itself, in the same properties.
+  - **Edges:** `FEEDS` from an instance to each successor, with its `order` in the successor order from 0, `IS_A` from an instance to its class, and `DERIVES_FROM` from a class to its parent.
+- **Cypher:** one `.cypher` script for an empty database, such as through `cypher-shell -f`. It makes indexes on the names of `Instance` and `Class` first, creates every class and instance with one `CREATE` each, then each connection with `MATCH` on both names and `CREATE`, one statement per line, each ending in `;`.
+- **Neo4j's CSV import:** a folder of `instances.csv`, `classes.csv`, `feeds.csv`, `is_a.csv` and `derives_from.csv` for `neo4j-admin database import`, with headers in Neo4j's documented form: `name:ID(Instance)` and `name:ID(Class)` in separate id spaces, since an instance may share a class's name, as the demo's Drain does, `:LABEL` with labels split by `;`, typed columns such as `stream:long` and `process_time_s:double`, an empty cell where a node hasn't the property, and `:START_ID`, `:END_ID` and `:TYPE` for edges.
+- **GraphML:** one `.graphml` file with a typed `key` per property (`string`, `long`, `double`, `boolean`, `int`), node keys named `n_<property>`, a `labels` key written as Neo4j's GraphML export does (`:Instance:Station`), and edges with `type` and `order`. Node ids are `i<n>` for instances and `c<n>` for classes.
+- **Names** follow the model's path without `.json`: `exports/plant/line.cypher`, `exports/plant/line.graphml`, and the folder `exports/plant/line/` for CSV. A run's export is named after it, such as `exports/run-12.cypher`, so a model file called `run-12.json` at the top of the folder would share its name.
+- **Overwriting:** an export is derived and never edited, so exporting again replaces it, and the operation is marked destructive, so a harness asks first. Each file is written beside its target and renamed over it, so an export is never seen half-written. It returns the paths and sizes of the files, never their content.
+- **The cost,** measured on 2026-11-08 on the 6,006-object file, in release, median of 7 calls each on the owner's PC, all overwriting: Cypher 56 ms for 3.9 MB, Neo4j CSV 49 ms for 1.6 MB, and GraphML 46 ms for 5.5 MB. Loading the model is 22 ms of each and building the text about 30 ms for Cypher. Overwriting a `.cypher` file in place took about 130 ms more, against 1 ms for a new file, most likely the operating system scanning it, which writing beside it and renaming avoids. The measurement is an ignored test, `exports_of_6006_objects` in `catalogue/tests/export.rs`.
+
 ## Who may change a model: the editor and the edit queue
 
 Slice 2's PR 3a, from spec issue 45 and ADR 0011. Only one editor may change a model file at a time, through `edit_model`, `write_model` or `delete_model`. Reading, validating, copying to a new path and running need no right.
@@ -113,9 +129,10 @@ Slice 2's PR 3b, from spec issue 45 and ADR 0011. The editor right covers only c
 
 The owner's concern: an agent working through crabsim must never be able to change crabsim itself.
 
-- Only `.json` model files inside the models folder, and crabsim's own `.crabsim/` folder there, which holds the results store. Never crabsim's code, never commands, never the network.
+- Only `.json` model files inside the models folder, crabsim's own `.crabsim/` folder there, which holds the results store, and from slice 3 `.cypher`, `.csv` and `.graphml` files in its `exports/` folder, which only `export_model` writes. Never crabsim's code, never commands, never the network.
 - The models folder is given when the server or the CLI starts (`--models <folder>`). Model paths are relative to it, with `/` between folders, and subfolders are allowed.
-- **Refused** with `outside_models_folder`: absolute paths, including Windows paths such as `C:model.json` and `/model.json`, any `..`, any path naming `.crabsim`, and anything whose real path, after following links, lies outside the folder or inside `.crabsim`. A path that doesn't exist yet is checked by its nearest existing folder.
+- **Refused** with `outside_models_folder`: absolute paths, including Windows paths such as `C:model.json` and `/model.json`, any `..`, any path naming `.crabsim`, a model path starting with `exports`, and anything whose real path, after following links, lies outside the folder or inside `.crabsim` or `exports`. A path that doesn't exist yet is checked by its nearest existing folder. `exports` and `.crabsim` match whatever their case.
+- **`exports/`** holds only exports: model operations can't reach it, so `list_models` never shows it and a model file there can't be read or changed, and `export_model` writes only graph files there, refusing an export whose real path, after following links, lands anywhere else, such as through a link in `exports` to a folder of models. Only the top-level `exports` is special: `plant/exports/line.json` is an ordinary model file.
 - **`list_models`** doesn't follow links into folders, so a link can neither lead it out nor round in a circle, and never shows `.crabsim`.
 - **A source tree is refused as a models folder:** the server and the CLI refuse a folder holding a `Cargo.toml`, a `.git` or any `.rs` file at any depth, so crabsim's own repository can't be exposed by mistake. The repository's own `models/` folder passes, but a folder of the user's own models outside the repository is recommended.
 - **`query_results`** can't reach outside either: its connection is read-only and can attach no other database.

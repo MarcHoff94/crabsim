@@ -20,3 +20,6 @@ log = "0.4"
 
 [dev-dependencies]
 jsonschema = { version = "0.60", default-features = false }
+# Reading exports back in their tests.
+csv = "1"
+roxmltree = "0.20"

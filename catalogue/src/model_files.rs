@@ -24,6 +24,7 @@ pub(crate) fn entries() -> Vec<Entry> {
     entries.extend(crate::results::entries());
     entries.extend(crate::compare::entries());
     entries.extend(crate::graph::entries());
+    entries.extend(crate::export::entries());
     entries.extend(crate::store::entries());
     entries
 }

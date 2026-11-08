@@ -41,7 +41,8 @@ fn timeout(typed: &str) -> Result<std::time::Duration, String> {
 /// What a harness shows its agent about the server as a whole.
 const INSTRUCTIONS: &str = "crabsim is a discrete-event material-flow simulator. Models are JSON files in one models folder, named by their path inside it. \
 Start with model_file_format, which explains how models are written and how their objects behave. \
-Typical work: list_models and read_model, get_attributes to see an object's values and where they come from, edit_model to change a model with a batch of changes, or write_model for a new one; then start_run, poll run_status until it's done, and read run_results. \
+To understand a model, start with describe_model, a summary whose size doesn't grow with the model, then narrow down with query_model (neighbours, upstream, downstream, paths, subgraph_around, find_instances, class_tree) rather than reading the whole file. \
+Typical work: list_models and describe_model, get_attributes to see an object's values and where they come from, edit_model to change a model with a batch of changes, or write_model for a new one; then start_run, poll run_status until it's done, and read run_results. \
 Every run's results stay in a results store, which query_results reads with SQL to compare runs and models.";
 
 struct Server {

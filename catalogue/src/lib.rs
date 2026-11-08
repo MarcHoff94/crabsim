@@ -19,6 +19,7 @@ mod edit;
 mod editing;
 mod error;
 mod folder;
+mod graph;
 mod jobs;
 mod model_files;
 mod process;

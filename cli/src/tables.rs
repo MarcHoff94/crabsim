@@ -160,9 +160,6 @@ pub fn edited(edited: &Value) -> String {
     if !connections.is_empty() {
         text += &format!("Also removed the connections {}\n", connections.join(", "));
     }
-    if edited["instance_order_changed"] == true {
-        text += "The instances moved up after a removal, so runs before and after this aren't paired any more\n";
-    }
     text
 }
 
@@ -246,12 +243,15 @@ pub fn compared(compared: &Value) -> String {
         _ => format!("not paired, because {}", cell(&compared["why_unpaired"])),
     };
     let mut text = format!("{} minus {}: {pairing}\n", side(&compared["b"]), side(&compared["a"]));
+    for warning in compared["warnings"].as_array().into_iter().flatten() {
+        text += &format!("Warning: {}\n", cell(warning));
+    }
     for dropped in compared["dropped"].as_array().into_iter().flatten() {
         text += &format!("Left out: {}\n", cell(&dropped["reason"]));
     }
     for object in compared["objects"].as_array().into_iter().flatten() {
-        let unpaired = object.get("why_unpaired").map_or(String::new(), |why| format!(" (not paired: {})", cell(why)));
-        text += &format!("\n{}{unpaired}\n", cell(&object["name"]));
+        let common = object.get("why_not_common").map_or(String::new(), |why| format!(" (no common random numbers: {})", cell(why)));
+        text += &format!("\n{}{common}\n", cell(&object["name"]));
         let mut rows = Vec::new();
         for statistic in crabsim_catalogue::STATISTICS {
             let Some(figure) = object["figures"].get(statistic) else { continue };
@@ -272,6 +272,10 @@ pub fn compared(compared: &Value) -> String {
             ]);
         }
         text += &table(&["Statistic", "a", "b", "Difference", "95% interval", "Relative", "Clear", "Method"], &rows);
+    }
+    let unchanged: Vec<String> = compared["unchanged"].as_array().into_iter().flatten().map(cell).collect();
+    if !unchanged.is_empty() {
+        text += &format!("\nUnchanged in every observation: {}\n", unchanged.join(", "));
     }
     for (which, key) in [("a", "only_in_a"), ("b", "only_in_b")] {
         let names: Vec<String> = compared[key].as_array().into_iter().flatten().map(cell).collect();

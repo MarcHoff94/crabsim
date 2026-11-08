@@ -11,6 +11,8 @@ use std::collections::HashSet;
 /// What couldn't be read, so the checks leave it alone.
 #[derive(Debug, Default)]
 pub(crate) struct Broken {
+    /// Instances whose stream couldn't be read, given another one so the rest can be checked.
+    pub streams: HashSet<usize>,
     /// Instances, by index, whose name couldn't be read.
     pub names: HashSet<usize>,
     /// Instances whose class couldn't be read.
@@ -28,7 +30,7 @@ pub(crate) struct Broken {
 }
 
 const TOP_LEVEL: [&str; 5] = ["$schema", "format_version", "description", "classes", "instances"];
-const INSTANCE: [&str; 5] = ["name", "class", "position", "successors", "attributes"];
+const INSTANCE: [&str; 6] = ["name", "class", "stream", "position", "successors", "attributes"];
 const CLASS: [&str; 3] = ["name", "parent", "attributes"];
 const ATTRIBUTES: [&str; 7] = ["interval", "process_time", "failures", "starting_mus", "capacity", "dimensions", "description"];
 
@@ -139,6 +141,15 @@ impl Reader {
             None => {
                 self.problem(pointer.clone(), name, "`class` is missing");
                 self.broken.classes.insert(index);
+            }
+        }
+        if let Some(stream) = fields.get("stream") {
+            match stream.as_u64() {
+                Some(stream) => instance.stream = Some(stream),
+                None => {
+                    self.problem(format!("{pointer}/stream"), name, format!("{stream} is not a stream: write a whole number, 0 or more"));
+                    self.broken.streams.insert(index);
+                }
             }
         }
         if let Some(position) = fields.get("position") {

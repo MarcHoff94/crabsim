@@ -33,13 +33,15 @@ A file holds the model only: classes, instances, their attributes, names, positi
 {
   "name": "Mill 1",
   "class": "CNC mill",
+  "stream": 7,
   "position": { "x": 4, "y": 0 },
   "successors": ["Station 2", "Station 3"],
   "attributes": { "process_time": "0:45" }
 }
 ```
 
-- An instance owns `name` and `class`, both required, `position` and `successors`.
+- An instance owns `name` and `class`, both required, `stream`, `position` and `successors`.
+- `stream` (ADR 0012) is the number that, with a run's seed, gives the instance's random numbers. crabsim gives one when the instance is placed: one more than the highest in the model, or, for a file from before streams, its position. It stays whatever else changes, so variants of a model keep their common random numbers. Saving always writes it, and two instances with one stream are a problem. The user may change it by hand or with `edit_model`'s `set_stream`, which agents can't use, and which ends pairing with earlier runs.
 - `position` is in metres, the centre of the object's footprint: `x` and `y`, and `z` optional, 0 until there's a 3D view. Without a position, the UI places the object where it puts unplaced objects.
 - `successors` names the instances an object passes MUs to, in the order they are tried. Optional, none by default.
 - `attributes` holds only the values set on this instance, where its inheritance is cut. Anything not there comes from its class. It is left out when empty, so an instance that changes nothing is a name, a class, a position and its successors.

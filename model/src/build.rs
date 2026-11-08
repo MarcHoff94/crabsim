@@ -33,6 +33,7 @@ pub(crate) fn build(model: &Model) -> ModelDescription {
             other => unreachable!("checked: `{other}` is a built-in class"),
         };
         description.set_name(id, instance.name.clone());
+        description.set_stream(id, instance.stream.unwrap_or(index as u64));
         if let Some(position) = instance.position {
             description.set_position(id, position);
         }

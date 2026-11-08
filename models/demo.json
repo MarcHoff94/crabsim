@@ -24,6 +24,7 @@
     {
       "name": "Source",
       "class": "Source",
+      "stream": 0,
       "position": {
         "x": 0.0,
         "y": 0.0
@@ -38,6 +39,7 @@
     {
       "name": "Station 1",
       "class": "Demo station",
+      "stream": 1,
       "position": {
         "x": 4.0,
         "y": 0.0
@@ -52,6 +54,7 @@
     {
       "name": "Station 2",
       "class": "Demo station",
+      "stream": 2,
       "position": {
         "x": 8.0,
         "y": 0.0
@@ -67,6 +70,7 @@
     {
       "name": "Station 3",
       "class": "Demo station",
+      "stream": 3,
       "position": {
         "x": 12.0,
         "y": 4.0
@@ -81,6 +85,7 @@
     {
       "name": "Station 4",
       "class": "Demo station",
+      "stream": 4,
       "position": {
         "x": 16.0,
         "y": 4.0
@@ -97,6 +102,7 @@
     {
       "name": "Station 4a",
       "class": "Demo station",
+      "stream": 5,
       "position": {
         "x": 20.0,
         "y": 7.0
@@ -111,6 +117,7 @@
     {
       "name": "Station 4b",
       "class": "Demo station",
+      "stream": 6,
       "position": {
         "x": 20.0,
         "y": 4.0
@@ -125,6 +132,7 @@
     {
       "name": "Station 4c",
       "class": "Demo station",
+      "stream": 7,
       "position": {
         "x": 20.0,
         "y": 1.0
@@ -139,6 +147,7 @@
     {
       "name": "Station 7",
       "class": "Demo station",
+      "stream": 8,
       "position": {
         "x": 24.0,
         "y": 4.0
@@ -153,6 +162,7 @@
     {
       "name": "Station 5",
       "class": "Demo station",
+      "stream": 9,
       "position": {
         "x": 12.0,
         "y": -4.0
@@ -169,6 +179,7 @@
     {
       "name": "Station 5a",
       "class": "Demo station",
+      "stream": 10,
       "position": {
         "x": 16.0,
         "y": -1.0
@@ -183,6 +194,7 @@
     {
       "name": "Station 5b",
       "class": "Demo station",
+      "stream": 11,
       "position": {
         "x": 16.0,
         "y": -4.0
@@ -197,6 +209,7 @@
     {
       "name": "Station 5c",
       "class": "Demo station",
+      "stream": 12,
       "position": {
         "x": 16.0,
         "y": -7.0
@@ -211,6 +224,7 @@
     {
       "name": "Drain",
       "class": "Drain",
+      "stream": 13,
       "position": {
         "x": 28.0,
         "y": 0.0

@@ -64,6 +64,11 @@ pub struct Instance {
     pub name: String,
     /// A built-in class or one of the model's own.
     pub class: String,
+    /// Its stream: with a run's seed, it gives the instance's random numbers. It's given when the
+    /// instance is placed and stays, whatever else changes in the model, so runs of two variants
+    /// with the same seed draw the same numbers for it. Unique in the model. `load` gives every
+    /// instance one: see [`Model::assign_streams`].
+    pub stream: Option<u64>,
     /// The centre of its footprint, in metres. `None` leaves placing it to a view.
     pub position: Option<Position>,
     /// The instances it passes MUs to, by name, in the order they are tried.
@@ -76,7 +81,7 @@ pub struct Instance {
 impl Instance {
     /// An instance of `class` called `name`, with nothing set on it.
     pub fn new(name: impl Into<String>, class: impl Into<String>) -> Instance {
-        Instance { name: name.into(), class: class.into(), position: None, successors: Vec::new(), attributes: Attributes::default() }
+        Instance { name: name.into(), class: class.into(), stream: None, position: None, successors: Vec::new(), attributes: Attributes::default() }
     }
 }
 
@@ -252,7 +257,8 @@ impl fmt::Display for Problem {
 
 /// Reads a model file, returning every problem in it, in file order, if there are any.
 pub fn load(text: &str) -> Result<Model, Vec<Problem>> {
-    let (model, mut problems, broken) = read::read(text);
+    let (mut model, mut problems, broken) = read::read(text);
+    model.assign_streams();
     problems.extend(check::check(&model, &broken));
     problems.sort_by(|a, b| order(&a.pointer).cmp(&order(&b.pointer)));
     if problems.is_empty() { Ok(model) } else { Err(problems) }
@@ -277,9 +283,22 @@ impl Model {
         check::check(self, &read::Broken::default())
     }
 
-    /// The model in its one canonical form, as a file saves it.
+    /// The model in its one canonical form, as a file saves it, with every instance's stream.
     pub fn save(&self) -> String {
-        write::write(self)
+        let mut model = self.clone();
+        model.assign_streams();
+        write::write(&model)
+    }
+
+    /// Gives every instance without a stream one more than the highest stream in the model, in
+    /// file order, starting from 0 if none has one. So a file from before streams numbers its
+    /// instances by place, which is how their random numbers were drawn then, and a new instance
+    /// never takes another's stream. Removing an instance leaves a gap.
+    pub fn assign_streams(&mut self) {
+        let first = self.instances.iter().filter_map(|instance| instance.stream).max().map_or(0, |highest| highest + 1);
+        for (offset, instance) in self.instances.iter_mut().filter(|instance| instance.stream.is_none()).enumerate() {
+            instance.stream = Some(first + offset as u64);
+        }
     }
 
     /// The engine's description of this model, ready to build runs from, with every instance's

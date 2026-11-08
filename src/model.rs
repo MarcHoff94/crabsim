@@ -59,6 +59,9 @@ pub struct ModelDescription {
     objects: Vec<ModelObject>,
     /// One entry per object, by id.
     layout: Vec<Layout>,
+    /// Each object's stream, by id: with the run's seed, it gives the object's random numbers.
+    /// Its id unless set, so a model built in code draws as it always did.
+    streams: Vec<u64>,
 }
 
 impl ModelDescription {
@@ -106,7 +109,20 @@ impl ModelDescription {
     /// Builds a run of this model, in its default state. Names, positions and dimensions stay
     /// behind: the run has no use for them.
     pub fn build(&self, seed: u64) -> SimulationRun {
-        SimulationRun::new(self.objects.clone(), seed)
+        SimulationRun::new(self.objects.clone(), seed, self.streams.clone())
+    }
+
+    /// Sets the object's stream: with the run's seed, it gives the object's random numbers, so
+    /// two models in which an object has the same stream draw the same numbers for it with the
+    /// same seed, wherever it stands among the objects. Streams should be unique: a model file
+    /// guarantees that.
+    pub fn set_stream(&mut self, id: u32, stream: u64) {
+        *self.streams.get_mut(id as usize).unwrap_or_else(|| panic!("object {id} is not in the model")) = stream;
+    }
+
+    /// The object's stream: its id unless set.
+    pub fn stream(&self, id: u32) -> u64 {
+        self.streams[id as usize]
     }
 
     /// How many objects the model has. Their ids run from 0 to one less than this.
@@ -172,6 +188,7 @@ impl ModelDescription {
         let id = self.next_id();
         self.objects.push(object);
         self.layout.push(Layout::default());
+        self.streams.push(u64::from(id));
         id
     }
 

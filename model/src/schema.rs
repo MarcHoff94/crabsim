@@ -65,6 +65,10 @@ pub struct InstanceFile {
     pub name: Name,
     /// Source, Station, Buffer, Drain or a class in the file.
     pub class: String,
+    /// Its stream: with a run's seed, it gives the instance's random numbers, so runs of two
+    /// variants with the same seed draw the same numbers for it. Unique in the model. crabsim
+    /// gives one when the instance is placed: changing it ends pairing with every earlier run.
+    pub stream: Option<u64>,
     /// The centre of its footprint, in metres. Visual only.
     pub position: Option<PositionFile>,
     /// The instances it passes MUs to, by name, in the order they are tried.

@@ -83,17 +83,13 @@ fn two_variants_run_with_the_same_seed_are_compared_pair_by_pair() {
 }
 
 #[test]
-fn a_run_compared_with_itself_differs_by_exactly_nothing() {
+fn a_run_compared_with_itself_differs_by_exactly_nothing_so_every_object_is_unchanged() {
     let setup = Setup::new("itself");
     write_models(&setup.folder);
     let a = run(&setup, "demo.json", 3, 3);
     let compared = setup.ok("compare_runs", json!({ "a": a, "b": a }));
-    for object in compared["objects"].as_array().unwrap() {
-        for (statistic, figure) in object["figures"].as_object().unwrap() {
-            assert_eq!(number(&figure["difference"]), 0.0, "{statistic} of {}", object["name"]);
-            assert_eq!(figure["clear"], false);
-        }
-    }
+    assert_eq!(compared["objects"], json!([]), "figures identical in every pair are left out");
+    assert_eq!(compared["unchanged"].as_array().unwrap().len(), 14);
 }
 
 #[test]
@@ -119,30 +115,52 @@ fn runs_with_different_seeds_are_compared_with_welchs_interval() {
 }
 
 #[test]
-fn an_object_is_paired_only_where_it_stands_in_the_same_place_in_both_models() {
-    let setup = Setup::new("places");
+fn every_figure_is_paired_by_observation_and_streams_say_which_objects_drew_the_same_numbers() {
+    let setup = Setup::new("streams");
     write_models(&setup.folder);
-    let mut model: Value = serde_json::from_str(&common::demo_text()).unwrap();
-    model["instances"].as_array_mut().unwrap().insert(0, json!({ "name": "Spare", "class": "Drain" }));
-    setup.ok("write_model", json!({ "path": "inserted.json", "text": model.to_string() }));
-    setup.ok("copy_model", json!({ "from": "demo.json", "to": "appended.json" })).to_string();
-    setup.ok("adopt_model", json!({ "path": "appended.json" }));
-    setup.ok("edit_model", json!({ "path": "appended.json", "changes": [{ "change": "add_instance", "name": "Spare", "class": "Drain" }] }));
+    // In front of the demo: an instance with a stream of its own, so every other keeps its stream.
+    let mut kept: Value = serde_json::from_str(&common::demo_text()).unwrap();
+    kept["instances"].as_array_mut().unwrap().insert(0, json!({ "name": "Spare", "class": "Drain" }));
+    setup.ok("write_model", json!({ "path": "kept.json", "text": kept.to_string() }));
+    // The same, from a file without streams, so every instance is numbered by place, as files
+    // from before streams are.
+    let mut renumbered = kept.clone();
+    for instance in renumbered["instances"].as_array_mut().unwrap() {
+        instance.as_object_mut().unwrap().remove("stream");
+    }
+    setup.ok("write_model", json!({ "path": "renumbered.json", "text": renumbered.to_string() }));
 
     let a = run(&setup, "demo.json", 5, 3);
-    let inserted = run(&setup, "inserted.json", 5, 3);
-    let appended = run(&setup, "appended.json", 5, 3);
-
-    let compared = setup.ok("compare_runs", json!({ "a": a, "b": inserted }));
+    let compared = setup.ok("compare_runs", json!({ "a": a, "b": run(&setup, "kept.json", 5, 3) }));
     assert_eq!(compared["only_in_b"], json!(["Spare"]));
+    assert_eq!(compared["pairing"], "paired");
+    assert!(
+        compared["unchanged"].as_array().unwrap().len() == 14,
+        "an idle Drain in front changes nothing for anyone, since each keeps its stream: {compared}"
+    );
+
+    let compared = setup.ok("compare_runs", json!({ "a": a, "b": run(&setup, "renumbered.json", 5, 3) }));
     let station = compared["objects"].as_array().unwrap().iter().find(|o| o["name"] == "Station 1").unwrap();
-    assert_eq!(station["paired"], false);
-    assert!(station["why_unpaired"].as_str().unwrap().contains("place"), "{station}");
-    assert_eq!(station["figures"]["mus_in"]["method"], "welch");
+    assert_eq!(station["common_random_numbers"], false);
+    assert!(station["why_not_common"].as_str().unwrap().contains("stream 1") && station["why_not_common"].as_str().unwrap().contains("stream 2"), "{station}");
+    assert_eq!(station["figures"]["mus_in"]["method"], "paired", "pairing by observation is valid either way");
+}
 
-    let compared = setup.ok("compare_runs", json!({ "a": a, "b": appended }));
-    assert_eq!(compared["only_in_b"], json!(["Spare"]));
-    assert!(compared["objects"].as_array().unwrap().iter().all(|o| o["paired"] == true), "appending keeps every object paired: {compared}");
+#[test]
+fn runs_of_different_lengths_or_warm_ups_are_compared_with_a_warning() {
+    let setup = Setup::new("warnings");
+    write_models(&setup.folder);
+    let short = setup.start(json!({ "model": "demo.json", "seed": 2, "length": "2:00:00", "observations": 3 }));
+    let long = setup.start(json!({ "model": "demo.json", "seed": 2, "length": "4:00:00", "warm_up": "0:30:00", "observations": 3 }));
+    setup.finished(&short);
+    setup.finished(&long);
+    let compared = setup.ok("compare_runs", json!({ "a": short, "b": long, "objects": ["Drain"] }));
+    let warnings: Vec<&str> = compared["warnings"].as_array().unwrap().iter().map(|w| w.as_str().unwrap()).collect();
+    assert!(warnings.iter().any(|w| w.contains("lengths") && w.contains("counts")), "{warnings:?}");
+    assert!(warnings.iter().any(|w| w.contains("warm-ups")), "{warnings:?}");
+    assert!(compared["objects"][0]["figures"]["throughput_per_hour"].is_object(), "computed all the same");
+    let same = setup.ok("compare_runs", json!({ "a": short, "b": short, "objects": ["Drain"] }));
+    assert_eq!(same["warnings"], json!([]));
 }
 
 #[test]
@@ -172,8 +190,7 @@ fn dropped_pairs_are_listed_with_why() {
         let reason = entry["reason"].as_str().unwrap();
         assert!(reason.contains("failed") && reason.contains(&run) && reason.contains(observation["error"].as_str().unwrap()), "{reason}");
     }
-    let counted = &figure(&compared, "Gate", "mus_in")["counted"];
-    assert_eq!(counted, &json!([6 - failed, 6 - failed]));
+    assert!(compared["unchanged"].as_array().unwrap().iter().any(|name| name == "Gate"), "compared with itself, the pairs left are identical");
 }
 
 #[test]
@@ -182,8 +199,11 @@ fn chosen_objects_and_classes_are_compared_and_unknown_ones_refused() {
     write_models(&setup.folder);
     let a = run(&setup, "demo.json", 1, 2);
     let b = run(&setup, "demo.json", 1, 2);
+    // Two runs of one model with one seed are identical, so what they compare is unchanged.
     let names = |input: Value| -> Vec<String> {
-        setup.ok("compare_runs", input)["objects"].as_array().unwrap().iter().map(|o| o["name"].as_str().unwrap().to_string()).collect()
+        let compared = setup.ok("compare_runs", input);
+        assert_eq!(compared["objects"], json!([]));
+        compared["unchanged"].as_array().unwrap().iter().map(|name| name.as_str().unwrap().to_string()).collect()
     };
     assert_eq!(names(json!({ "a": a, "b": b, "objects": ["Station 1", "Drain"] })), ["Station 1", "Drain"]);
     assert_eq!(names(json!({ "a": a, "b": b, "classes": ["Drain"] })), ["Drain"]);

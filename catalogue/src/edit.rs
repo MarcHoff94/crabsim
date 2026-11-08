@@ -114,6 +114,9 @@ pub enum Change {
     RestoreInheritance { target: Target, attribute: String },
     /// Sets the model's own description, or removes it if left out.
     SetModelDescription { description: Option<String> },
+    /// For the user only: gives an instance another stream, which ends pairing with every earlier
+    /// run of it. Not advised: crabsim gives each instance its stream when it's placed.
+    SetStream { name: String, stream: u64 },
 }
 
 impl Change {
@@ -135,6 +138,7 @@ impl Change {
             Change::SetAttribute { .. } => "set_attribute",
             Change::RestoreInheritance { .. } => "restore_inheritance",
             Change::SetModelDescription { .. } => "set_model_description",
+            Change::SetStream { .. } => "set_stream",
         }
     }
 }
@@ -161,7 +165,8 @@ pub struct AlsoRemoved {
 struct Draft {
     model: Value,
     also: AlsoRemoved,
-    order_changed: bool,
+    /// The changes come from the user, who alone may set a stream.
+    user: bool,
 }
 
 type Refusal = String;
@@ -250,9 +255,6 @@ impl Draft {
         for successor in removed.get("successors").and_then(Value::as_array).into_iter().flatten() {
             self.also.connections.push(Connection { from: name.clone(), to: successor.as_str().unwrap_or_default().to_string() });
         }
-        if index < self.instances().len() {
-            self.order_changed = true;
-        }
     }
 
     /// The classes deriving from `name` through any depth, in file order.
@@ -327,6 +329,8 @@ impl Draft {
                 let fields = copy.as_object_mut().expect("an instance is an object");
                 fields.insert("name".into(), json!(to));
                 fields.remove("successors");
+                // A copy is a new instance, so it gets a stream of its own when the model is read.
+                fields.remove("stream");
                 if let Some(position) = position {
                     fields.insert("position".into(), position.to_json());
                 }
@@ -435,6 +439,13 @@ impl Draft {
                     return Err(format!("`{attribute}` isn't set on {what}, so it already inherits it"));
                 }
             }
+            Change::SetStream { name, stream } => {
+                if !self.user {
+                    return Err("set_stream is only for the user: crabsim gives each instance its stream when it's placed, and changing it ends pairing with earlier runs".to_string());
+                }
+                let index = self.instance(&name)?;
+                self.instances()[index]["stream"] = json!(stream);
+            }
             Change::SetModelDescription { description } => {
                 let fields = self.model.as_object_mut().expect("a model is an object");
                 match description {
@@ -474,15 +485,11 @@ pub struct EditModelOutput {
     /// What the changes removed beyond what they named: connections with an instance, and
     /// instances and classes with a class.
     pub also_removed: AlsoRemoved,
-    /// An instance was removed, so the instances after it moved up. Each object's random numbers
-    /// follow its position among the instances, so runs before and after this edit are no
-    /// longer paired, even with the same seed.
-    pub instance_order_changed: bool,
 }
 
 impl Operation for EditModel {
     const NAME: &'static str = "edit_model";
-    const DESCRIPTION: &'static str = "Changes a valid model file in the models folder with a batch of changes, applied in order, all or nothing, then saves it in canonical form. Each change is an object naming its kind in `change`: add_instance, remove_instance, rename_instance, move_instance, set_class, duplicate_instance, connect, disconnect, add_class, remove_class, rename_class, set_parent, duplicate_class, set_attribute, restore_inheritance or set_model_description. Values are written as in a model file, such as \"0:45\" for a time (model_file_format gives the format). Only the result is checked, so a batch may pass through invalid states, such as adding a Source and then setting its interval. A change that can't apply, such as one naming an unknown instance, refuses the batch with invalid_input naming its place, such as changes/2. A result with problems refuses it with invalid_model and every problem, each pointing into the file the batch would have produced. Either way the file is unchanged. Give `expected_hash`, the hash read_model or get_attributes gave, to have the batch refused as a conflict if the file changed since you read it. Only the file's editor may change it (claim_model), and not a file changed outside crabsim until adopt_model. On success it gives the file's new hash, what else was removed, such as the connections of a removed instance, and `instance_order_changed`, true when an instance was removed: random numbers follow an object's position among the instances, so runs before and after are then no longer paired. Renaming keeps the order, and new instances go at the end.";
+    const DESCRIPTION: &'static str = "Changes a valid model file in the models folder with a batch of changes, applied in order, all or nothing, then saves it in canonical form. Each change is an object naming its kind in `change`: add_instance, remove_instance, rename_instance, move_instance, set_class, duplicate_instance, connect, disconnect, add_class, remove_class, rename_class, set_parent, duplicate_class, set_attribute, restore_inheritance or set_model_description, and for the user set_stream. Values are written as in a model file, such as \"0:45\" for a time (model_file_format gives the format). Only the result is checked, so a batch may pass through invalid states, such as adding a Source and then setting its interval. A change that can't apply, such as one naming an unknown instance, refuses the batch with invalid_input naming its place, such as changes/2. A result with problems refuses it with invalid_model and every problem, each pointing into the file the batch would have produced. Either way the file is unchanged. Give `expected_hash`, the hash read_model or get_attributes gave, to have the batch refused as a conflict if the file changed since you read it. Only the file's editor may change it (claim_model), and not a file changed outside crabsim until adopt_model. On success it gives the file's new hash, and what else was removed, such as the connections of a removed instance. Every instance keeps its stream, which gives its random numbers, whatever else changes, so runs of the model before and after an edit stay paired for every instance they share. New and duplicated instances get a stream of their own and go at the end.";
     const EFFECT: Effect = Effect::Destructive;
     type Input = EditModelInput;
     type Output = EditModelOutput;
@@ -498,7 +505,7 @@ impl Operation for EditModel {
         let mut draft = Draft {
             model: serde_json::from_str(&model.save()).expect("a saved model is JSON"),
             also: AlsoRemoved::default(),
-            order_changed: false,
+            user: catalogue.source() == crate::Source::Cli,
         };
         let count = input.changes.len();
         for (place, change) in input.changes.into_iter().enumerate() {
@@ -515,7 +522,6 @@ impl Operation for EditModel {
             hash: hash(&edited),
             changes: count,
             also_removed: draft.also,
-            instance_order_changed: draft.order_changed,
         })
     }
 }
@@ -573,6 +579,9 @@ pub struct GetAttributesOutput {
     pub chain: Vec<String>,
     /// Every attribute its built-in class has, in a fixed order.
     pub attributes: Vec<AttributeValue>,
+    /// An instance's stream, which with a run's seed gives its random numbers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream: Option<u64>,
     /// An instance's own position, if it has one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub position: Option<Value>,
@@ -636,6 +645,7 @@ impl Operation for GetAttributes {
                 if position.z == 0.0 { json!({ "x": position.x, "y": position.y }) } else { json!({ "x": position.x, "y": position.y, "z": position.z }) }
             }),
             successors: instance.map(|instance| instance.successors.clone()),
+            stream: instance.and_then(|instance| instance.stream),
         })
     }
 }

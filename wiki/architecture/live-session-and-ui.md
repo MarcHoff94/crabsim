@@ -41,6 +41,7 @@ A checkpoint is a clone of the run plus how much of the intervention log is in i
 - the model's name, a seed (only before Init or after Reset, kept across models) and an end time in the top bar,
 - the folder reached only through the catalogue as `Source::Ui`, holding `.crabsim/user.lock`, and a banner when another window has the folder,
 - before Init or after Reset, every attribute of the selected instance in the inspector, with where its value comes from, changed in the model file through `edit_model` and each restored on its own; while an agent holds the file, "Change anyway" takes over for one change,
+- an Editing tab beside the inspector: who holds the open model's editor right and who waits, other files and blocked agents, with the user's controls, each checked against the latest queue before it acts; taking the right from an agent asks first, and the agent waits first in line,
 - changes to the open model file picked up, such as an agent's edit: used at once with no run in progress, and otherwise a banner says Reset will; a file changed outside crabsim is marked, with an Adopt button; a halted window stays idle, woken by a thread only when the file's size or modified time changes,
 
 - state colours, connections, and names that shrink with the model,
@@ -54,6 +55,7 @@ A checkpoint is a clone of the run plus how much of the intervention log is in i
 Its logic is in plain Rust, tested without a window:
 
 - `ui/src/workspace.rs` — what the window works on: the models folder through the catalogue, the model list, the model open and laid out, its problems, the seed, and sessions built from them. `check` is the one seam for noticing the open file changed: size and modified time first, then its hash.
+- `ui/src/editing.rs` — the edit queue as the Editing tab shows it, and what changed between two readings.
 - `ui/src/attributes.rs` — the inspector's fields for each attribute, from a model file's value to text and back.
 - `ui/src/view.rs` — the view state: from the `ModelDescription`, the session's outputs and wall time, it works out what is drawn, which controls are offered and whether frames are needed. A halted window draws nothing once things settle.
 - `ui/src/camera.rs` — where the view looks and how close.

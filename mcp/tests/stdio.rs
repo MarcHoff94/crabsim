@@ -115,14 +115,14 @@ fn an_agent_lists_the_tools_validates_runs_and_reads_results_over_stdio() {
     let listed = server.request("tools/list", json!({}));
     let tools = listed["tools"].as_array().unwrap();
     let tool = |name: &str| tools.iter().find(|tool| tool["name"] == name).unwrap_or_else(|| panic!("no tool {name}: {listed}")).clone();
-    assert_eq!(tools.len(), 23, "{listed}");
+    assert_eq!(tools.len(), 24, "{listed}");
     for users_own in ["take_model", "give_model", "move_in_queue", "remove_from_queue", "block_agent", "unblock_agent"] {
         assert!(!tools.iter().any(|tool| tool["name"] == users_own), "{users_own} is the user's own");
     }
     for read_only in ["validate_model", "list_models", "read_model", "model_file_format", "get_attributes", "describe_model", "query_model", "get_edit_queue", "compare_runs", "run_status", "run_results", "query_results"] {
         assert_eq!(tool(read_only)["annotations"]["readOnlyHint"], true, "{read_only}");
     }
-    for destructive in ["write_model", "edit_model", "delete_model", "forget_run"] {
+    for destructive in ["write_model", "edit_model", "delete_model", "export_model", "forget_run"] {
         assert_eq!(tool(destructive)["annotations"]["readOnlyHint"], false, "{destructive}");
         assert_eq!(tool(destructive)["annotations"]["destructiveHint"], true, "{destructive}");
     }

@@ -257,11 +257,20 @@ impl fmt::Display for Problem {
 
 /// Reads a model file, returning every problem in it, in file order, if there are any.
 pub fn load(text: &str) -> Result<Model, Vec<Problem>> {
+    let (model, problems) = load_what_can_be_read(text);
+    if problems.is_empty() { Ok(model) } else { Err(problems) }
+}
+
+/// Reads as much of a model file as can be read, along with every problem in it, as `load`
+/// reports them. With problems, the model may name unknown classes and successors, and what
+/// couldn't be read is left at its default, such as an empty name. For a summary of a model
+/// being worked on: only a model without problems can be run.
+pub fn load_what_can_be_read(text: &str) -> (Model, Vec<Problem>) {
     let (mut model, mut problems, broken) = read::read(text);
     model.assign_streams();
     problems.extend(check::check(&model, &broken));
     problems.sort_by(|a, b| order(&a.pointer).cmp(&order(&b.pointer)));
-    if problems.is_empty() { Ok(model) } else { Err(problems) }
+    (model, problems)
 }
 
 /// Orders pointers as they come in the file: by each part, numbers as numbers. Classes come

@@ -21,9 +21,9 @@ An operation implements the `Operation` trait: `NAME`, `DESCRIPTION`, `EFFECT` (
 - **Defaults** of an input are in its schema, as `default`, so an agent sees them.
 - **Errors** are structured: a `kind`, a `message` and, for an invalid model, every `problem` as `crabsim-model` reports it (JSON Pointer, name, message). The kinds are `invalid_input`, `invalid_model`, `not_found`, `outside_models_folder`, `already_exists` and `run_error`. Over MCP they are tool results marked as errors, so the agent reads them, rather than protocol errors its harness would hide.
 - **What an output means is in the description,** not only in the output schema, because a harness may not show output schemas to the model: the first harness trial's agent never saw them, and asked what `here` and a summed `wall_time_s` meant.
-- **Effects** become MCP's hints: read-only for `validate_model`, `list_models`, `read_model`, `model_file_format`, `run_status`, `run_results` and `query_results`, destructive for `write_model`, `delete_model` and `forget_run`, and neither for the rest.
+- **Effects** become MCP's hints: read-only for `validate_model`, `list_models`, `read_model`, `model_file_format`, `get_attributes`, `run_status`, `run_results` and `query_results`, destructive for `write_model`, `edit_model`, `delete_model` and `forget_run`, and neither for the rest.
 
-Slice 1's operations, with `model_file_format` from slice 2:
+Slice 1's operations, with `model_file_format`, `edit_model` and `get_attributes` from slice 2:
 
 | Operation | Does |
 |---|---|
@@ -33,6 +33,8 @@ Slice 1's operations, with `model_file_format` from slice 2:
 | `write_model { path, text }` | Saves a valid model in canonical form, an invalid one exactly as given, returning its problems either way |
 | `copy_model { from, to }` | Copies, refused if `to` exists |
 | `delete_model { path }` | Deletes a file, never a folder |
+| `edit_model { path, changes }` | Applies a batch of typed changes to a valid model, all or nothing, and saves it canonical |
+| `get_attributes { path, target }` | Every attribute of an instance or class, with its value and where it comes from |
 | `model_file_format {}` | The model file's JSON Schema, how the built-in classes behave, and a small valid example in canonical form |
 | `start_run { model, seed?, length, warm_up?, observations?, label? }` | Starts a job and returns its id at once. Seed 0 and 10 observations if left out |
 | `run_status { run }` | Queued, running, done, failed, cancelled or interrupted, observations done, and where each running one has reached |
@@ -41,6 +43,19 @@ Slice 1's operations, with `model_file_format` from slice 2:
 | `query_results { sql }` | One read-only SQL query on the store |
 | `label_run { run, label? }` | Sets or clears a run's label |
 | `forget_run { run }` | Deletes a run's results |
+
+## Changing a model: `edit_model` and `get_attributes`
+
+Slice 2 of the catalogue, spec issue 45. Models change only through operations (ADR 0011), so an agent changes one value without resending the whole file, which the first harness trial had to do: about 5 KB to change `15` to `10`.
+
+- **A batch on the file's JSON:** `edit_model` loads the file, refusing one with problems (`write_model` saves work in progress), takes its canonical form as JSON, applies each change in order, then checks the result with `crabsim_model::load` and saves it canonical. Only the result is checked, so a batch may pass through invalid states, such as adding a Source and then setting its interval, and values are written and checked exactly as in a file, with the same messages and "did you mean". A problem's pointer points into the file the batch would have produced. Working on JSON rather than the typed model keeps the change kinds free of the attribute types, so a new attribute needs no new change.
+- **All or nothing:** a change that can't apply, such as naming an unknown instance, connecting twice or restoring an attribute that isn't set, refuses the whole batch with `invalid_input` naming its place, such as `changes/2 (connect)`. A result with problems refuses it with `invalid_model`. Either way the file is untouched.
+- **Change kinds**, each a tagged object (`"change": "connect"`): `add_instance`, `remove_instance`, `rename_instance`, `move_instance`, `set_class`, `duplicate_instance`, `connect` (with an optional `place` in the successor order), `disconnect`, `add_class`, `remove_class` (with `delete_dependents`), `rename_class`, `set_parent`, `duplicate_class`, `set_attribute` and `restore_inheritance` (each on `{"instance": name}` or `{"class": name}`), and `set_model_description`.
+- **What else changes:** removing an instance removes its connections. Removing a class is refused while classes derive from it or instances are of it, listing them, unless `delete_dependents: true`, which removes them all with their connections. Renames update every reference. New and duplicated instances go at the end, and a duplicate has no connections, nor a duplicated class its children. The output lists what was removed beyond what the changes named.
+- **Pairing:** each object's random numbers follow its position among the instances (`simulation_run.rs`), so the output's `instance_order_changed` is true when an instance was removed and the ones after it moved up: runs of the model before and after are then no longer paired, even with the same seed.
+- **`get_attributes { path, target }`** gives every attribute the target's built-in class has, in a fixed order, each with its value as a file writes it and `from`: `instance`, `class` (naming the nearest class that sets it), `built_in` (the default) or `not_set`. Also the chain of classes, an instance's position and successors, and the file's hash. A built-in class as target gives the defaults. It uses `Model::resolve` and `Model::resolve_class`.
+- **Hashes** are the SHA-256 of the file's bytes as they are. A file crabsim saved is canonical, so its hash equals the `model_hash` the results store keeps for runs of it. `edit_model` returns the new one. Checking an `expected_hash`, with the editor and the edit queue, comes in slice 2's PR 3.
+- **The cost,** measured on 2026-11-08 on the benchmark's model as a file (429 copies of the demo with unique names, 6,006 objects, 1.66 MB), in release, median of 7 calls each on the owner's PC: `get_attributes` 21 ms, `edit_model` with one change 85 ms, and `validate_model` 21 ms. An edit loads and checks the file twice and saves it, so it costs about four validations, whatever the size of the batch. It touches no simulation run. The measurement is an ignored test, `get_attributes_and_edit_model_on_6006_objects` in `catalogue/tests/edit_model.rs`.
 
 ## Scope: what crabsim's operations can touch
 

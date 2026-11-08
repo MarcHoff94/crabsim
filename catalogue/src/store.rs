@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 pub const STORE_FILE: &str = "results.sqlite";
 
 /// The tables' version, kept in SQLite's `user_version`. A change to the tables raises it.
-const TABLES_VERSION: i64 = 2;
+const TABLES_VERSION: i64 = 3;
 
 /// The most rows `query_results` returns.
 pub const QUERY_ROW_LIMIT: usize = 1_000;
@@ -42,7 +42,9 @@ CREATE TABLE IF NOT EXISTS runs (
     started TEXT NOT NULL,
     finished TEXT,
     state TEXT NOT NULL,
-    process TEXT
+    process TEXT,
+    crabsim_build TEXT,
+    agent TEXT
 );
 CREATE TABLE IF NOT EXISTS observations (
     run TEXT NOT NULL,
@@ -72,7 +74,7 @@ macro_rules! tables_description {
     () => {
         concat!(
             "Tables: ",
-            "runs(id TEXT such as 'run-3', model_path, model_text: the canonical model file the run used, model_hash: SHA-256 of model_text so equal hashes mean the same model, seed TEXT, length_s, warm_up_s, observations, label, source: 'mcp' or 'cli', crabsim_version, started and finished: UTC ISO 8601, state: queued|running|done|failed|cancelled|interrupted, process: the lock id of the crabsim process that ran it). ",
+            "runs(id TEXT such as 'run-3', model_path, model_text: the canonical model file the run used, model_hash: SHA-256 of model_text so equal hashes mean the same model, seed TEXT, length_s, warm_up_s, observations, label, source: 'mcp' or 'cli', crabsim_version, started and finished: UTC ISO 8601, state: queued|running|done|failed|cancelled|interrupted, process: the lock id of the crabsim process that ran it, crabsim_build: the git commit crabsim was built from, agent: such as 'agent-3 (claude-code)' or 'the user'). ",
             "observations(run, number from 1, seed TEXT: the observation's own seed, events, wall_time_s, error, error_time_s: simulated seconds). ",
             "statistics(run, observation, object: instance name, class, built_in_class: Source|Station|Buffer|Drain, statistic, value REAL), one row per figure of an observation that ran to its end. ",
             "Statistics: mus_in, mus_out, working_share, blocked_share, idle_share, failed_share, paused_share (each 0 to 1 of the time measured after the warm-up), failures, availability (0 to 1), and for Drains throughput_per_hour and mean_lead_time_s. Times are in seconds. Besides SQLite's own functions, such as avg, min, max and count, there are sqrt, power, ln, exp and log10, for example to work out a standard deviation. ",
@@ -114,6 +116,10 @@ impl Store {
         // Version 1 had no `process` column: its runs' processes are unknown.
         if version == 1 {
             transaction.execute_batch("ALTER TABLE runs ADD COLUMN process TEXT")?;
+        }
+        // Versions 1 and 2 didn't record which build and which agent or user started a run.
+        if (1..=2).contains(&version) {
+            transaction.execute_batch("ALTER TABLE runs ADD COLUMN crabsim_build TEXT; ALTER TABLE runs ADD COLUMN agent TEXT")?;
         }
         transaction.pragma_update(None, "user_version", TABLES_VERSION)?;
         transaction.commit()?;

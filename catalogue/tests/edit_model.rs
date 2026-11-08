@@ -78,7 +78,7 @@ fn a_batch_applies_in_order_and_saves_the_model_canonical() {
     });
     let saved = setup.folder.read("line.json");
     assert_eq!(saved, expected);
-    assert_eq!(output["hash"], hash(&saved), "the hash of the file as saved");
+    assert_eq!(output["file_hash"], hash(&saved), "the hash of the file as saved");
     assert_eq!(output["changes"], 5);
     assert!(output.get("instance_order_changed").is_none(), "streams keep pairing, whatever the order");
     assert_eq!(output["also_removed"], json!({ "instances": [], "classes": [], "connections": [] }));
@@ -285,7 +285,7 @@ fn get_attributes_gives_every_attribute_with_its_value_and_origin() {
     assert_eq!(got["chain"], json!(["Mill", "Station"]));
     assert_eq!(got["position"], json!({ "x": 4.0, "y": -2.0 }));
     assert_eq!(got["successors"], json!(["Out"]));
-    assert_eq!(got["hash"], hash(&setup.folder.read("line.json")));
+    assert_eq!(got["file_hash"], hash(&setup.folder.read("line.json")));
     let attributes: Vec<(String, Value)> = got["attributes"].as_array().unwrap().iter().map(|a| (a["attribute"].as_str().unwrap().to_string(), a.clone())).collect();
     let names: Vec<&str> = attributes.iter().map(|(name, _)| name.as_str()).collect();
     assert_eq!(names, ["process_time", "failures", "starting_mus", "dimensions", "description"], "every attribute a Station has");
@@ -317,11 +317,11 @@ fn get_attributes_of_a_class_and_of_a_source_without_a_value() {
 #[test]
 fn the_hash_after_an_edit_is_what_get_attributes_then_gives() {
     let setup = setup("hashes");
-    let before = setup.ok("get_attributes", json!({ "path": "line.json", "target": { "instance": "In" } }))["hash"].clone();
+    let before = setup.ok("get_attributes", json!({ "path": "line.json", "target": { "instance": "In" } }))["file_hash"].clone();
     let edited = edit(&setup, json!([{ "change": "move_instance", "name": "In", "position": { "x": -1, "y": 0 } }]));
-    let after = setup.ok("get_attributes", json!({ "path": "line.json", "target": { "instance": "In" } }))["hash"].clone();
+    let after = setup.ok("get_attributes", json!({ "path": "line.json", "target": { "instance": "In" } }))["file_hash"].clone();
     assert_ne!(before, after);
-    assert_eq!(edited["hash"], after);
+    assert_eq!(edited["file_hash"], after);
 }
 
 // ---------- Cost ----------

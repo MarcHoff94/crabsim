@@ -179,8 +179,13 @@ pub struct ReadModelOutput {
     /// The file's text, exactly as it is: JSON whose schema model_file_format gives.
     #[schemars(schema_with = "model_text_schema")]
     pub text: String,
-    /// SHA-256 of the text, for `expected_hash` when changing it.
-    pub hash: String,
+    /// SHA-256 of the file's bytes, for `expected_hash` when changing it.
+    pub file_hash: String,
+    /// SHA-256 of the model in canonical form, as runs record it in `model_hash`, so it tells
+    /// whether a run ran this model. Only for a valid model. For a file crabsim saved, it equals
+    /// `file_hash`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_hash: Option<String>,
     /// The file was changed outside crabsim, or crabsim never saved it: adopt_model before
     /// changing it.
     pub changed_outside: bool,
@@ -188,7 +193,7 @@ pub struct ReadModelOutput {
 
 impl Operation for ReadModel {
     const NAME: &'static str = "read_model";
-    const DESCRIPTION: &'static str = "Reads a model file in the models folder and returns its text exactly as it is, its hash for edit_model's or write_model's `expected_hash`, and `changed_outside`: true when the file was written outside crabsim since crabsim last saved it, or crabsim never saved it, so it must be adopted with adopt_model before crabsim changes it.";
+    const DESCRIPTION: &'static str = "Reads a model file in the models folder and returns its text exactly as it is, its `file_hash` for edit_model's or write_model's `expected_hash`, its `model_hash`, which runs record, to tell whether a run ran this model, and `changed_outside`: true when the file was written outside crabsim since crabsim last saved it, or crabsim never saved it, so it must be adopted with adopt_model before crabsim changes it.";
     const EFFECT: Effect = Effect::ReadOnly;
     type Input = PathInput;
     type Output = ReadModelOutput;
@@ -196,7 +201,8 @@ impl Operation for ReadModel {
     fn run(catalogue: &Catalogue, input: PathInput) -> Result<ReadModelOutput, OperationError> {
         let (_, text) = read_file(catalogue, &input.path)?;
         let changed_outside = crate::editing::changed_outside(catalogue, &input.path, &text)?;
-        Ok(ReadModelOutput { hash: crate::edit::hash(&text), changed_outside, path: input.path, text })
+        let model_hash = crate::edit::model_hash(&text);
+        Ok(ReadModelOutput { file_hash: crate::edit::hash(&text), model_hash, changed_outside, path: input.path, text })
     }
 }
 
@@ -291,11 +297,14 @@ pub struct CopyModelInput {
 pub struct CopyModelOutput {
     /// The copy's path.
     pub path: String,
+    /// The copy, like its source, was changed outside crabsim, or crabsim never saved it: adopt it
+    /// with adopt_model before changing it.
+    pub changed_outside: bool,
 }
 
 impl Operation for CopyModel {
     const NAME: &'static str = "copy_model";
-    const DESCRIPTION: &'static str = "Copies a model file in the models folder to a new path there, such as to start a variant. Never overwrites: refused if the target already exists.";
+    const DESCRIPTION: &'static str = "Copies a model file in the models folder to a new path there, such as to start a variant. Never overwrites: refused if the target already exists. A copy of a file changed outside crabsim is too, as `changed_outside` says, and needs adopt_model before crabsim changes it.";
     const EFFECT: Effect = Effect::Additive;
     type Input = CopyModelInput;
     type Output = CopyModelOutput;
@@ -320,10 +329,11 @@ impl Operation for CopyModel {
         // A copy of a file crabsim saved is crabsim's own too. A copy of one changed outside isn't,
         // so the outside change can't slip in through it.
         let mut editing = catalogue.editing()?;
-        if editing.recorded(&crate::editing::key_of(catalogue, &input.from)?, &text) {
+        let recorded = editing.recorded(&crate::editing::key_of(catalogue, &input.from)?, &text);
+        if recorded {
             editing.record_at(crate::editing::key_of(catalogue, &input.to)?, &text);
         }
-        Ok(CopyModelOutput { path: input.to })
+        Ok(CopyModelOutput { path: input.to, changed_outside: !recorded })
     }
 }
 

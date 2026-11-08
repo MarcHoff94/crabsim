@@ -26,6 +26,11 @@ pub(crate) fn hash(text: &str) -> String {
     Sha256::digest(text.as_bytes()).iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
+/// The SHA-256 of a valid model in canonical form, as runs record it, or none for an invalid one.
+pub(crate) fn model_hash(text: &str) -> Option<String> {
+    crabsim_model::load(text).ok().map(|model| hash(&model.save()))
+}
+
 /// A position in metres, the centre of the object's footprint.
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -478,8 +483,11 @@ pub struct EditModelInput {
 #[derive(Serialize, JsonSchema)]
 pub struct EditModelOutput {
     pub path: String,
-    /// SHA-256 of the file as saved, in canonical form.
-    pub hash: String,
+    /// SHA-256 of the file as saved, for the next `expected_hash`.
+    pub file_hash: String,
+    /// SHA-256 of the model in canonical form, as runs of it will record it: equal to
+    /// `file_hash`, since crabsim saved it.
+    pub model_hash: String,
     /// How many changes were applied.
     pub changes: usize,
     /// What the changes removed beyond what they named: connections with an instance, and
@@ -489,7 +497,7 @@ pub struct EditModelOutput {
 
 impl Operation for EditModel {
     const NAME: &'static str = "edit_model";
-    const DESCRIPTION: &'static str = "Changes a valid model file in the models folder with a batch of changes, applied in order, all or nothing, then saves it in canonical form. Each change is an object naming its kind in `change`: add_instance, remove_instance, rename_instance, move_instance, set_class, duplicate_instance, connect, disconnect, add_class, remove_class, rename_class, set_parent, duplicate_class, set_attribute, restore_inheritance or set_model_description, and for the user set_stream. Values are written as in a model file, such as \"0:45\" for a time (model_file_format gives the format). Only the result is checked, so a batch may pass through invalid states, such as adding a Source and then setting its interval. A change that can't apply, such as one naming an unknown instance, refuses the batch with invalid_input naming its place, such as changes/2. A result with problems refuses it with invalid_model and every problem, each pointing into the file the batch would have produced. Either way the file is unchanged. Give `expected_hash`, the hash read_model or get_attributes gave, to have the batch refused as a conflict if the file changed since you read it. Only the file's editor may change it (claim_model), and not a file changed outside crabsim until adopt_model. On success it gives the file's new hash, and what else was removed, such as the connections of a removed instance. Every instance keeps its stream, which gives its random numbers, whatever else changes, so runs of the model before and after an edit stay paired for every instance they share. New and duplicated instances get a stream of their own and go at the end.";
+    const DESCRIPTION: &'static str = "Changes a valid model file in the models folder with a batch of changes, applied in order, all or nothing, then saves it in canonical form. Each change is an object naming its kind in `change`: add_instance, remove_instance, rename_instance, move_instance, set_class, duplicate_instance, connect, disconnect, add_class, remove_class, rename_class, set_parent, duplicate_class, set_attribute, restore_inheritance or set_model_description, and for the user set_stream. Values are written as in a model file, such as \"0:45\" for a time (model_file_format gives the format). Only the result is checked, so a batch may pass through invalid states, such as adding a Source and then setting its interval. A change that can't apply, such as one naming an unknown instance, refuses the batch with invalid_input naming its place, such as changes/2, along with every other that can't and the problems of the model the rest would make, so one round fixes them all. A result with problems refuses it with invalid_model and every problem, each pointing into the file the batch would have produced. Either way the file is unchanged. Give `expected_hash`, the file_hash read_model or get_attributes gave, to have the batch refused as a conflict if the file changed since you read it. Only the file's editor may change it (claim_model), and not a file changed outside crabsim until adopt_model. On success it gives the file's new file_hash, and what else was removed, such as the connections of a removed instance. Every instance keeps its stream, which gives its random numbers, whatever else changes, so runs of the model before and after an edit stay paired for every instance they share. New and duplicated instances get a stream of their own and go at the end.";
     const EFFECT: Effect = Effect::Destructive;
     type Input = EditModelInput;
     type Output = EditModelOutput;
@@ -508,9 +516,22 @@ impl Operation for EditModel {
             user: catalogue.source() == crate::Source::Cli,
         };
         let count = input.changes.len();
+        // Every change that can't apply, after which the rest still apply, so the result's own
+        // problems can be reported along with them in one go.
+        let mut refused = Vec::new();
         for (place, change) in input.changes.into_iter().enumerate() {
             let kind = change.kind();
-            draft.apply(change).map_err(|why| OperationError::invalid_input(format!("changes/{place} ({kind}): {why}. Nothing was changed")))?;
+            if let Err(why) = draft.apply(change) {
+                refused.push(format!("changes/{place} ({kind}): {why}"));
+            }
+        }
+        if !refused.is_empty() {
+            let mut error = OperationError::invalid_input(format!("{}. Nothing was changed", refused.join("; ")));
+            if let Err(problems) = crabsim_model::load(&draft.model.to_string()) {
+                error.problems = problems.iter().map(crate::ModelProblem::from).collect();
+                error.message += ". The problems are those of the model the other changes would make";
+            }
+            return Err(error);
         }
         let edited = crabsim_model::load(&draft.model.to_string())
             .map_err(|problems| OperationError::invalid_model("the model these changes would make", &problems))?
@@ -519,7 +540,8 @@ impl Operation for EditModel {
         editing.record(&edited);
         Ok(EditModelOutput {
             path: input.path,
-            hash: hash(&edited),
+            file_hash: hash(&edited),
+            model_hash: hash(&edited),
             changes: count,
             also_removed: draft.also,
         })
@@ -569,8 +591,10 @@ pub struct AttributeValue {
 #[derive(Serialize, JsonSchema)]
 pub struct GetAttributesOutput {
     pub path: String,
-    /// SHA-256 of the file as it is now.
-    pub hash: String,
+    /// SHA-256 of the file's bytes, for edit_model's `expected_hash`.
+    pub file_hash: String,
+    /// SHA-256 of the model in canonical form, as runs record it.
+    pub model_hash: String,
     /// The file was changed outside crabsim, or crabsim never saved it: adopt_model before
     /// changing it.
     pub changed_outside: bool,
@@ -592,7 +616,7 @@ pub struct GetAttributesOutput {
 
 impl Operation for GetAttributes {
     const NAME: &'static str = "get_attributes";
-    const DESCRIPTION: &'static str = "Shows every attribute of an instance or class in a model file, with its value as a model file writes it and where it comes from: `from` is instance (set on it), class (inherited, with the class named), built_in (the built-in default) or not_set. It also gives the chain of classes, nearest first, an instance's position and successors, and the file's hash. Use it to see why an object behaves as it does before changing it with edit_model.";
+    const DESCRIPTION: &'static str = "Shows every attribute of an instance or class in a model file, with its value as a model file writes it and where it comes from: `from` is instance (set on it), class (inherited, with the class named), built_in (the built-in default) or not_set. It also gives the chain of classes, nearest first, an instance's stream, position and successors, the file's file_hash, and the model_hash runs of it record. Use it to see why an object behaves as it does before changing it with edit_model.";
     const EFFECT: Effect = Effect::ReadOnly;
     type Input = GetAttributesInput;
     type Output = GetAttributesOutput;
@@ -636,7 +660,8 @@ impl Operation for GetAttributes {
         let changed_outside = crate::editing::changed_outside(catalogue, &input.path, &text)?;
         Ok(GetAttributesOutput {
             path: input.path,
-            hash: hash(&text),
+            file_hash: hash(&text),
+            model_hash: hash(&model.save()),
             changed_outside,
             built_in_class: built_in.to_string(),
             chain,

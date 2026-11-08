@@ -19,7 +19,7 @@ fn a_new_store_has_the_documented_tables() {
         columns("runs"),
         [
             "number", "id", "model_path", "model_text", "model_hash", "seed", "length_s", "warm_up_s", "observations", "label", "source",
-            "crabsim_version", "started", "finished", "state", "process"
+            "crabsim_version", "started", "finished", "state", "process", "crabsim_build", "agent"
         ]
     );
     assert_eq!(columns("observations"), ["run", "number", "seed", "events", "wall_time_s", "error", "error_time_s"]);

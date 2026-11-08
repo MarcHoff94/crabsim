@@ -86,8 +86,8 @@ fn expected_hash_refuses_a_change_based_on_an_older_reading() {
     let setup = Setup::new("expected-hash");
     setup.ok("write_model", json!({ "path": "line.json", "text": SMALL }));
     let read = setup.ok("read_model", json!({ "path": "line.json" }));
-    let hash = read["hash"].as_str().unwrap().to_string();
-    assert_eq!(hash, setup.ok("get_attributes", json!({ "path": "line.json", "target": { "instance": "In" } }))["hash"]);
+    let hash = read["file_hash"].as_str().unwrap().to_string();
+    assert_eq!(hash, setup.ok("get_attributes", json!({ "path": "line.json", "target": { "instance": "In" } }))["file_hash"]);
 
     let change = |expected: &str| {
         setup.catalogue.call(
@@ -99,12 +99,12 @@ fn expected_hash_refuses_a_change_based_on_an_older_reading() {
     let before = setup.folder.read("line.json");
     let refused = change(&hash).unwrap_err().to_json();
     assert_eq!(refused["kind"], "conflict", "the file changed since that reading");
-    assert!(refused["message"].as_str().unwrap().contains(edited["hash"].as_str().unwrap()), "names the hash it has now: {refused}");
+    assert!(refused["message"].as_str().unwrap().contains(edited["file_hash"].as_str().unwrap()), "names the hash it has now: {refused}");
     assert_eq!(setup.folder.read("line.json"), before);
 
     let written = setup.err("write_model", json!({ "path": "line.json", "text": SMALL, "overwrite": true, "expected_hash": hash }));
     assert_eq!(written["kind"], "conflict");
-    setup.ok("write_model", json!({ "path": "line.json", "text": SMALL, "overwrite": true, "expected_hash": edited["hash"] }));
+    setup.ok("write_model", json!({ "path": "line.json", "text": SMALL, "overwrite": true, "expected_hash": edited["file_hash"] }));
     assert_eq!(setup.err("write_model", json!({ "path": "new.json", "text": SMALL, "expected_hash": hash }))["kind"], "conflict", "a file that doesn't exist has no hash");
 }
 

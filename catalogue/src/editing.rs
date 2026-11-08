@@ -167,6 +167,8 @@ pub(crate) struct Editing {
     now: u64,
     /// The model file a change is about, once checked.
     key: Option<String>,
+    /// The user changes past an agent's right, for one command.
+    take_over: bool,
 }
 
 impl Catalogue {
@@ -193,7 +195,7 @@ impl Catalogue {
             }
             Source::Cli => Asker::User,
         };
-        let mut editing = Editing { held, asker, now, key: None };
+        let mut editing = Editing { held, asker, now, key: None, take_over: self.take_over() };
         editing.sweep(&crabsim_folder, self.edit_timeout());
         Ok(editing)
     }
@@ -298,6 +300,10 @@ impl Editing {
             (Asker::Agent(me), Some(process)) => me == process,
             _ => false,
         };
+        if self.take_over && asker == Asker::User {
+            // The agent keeps its right: the user borrows it for this change only.
+            return Ok(());
+        }
         if mine {
             if let Some(editor) = self.state().files.get_mut(path).and_then(|file| file.editor.as_mut()) {
                 editor.last_active = now;

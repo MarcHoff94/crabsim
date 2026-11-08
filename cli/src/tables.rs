@@ -144,3 +144,93 @@ pub fn results(results: &Value) -> String {
     }
     text
 }
+
+/// What `edit_model` did.
+pub fn edited(edited: &Value) -> String {
+    let count = edited["changes"].as_u64().unwrap_or_default();
+    let mut text = format!("{count} change{} applied to {}, now SHA-256 {}\n", if count == 1 { "" } else { "s" }, cell(&edited["path"]), cell(&edited["hash"]));
+    let also = &edited["also_removed"];
+    for (what, key) in [("instances", "instances"), ("classes", "classes")] {
+        let names: Vec<String> = also[key].as_array().into_iter().flatten().map(cell).collect();
+        if !names.is_empty() {
+            text += &format!("Also removed the {what} {}\n", names.join(", "));
+        }
+    }
+    let connections: Vec<String> = also["connections"].as_array().into_iter().flatten().map(|c| format!("{} -> {}", cell(&c["from"]), cell(&c["to"]))).collect();
+    if !connections.is_empty() {
+        text += &format!("Also removed the connections {}\n", connections.join(", "));
+    }
+    if edited["instance_order_changed"] == true {
+        text += "The instances moved up after a removal, so runs before and after this aren't paired any more\n";
+    }
+    text
+}
+
+/// What `get_attributes` gives, as a table.
+pub fn attributes(name: &str, got: &Value) -> String {
+    let chain: Vec<String> = got["chain"].as_array().into_iter().flatten().map(cell).collect();
+    let mut text = format!("{name} ({})\n", chain.join(", "));
+    if got["changed_outside"] == true {
+        text += "The file was changed outside crabsim, or crabsim never saved it: crabsim adopt it before changing it\n";
+    }
+    let rows: Vec<Vec<String>> = got["attributes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|attribute| {
+            let from = match attribute["from"].as_str().unwrap_or_default() {
+                "class" => format!("class {}", cell(&attribute["class"])),
+                "built_in" => "built in".to_string(),
+                "not_set" => "not set".to_string(),
+                other => other.to_string(),
+            };
+            let value = attribute.get("value").map_or(String::new(), |value| match value {
+                Value::String(text) => text.clone(),
+                other => other.to_string(),
+            });
+            vec![cell(&attribute["attribute"]), value, from]
+        })
+        .collect();
+    text += &table(&["Attribute", "Value", "From"], &rows);
+    if let Some(successors) = got["successors"].as_array() {
+        let names: Vec<String> = successors.iter().map(cell).collect();
+        text += &format!("Successors, in the order tried: {}\n", if names.is_empty() { "none".to_string() } else { names.join(", ") });
+    }
+    text
+}
+
+/// What `adopt_model` did.
+pub fn adopted(adopted: &Value) -> String {
+    let mut text = format!("{} adopted as it is, SHA-256 {}\n", cell(&adopted["path"]), cell(&adopted["hash"]));
+    let problems = adopted["problems"].as_array().map_or(0, Vec::len);
+    if problems > 0 {
+        text += &format!("It has {problems} problem{}: crabsim validate it, or write it again\n", if problems == 1 { "" } else { "s" });
+    }
+    text
+}
+
+/// The edit queue: each file's editor and waiting agents, and the blocked agents.
+pub fn queue(queue: &Value) -> String {
+    let files: Vec<Value> = match queue["files"].as_array() {
+        Some(files) => files.clone(),
+        None => vec![serde_json::json!({ "path": "", "editor": queue["editor"], "queue": queue["queue"] })],
+    };
+    let mut rows = Vec::new();
+    for file in &files {
+        let path = cell(&file["path"]);
+        match &file["editor"] {
+            Value::Null => rows.push(vec![path.clone(), "nobody edits".to_string(), String::new(), String::new(), String::new(), String::new()]),
+            editor if editor["user"] == true => rows.push(vec![path.clone(), "editor".to_string(), "the user".to_string(), String::new(), String::new(), cell(&editor["since"])]),
+            editor => rows.push(vec![path.clone(), "editor".to_string(), cell(&editor["agent"]), cell(&editor["client"]), cell(&editor["purpose"]), cell(&editor["since"])]),
+        }
+        for (place, waiting) in file["queue"].as_array().into_iter().flatten().enumerate() {
+            rows.push(vec![path.clone(), format!("waiting {place}"), cell(&waiting["agent"]), cell(&waiting["client"]), cell(&waiting["purpose"]), cell(&waiting["since"])]);
+        }
+    }
+    let mut text = if rows.is_empty() { "Nobody edits or waits for any model file.\n".to_string() } else { table(&["File", "Role", "Who", "Harness", "Purpose", "Since"], &rows) };
+    let blocked: Vec<String> = queue["blocked"].as_array().into_iter().flatten().map(|agent| format!("{} ({})", cell(&agent["agent"]), cell(&agent["client"]))).collect();
+    if !blocked.is_empty() {
+        text += &format!("Blocked: {}\n", blocked.join(", "));
+    }
+    text
+}

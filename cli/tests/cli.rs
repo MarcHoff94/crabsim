@@ -258,3 +258,132 @@ fn a_run_whose_process_was_killed_is_interrupted() {
     let runs = stdout(&crabsim(&["runs", "--models", models.arg()]));
     assert!(runs.lines().nth(1).unwrap().contains("interrupted"), "{runs}");
 }
+
+// ---------- Changing models, as the user ----------
+
+fn crabsim_with_stdin(args: &[&str], input: &str) -> Output {
+    use std::io::Write;
+    let mut child = Command::new(env!("CARGO_BIN_EXE_crabsim"))
+        .args(args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the binary runs");
+    child.stdin.take().unwrap().write_all(input.as_bytes()).unwrap();
+    child.wait_with_output().unwrap()
+}
+
+fn stderr(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+/// An agent on the folder: a catalogue opened as the MCP server is, alive while it's kept.
+fn agent(models: &Models) -> crabsim_catalogue::Catalogue {
+    let agent = crabsim_catalogue::Catalogue::open(crabsim_catalogue::Settings::new(&models.0, crabsim_catalogue::Source::Mcp)).unwrap();
+    agent.set_client_name("test-agent");
+    agent
+}
+
+const SLOWER: &str = r#"[{ "change": "set_attribute", "target": { "instance": "Station 1" }, "attribute": "process_time", "value": "0:11" }]"#;
+
+#[test]
+fn edit_needs_a_file_adopted_then_applies_changes_from_a_file_or_stdin() {
+    let models = Models::new("edit");
+    let refused = crabsim_with_stdin(&["edit", "--models", models.arg(), "demo.json", "-"], SLOWER);
+    assert!(!refused.status.success());
+    assert!(stderr(&refused).contains("adopt"), "the copied demo was never saved by crabsim: {}", stderr(&refused));
+
+    let adopted = crabsim(&["adopt", "--models", models.arg(), "demo.json"]);
+    assert!(adopted.status.success(), "{adopted:?}");
+    assert!(stdout(&adopted).contains("demo.json adopted"), "{}", stdout(&adopted));
+
+    let changes = models.0.join("slower.changes");
+    std::fs::write(&changes, SLOWER).unwrap();
+    let edited = crabsim(&["edit", "--models", models.arg(), "demo.json", changes.to_str().unwrap()]);
+    assert!(edited.status.success(), "{edited:?}");
+    assert!(stdout(&edited).contains("1 change applied"), "{}", stdout(&edited));
+    assert!(std::fs::read_to_string(models.0.join("demo.json")).unwrap().contains("00:00:11"));
+
+    let from_stdin = crabsim_with_stdin(&["edit", "--models", models.arg(), "demo.json", "-"], r#"[{ "change": "move_instance", "name": "Drain", "position": { "x": 40, "y": 0 } }]"#);
+    assert!(from_stdin.status.success(), "{from_stdin:?}");
+
+    let stale = crabsim_with_stdin(&["edit", "--models", models.arg(), "demo.json", "-", "--expected-hash", "0000"], SLOWER);
+    assert!(!stale.status.success());
+    assert!(stderr(&stale).contains("0000"), "{}", stderr(&stale));
+
+    let bad = crabsim_with_stdin(&["edit", "--models", models.arg(), "demo.json", "-"], r#"[{ "change": "remove_instance", "name": "Nobody" }]"#);
+    assert!(!bad.status.success());
+    assert!(stderr(&bad).contains("changes/0"), "{}", stderr(&bad));
+}
+
+#[test]
+fn attributes_prints_each_value_and_where_it_comes_from() {
+    let models = Models::new("attributes");
+    let printed = stdout(&crabsim(&["attributes", "--models", models.arg(), "demo.json", "Station 1"]));
+    assert!(printed.contains("Station 1 (Demo station, Station)"), "{printed}");
+    let line = |name: &str| printed.lines().find(|line| line.starts_with(name)).unwrap_or_else(|| panic!("no {name} in {printed}")).to_string();
+    assert!(line("process_time").contains("instance"), "{printed}");
+    assert!(line("failures").contains("class Demo station"), "{printed}");
+    assert!(line("starting_mus").contains("built in"), "{printed}");
+    assert!(line("description").contains("class Demo station"), "{printed}");
+    let source = stdout(&crabsim(&["attributes", "--models", models.arg(), "demo.json", "Source", "--class"]));
+    assert!(source.lines().any(|line| line.starts_with("interval") && line.contains("not set")), "a built-in Source has no interval: {source}");
+    assert!(printed.contains("changed outside crabsim"), "the copied demo isn't adopted: {printed}");
+
+    let class = stdout(&crabsim(&["attributes", "--models", models.arg(), "demo.json", "Demo station", "--class"]));
+    assert!(class.lines().any(|line| line.starts_with("failures") && line.contains("class Demo station")), "{class}");
+    let missing = crabsim(&["attributes", "--models", models.arg(), "demo.json", "Nobody"]);
+    assert!(!missing.status.success());
+}
+
+#[test]
+fn the_user_sees_and_controls_the_edit_queue() {
+    let models = Models::new("queue");
+    assert!(crabsim(&["adopt", "--models", models.arg(), "demo.json"]).status.success());
+    let first = agent(&models);
+    let second = agent(&models);
+    first.call("claim_model", serde_json::json!({ "path": "demo.json", "purpose": "making Station 4 faster" })).unwrap();
+    second.call("claim_model", serde_json::json!({ "path": "demo.json", "purpose": "checking the drain" })).unwrap();
+    let id = |agent: &crabsim_catalogue::Catalogue| agent.call("get_edit_queue", serde_json::json!({})).unwrap()["you"].as_str().unwrap().to_string();
+    let (first_id, second_id) = (id(&first), id(&second));
+    let queue = || first.call("get_edit_queue", serde_json::json!({ "path": "demo.json" })).unwrap();
+    let waiting = |queue: serde_json::Value| queue["queue"].as_array().unwrap().iter().map(|entry| entry["agent"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+
+    let shown = stdout(&crabsim(&["queue", "show", "--models", models.arg(), "demo.json"]));
+    for part in [first_id.as_str(), "test-agent", "making Station 4 faster", second_id.as_str(), "checking the drain"] {
+        assert!(shown.contains(part), "{part} in {shown}");
+    }
+
+    let refused = crabsim_with_stdin(&["edit", "--models", models.arg(), "demo.json", "-"], SLOWER);
+    assert!(!refused.status.success());
+    assert!(stderr(&refused).contains("--take-over"), "{}", stderr(&refused));
+    let lent = crabsim_with_stdin(&["edit", "--models", models.arg(), "demo.json", "-", "--take-over"], SLOWER);
+    assert!(lent.status.success(), "{lent:?}");
+    assert_eq!(queue()["editor"]["agent"], first_id.as_str(), "a take-over is for one command: the agent keeps its right");
+    let agent_edit = first.call("edit_model", serde_json::json!({ "path": "demo.json", "changes": [{ "change": "set_model_description", "description": "agent" }] }));
+    assert!(agent_edit.is_ok(), "the file stays crabsim's own after a take-over: {agent_edit:?}");
+
+    assert!(crabsim(&["queue", "take", "--models", models.arg(), "demo.json"]).status.success());
+    assert_eq!(queue()["editor"]["user"], true);
+    assert!(crabsim_with_stdin(&["edit", "--models", models.arg(), "demo.json", "-"], SLOWER).status.success(), "the user holds the right now");
+    assert!(crabsim(&["queue", "release", "--models", models.arg(), "demo.json"]).status.success());
+    assert_eq!(queue()["editor"]["agent"], second_id.as_str());
+
+    let third = agent(&models);
+    third.call("claim_model", serde_json::json!({ "path": "demo.json", "purpose": "third" })).unwrap();
+    first.call("claim_model", serde_json::json!({ "path": "demo.json", "purpose": "again" })).unwrap();
+    let third_id = id(&third);
+    assert!(crabsim(&["queue", "move", "--models", models.arg(), "demo.json", &first_id, "0"]).status.success());
+    assert_eq!(waiting(queue()), [first_id.clone(), third_id.clone()]);
+    assert!(crabsim(&["queue", "give", "--models", models.arg(), "demo.json", &third_id]).status.success());
+    assert_eq!(queue()["editor"]["agent"], third_id.as_str());
+    assert!(crabsim(&["queue", "remove", "--models", models.arg(), "demo.json", &first_id]).status.success());
+    assert_eq!(waiting(queue()), Vec::<String>::new());
+    assert!(crabsim(&["queue", "block", "--models", models.arg(), &second_id]).status.success());
+    let blocked = second.call("claim_model", serde_json::json!({ "path": "demo.json", "purpose": "x" })).unwrap_err().to_json();
+    assert_eq!(blocked["kind"], "blocked");
+    assert!(stdout(&crabsim(&["queue", "show", "--models", models.arg()])).contains("Blocked"), "every file, and the blocked agents");
+    assert!(crabsim(&["queue", "unblock", "--models", models.arg(), &second_id]).status.success());
+    assert!(!crabsim(&["queue", "give", "--models", models.arg(), "demo.json", "agent-99"]).status.success());
+}

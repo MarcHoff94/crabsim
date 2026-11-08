@@ -214,6 +214,8 @@ pub struct Catalogue {
     edit_timeout: std::time::Duration,
     /// The name an agent's harness gave, for the edit queue.
     client_name: Mutex<String>,
+    /// For the user: changes go through even while an agent holds the right, which keeps it.
+    take_over: std::sync::atomic::AtomicBool,
     /// This process's lock, taken with the store. Last, so it is dropped last: until its jobs have
     /// stopped, no other process may take their runs for interrupted.
     process: std::sync::OnceLock<process::ProcessLock>,
@@ -234,6 +236,7 @@ impl Catalogue {
             jobs,
             edit_timeout: settings.edit_timeout,
             client_name: Mutex::new("an agent".to_string()),
+            take_over: std::sync::atomic::AtomicBool::new(false),
             process: std::sync::OnceLock::new(),
         })
     }
@@ -259,6 +262,17 @@ impl Catalogue {
     /// queue shows the user.
     pub fn set_client_name(&self, name: &str) {
         *self.client_name.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = name.to_string();
+    }
+
+    /// For the user only: lets the following changes go through while an agent holds the editor
+    /// right, which the agent keeps, as the CLI's `--take-over` does for one command. An agent's
+    /// catalogue ignores it.
+    pub fn set_take_over(&self, on: bool) {
+        self.take_over.store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub(crate) fn take_over(&self) -> bool {
+        self.source == Source::Cli && self.take_over.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub(crate) fn client_name(&self) -> String {

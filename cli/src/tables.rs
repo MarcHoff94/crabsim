@@ -286,3 +286,261 @@ pub fn compared(compared: &Value) -> String {
     }
     text
 }
+
+/// `count` and a noun, made plural unless there is one.
+fn counted(count: u64, noun: &str) -> String {
+    let plural = if noun.ends_with('s') { format!("{noun}es") } else { format!("{noun}s") };
+    format!("{count} {}", if count == 1 { noun } else { &plural })
+}
+
+/// A list of names with its full count, such as "Sources (12): A, B, and 10 more".
+fn listed(what: &str, list: &Value, none: &str) -> String {
+    let count = list["count"].as_u64().unwrap_or_default();
+    if count == 0 {
+        return format!("{none}\n");
+    }
+    let names: Vec<String> = list["names"].as_array().into_iter().flatten().map(cell).collect();
+    let more = count.saturating_sub(names.len() as u64);
+    let more = if more > 0 { format!(", and {more} more") } else { String::new() };
+    format!("{what} ({count}): {}{more}\n", names.join(", "))
+}
+
+/// What `describe_model` gives.
+pub fn described(described: &Value) -> String {
+    let mut text = String::new();
+    if let Some(description) = described["description"].as_str() {
+        text += &format!("{description}\n");
+    }
+    let problems = described["problems"]["count"].as_u64().unwrap_or_default();
+    text += &format!(
+        "{}, {}\n\n",
+        counted(described["instances"].as_u64().unwrap_or_default(), "instance"),
+        if problems == 0 { "valid".to_string() } else { format!("with {}", counted(problems, "problem")) }
+    );
+    let rows: Vec<Vec<String>> = described["classes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|class| vec![cell(&class["class"]), cell(&class["built_in_class"]), cell(&class["instances"])])
+        .collect();
+    text += &table(&["Class", "Built-in class", "Instances"], &rows);
+    if let Some(more) = described["more_classes"].as_u64() {
+        text += &format!("and {} more\n", counted(more, "class"));
+    }
+    text += "\n";
+    text += &listed("Sources", &described["sources"], "No Sources");
+    text += &listed("Drains", &described["drains"], "No Drains");
+    for (what, key, width) in [("Branch points", "branch_points", "successor"), ("Merge points", "merge_points", "predecessor")] {
+        let points = &described[key];
+        let count = points["count"].as_u64().unwrap_or_default();
+        if count == 0 {
+            text += &format!("No {}\n", what.to_lowercase());
+            continue;
+        }
+        let widest: Vec<String> = points["widest"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|point| format!("{} ({})", cell(&point["name"]), counted(point[format!("{width}s")].as_u64().unwrap_or_default(), width)))
+            .collect();
+        let more = count.saturating_sub(widest.len() as u64);
+        let more = if more > 0 { format!(", and {more} more") } else { String::new() };
+        text += &format!("{what} ({count}), widest first: {}{more}\n", widest.join(", "));
+    }
+    text += "\n";
+    for flow in described["flows"].as_array().into_iter().flatten() {
+        let source = cell(&flow["source"]);
+        let drains = flow["drains"].as_array().map_or(&[][..], Vec::as_slice);
+        if drains.is_empty() {
+            text += &format!("{source} reaches no Drain\n");
+        }
+        for reach in drains {
+            let fewest = reach["fewest_objects"].as_u64().unwrap_or_default();
+            let past = match reach["most_objects"].as_u64() {
+                Some(most) if most == fewest => counted(most, "object"),
+                Some(most) => format!("{fewest} to {most} objects"),
+                None => format!("at least {}, through a loop", counted(fewest, "object")),
+            };
+            text += &format!("{source} reaches {} past {past}\n", cell(&reach["drain"]));
+        }
+        if let Some(more) = flow["more_drains"].as_u64() {
+            text += &format!("{source} reaches {} more\n", counted(more, "Drain"));
+        }
+    }
+    let sources = described["sources"]["count"].as_u64().unwrap_or_default();
+    let shown = described["flows"].as_array().map_or(0, Vec::len) as u64;
+    if sources > shown {
+        text += &format!("and the flows of {} more\n", counted(sources - shown, "Source"));
+    }
+    text += "\n";
+    let loops = &described["loops"];
+    match loops["count"].as_u64().unwrap_or_default() {
+        0 => text += "No loops\n",
+        count => {
+            text += &format!("Loops ({count}):\n");
+            for example in loops["examples"].as_array().into_iter().flatten() {
+                let cycle: Vec<String> = example["cycle"].as_array().into_iter().flatten().map(cell).collect();
+                let length = example["cycle_length"].as_u64().unwrap_or_default();
+                let round = if cycle.len() as u64 == length { format!(" -> {}", cycle[0]) } else { " -> ...".to_string() };
+                text += &format!("  {}{round}, in a group of {}\n", cycle.join(" -> "), counted(example["objects"].as_u64().unwrap_or_default(), "object"));
+            }
+        }
+    }
+    text += &listed("Unreachable", &described["unreachable"], "Nothing is unreachable");
+    text += &listed("Dead ends", &described["dead_ends"], "No dead ends");
+    if problems == 0 {
+        text += "No problems\n";
+    } else {
+        text += &format!("\n{}:\n", counted(problems, "problem"));
+        for problem in described["problems"]["first"].as_array().into_iter().flatten() {
+            let pointer = problem["pointer"].as_str().filter(|pointer| !pointer.is_empty()).unwrap_or("/");
+            let name = problem["name"].as_str().map_or(String::new(), |name| format!(" \"{name}\""));
+            text += &format!("  {pointer}{name}: {}\n", cell(&problem["message"]));
+        }
+        let shown = described["problems"]["first"].as_array().map_or(0, Vec::len) as u64;
+        if problems > shown {
+            text += &format!("  and {} more: crabsim validate gives them all\n", problems - shown);
+        }
+    }
+    text
+}
+
+/// Instances with their classes, and a distance when they have one.
+fn instances(list: &Value) -> String {
+    let with_distance = list.as_array().is_some_and(|list| list.iter().any(|node| node.get("distance").is_some()));
+    let rows: Vec<Vec<String>> = list
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|node| {
+            let mut row = vec![cell(&node["name"]), cell(&node["class"]), cell(&node["built_in_class"])];
+            if with_distance {
+                row.insert(0, cell(&node["distance"]));
+            }
+            row
+        })
+        .collect();
+    if rows.is_empty() {
+        return "none\n".to_string();
+    }
+    if with_distance { table(&["Distance", "Name", "Class", "Built-in class"], &rows) } else { table(&["Name", "Class", "Built-in class"], &rows) }
+}
+
+/// "N instances", and that the list stops short when it does.
+fn total(answer: &Value, shown: &str) -> String {
+    let count = answer["count"].as_u64().unwrap_or_default();
+    let cut = if answer["truncated"] == true { format!(", the first {} shown", answer[shown].as_array().map_or(0, Vec::len)) } else { String::new() };
+    format!("{}{cut}\n", counted(count, "instance"))
+}
+
+/// What `query_model` answers, by its kind.
+pub fn answer(answer: &Value) -> String {
+    let path = |path: &Value| path.as_array().into_iter().flatten().map(cell).collect::<Vec<_>>().join(" -> ");
+    match answer["kind"].as_str().unwrap_or_default() {
+        "neighbours" => {
+            let name = cell(&answer["name"]);
+            format!(
+                "Predecessors of {name}:\n{}\nSuccessors of {name}, in the order tried:\n{}",
+                instances(&answer["predecessors"]),
+                instances(&answer["successors"])
+            )
+        }
+        kind @ ("upstream" | "downstream") => {
+            let within = answer["steps"].as_u64().map_or(String::new(), |steps| format!(", within {}", counted(steps, "step")));
+            let what = if kind == "upstream" { "Upstream" } else { "Downstream" };
+            format!("{what} of {}{within}:\n{}{}", cell(&answer["name"]), instances(&answer["instances"]), total(answer, "instances"))
+        }
+        "paths" => {
+            let (from, to) = (cell(&answer["from"]), cell(&answer["to"]));
+            if answer["shortest"].is_null() {
+                return format!("No route from {from} to {to}\n");
+            }
+            let mut text = format!("Shortest: {}\n", path(&answer["shortest"]));
+            let others = answer["others"].as_array().map_or(&[][..], Vec::as_slice);
+            if !others.is_empty() {
+                text += "Others, shortest first:\n";
+                for other in others {
+                    text += &format!("  {}\n", path(other));
+                }
+            }
+            let count = answer["count"].as_u64().unwrap_or_default();
+            let more = if answer["more"] == true { "More than " } else { "" };
+            text += &format!("{more}{} from {from} to {to}\n", counted(count, "path"));
+            text
+        }
+        "subgraph_around" => {
+            let steps = answer["steps"].as_u64().unwrap_or_default();
+            let mut text = format!("Within {} of {}, either way:\n", counted(steps, "step"), cell(&answer["name"]));
+            text += &instances(&answer["nodes"]);
+            if answer["truncated"] == true {
+                text += "and more, left out: give fewer steps\n";
+            }
+            text += "Connections between them:\n";
+            for edge in answer["edges"].as_array().into_iter().flatten() {
+                text += &format!("  {} -> {}\n", cell(&edge["from"]), cell(&edge["to"]));
+            }
+            text
+        }
+        "find_instances" => {
+            let rows: Vec<Vec<String>> = answer["instances"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|found| {
+                    let values: Vec<String> = found["values"].as_object().into_iter().flatten().map(|(key, value)| format!("{key} = {}", cell(value))).collect();
+                    vec![cell(&found["name"]), cell(&found["class"]), cell(&found["built_in_class"]), values.join("; ")]
+                })
+                .collect();
+            let found = if rows.is_empty() { String::new() } else { table(&["Name", "Class", "Built-in class", "Values"], &rows) };
+            found + &total(answer, "instances")
+        }
+        "class_tree" => {
+            let mut text = String::new();
+            for class in answer["classes"].as_array().into_iter().flatten() {
+                let indent = "  ".repeat(class["depth"].as_u64().unwrap_or_default() as usize);
+                let kind = class["parent"].as_str().map_or("built in".to_string(), |parent| format!("derived from {parent}"));
+                let sets: Vec<String> = class["sets"].as_object().into_iter().flatten().map(|(key, value)| format!("{key} = {}", cell(value))).collect();
+                let sets = if sets.is_empty() { String::new() } else { format!(", sets {}", sets.join("; ")) };
+                text += &format!(
+                    "{indent}{} ({kind}){sets}: {} of its own, {} in all\n",
+                    cell(&class["name"]),
+                    counted(class["instances_direct"].as_u64().unwrap_or_default(), "instance"),
+                    class["instances_total"].as_u64().unwrap_or_default()
+                );
+                if let Some(names) = class["instances"].as_array().filter(|names| !names.is_empty()) {
+                    text += &format!("{indent}  {}\n", names.iter().map(cell).collect::<Vec<_>>().join(", "));
+                }
+            }
+            if answer["truncated"] == true {
+                text += "Instance names stop at 1,000: ask about one class with --class\n";
+            }
+            text
+        }
+        other => format!("{other}: {answer}\n"),
+    }
+}
+
+/// A size as people read it.
+fn size(bytes: u64) -> String {
+    match bytes {
+        0..1_000 => format!("{bytes} bytes"),
+        1_000..1_000_000 => format!("{:.1} KB", bytes as f64 / 1e3),
+        _ => format!("{:.1} MB", bytes as f64 / 1e6),
+    }
+}
+
+/// What `export_model` wrote.
+pub fn exported(exported: &Value) -> String {
+    let mut text = String::new();
+    for file in exported["files"].as_array().into_iter().flatten() {
+        text += &format!("Wrote {} ({})\n", cell(&file["path"]), size(file["bytes"].as_u64().unwrap_or_default()));
+    }
+    text += &format!(
+        "{}, {} and {}, as {}\n",
+        counted(exported["instances"].as_u64().unwrap_or_default(), "instance"),
+        counted(exported["classes"].as_u64().unwrap_or_default(), "class"),
+        counted(exported["connections"].as_u64().unwrap_or_default(), "connection"),
+        cell(&exported["format"])
+    );
+    text
+}

@@ -14,6 +14,7 @@
 //! crabsim's own `.crabsim` folder there, which holds the results store. Never crabsim's code,
 //! never commands, never the network.
 
+mod edit;
 mod error;
 mod folder;
 mod jobs;

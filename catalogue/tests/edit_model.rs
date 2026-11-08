@@ -1,0 +1,371 @@
+//! Changing a model through `edit_model` and reading its values through `get_attributes`, by
+//! `call(name, JSON)`: a batch of changes in, the file it produced out, compared in canonical form.
+
+mod common;
+
+use common::Setup;
+use serde_json::{json, Value};
+
+/// A Source feeding two mills of one class, which feed a Drain.
+fn line() -> Value {
+    json!({
+        "format_version": 1,
+        "classes": [
+            { "name": "Mill", "parent": "Station", "attributes": {
+                "process_time": "0:45",
+                "failures": { "availability": 0.9, "repair_time": { "constant": "1:00" } } } }
+        ],
+        "instances": [
+            { "name": "In", "class": "Source", "position": { "x": 0, "y": 0 }, "successors": ["Mill 1", "Mill 2"], "attributes": { "interval": "0:30" } },
+            { "name": "Mill 1", "class": "Mill", "position": { "x": 4, "y": 2 }, "successors": ["Out"] },
+            { "name": "Mill 2", "class": "Mill", "position": { "x": 4, "y": -2 }, "successors": ["Out"], "attributes": { "process_time": "0:50" } },
+            { "name": "Out", "class": "Drain", "position": { "x": 8, "y": 0 } }
+        ]
+    })
+}
+
+/// A model as crabsim saves it.
+fn canonical(model: &Value) -> String {
+    crabsim_model::load(&model.to_string()).unwrap_or_else(|problems| panic!("{problems:?}")).save()
+}
+
+fn setup(name: &str) -> Setup {
+    let setup = Setup::new(name);
+    setup.folder.write("line.json", &canonical(&line()));
+    setup
+}
+
+/// `line()` with `change` applied to its JSON, as the test expects the file to end up.
+fn line_with(change: impl FnOnce(&mut Value)) -> String {
+    let mut model = line();
+    change(&mut model);
+    canonical(&model)
+}
+
+fn edit(setup: &Setup, changes: Value) -> Value {
+    setup.ok("edit_model", json!({ "path": "line.json", "changes": changes }))
+}
+
+fn edit_err(setup: &Setup, changes: Value) -> Value {
+    setup.err("edit_model", json!({ "path": "line.json", "changes": changes }))
+}
+
+fn hash(text: &str) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(text.as_bytes()).iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+// ---------- edit_model ----------
+
+#[test]
+fn a_batch_applies_in_order_and_saves_the_model_canonical() {
+    let setup = setup("batch");
+    let output = edit(
+        &setup,
+        json!([
+            { "change": "add_class", "name": "Inspection", "parent": "Station", "attributes": { "process_time": "0:20" } },
+            { "change": "add_instance", "name": "Check", "class": "Inspection", "position": { "x": 6, "y": 0 }, "successors": ["Out"] },
+            { "change": "disconnect", "from": "Mill 1", "to": "Out" },
+            { "change": "connect", "from": "Mill 1", "to": "Check" },
+            { "change": "set_model_description", "description": "With an inspection" },
+        ]),
+    );
+    let expected = line_with(|model| {
+        model["description"] = json!("With an inspection");
+        model["classes"].as_array_mut().unwrap().push(json!({ "name": "Inspection", "parent": "Station", "attributes": { "process_time": "0:20" } }));
+        model["instances"][1]["successors"] = json!(["Check"]);
+        model["instances"].as_array_mut().unwrap().push(json!({ "name": "Check", "class": "Inspection", "position": { "x": 6, "y": 0 }, "successors": ["Out"] }));
+    });
+    let saved = setup.folder.read("line.json");
+    assert_eq!(saved, expected);
+    assert_eq!(output["hash"], hash(&saved), "the hash of the file as saved");
+    assert_eq!(output["changes"], 5);
+    assert_eq!(output["instance_order_changed"], false, "appending keeps runs paired");
+    assert_eq!(output["also_removed"], json!({ "instances": [], "classes": [], "connections": [] }));
+}
+
+#[test]
+fn a_batch_may_pass_through_invalid_states_when_it_ends_valid() {
+    let setup = setup("through-invalid");
+    edit(
+        &setup,
+        json!([
+            { "change": "add_instance", "name": "In 2", "class": "Source" },
+            { "change": "connect", "from": "In 2", "to": "Mill 2" },
+            { "change": "set_attribute", "target": { "instance": "In 2" }, "attribute": "interval", "value": "1:00" },
+        ]),
+    );
+    assert!(setup.folder.read("line.json").contains("In 2"));
+}
+
+#[test]
+fn a_change_that_cant_apply_refuses_the_batch_naming_its_place_and_changes_nothing() {
+    let setup = setup("cant-apply");
+    let before = setup.folder.read("line.json");
+    for (changes, says) in [
+        (json!([{ "change": "set_model_description", "description": "x" }, { "change": "remove_instance", "name": "Nobody" }]), "changes/1 (remove_instance): no instance is called `Nobody`"),
+        (json!([{ "change": "add_instance", "name": "Out", "class": "Drain" }]), "changes/0 (add_instance): an instance is already called `Out`"),
+        (json!([{ "change": "connect", "from": "In", "to": "Mill 1" }]), "changes/0 (connect): `In` is already connected to `Mill 1`"),
+        (json!([{ "change": "disconnect", "from": "Out", "to": "In" }]), "changes/0 (disconnect): `Out` isn't connected to `In`"),
+        (json!([{ "change": "restore_inheritance", "target": { "instance": "Mill 1" }, "attribute": "process_time" }]), "changes/0 (restore_inheritance): `process_time` isn't set on instance `Mill 1`, so it already inherits it"),
+        (json!([{ "change": "set_attribute", "target": { "class": "Lathe" }, "attribute": "process_time", "value": "1:00" }]), "changes/0 (set_attribute): no class is called `Lathe`"),
+        (json!([{ "change": "rename_class", "name": "Mill", "to": "Station" }]), "changes/0 (rename_class): `Station` is a built-in class"),
+        (json!([{ "change": "connect", "from": "Mill 1", "to": "Mill 2", "place": 5 }]), "changes/0 (connect): `Mill 1` has 1 successor, so the place can be 0 to 1"),
+    ] {
+        let error = edit_err(&setup, changes.clone());
+        assert_eq!(error["kind"], "invalid_input", "{changes}");
+        assert!(error["message"].as_str().unwrap().contains(says), "{changes}: {error}");
+        assert_eq!(setup.folder.read("line.json"), before, "{changes} changed the file");
+    }
+    assert_eq!(edit_err(&setup, json!([{ "change": "paint", "name": "In" }]))["kind"], "invalid_input");
+}
+
+#[test]
+fn a_batch_ending_invalid_is_refused_with_every_problem_pointing_into_the_result() {
+    let setup = setup("ends-invalid");
+    let before = setup.folder.read("line.json");
+    let error = edit_err(
+        &setup,
+        json!([
+            { "change": "add_instance", "name": "Extra", "class": "Mill" },
+            { "change": "set_attribute", "target": { "class": "Mill" }, "attribute": "failures", "value": { "availability": 1.5, "repair_time": { "constant": "1:00" } } },
+            { "change": "set_attribute", "target": { "instance": "Mill 2" }, "attribute": "proces_time", "value": "1:00" },
+        ]),
+    );
+    assert_eq!(error["kind"], "invalid_model");
+    let pointers: Vec<&str> = error["problems"].as_array().unwrap().iter().map(|problem| problem["pointer"].as_str().unwrap()).collect();
+    assert_eq!(pointers, ["/classes/0/attributes/failures/availability", "/instances/2/attributes/proces_time"]);
+    assert!(error["problems"][1]["message"].as_str().unwrap().contains("did you mean `process_time`?"));
+    assert_eq!(setup.folder.read("line.json"), before);
+}
+
+#[test]
+fn a_file_that_is_already_invalid_is_refused_and_write_model_stays_the_way_to_fix_it() {
+    let setup = setup("already-invalid");
+    setup.folder.write("broken.json", common::BROKEN);
+    let error = setup.err("edit_model", json!({ "path": "broken.json", "changes": [{ "change": "set_model_description", "description": "x" }] }));
+    assert_eq!(error["kind"], "invalid_model");
+    assert!(error["message"].as_str().unwrap().contains("write_model"), "{error}");
+    assert_eq!(setup.folder.read("broken.json"), common::BROKEN);
+    assert_eq!(setup.err("edit_model", json!({ "path": "gone.json", "changes": [] }))["kind"], "not_found");
+    assert_eq!(setup.err("edit_model", json!({ "path": "../line.json", "changes": [] }))["kind"], "outside_models_folder");
+}
+
+#[test]
+fn removing_an_instance_removes_its_connections_and_says_runs_are_no_longer_paired() {
+    let setup = setup("remove-instance");
+    let output = edit(&setup, json!([{ "change": "remove_instance", "name": "Mill 1" }]));
+    assert_eq!(
+        setup.folder.read("line.json"),
+        line_with(|model| {
+            model["instances"].as_array_mut().unwrap().remove(1);
+            model["instances"][0]["successors"] = json!(["Mill 2"]);
+        })
+    );
+    assert_eq!(output["also_removed"]["connections"], json!([{ "from": "In", "to": "Mill 1" }, { "from": "Mill 1", "to": "Out" }]));
+    assert_eq!(output["instance_order_changed"], true);
+}
+
+#[test]
+fn removing_a_class_others_depend_on_is_refused_listing_them_unless_their_removal_is_asked_for() {
+    let setup = setup("remove-class");
+    edit(&setup, json!([
+        { "change": "add_class", "name": "Fast mill", "parent": "Mill", "attributes": { "process_time": "0:30" } },
+        { "change": "set_class", "name": "Mill 2", "class": "Fast mill" },
+    ]));
+    let before = setup.folder.read("line.json");
+    let error = edit_err(&setup, json!([{ "change": "remove_class", "name": "Mill" }]));
+    let message = error["message"].as_str().unwrap();
+    for named in ["`Fast mill`", "`Mill 1`", "`Mill 2`", "delete_dependents"] {
+        assert!(message.contains(named), "{named} in {message}");
+    }
+    assert_eq!(setup.folder.read("line.json"), before);
+
+    let output = edit(&setup, json!([{ "change": "remove_class", "name": "Mill", "delete_dependents": true }]));
+    let model = crabsim_model::load(&setup.folder.read("line.json")).unwrap();
+    assert!(model.classes.is_empty());
+    assert_eq!(model.instances.iter().map(|instance| instance.name.as_str()).collect::<Vec<_>>(), ["In", "Out"]);
+    assert_eq!(output["also_removed"]["classes"], json!(["Fast mill"]));
+    assert_eq!(output["also_removed"]["instances"], json!(["Mill 1", "Mill 2"]));
+    assert_eq!(output["also_removed"]["connections"].as_array().unwrap().len(), 4);
+    assert_eq!(output["instance_order_changed"], true);
+}
+
+#[test]
+fn renaming_updates_every_reference_and_keeps_the_order() {
+    let setup = setup("rename");
+    let output = edit(&setup, json!([
+        { "change": "rename_instance", "name": "Out", "to": "Shipping" },
+        { "change": "rename_class", "name": "Mill", "to": "CNC mill" },
+    ]));
+    assert_eq!(
+        setup.folder.read("line.json"),
+        line_with(|model| {
+            model["classes"][0]["name"] = json!("CNC mill");
+            model["instances"][1]["class"] = json!("CNC mill");
+            model["instances"][2]["class"] = json!("CNC mill");
+            model["instances"][1]["successors"] = json!(["Shipping"]);
+            model["instances"][2]["successors"] = json!(["Shipping"]);
+            model["instances"][3]["name"] = json!("Shipping");
+        })
+    );
+    assert_eq!(output["instance_order_changed"], false);
+}
+
+#[test]
+fn a_duplicate_has_no_connections_or_children_and_goes_at_the_end() {
+    let setup = setup("duplicate");
+    edit(&setup, json!([
+        { "change": "duplicate_instance", "name": "Mill 2", "to": "Mill 3", "position": { "x": 4, "y": -6 } },
+        { "change": "duplicate_instance", "name": "Mill 1", "to": "Mill 4" },
+        { "change": "duplicate_class", "name": "Mill", "to": "Lathe" },
+    ]));
+    assert_eq!(
+        setup.folder.read("line.json"),
+        line_with(|model| {
+            let mill = model["classes"][0].clone();
+            let mut lathe = mill;
+            lathe["name"] = json!("Lathe");
+            model["classes"].as_array_mut().unwrap().push(lathe);
+            let instances = model["instances"].as_array_mut().unwrap();
+            instances.push(json!({ "name": "Mill 3", "class": "Mill", "position": { "x": 4, "y": -6 }, "attributes": { "process_time": "0:50" } }));
+            instances.push(json!({ "name": "Mill 4", "class": "Mill", "position": { "x": 4, "y": 2 } }));
+        })
+    );
+}
+
+#[test]
+fn attributes_are_set_and_restored_on_instances_and_classes() {
+    let setup = setup("attributes");
+    edit(&setup, json!([
+        { "change": "set_attribute", "target": { "class": "Mill" }, "attribute": "process_time", "value": "1:00" },
+        { "change": "set_attribute", "target": { "instance": "Mill 1" }, "attribute": "description", "value": "the old one" },
+        { "change": "restore_inheritance", "target": { "instance": "Mill 2" }, "attribute": "process_time" },
+        { "change": "restore_inheritance", "target": { "class": "Mill" }, "attribute": "failures" },
+    ]));
+    assert_eq!(
+        setup.folder.read("line.json"),
+        line_with(|model| {
+            model["classes"][0]["attributes"] = json!({ "process_time": "1:00" });
+            model["instances"][1]["attributes"] = json!({ "description": "the old one" });
+            model["instances"][2].as_object_mut().unwrap().remove("attributes");
+        })
+    );
+}
+
+#[test]
+fn instances_move_change_class_and_connect_at_a_chosen_place() {
+    let setup = setup("move");
+    edit(&setup, json!([
+        { "change": "move_instance", "name": "Out", "position": { "x": 10, "y": 1, "z": 0.5 } },
+        { "change": "add_class", "name": "Lathe", "parent": "Station" },
+        { "change": "set_class", "name": "Mill 1", "class": "Lathe" },
+        { "change": "set_parent", "name": "Lathe", "parent": "Mill" },
+        { "change": "add_instance", "name": "Spare", "class": "Mill", "successors": ["Out"] },
+        { "change": "connect", "from": "In", "to": "Spare", "place": 0 },
+    ]));
+    assert_eq!(
+        setup.folder.read("line.json"),
+        line_with(|model| {
+            model["classes"].as_array_mut().unwrap().push(json!({ "name": "Lathe", "parent": "Mill" }));
+            model["instances"][1]["class"] = json!("Lathe");
+            model["instances"][3]["position"] = json!({ "x": 10, "y": 1, "z": 0.5 });
+            model["instances"][0]["successors"] = json!(["Spare", "Mill 1", "Mill 2"]);
+            model["instances"].as_array_mut().unwrap().push(json!({ "name": "Spare", "class": "Mill", "successors": ["Out"] }));
+        })
+    );
+}
+
+// ---------- get_attributes ----------
+
+#[test]
+fn get_attributes_gives_every_attribute_with_its_value_and_origin() {
+    let setup = setup("get-instance");
+    let got = setup.ok("get_attributes", json!({ "path": "line.json", "target": { "instance": "Mill 2" } }));
+    assert_eq!(got["built_in_class"], "Station");
+    assert_eq!(got["chain"], json!(["Mill", "Station"]));
+    assert_eq!(got["position"], json!({ "x": 4.0, "y": -2.0 }));
+    assert_eq!(got["successors"], json!(["Out"]));
+    assert_eq!(got["hash"], hash(&setup.folder.read("line.json")));
+    let attributes: Vec<(String, Value)> = got["attributes"].as_array().unwrap().iter().map(|a| (a["attribute"].as_str().unwrap().to_string(), a.clone())).collect();
+    let names: Vec<&str> = attributes.iter().map(|(name, _)| name.as_str()).collect();
+    assert_eq!(names, ["process_time", "failures", "starting_mus", "dimensions", "description"], "every attribute a Station has");
+    let of = |name: &str| attributes.iter().find(|(n, _)| n == name).unwrap().1.clone();
+    assert_eq!(of("process_time"), json!({ "attribute": "process_time", "value": "00:00:50", "from": "instance" }));
+    assert_eq!(of("failures"), json!({ "attribute": "failures", "value": { "availability": 0.9, "repair_time": { "constant": "00:01:00" } }, "from": "class", "class": "Mill" }));
+    assert_eq!(of("starting_mus"), json!({ "attribute": "starting_mus", "value": 0, "from": "built_in" }));
+    assert_eq!(of("dimensions")["from"], "built_in");
+    assert_eq!(of("description"), json!({ "attribute": "description", "from": "not_set" }));
+}
+
+#[test]
+fn get_attributes_of_a_class_and_of_a_source_without_a_value() {
+    let setup = setup("get-class");
+    let mill = setup.ok("get_attributes", json!({ "path": "line.json", "target": { "class": "Mill" } }));
+    assert_eq!(mill["chain"], json!(["Station"]));
+    assert!(mill.get("position").is_none() && mill.get("successors").is_none());
+    let process_time = mill["attributes"].as_array().unwrap().iter().find(|a| a["attribute"] == "process_time").unwrap().clone();
+    assert_eq!(process_time, json!({ "attribute": "process_time", "value": "00:00:45", "from": "class", "class": "Mill" }));
+
+    let source = setup.ok("get_attributes", json!({ "path": "line.json", "target": { "class": "Source" } }));
+    let interval = source["attributes"].as_array().unwrap().iter().find(|a| a["attribute"] == "interval").unwrap().clone();
+    assert_eq!(interval, json!({ "attribute": "interval", "from": "not_set" }), "a Source's interval has no default");
+
+    assert_eq!(setup.err("get_attributes", json!({ "path": "line.json", "target": { "instance": "Nobody" } }))["kind"], "not_found");
+    assert_eq!(setup.err("get_attributes", json!({ "path": "line.json", "target": { "class": "Lathe" } }))["kind"], "not_found");
+}
+
+#[test]
+fn the_hash_after_an_edit_is_what_get_attributes_then_gives() {
+    let setup = setup("hashes");
+    let before = setup.ok("get_attributes", json!({ "path": "line.json", "target": { "instance": "In" } }))["hash"].clone();
+    let edited = edit(&setup, json!([{ "change": "move_instance", "name": "In", "position": { "x": -1, "y": 0 } }]));
+    let after = setup.ok("get_attributes", json!({ "path": "line.json", "target": { "instance": "In" } }))["hash"].clone();
+    assert_ne!(before, after);
+    assert_eq!(edited["hash"], after);
+}
+
+// ---------- Cost ----------
+
+/// The cost of loading, changing and saving a whole file per call, on the benchmark's model of
+/// 429 copies of the demo (6,006 objects), with unique names. Timing only, so on demand in
+/// release: `cargo test --release -p crabsim-catalogue --test edit_model -- --ignored --nocapture`.
+#[test]
+#[ignore]
+fn get_attributes_and_edit_model_on_6006_objects() {
+    let demo = crabsim_model::load(&common::demo_text()).unwrap();
+    let mut model = crabsim_model::Model { description: Some("429 copies of the demo model".into()), classes: demo.classes.clone(), ..Default::default() };
+    for copy in 0..429 {
+        let rename = |name: &str| format!("Copy {copy} / {name}");
+        for instance in &demo.instances {
+            let mut instance = instance.clone();
+            instance.name = rename(&instance.name);
+            instance.successors = instance.successors.iter().map(|name| rename(name)).collect();
+            if let Some(position) = &mut instance.position {
+                position.y += 20.0 * copy as f64;
+            }
+            model.instances.push(instance);
+        }
+    }
+    let text = model.save();
+    let setup = Setup::new("large");
+    setup.folder.write("large.json", &text);
+    println!("6,006 objects: {} bytes of model file", text.len());
+    let time = |what: &str, input: Value, name: &str| {
+        let mut times = Vec::new();
+        for _ in 0..7 {
+            let start = std::time::Instant::now();
+            setup.ok(name, input.clone());
+            times.push(start.elapsed());
+        }
+        times.sort();
+        println!("{what}: median {:?} of 7, fastest {:?}", times[3], times[0]);
+    };
+    time("get_attributes", json!({ "path": "large.json", "target": { "instance": "Copy 428 / Station 4" } }), "get_attributes");
+    time(
+        "edit_model, one set_attribute",
+        json!({ "path": "large.json", "changes": [{ "change": "set_attribute", "target": { "instance": "Copy 200 / Station 2" }, "attribute": "process_time", "value": "0:12" }] }),
+        "edit_model",
+    );
+    time("validate_model", json!({ "path": "large.json" }), "validate_model");
+}

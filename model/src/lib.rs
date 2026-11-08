@@ -100,6 +100,11 @@ pub struct Attributes {
 }
 
 impl Attributes {
+    /// The attributes set here, as a file writes them, such as `{"process_time": "00:00:45"}`.
+    pub fn to_json(&self) -> serde_json::Value {
+        write::attributes(self)
+    }
+
     pub(crate) fn is_empty(&self) -> bool {
         *self == Attributes::default()
     }
@@ -316,12 +321,24 @@ impl Model {
     /// each comes from. `None` if its class's chain is broken, which `check` reports.
     pub fn resolve(&self, index: usize) -> Option<Resolved> {
         let instance = self.instances.get(index)?;
-        let (chain, built_in) = self.chain(&instance.class)?;
+        self.resolve_chain(Some(&instance.attributes), &instance.class)
+    }
+
+    /// The values a class gives its instances, worked out from its own chain, and where each
+    /// comes from: from a class, the class itself included, or built in. `name` may be a built-in
+    /// class. `None` if there is no such class or its chain is broken.
+    pub fn resolve_class(&self, name: &str) -> Option<Resolved> {
+        self.resolve_chain(None, name)
+    }
+
+    /// The values of something with `own` attributes, if it's an instance, made from `class`.
+    fn resolve_chain(&self, own: Option<&Attributes>, class: &str) -> Option<Resolved> {
+        let (chain, built_in) = self.chain(class)?;
         let mut attributes = Attributes::default();
         let mut origins = Vec::new();
         for attribute in Attribute::ALL {
-            let origin = if instance.attributes.is_set(attribute) {
-                attributes.take(attribute, &instance.attributes);
+            let origin = if let Some(own) = own.filter(|own| own.is_set(attribute)) {
+                attributes.take(attribute, own);
                 Origin::Instance
             } else if let Some(class) = chain.iter().find(|class| class.attributes.is_set(attribute)) {
                 attributes.take(attribute, &class.attributes);

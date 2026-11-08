@@ -61,7 +61,7 @@ fn instance(instance: &Instance) -> Value {
     Value::Object(fields)
 }
 
-fn attributes(attributes: &Attributes) -> Value {
+pub(crate) fn attributes(attributes: &Attributes) -> Value {
     let mut fields = Map::new();
     if let Some(interval) = attributes.interval {
         fields.insert("interval".into(), time(interval));

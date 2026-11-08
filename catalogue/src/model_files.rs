@@ -18,6 +18,7 @@ pub(crate) fn entries() -> Vec<Entry> {
         entry::<DeleteModel>(),
         entry::<ModelFileFormat>(),
     ];
+    entries.extend(crate::edit::entries());
     entries.extend(crate::jobs::entries());
     entries.extend(crate::results::entries());
     entries.extend(crate::store::entries());

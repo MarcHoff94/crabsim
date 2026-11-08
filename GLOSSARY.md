@@ -256,6 +256,12 @@ MU count multiplied by time, kept per MU state: busy, blocked, waiting to start 
 **Bottleneck**:
 The object limiting a material flow: what is upstream of it is mostly blocked, and what is downstream of it is mostly starved.
 
+**Upstream**:
+Every object that can pass MUs to a given object, directly or through any number of others.
+
+**Downstream**:
+Every object a given object can pass MUs to, directly or through any number of others.
+
 **Starved**:
 Having empty capacity because no MU has arrived.
 

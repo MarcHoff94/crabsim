@@ -391,17 +391,19 @@ fn the_user_sees_and_controls_the_edit_queue() {
 #[test]
 fn compare_prints_each_figures_difference_and_whether_it_is_clear() {
     let models = Models::new("compare");
-    for label in ["one", "two"] {
-        let output = crabsim(&["run", "--models", models.arg(), "--model", "demo.json", "--length", "2:00:00", "--observations", "3", "--label", label]);
+    for (label, seed) in [("one", "1"), ("two", "2"), ("again", "1")] {
+        let output = crabsim(&["run", "--models", models.arg(), "--model", "demo.json", "--length", "2:00:00", "--observations", "3", "--seed", seed, "--label", label]);
         assert!(output.status.success(), "{output:?}");
     }
     let output = crabsim(&["compare", "--models", models.arg(), "run-1", "run-2", "--object", "Drain"]);
     assert!(output.status.success(), "{output:?}");
     let printed = stdout(&output);
-    assert!(printed.starts_with("run-2 \"two\" minus run-1 \"one\": paired"), "{printed}");
-    assert!(printed.contains("Drain"), "{printed}");
+    assert!(printed.starts_with("run-2 \"two\" minus run-1 \"one\": not paired, because the runs used different seeds"), "{printed}");
     let mus_in = printed.lines().find(|line| line.trim_start().starts_with("mus_in")).unwrap_or_else(|| panic!("{printed}"));
-    assert!(mus_in.contains("paired") && mus_in.contains("no"), "the same run twice differs by nothing, so not clearly: {mus_in}");
+    assert!(mus_in.contains("welch") && (mus_in.contains("yes") || mus_in.contains("no")), "{mus_in}");
+
+    let same = stdout(&crabsim(&["compare", "--models", models.arg(), "run-1", "run-3", "--object", "Drain"]));
+    assert!(same.contains(": paired") && same.contains("Unchanged in every observation: Drain"), "the same seed twice: {same}");
     let missing = crabsim(&["compare", "--models", models.arg(), "run-1", "run-9"]);
     assert!(!missing.status.success());
 }

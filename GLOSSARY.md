@@ -44,8 +44,12 @@ One simulation run of an experiment. Observations of one experiment differ only 
 _Avoid_: Replication
 
 **Paired runs**:
-Two runs whose observation *k* used the same seed, so an object at the same place among the instances in both models drew the same random numbers. Their difference then has a far narrower interval than either run alone, which is what makes comparing two variants of a model cheap.
+Two runs with the same seed and the same number of observations, so that observation *k* of one can be compared with observation *k* of the other. An instance with the same stream in both models then drew the same random numbers, which gives the difference a far narrower interval than either run alone, and is what makes comparing two variants of a model cheap.
 _Avoid_: Matched runs
+
+**Stream**:
+The number an instance gets when it's placed in a model, which together with the run's seed gives its random numbers. It stays whatever else changes in the model, so only changing the seed changes an instance's random numbers, unless the user changes its stream on purpose.
+_Avoid_: Object seed (the seed belongs to the run)
 
 **Simulation study**:
 Several experiments of one model, each changing different attribute values, each run as a defined number of observations. By default, observation *k* of every experiment uses the same seed, so the experiments differ by their values and not by chance.

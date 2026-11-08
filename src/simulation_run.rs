@@ -38,6 +38,8 @@ pub struct SimulationRun {
     counted_time: SimTime,
     events_at_this_time: u64,
     seed: u64,
+    /// Each object's stream, by id, which with the seed gives its random numbers.
+    streams: Vec<u64>,
     initialised: bool,
     recording: Recording,
     statistics_since: SimTime,
@@ -47,8 +49,10 @@ pub struct SimulationRun {
 impl SimulationRun {
     /// A run of these objects, whose ids must match their positions. `ModelDescription` builds
     /// them that way.
-    pub(crate) fn new(objects: Vec<ModelObject>, seed: u64) -> SimulationRun {
+    pub(crate) fn new(objects: Vec<ModelObject>, seed: u64, streams: Vec<u64>) -> SimulationRun {
+        debug_assert_eq!(objects.len(), streams.len(), "one stream per object");
         SimulationRun {
+            streams,
             objects,
             queue: BinaryHeap::new(),
             time: SimTime::ZERO,
@@ -117,7 +121,7 @@ impl SimulationRun {
         for index in 0..self.objects.len() {
             let id = index as u32;
             let object = &mut self.objects[index];
-            object.set_random_seed(self.seed ^ (id as u64).wrapping_mul(0x9E3779B97F4A7C15));
+            object.set_random_seed(self.seed ^ self.streams[index].wrapping_mul(0x9E3779B97F4A7C15));
             let events = object
                 .init(&mut self.context)
                 .map_err(|_| RunError::ObjectFailed { object_id: id, time: SimTime::ZERO })?;
@@ -333,7 +337,7 @@ mod tests {
     }
 
     fn fails_at_five_seconds() -> SimulationRun {
-        let mut run = SimulationRun::new(vec![ModelObject::RecordsThenFails(RecordsThenFails::new(secs(5)))], 0);
+        let mut run = SimulationRun::new(vec![ModelObject::RecordsThenFails(RecordsThenFails::new(secs(5)))], 0, vec![0]);
         run.set_recording(Recording::ALL);
         run
     }

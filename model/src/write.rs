@@ -43,6 +43,9 @@ fn instance(instance: &Instance) -> Value {
     let mut fields = Map::new();
     fields.insert("name".into(), json!(instance.name));
     fields.insert("class".into(), json!(instance.class));
+    if let Some(stream) = instance.stream {
+        fields.insert("stream".into(), json!(stream));
+    }
     if let Some(position) = instance.position {
         let mut at = Map::new();
         at.insert("x".into(), json!(position.x));

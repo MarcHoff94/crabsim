@@ -1,10 +1,11 @@
-//! Comparing two runs: each figure's difference with a 95% confidence interval, paired where both
-//! runs drew the same random numbers and unpaired otherwise. See
-//! `docs/design/operation-catalogue.md`.
+//! Comparing two runs: each figure's difference with a 95% confidence interval, paired by
+//! observation when both runs used the same seed and number of observations, and with Welch's
+//! interval otherwise. See `docs/design/operation-catalogue.md` and ADR 0012.
 //!
-//! Each object's random numbers come from the run's seed and the object's place among the
-//! instances (`simulation_run.rs`), so pairing holds object by object: two runs with the same
-//! seed and number of observations pair every object that stands in the same place in both models.
+//! Pairing observation k with observation k is valid whatever the models, since different k are
+//! independent. How much narrower it makes the interval depends on common random numbers: each
+//! object's random numbers come from the seed and its stream (ADR 0012), so an object with the
+//! same stream in both models drew the same numbers.
 
 use crate::error::OperationError;
 use crate::jobs::run_number;
@@ -27,10 +28,12 @@ struct Run {
     seed: String,
     observations: u32,
     label: Option<String>,
+    length_s: f64,
+    warm_up_s: f64,
     /// Each observation that ended, by number: its error, if it failed.
     ended: BTreeMap<u32, Option<String>>,
-    /// Each instance's place among the model's instances, by name.
-    places: HashMap<String, usize>,
+    /// Each instance's stream, by name.
+    streams: HashMap<String, u64>,
     /// The instance names in model order.
     names: Vec<String>,
 }
@@ -38,9 +41,17 @@ struct Run {
 impl Run {
     fn read(connection: &rusqlite::Connection, id: &str) -> Result<Run, OperationError> {
         let number = run_number(id)?;
-        let (model_path, model_text, seed, observations, label) = connection
-            .query_row("SELECT model_path, model_text, seed, observations, label FROM runs WHERE number = ?1", [number], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, u32>(3)?, row.get::<_, Option<String>>(4)?))
+        let (model_path, model_text, seed, observations, label, length_s, warm_up_s) = connection
+            .query_row("SELECT model_path, model_text, seed, observations, label, length_s, warm_up_s FROM runs WHERE number = ?1", [number], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, u32>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, f64>(5)?,
+                    row.get::<_, f64>(6)?,
+                ))
             })
             .optional()?
             .ok_or_else(|| OperationError::not_found(format!("there is no run `{id}` in the results store")))?;
@@ -52,8 +63,9 @@ impl Run {
         }
         let model = crabsim_model::load(&model_text).map_err(|_| OperationError::run_error(format!("the model `{id}` ran can't be read back")))?;
         let names: Vec<String> = model.instances.iter().map(|instance| instance.name.clone()).collect();
-        let places = names.iter().enumerate().map(|(place, name)| (name.clone(), place)).collect();
-        Ok(Run { id: id.to_string(), model_path, model_text, seed, observations, label, ended, places, names })
+        // A model saved before streams numbers its instances by place, as its run drew them.
+        let streams = model.instances.iter().map(|instance| (instance.name.clone(), instance.stream.expect("loading gives every stream"))).collect();
+        Ok(Run { id: id.to_string(), model_path, model_text, seed, observations, label, length_s, warm_up_s, ended, streams, names })
     }
 
     /// Why observation `k` gave no figures, if it didn't.
@@ -173,11 +185,12 @@ impl Difference {
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct ComparedObject {
     pub name: String,
-    /// It drew the same random numbers in both runs, observation by observation.
-    pub paired: bool,
-    /// Why it isn't paired, when the runs are.
+    /// It drew the same random numbers in both runs, observation by observation: the runs are
+    /// paired and it has the same stream in both models. Its intervals are then narrowest.
+    pub common_random_numbers: bool,
+    /// Why not, when the runs are paired.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub why_unpaired: Option<String>,
+    pub why_not_common: Option<String>,
     /// By statistic, named as in the store. Figures that are 0 in both runs are left out.
     pub figures: BTreeMap<String, Difference>,
 }
@@ -214,10 +227,15 @@ pub struct CompareRunsOutput {
     pub pairing: Pairing,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub why_unpaired: Option<String>,
+    /// What makes the comparison less meaningful, such as different lengths.
+    pub warnings: Vec<String>,
     /// Observations that gave no figures, and why: for paired runs each dropped pair, otherwise
     /// each observation left out of either run.
     pub dropped: Vec<Dropped>,
+    /// The objects with a figure that differs, leaving out figures identical in every pair.
     pub objects: Vec<ComparedObject>,
+    /// Objects compared whose every figure was identical in every pair.
+    pub unchanged: Vec<String>,
     /// Instances of a's model that b's lacks, by name.
     pub only_in_a: Vec<String>,
     pub only_in_b: Vec<String>,
@@ -241,7 +259,7 @@ pub struct CompareRunsInput {
 
 impl Operation for CompareRuns {
     const NAME: &'static str = "compare_runs";
-    const DESCRIPTION: &'static str = "Compares two runs, such as a model and a variant of it: per object and figure, a's mean, b's mean, the difference b minus a with its 95% confidence interval, the relative difference, and `clear` when the interval leaves out 0, to 4 significant digits. Runs with the same seed and number of observations are paired: each object's random numbers follow its place among the instances, so an object in the same place in both models is compared observation by observation (method paired), with a far narrower interval. Others, and objects that moved place, are compared with Welch's interval (method welch). `dropped` lists every observation that gave no figures and why, such as a run error, and `counted` how many went into each figure. Objects are matched by name, and those in only one model are listed apart. By default the same objects as run_results shows, from both runs: a small model whole, otherwise every Drain and the busiest, most blocked and clearly most failed. Give `objects` or `classes` for exactly those. Compared at 95%, a few of many figures are clear by chance alone.";
+    const DESCRIPTION: &'static str = "Compares two runs, such as a model and a variant of it: per object and figure, a's mean, b's mean, the difference b minus a with its 95% confidence interval, the relative difference, and `clear` when the interval leaves out 0, to 4 significant digits. Runs with the same seed and number of observations are paired: every figure is compared observation by observation (method paired). An object with the same stream in both models also drew the same random numbers (`common_random_numbers`), which narrows its intervals most: every instance keeps its stream through edits, so variants made with edit_model share them. Other runs are compared with Welch's interval (method welch). `warnings` says what makes a comparison less meaningful, such as different lengths or warm-ups, `dropped` every observation that gave no figures and why, and `counted` how many went into each figure. Figures identical in every pair are left out, and objects with none left are listed in `unchanged`. Objects are matched by name, and those in only one model are listed apart. By default the same objects as run_results shows, from both runs: a small model whole, otherwise every Drain and the busiest, most blocked and clearly most failed. Give `objects` or `classes` for exactly those. Compared at 95%, a few of many figures are clear by chance alone.";
     const EFFECT: Effect = Effect::ReadOnly;
     type Input = CompareRunsInput;
     type Output = CompareRunsOutput;
@@ -259,6 +277,18 @@ impl Operation for CompareRuns {
             None
         };
         let paired_runs = why_unpaired.is_none();
+        let mut warnings = Vec::new();
+        let time = |secs: f64| crabsim::time::format_time_exact(crabsim::SimTime::from_secs_f64(secs));
+        if a.length_s != b.length_s {
+            warnings.push(format!(
+                "the runs measured different lengths ({} and {}): counts such as mus_in aren't comparable, while rates and shares are. If their intervals agree, the shorter length was enough to capture the system's behaviour",
+                time(a.length_s),
+                time(b.length_s)
+            ));
+        }
+        if a.warm_up_s != b.warm_up_s {
+            warnings.push(format!("the runs left out different warm-ups ({} and {}), so they measured from different starting states", time(a.warm_up_s), time(b.warm_up_s)));
+        }
 
         // Every observation that gives no figures, and why.
         let mut dropped = Vec::new();
@@ -289,12 +319,13 @@ impl Operation for CompareRuns {
         if input.objects.is_none() && input.classes.is_none() {
             for run in [&a, &b] {
                 let mut chosen: Vec<String> = choose_objects(connection, &run.id, &run.model_text, None, None)?.into_iter().map(|(name, _)| name).collect();
-                chosen.sort_by_key(|name| run.places.get(name).copied().unwrap_or(usize::MAX));
+                let order: HashMap<&String, usize> = run.names.iter().enumerate().map(|(place, name)| (name, place)).collect();
+                chosen.sort_by_key(|name| order.get(name).copied().unwrap_or(usize::MAX));
                 chosen.into_iter().for_each(&mut add);
             }
         } else {
             for name in input.objects.iter().flatten() {
-                if !a.places.contains_key(name) && !b.places.contains_key(name) {
+                if !a.streams.contains_key(name) && !b.streams.contains_key(name) {
                     return Err(OperationError::not_found(format!("neither {} nor {} ran a model with an instance called `{name}`", a.id, b.id)));
                 }
                 add(name.clone());
@@ -314,11 +345,13 @@ impl Operation for CompareRuns {
         }
 
         let mut objects = Vec::new();
-        for name in names.iter().filter(|name| a.places.contains_key(*name) && b.places.contains_key(*name)) {
-            let (place_a, place_b) = (a.places[name], b.places[name]);
-            let why_unpaired = (paired_runs && place_a != place_b)
-                .then(|| format!("it's in place {place_a} among the instances of {}'s model and {place_b} in {}'s, so its random numbers differ", a.id, b.id));
-            let paired = paired_runs && why_unpaired.is_none();
+        let mut unchanged = Vec::new();
+        for name in names.iter().filter(|name| a.streams.contains_key(*name) && b.streams.contains_key(*name)) {
+            let (stream_a, stream_b) = (a.streams[name], b.streams[name]);
+            let why_not_common = (paired_runs && stream_a != stream_b).then(|| {
+                format!("it has stream {stream_a} in {}'s model and stream {stream_b} in {}'s, so it drew other random numbers", a.id, b.id)
+            });
+            let common = paired_runs && why_not_common.is_none();
             let (fa, fb) = (figures(connection, &a, name)?, figures(connection, &b, name)?);
             let empty = BTreeMap::new();
             let mut compared = BTreeMap::new();
@@ -327,24 +360,34 @@ impl Operation for CompareRuns {
                 if va.values().chain(vb.values()).all(|value| *value == 0.0) {
                     continue;
                 }
-                let difference = if paired { Difference::paired(va, vb) } else { Difference::welch(va, vb) };
+                // Identical in every pair, such as a failure count with common random numbers.
+                if paired_runs && va == vb {
+                    continue;
+                }
+                let difference = if paired_runs { Difference::paired(va, vb) } else { Difference::welch(va, vb) };
                 if let Some(difference) = difference {
                     compared.insert(statistic.to_string(), difference);
                 }
             }
-            objects.push(ComparedObject { name: name.clone(), paired, why_unpaired, figures: compared });
+            if compared.is_empty() {
+                unchanged.push(name.clone());
+            } else {
+                objects.push(ComparedObject { name: name.clone(), common_random_numbers: common, why_not_common, figures: compared });
+            }
         }
 
         let side = |run: &Run| RunSide { run: run.id.clone(), model: run.model_path.clone(), seed: run.seed.clone(), observations: run.observations, label: run.label.clone() };
         Ok(CompareRunsOutput {
-            only_in_a: a.names.iter().filter(|name| !b.places.contains_key(*name)).cloned().collect(),
-            only_in_b: b.names.iter().filter(|name| !a.places.contains_key(*name)).cloned().collect(),
+            only_in_a: a.names.iter().filter(|name| !b.streams.contains_key(*name)).cloned().collect(),
+            only_in_b: b.names.iter().filter(|name| !a.streams.contains_key(*name)).cloned().collect(),
             a: side(&a),
             b: side(&b),
             pairing: if paired_runs { Pairing::Paired } else { Pairing::Unpaired },
             why_unpaired,
+            warnings,
             dropped,
             objects,
+            unchanged,
         })
     }
 }

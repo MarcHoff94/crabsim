@@ -96,6 +96,7 @@ fn a_hand_written_file_is_saved_in_canonical_form_and_then_stays_the_same() {
     {
       "name": "In",
       "class": "Source",
+      "stream": 0,
       "position": {
         "x": 1.0,
         "y": 2.0
@@ -109,7 +110,8 @@ fn a_hand_written_file_is_saved_in_canonical_form_and_then_stays_the_same() {
     },
     {
       "name": "Out",
-      "class": "Drain"
+      "class": "Drain",
+      "stream": 1
     }
   ]
 }
@@ -139,6 +141,7 @@ fn copies_of_the_demo(copies: usize) -> Model {
         for instance in &demo.instances {
             let mut instance: Instance = instance.clone();
             instance.name = rename(&instance.name);
+            instance.stream = instance.stream.map(|stream| stream + 100 * copy as u64);
             instance.successors = instance.successors.iter().map(|name| rename(name)).collect();
             if let Some(position) = &mut instance.position {
                 position.y += 20.0 * copy as f64;
@@ -572,4 +575,72 @@ fn a_class_built_in_code_is_checked_like_one_in_a_file() {
     assert_eq!(model.check(), vec![]);
     model.classes[0].parent = "Mill".into();
     assert_eq!(model.check().len(), 1);
+}
+
+// ---------- Streams ----------
+
+fn streams(text: &str) -> Vec<u64> {
+    load(text).expect("valid").instances.iter().map(|instance| instance.stream.expect("loading gives every instance a stream")).collect()
+}
+
+#[test]
+fn a_file_without_streams_numbers_its_instances_by_place_so_old_results_stay() {
+    let text = file(json!([
+        { "name": "In", "class": "Source", "successors": ["Work"], "attributes": { "interval": "10" } },
+        { "name": "Work", "class": "Station", "successors": ["Out"] },
+        { "name": "Out", "class": "Drain" },
+    ]));
+    assert_eq!(streams(&text), [0, 1, 2]);
+    let saved = load(&text).unwrap().save();
+    assert!(saved.contains("\"stream\": 1"), "saving writes every stream: {saved}");
+    assert_eq!(streams(&saved), [0, 1, 2]);
+}
+
+#[test]
+fn an_instance_without_a_stream_gets_one_more_than_the_highest() {
+    let text = file(json!([
+        { "name": "In", "class": "Source", "stream": 5, "successors": ["A"], "attributes": { "interval": "10" } },
+        { "name": "A", "class": "Station", "successors": ["B"] },
+        { "name": "B", "class": "Station", "stream": 2, "successors": ["Out"] },
+        { "name": "Out", "class": "Drain" },
+    ]));
+    assert_eq!(streams(&text), [5, 6, 2, 7]);
+}
+
+#[test]
+fn two_instances_with_one_stream_or_a_stream_that_isnt_a_number_are_problems() {
+    let text = file(json!([
+        { "name": "In", "class": "Source", "stream": 4, "successors": ["Out"], "attributes": { "interval": "10" } },
+        { "name": "Out", "class": "Drain", "stream": 4 },
+        { "name": "Odd", "class": "Drain", "stream": -1 },
+    ]));
+    assert_found(&text, "/instances/1/stream", "instance 0 already has stream 4");
+    assert_found(&text, "/instances/2/stream", "a whole number, 0 or more");
+}
+
+#[test]
+fn a_stations_random_numbers_follow_its_stream_through_a_file() {
+    let failures = |instances: Value| {
+        let description = built(&file(instances));
+        let mut run = description.build(3);
+        run.init().unwrap();
+        run.advance_to(secs(86_400)).unwrap();
+        let state = run.state();
+        state.objects.iter().zip(0..).find(|(_, id)| description.name(*id) == Some("Mill")).unwrap().0.statistics.failures
+    };
+    let mill = json!({ "name": "Mill", "class": "Station", "stream": 9, "successors": ["Out"],
+        "attributes": { "process_time": "5", "failures": { "availability": 0.8, "repair_time": { "erlang": { "mean": "20", "k": 2 } } } } });
+    let alone = failures(json!([
+        { "name": "In", "class": "Source", "stream": 0, "successors": ["Mill"], "attributes": { "interval": "10" } },
+        mill.clone(),
+        { "name": "Out", "class": "Drain", "stream": 1 },
+    ]));
+    let with_one_in_front = failures(json!([
+        { "name": "In", "class": "Source", "stream": 0, "successors": ["Pass"], "attributes": { "interval": "10" } },
+        { "name": "Pass", "class": "Station", "stream": 2, "successors": ["Mill"] },
+        mill,
+        { "name": "Out", "class": "Drain", "stream": 1 },
+    ]));
+    assert!(alone > 10, "{alone}");
+    assert_eq!(with_one_in_front, alone, "the Mill moved to another place but kept its stream");
 }

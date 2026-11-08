@@ -13,6 +13,7 @@ pub(crate) fn check(model: &Model, broken: &Broken) -> Vec<Problem> {
         checker.class(index);
     }
     checker.instance_names();
+    checker.instance_streams();
     for index in 0..model.instances.len() {
         checker.instance(index);
     }
@@ -152,6 +153,21 @@ impl<'m> Checker<'m> {
                 Some(&first) => self.problem(Owner::Instance(index), "/name", format!("instance {first} already has this name")),
                 None => {
                     self.by_name.insert(name, index);
+                }
+            }
+        }
+    }
+
+    /// Each stream is one instance's own, so no two draw the same random numbers.
+    fn instance_streams(&mut self) {
+        let model = self.model;
+        let mut seen: HashMap<u64, usize> = HashMap::new();
+        for (index, instance) in model.instances.iter().enumerate() {
+            let Some(stream) = instance.stream.filter(|_| !self.broken.streams.contains(&index)) else { continue };
+            match seen.get(&stream) {
+                Some(&first) => self.problem(Owner::Instance(index), "/stream", format!("instance {first} already has stream {stream}: every instance needs its own")),
+                None => {
+                    seen.insert(stream, index);
                 }
             }
         }

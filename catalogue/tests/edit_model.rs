@@ -16,10 +16,10 @@ fn line() -> Value {
                 "failures": { "availability": 0.9, "repair_time": { "constant": "1:00" } } } }
         ],
         "instances": [
-            { "name": "In", "class": "Source", "position": { "x": 0, "y": 0 }, "successors": ["Mill 1", "Mill 2"], "attributes": { "interval": "0:30" } },
-            { "name": "Mill 1", "class": "Mill", "position": { "x": 4, "y": 2 }, "successors": ["Out"] },
-            { "name": "Mill 2", "class": "Mill", "position": { "x": 4, "y": -2 }, "successors": ["Out"], "attributes": { "process_time": "0:50" } },
-            { "name": "Out", "class": "Drain", "position": { "x": 8, "y": 0 } }
+            { "name": "In", "class": "Source", "stream": 0, "position": { "x": 0, "y": 0 }, "successors": ["Mill 1", "Mill 2"], "attributes": { "interval": "0:30" } },
+            { "name": "Mill 1", "class": "Mill", "stream": 1, "position": { "x": 4, "y": 2 }, "successors": ["Out"] },
+            { "name": "Mill 2", "class": "Mill", "stream": 2, "position": { "x": 4, "y": -2 }, "successors": ["Out"], "attributes": { "process_time": "0:50" } },
+            { "name": "Out", "class": "Drain", "stream": 3, "position": { "x": 8, "y": 0 } }
         ]
     })
 }
@@ -80,7 +80,7 @@ fn a_batch_applies_in_order_and_saves_the_model_canonical() {
     assert_eq!(saved, expected);
     assert_eq!(output["hash"], hash(&saved), "the hash of the file as saved");
     assert_eq!(output["changes"], 5);
-    assert_eq!(output["instance_order_changed"], false, "appending keeps runs paired");
+    assert!(output.get("instance_order_changed").is_none(), "streams keep pairing, whatever the order");
     assert_eq!(output["also_removed"], json!({ "instances": [], "classes": [], "connections": [] }));
 }
 
@@ -164,7 +164,6 @@ fn removing_an_instance_removes_its_connections_and_says_runs_are_no_longer_pair
         })
     );
     assert_eq!(output["also_removed"]["connections"], json!([{ "from": "In", "to": "Mill 1" }, { "from": "Mill 1", "to": "Out" }]));
-    assert_eq!(output["instance_order_changed"], true);
 }
 
 #[test]
@@ -189,7 +188,6 @@ fn removing_a_class_others_depend_on_is_refused_listing_them_unless_their_remova
     assert_eq!(output["also_removed"]["classes"], json!(["Fast mill"]));
     assert_eq!(output["also_removed"]["instances"], json!(["Mill 1", "Mill 2"]));
     assert_eq!(output["also_removed"]["connections"].as_array().unwrap().len(), 4);
-    assert_eq!(output["instance_order_changed"], true);
 }
 
 #[test]
@@ -210,7 +208,7 @@ fn renaming_updates_every_reference_and_keeps_the_order() {
             model["instances"][3]["name"] = json!("Shipping");
         })
     );
-    assert_eq!(output["instance_order_changed"], false);
+    let _ = output;
 }
 
 #[test]
@@ -341,6 +339,7 @@ fn get_attributes_and_edit_model_on_6006_objects() {
         for instance in &demo.instances {
             let mut instance = instance.clone();
             instance.name = rename(&instance.name);
+            instance.stream = instance.stream.map(|stream| stream + 100 * copy as u64);
             instance.successors = instance.successors.iter().map(|name| rename(name)).collect();
             if let Some(position) = &mut instance.position {
                 position.y += 20.0 * copy as f64;
@@ -369,4 +368,42 @@ fn get_attributes_and_edit_model_on_6006_objects() {
         "edit_model",
     );
     time("validate_model", json!({ "path": "large.json" }), "validate_model");
+}
+
+// ---------- Streams ----------
+
+fn streams_in(setup: &Setup) -> Vec<(String, u64)> {
+    let model = crabsim_model::load(&setup.folder.read("line.json")).unwrap();
+    model.instances.iter().map(|instance| (instance.name.clone(), instance.stream.unwrap())).collect()
+}
+
+#[test]
+fn a_new_or_duplicated_instance_gets_a_new_stream_and_a_removed_ones_leaves_a_gap() {
+    let setup = setup("streams");
+    edit(&setup, json!([
+        { "change": "remove_instance", "name": "Mill 1" },
+        { "change": "duplicate_instance", "name": "Mill 2", "to": "Mill 3" },
+        { "change": "add_instance", "name": "Spare", "class": "Drain" },
+    ]));
+    let streams = streams_in(&setup);
+    let of = |name: &str| streams.iter().find(|(n, _)| n == name).unwrap().1;
+    assert_eq!((of("In"), of("Mill 2"), of("Out")), (0, 2, 3), "nobody else's stream changes");
+    assert_eq!((of("Mill 3"), of("Spare")), (4, 5), "one more than the highest, and not the original's");
+    let got = setup.ok("get_attributes", json!({ "path": "line.json", "target": { "instance": "Mill 3" } }));
+    assert_eq!(got["stream"], 4, "get_attributes shows an instance's stream");
+}
+
+#[test]
+fn only_the_user_sets_a_stream_and_it_must_be_unique() {
+    let setup = setup("set-stream");
+    let refused = edit_err(&setup, json!([{ "change": "set_stream", "name": "Mill 1", "stream": 40 }]));
+    assert_eq!(refused["kind"], "invalid_input");
+    assert!(refused["message"].as_str().unwrap().contains("only for the user"), "{refused}");
+
+    let user = crabsim_catalogue::Catalogue::open(crabsim_catalogue::Settings::new(&setup.folder.path, crabsim_catalogue::Source::Cli)).unwrap();
+    user.call("edit_model", json!({ "path": "line.json", "changes": [{ "change": "set_stream", "name": "Mill 1", "stream": 40 }] })).unwrap();
+    assert!(streams_in(&setup).contains(&("Mill 1".to_string(), 40)));
+    let taken = user.call("edit_model", json!({ "path": "line.json", "changes": [{ "change": "set_stream", "name": "Mill 2", "stream": 40 }] })).unwrap_err().to_json();
+    assert_eq!(taken["kind"], "invalid_model");
+    assert_eq!(taken["problems"][0]["pointer"], "/instances/2/stream");
 }

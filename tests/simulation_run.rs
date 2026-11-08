@@ -2496,3 +2496,45 @@ fn a_clone_of_a_run_continues_exactly_as_the_original_would() {
     assert_eq!(from_copy, from_original);
     assert_eq!(copy.state(), run.state());
 }
+
+// ---------- Streams ----------
+
+/// A Source, a dummy Station or not, a failing Station with `stream`, and a Drain. Gives the
+/// failing Station's failures over a day with seed 3.
+fn failures_of_a_station_with_stream(dummy_in_front: bool, stream: Option<u64>) -> u64 {
+    let mut model = ModelDescription::new();
+    let source = source(&mut model, 10);
+    let mut previous = source;
+    if dummy_in_front {
+        let dummy = station(&mut model, 0);
+        model.connect(previous, dummy);
+        previous = dummy;
+    }
+    let profile = FailureProfile::new(0.8, Distribution::ERLANG { mean: 20_000.0, k: 2 }, 0);
+    let failing = station_with_failures(&mut model, 5, profile);
+    if let Some(stream) = stream {
+        model.set_stream(failing, stream);
+    }
+    model.connect(previous, failing);
+    let out = drain(&mut model);
+    model.connect(failing, out);
+    let mut run = model.build(3);
+    run.init().unwrap();
+    run.advance_to(secs(86_400)).unwrap();
+    statistics_of(&run, failing).failures
+}
+
+#[test]
+fn an_objects_random_numbers_follow_its_stream_not_its_place() {
+    let alone = failures_of_a_station_with_stream(false, Some(7));
+    assert!(alone > 10, "the test needs failures: {alone}");
+    assert_eq!(failures_of_a_station_with_stream(true, Some(7)), alone, "an object inserted in front changes nothing");
+    assert_ne!(failures_of_a_station_with_stream(false, Some(8)), alone, "another stream draws other numbers");
+}
+
+#[test]
+fn an_object_without_a_stream_draws_from_its_id_as_before() {
+    // The failing Station's id is 1 without the dummy, and the formula was the seed and the id.
+    assert_eq!(failures_of_a_station_with_stream(false, None), failures_of_a_station_with_stream(false, Some(1)));
+    assert_eq!(failures_of_a_station_with_stream(true, None), failures_of_a_station_with_stream(false, Some(2)));
+}

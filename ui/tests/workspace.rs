@@ -118,19 +118,22 @@ fn assert_no_overlap(model: &ModelDescription) {
 // ---------- Opening a folder ----------
 
 #[test]
-fn without_a_folder_the_demo_runs_with_no_list() {
-    let workspace = Workspace::open(None);
-    assert_eq!(workspace.banner(), None);
-    assert!(!workspace.has_folder());
-    assert!(workspace.models().is_empty());
+fn until_a_model_is_chosen_none_is_open_and_the_view_offers_no_control() {
+    let folder = folder("none-yet");
+    let workspace = Workspace::open(&folder.0);
     assert_eq!(workspace.opened(), None);
-    assert_eq!(workspace.description().object_count(), crabsim::demo::model().object_count());
+    assert_eq!(workspace.description().object_count(), 0);
+    let view = ViewState::new(workspace.description());
+    assert!(!view.has_model());
+    for control in [Control::Init, Control::Start, Control::Halt, Control::Reset, Control::StepBack, Control::StepForward] {
+        assert!(!view.allows(control), "{control:?} with no model");
+    }
 }
 
 #[test]
 fn a_folder_lists_its_models_marking_those_with_problems() {
     let folder = folder("list");
-    let workspace = Workspace::open(Some(&folder.0));
+    let workspace = Workspace::open(&folder.0);
     assert_eq!(workspace.banner(), None);
     assert!(workspace.has_folder());
     let listed: Vec<(&str, usize)> = workspace.models().iter().map(|entry| (entry.path.as_str(), entry.problems)).collect();
@@ -141,7 +144,7 @@ fn a_folder_lists_its_models_marking_those_with_problems() {
 #[test]
 fn opening_a_model_builds_it_with_its_names_and_positions() {
     let folder = folder("open");
-    let mut workspace = Workspace::open(Some(&folder.0));
+    let mut workspace = Workspace::open(&folder.0);
     assert!(workspace.open_model("placed.json"));
     assert_eq!(workspace.opened(), Some("placed.json"));
     assert_eq!(workspace.problems(), None);
@@ -156,7 +159,7 @@ fn opening_a_model_builds_it_with_its_names_and_positions() {
 #[test]
 fn a_model_with_nothing_placed_is_laid_out_in_columns_by_flow() {
     let folder = folder("layout");
-    let mut workspace = Workspace::open(Some(&folder.0));
+    let mut workspace = Workspace::open(&folder.0);
     assert!(workspace.open_model("unplaced.json"));
     let model = workspace.description();
     let x = |name: &str| at(model, name).0;
@@ -171,7 +174,7 @@ fn a_model_with_nothing_placed_is_laid_out_in_columns_by_flow() {
 #[test]
 fn the_few_unplaced_instances_go_in_a_row_below_the_placed_ones() {
     let folder = folder("layout-partly");
-    let mut workspace = Workspace::open(Some(&folder.0));
+    let mut workspace = Workspace::open(&folder.0);
     assert!(workspace.open_model("plant/partly.json"));
     let model = workspace.description();
     assert_eq!(at(model, "In"), (0.0, 0.0));
@@ -191,7 +194,7 @@ fn the_few_unplaced_instances_go_in_a_row_below_the_placed_ones() {
 #[test]
 fn a_model_with_problems_shows_them_and_the_open_model_stays() {
     let folder = folder("problems");
-    let mut workspace = Workspace::open(Some(&folder.0));
+    let mut workspace = Workspace::open(&folder.0);
     assert!(workspace.open_model("placed.json"));
     assert!(!workspace.open_model("plant/broken.json"));
     assert_eq!(workspace.opened(), Some("placed.json"), "the model open before stays open");
@@ -209,28 +212,28 @@ fn a_model_with_problems_shows_them_and_the_open_model_stays() {
 // ---------- A second window ----------
 
 #[test]
-fn a_second_window_on_the_folder_is_refused_and_runs_the_demo() {
+fn a_second_window_on_the_folder_is_refused_and_opens_nothing() {
     let folder = folder("second");
-    let first = Workspace::open(Some(&folder.0));
-    let second = Workspace::open(Some(&folder.0));
+    let first = Workspace::open(&folder.0);
+    let second = Workspace::open(&folder.0);
     let banner = second.banner().expect("the second window says why");
     assert!(banner.contains("Another crabsim window") && banner.contains("copy"), "{banner}");
     assert!(!second.has_folder());
     assert!(second.models().is_empty());
-    assert_eq!(second.description().object_count(), crabsim::demo::model().object_count());
+    assert_eq!(second.description().object_count(), 0, "no model, not the demo");
 
     drop(first);
     drop(second);
-    assert_eq!(Workspace::open(Some(&folder.0)).banner(), None, "the folder is free once the first window closes");
+    assert_eq!(Workspace::open(&folder.0).banner(), None, "the folder is free once the first window closes");
 }
 
 #[test]
-fn a_folder_that_cant_be_opened_says_so_and_runs_the_demo() {
+fn a_folder_that_cant_be_opened_says_so_and_opens_nothing() {
     let missing = std::env::temp_dir().join("crabsim-ui-no-such-folder-at-all");
-    let workspace = Workspace::open(Some(&missing));
+    let workspace = Workspace::open(&missing);
     assert!(workspace.banner().is_some());
     assert!(!workspace.has_folder());
-    assert_eq!(workspace.description().object_count(), crabsim::demo::model().object_count());
+    assert_eq!(workspace.description().object_count(), 0);
 }
 
 // ---------- The seed ----------
@@ -270,7 +273,7 @@ fn session_state(workspace: &Workspace, t: SimTime) -> RunState {
 #[test]
 fn the_seed_gives_the_runs_random_numbers_and_is_kept_when_another_model_opens() {
     let folder = folder("seed");
-    let mut workspace = Workspace::open(Some(&folder.0));
+    let mut workspace = Workspace::open(&folder.0);
     assert_eq!(workspace.seed(), 0);
     assert!(workspace.open_model("demo.json"));
     workspace.set_seed(7);

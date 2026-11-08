@@ -52,7 +52,7 @@ impl Drop for Folder {
 }
 
 fn open(folder: &Folder, path: &str) -> Workspace {
-    let mut workspace = Workspace::open(Some(&folder.0));
+    let mut workspace = Workspace::open(&folder.0);
     assert!(workspace.open_model(path), "{path} opens");
     workspace
 }

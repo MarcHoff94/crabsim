@@ -1,13 +1,13 @@
 //! The workspace: what the window works on. A models folder, reached only through the operation
 //! catalogue as the user (`Source::Ui`), its model files, the model open and the seed runs use.
-//! Without a folder, or when another window has it, the window runs the built-in demo. Plain Rust
-//! with no Bevy types, so it is tested without a window. See spec issue 63.
+//! Until a model is chosen, or when the folder can't be opened or another window has it, no model
+//! is open. Plain Rust with no Bevy types, so it is tested without a window. See spec issue 63.
 //!
 //! `check` is the one seam for noticing that the open model file changed, such as by an agent: it
 //! compares the file's size and modified time, and only when they differ reads it again through
 //! the catalogue and compares its hash. A file watcher could take its place later.
 
-use crabsim::{demo, Clock, Dimensions, LiveSession, ModelDescription, ObjectKind, Position};
+use crabsim::{Clock, Dimensions, LiveSession, ModelDescription, ObjectKind, Position};
 use crabsim_catalogue::{Catalogue, ErrorKind, Settings, Source};
 use serde_json::{json, Value};
 use std::collections::VecDeque;
@@ -44,6 +44,52 @@ pub enum ModelChange {
     NowHasProblems,
 }
 
+/// Where an instance's value of an attribute comes from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ValueFrom {
+    /// Set on the instance itself, which cuts its inheritance.
+    Instance,
+    /// Inherited from this class, the nearest that sets it.
+    Class(String),
+    /// The built-in class's default.
+    BuiltIn,
+    /// Set nowhere, and with no default.
+    NotSet,
+}
+
+/// One attribute of an instance, as the inspector shows it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AttributeView {
+    /// Its name in a model file, such as `process_time`.
+    pub attribute: String,
+    /// As a model file writes it, if it has one.
+    pub value: Option<Value>,
+    pub from: ValueFrom,
+}
+
+/// Why a change to the model file was refused.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Refusal {
+    /// An agent holds the editor right: the message names it and its purpose. A take-over for the
+    /// one change goes through, and the agent keeps its right.
+    NotEditor(String),
+    /// The file was written outside crabsim, so it must be adopted first.
+    ChangedOutside(String),
+    /// The value doesn't fit the model file's rules, with their message.
+    Invalid(String),
+    /// No model file is open.
+    NoModel,
+}
+
+impl std::fmt::Display for Refusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Refusal::NotEditor(message) | Refusal::ChangedOutside(message) | Refusal::Invalid(message) => write!(f, "{message}"),
+            Refusal::NoModel => write!(f, "no model file is open"),
+        }
+    }
+}
+
 /// A file's size and modified time, which change whenever it is written.
 type Stamp = (u64, SystemTime);
 
@@ -65,9 +111,9 @@ pub struct Workspace {
     /// Why there is no folder when one was asked for.
     banner: Option<String>,
     models: Vec<ModelEntry>,
-    /// The model the window runs, laid out.
+    /// The model the window runs, laid out. Empty until one is opened.
     description: ModelDescription,
-    /// Its path, or none for the demo.
+    /// Its path, until one is opened none.
     opened: Option<String>,
     /// The open file as last read.
     read: Option<Read>,
@@ -78,21 +124,20 @@ pub struct Workspace {
 }
 
 impl Workspace {
-    /// The workspace on `models`, a models folder, or on the demo without one. A folder another
-    /// window has, or that can't be opened, leaves the demo and a banner saying why.
-    pub fn open(models: Option<&Path>) -> Workspace {
+    /// The workspace on `models`, a models folder, with no model open yet. A folder another window
+    /// has, or that can't be opened, leaves the workspace empty, with a banner saying why.
+    pub fn open(models: &Path) -> Workspace {
         let mut workspace = Workspace {
             catalogue: None,
             banner: None,
             models: Vec::new(),
-            description: demo::model(),
+            description: ModelDescription::new(),
             opened: None,
             read: None,
             pending: None,
             problems: None,
             seed: 0,
         };
-        let Some(models) = models else { return workspace };
         match Catalogue::open(Settings::new(models, Source::Ui)) {
             Ok(catalogue) => {
                 workspace.catalogue = Some(catalogue);
@@ -230,6 +275,56 @@ impl Workspace {
         }
     }
 
+    /// Every attribute the instance's built-in class has, with its value and where it comes
+    /// from, as `get_attributes` gives them.
+    pub fn attributes(&self, instance: &str) -> Result<Vec<AttributeView>, String> {
+        let path = self.opened.as_deref().ok_or("no model file is open")?;
+        let catalogue = self.catalogue.as_ref().ok_or("no models folder is open")?;
+        let got = catalogue.call("get_attributes", json!({ "path": path, "target": { "instance": instance } })).map_err(|error| error.to_string())?;
+        Ok(got["attributes"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|attribute| AttributeView {
+                attribute: attribute["attribute"].as_str().unwrap_or_default().to_string(),
+                value: attribute.get("value").cloned(),
+                from: match attribute["from"].as_str() {
+                    Some("instance") => ValueFrom::Instance,
+                    Some("class") => ValueFrom::Class(attribute["class"].as_str().unwrap_or_default().to_string()),
+                    Some("built_in") => ValueFrom::BuiltIn,
+                    _ => ValueFrom::NotSet,
+                },
+            })
+            .collect())
+    }
+
+    /// Sets an attribute on the instance, which cuts its inheritance, saving the model file.
+    /// `take_over` makes the one change while an agent holds the editor right, which it keeps.
+    /// The window picks up the saved file through `check`.
+    pub fn set_attribute(&mut self, instance: &str, attribute: &str, value: Value, take_over: bool) -> Result<(), Refusal> {
+        self.change(json!({ "change": "set_attribute", "target": { "instance": instance }, "attribute": attribute, "value": value }), take_over)
+    }
+
+    /// Takes one attribute set on the instance back to what its class gives, saving the model
+    /// file. The instance's other attributes stay as they are.
+    pub fn restore(&mut self, instance: &str, attribute: &str, take_over: bool) -> Result<(), Refusal> {
+        self.change(json!({ "change": "restore_inheritance", "target": { "instance": instance }, "attribute": attribute }), take_over)
+    }
+
+    /// One change to the open model file, through `edit_model`.
+    fn change(&mut self, change: Value, take_over: bool) -> Result<(), Refusal> {
+        let path = self.opened.clone().ok_or(Refusal::NoModel)?;
+        let catalogue = self.catalogue.as_ref().ok_or(Refusal::NoModel)?;
+        catalogue.set_take_over(take_over);
+        let changed = catalogue.call("edit_model", json!({ "path": path, "changes": [change] }));
+        catalogue.set_take_over(false);
+        changed.map(|_| ()).map_err(|error| match error.kind {
+            ErrorKind::NotEditor => Refusal::NotEditor(error.message.clone()),
+            ErrorKind::ChangedOutside => Refusal::ChangedOutside(error.message.clone()),
+            _ => Refusal::Invalid(error.to_string()),
+        })
+    }
+
     /// The open model file on disk, which the window may watch for changes.
     pub fn watched_file(&self) -> Option<PathBuf> {
         self.catalogue.as_ref()?.folder().model_file(self.opened.as_deref()?).ok()
@@ -252,7 +347,7 @@ impl Workspace {
         Ok(())
     }
 
-    /// The path of the model open, or none for the demo.
+    /// The path of the model open, or none until one is opened.
     pub fn opened(&self) -> Option<&str> {
         self.opened.as_deref()
     }
@@ -267,7 +362,7 @@ impl Workspace {
         self.problems = None;
     }
 
-    /// The model the window runs, with every object placed.
+    /// The model the window runs, with every object placed. Empty until one is opened.
     pub fn description(&self) -> &ModelDescription {
         &self.description
     }

@@ -1,4 +1,4 @@
-//! The headless CLI, run as its binary: the demo model with a seed and a simulated length, then
+//! The headless CLI, run as its binary: a model file with a seed and a simulated length, then
 //! each object's final statistics and how long the run took, and with a models folder, experiments
 //! kept in the results store.
 
@@ -24,8 +24,8 @@ fn results(output: &Output) -> String {
 }
 
 #[test]
-fn it_runs_the_demo_headless_and_prints_each_objects_statistics() {
-    let output = crabsim(&["--seed", "3", "--length", "2:00:00"]);
+fn it_runs_a_model_file_headless_and_prints_each_objects_statistics() {
+    let output = crabsim(&["--model", &demo_file(), "--seed", "3", "--length", "2:00:00"]);
 
     assert!(output.status.success(), "{output:?}");
     let printed = stdout(&output);
@@ -46,9 +46,9 @@ fn it_runs_the_demo_headless_and_prints_each_objects_statistics() {
 
 #[test]
 fn the_same_seed_prints_the_same_results_and_another_seed_others() {
-    let first = crabsim(&["--seed", "5", "--length", "4:00:00"]);
-    let again = crabsim(&["--seed", "5", "--length", "4:00:00"]);
-    let other = crabsim(&["--seed", "6", "--length", "4:00:00"]);
+    let first = crabsim(&["--model", &demo_file(), "--seed", "5", "--length", "4:00:00"]);
+    let again = crabsim(&["--model", &demo_file(), "--seed", "5", "--length", "4:00:00"]);
+    let other = crabsim(&["--model", &demo_file(), "--seed", "6", "--length", "4:00:00"]);
 
     assert_eq!(results(&first), results(&again));
     assert_ne!(results(&first), results(&other));
@@ -56,7 +56,7 @@ fn the_same_seed_prints_the_same_results_and_another_seed_others() {
 
 #[test]
 fn the_length_is_written_as_the_ui_shows_time() {
-    let output = crabsim(&["--length", "1d 00:00:30"]);
+    let output = crabsim(&["--model", &demo_file(), "--length", "1d 00:00:30"]);
 
     assert!(output.status.success(), "{output:?}");
     let printed = stdout(&output);
@@ -66,7 +66,7 @@ fn the_length_is_written_as_the_ui_shows_time() {
 
 #[test]
 fn a_length_that_isnt_a_time_is_refused() {
-    let output = crabsim(&["--length", "soon"]);
+    let output = crabsim(&["--model", &demo_file(), "--length", "soon"]);
 
     assert!(!output.status.success());
     let error = String::from_utf8_lossy(&output.stderr);
@@ -78,14 +78,15 @@ fn demo_file() -> String {
 }
 
 #[test]
-fn the_demo_as_a_model_file_gives_the_same_results_as_the_built_in_demo() {
-    let from_file = crabsim(&["--model", &demo_file(), "--seed", "4", "--length", "4:00:00"]);
-    let built_in = crabsim(&["--seed", "4", "--length", "4:00:00"]);
+fn a_single_run_needs_a_model_file() {
+    let output = crabsim(&["--seed", "4", "--length", "4:00:00"]);
+    assert!(!output.status.success(), "there is no built-in model to run any more");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--model"), "{}", String::from_utf8_lossy(&output.stderr));
 
+    let from_file = crabsim(&["--model", &demo_file(), "--seed", "4", "--length", "4:00:00"]);
     assert!(from_file.status.success(), "{from_file:?}");
     assert!(stdout(&from_file).starts_with("crabsim: "), "the header names the file");
     assert!(stdout(&from_file).contains("demo.json"));
-    assert_eq!(results(&from_file), results(&built_in));
 }
 
 #[test]

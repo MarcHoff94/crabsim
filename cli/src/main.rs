@@ -1,6 +1,6 @@
-﻿//! The headless CLI. Without a subcommand it runs a model file, or the built-in demo model, with a
-//! seed for a simulated length, then prints each object's final statistics and how long the run
-//! took, saving nothing. An invalid model file prints every problem in it and runs nothing.
+﻿//! The headless CLI. Without a subcommand it runs a model file with a seed for a simulated length,
+//! then prints each object's final statistics and how long the run took, saving nothing. An invalid
+//! model file prints every problem in it and runs nothing.
 //!
 //! With a models folder it is people's front-end on the operation catalogue, the same one agents
 //! use through the MCP server: `run` starts an experiment and waits for it, `runs` lists the runs
@@ -15,7 +15,7 @@ mod tables;
 
 use clap::{Args, Parser, Subcommand};
 use crabsim::time::{format_time_exact, parse_time};
-use crabsim::{demo, ModelDescription, ObjectKind, ObjectStatistics, RunState, SimTime};
+use crabsim::{ModelDescription, ObjectKind, ObjectStatistics, RunState, SimTime};
 use crabsim_catalogue::{Catalogue, OperationError, Settings, Source};
 use serde_json::{json, Value};
 use std::path::PathBuf;
@@ -25,8 +25,10 @@ use std::time::{Duration, Instant};
 #[derive(Parser, Debug)]
 #[command(
     name = "crabsim",
-    about = "Runs a crabsim model headless and prints its statistics, or, with a models folder, runs experiments and reads their results",
-    args_conflicts_with_subcommands = true
+    about = "Runs a crabsim model file headless and prints its statistics, or, with a models folder, runs experiments and reads their results",
+    args_conflicts_with_subcommands = true,
+    subcommand_negates_reqs = true,
+    after_help = "Example: crabsim --model models/demo.json --length 30d"
 )]
 struct Opts {
     #[command(subcommand)]
@@ -38,8 +40,8 @@ struct Opts {
 /// One run, printed and not saved.
 #[derive(Args, Debug)]
 struct SingleRun {
-    /// A model file to run. Without one, the built-in demo model runs.
-    #[arg(long)]
+    /// The model file to run, such as models/demo.json.
+    #[arg(long, required = true)]
     model: Option<PathBuf>,
     /// Seed for the run's random numbers. The same seed gives the same results.
     #[arg(long, default_value_t = 0)]
@@ -604,18 +606,16 @@ fn runs(catalogue: &Catalogue) -> Result<bool, OperationError> {
 
 /// The CLI as it always was: one run, printed, nothing saved.
 fn single_run(opts: &SingleRun) -> ExitCode {
-    let (model, which) = match &opts.model {
-        None => (demo::model(), "the demo model".to_string()),
-        Some(path) => match read_model(path) {
-            Ok(model) => (model, path.display().to_string()),
-            Err(problems) => {
-                eprintln!("{} can't be run:", path.display());
-                for problem in problems {
-                    eprintln!("{problem}");
-                }
-                return ExitCode::FAILURE;
+    let Some(path) = &opts.model else { unreachable!("clap requires --model for a single run") };
+    let (model, which) = match read_model(path) {
+        Ok(model) => (model, path.display().to_string()),
+        Err(problems) => {
+            eprintln!("{} can't be run:", path.display());
+            for problem in problems {
+                eprintln!("{problem}");
             }
-        },
+            return ExitCode::FAILURE;
+        }
     };
     let mut run = model.build(opts.seed);
     println!("crabsim: {which}, seed {}, for {}", opts.seed, format_time_exact(opts.length));

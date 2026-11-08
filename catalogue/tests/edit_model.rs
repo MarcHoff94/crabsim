@@ -31,7 +31,7 @@ fn canonical(model: &Value) -> String {
 
 fn setup(name: &str) -> Setup {
     let setup = Setup::new(name);
-    setup.folder.write("line.json", &canonical(&line()));
+    setup.ok("write_model", json!({ "path": "line.json", "text": canonical(&line()) }));
     setup
 }
 
@@ -143,6 +143,7 @@ fn a_batch_ending_invalid_is_refused_with_every_problem_pointing_into_the_result
 fn a_file_that_is_already_invalid_is_refused_and_write_model_stays_the_way_to_fix_it() {
     let setup = setup("already-invalid");
     setup.folder.write("broken.json", common::BROKEN);
+    setup.ok("adopt_model", json!({ "path": "broken.json" }));
     let error = setup.err("edit_model", json!({ "path": "broken.json", "changes": [{ "change": "set_model_description", "description": "x" }] }));
     assert_eq!(error["kind"], "invalid_model");
     assert!(error["message"].as_str().unwrap().contains("write_model"), "{error}");
@@ -349,7 +350,7 @@ fn get_attributes_and_edit_model_on_6006_objects() {
     }
     let text = model.save();
     let setup = Setup::new("large");
-    setup.folder.write("large.json", &text);
+    setup.ok("write_model", json!({ "path": "large.json", "text": text }));
     println!("6,006 objects: {} bytes of model file", text.len());
     let time = |what: &str, input: Value, name: &str| {
         let mut times = Vec::new();

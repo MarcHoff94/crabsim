@@ -495,6 +495,9 @@ pub struct StartRunOutput {
     /// The run's id, such as `run-3`, for run_status, run_results and cancel_run.
     pub run: String,
     pub state: RunState,
+    /// The model file was changed outside crabsim, or crabsim never saved it. It runs all the
+    /// same, as it is now.
+    pub changed_outside: bool,
 }
 
 impl Operation for StartRun {
@@ -514,6 +517,7 @@ impl Operation for StartRun {
             return Err(OperationError::invalid_input(format!("`observations` must be from 1 to {MAX_OBSERVATIONS}")));
         }
         let (_, text) = read_file(catalogue, &input.model)?;
+        let changed_outside = crate::editing::changed_outside(catalogue, &input.model, &text)?;
         let model = crabsim_model::load(&text).map_err(|problems| OperationError::invalid_model(&format!("`{}`", input.model), &problems))?;
         let canonical = model.save();
         let hash: String = Sha256::digest(canonical.as_bytes()).iter().map(|byte| format!("{byte:02x}")).collect();
@@ -547,7 +551,7 @@ impl Operation for StartRun {
         drop(store);
         let plan = Plan { id: id.clone(), model: model.to_description(), objects, seed: input.seed, length, warm_up, observations: input.observations };
         catalogue.jobs().submit(plan);
-        Ok(StartRunOutput { run: id, state: RunState::Queued })
+        Ok(StartRunOutput { run: id, state: RunState::Queued, changed_outside })
     }
 }
 

@@ -280,7 +280,8 @@ fn a_run_uses_the_model_as_it_was_when_it_started() {
     let long = setup.start(json!({ "model": "demo.json", "seed": 1, "length": "365d", "observations": 1 }));
     let run = setup.start(json!({ "model": "small.json", "seed": 5, "length": "2:00:00", "observations": 2 }));
     let changed = common::SMALL.replace(r#""process_time":"8""#, r#""process_time":"9""#);
-    setup.ok("write_model", json!({ "path": "small.json", "text": changed }));
+    setup.ok("adopt_model", json!({ "path": "small.json" }));
+    setup.ok("write_model", json!({ "path": "small.json", "text": changed, "overwrite": true }));
     setup.ok("cancel_run", json!({ "run": long }));
     setup.finished(&run);
 

@@ -17,6 +17,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub(crate) fn entries() -> Vec<Entry> {
     vec![
+        entry::<AdoptModel>(),
         entry::<ClaimModel>(),
         entry::<ReleaseModel>(),
         entry::<GetEditQueue>(),
@@ -69,6 +70,10 @@ struct State {
     agents: BTreeMap<String, Agent>,
     /// Every model file someone edits or waits for, by its path in the models folder.
     files: BTreeMap<String, FileState>,
+    /// The hash of each model file as crabsim last saved or adopted it, by its path. A file whose
+    /// hash differs, or that has none here, was changed outside crabsim.
+    #[serde(default)]
+    records: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -160,6 +165,8 @@ pub(crate) struct Editing {
     held: Held,
     asker: Asker,
     now: u64,
+    /// The model file a change is about, once checked.
+    key: Option<String>,
 }
 
 impl Catalogue {
@@ -186,7 +193,7 @@ impl Catalogue {
             }
             Source::Cli => Asker::User,
         };
-        let mut editing = Editing { held, asker, now };
+        let mut editing = Editing { held, asker, now, key: None };
         editing.sweep(&crabsim_folder, self.edit_timeout());
         Ok(editing)
     }
@@ -363,11 +370,77 @@ fn key(catalogue: &Catalogue, path: &str) -> Result<String, OperationError> {
 /// Before an operation changes the model file at `path`: refused unless the caller may change it
 /// now. The returned state is held until the change is written, so two changes nobody claimed
 /// can't both go through.
-pub(crate) fn before_change(catalogue: &Catalogue, path: &str) -> Result<Editing, OperationError> {
+pub(crate) fn before_change(catalogue: &Catalogue, path: &str, expected_hash: Option<&str>) -> Result<Editing, OperationError> {
+    let editing = before_adopt(catalogue, path)?;
+    let key = editing.key.clone().expect("set before adopting");
+    let current = std::fs::read_to_string(catalogue.folder().model_file(path)?).ok();
+    if let Some(text) = &current
+        && !editing.recorded(&key, text)
+    {
+        return Err(OperationError::new(
+            ErrorKind::ChangedOutside,
+            format!(
+                "`{path}` was changed outside crabsim since crabsim last saved it, or crabsim never saved it, so crabsim won't change it: look at it with read_model, then accept it as it is with adopt_model"
+            ),
+        ));
+    }
+    if let Some(expected) = expected_hash {
+        let now = current.as_deref().map(crate::edit::hash);
+        if now.as_deref() != Some(expected) {
+            let what = now.map_or_else(|| "doesn't exist".to_string(), |hash| format!("has the hash {hash} now"));
+            return Err(OperationError::new(
+                ErrorKind::Conflict,
+                format!("`{path}` isn't the version with the hash {expected} any more: it {what}. Read it again and decide on your change from that"),
+            ));
+        }
+    }
+    Ok(editing)
+}
+
+/// Before an operation that changes who owns a file's content but not the content, such as
+/// adopting it: only the editor rules.
+pub(crate) fn before_adopt(catalogue: &Catalogue, path: &str) -> Result<Editing, OperationError> {
     let key = key(catalogue, path)?;
     let mut editing = catalogue.editing()?;
     editing.may_change(&key)?;
+    editing.key = Some(key);
     Ok(editing)
+}
+
+/// Whether the model file at `path`, whose text is `text`, was changed outside crabsim.
+pub(crate) fn changed_outside(catalogue: &Catalogue, path: &str, text: &str) -> Result<bool, OperationError> {
+    let key = key(catalogue, path)?;
+    let editing = catalogue.editing()?;
+    Ok(!editing.recorded(&key, text))
+}
+
+impl Editing {
+    /// Whether `text` is the file at `key` as crabsim last saved or adopted it.
+    pub(crate) fn recorded(&self, key: &str, text: &str) -> bool {
+        self.held.state.records.get(key).is_some_and(|hash| *hash == crate::edit::hash(text))
+    }
+
+    /// Records the file the change was about as saved with `text`.
+    pub(crate) fn record(&mut self, text: &str) {
+        let key = self.key.clone().expect("a change names its file");
+        self.state().records.insert(key, crate::edit::hash(text));
+    }
+
+    /// Records `text` as crabsim's own at `key`, such as a copy of a file crabsim saved.
+    pub(crate) fn record_at(&mut self, key: String, text: &str) {
+        self.state().records.insert(key, crate::edit::hash(text));
+    }
+
+    /// Forgets the file the change was about, which was deleted.
+    pub(crate) fn forget(&mut self) {
+        let key = self.key.clone().expect("a change names its file");
+        self.state().records.remove(&key);
+    }
+}
+
+/// The key of a model file, for recording a copy.
+pub(crate) fn key_of(catalogue: &Catalogue, path: &str) -> Result<String, OperationError> {
+    key(catalogue, path)
 }
 
 fn user_only(catalogue: &Catalogue, operation: &str) -> Result<(), OperationError> {
@@ -417,6 +490,36 @@ pub struct FileView {
 pub struct PathInput {
     /// A model file in the models folder, such as `line.json`. It needn't exist yet.
     pub path: String,
+}
+
+// --- adopt_model ---
+
+pub struct AdoptModel;
+
+#[derive(Serialize, JsonSchema)]
+pub struct AdoptModelOutput {
+    pub path: String,
+    /// The SHA-256 of the file as adopted.
+    pub hash: String,
+    /// Every problem in it, empty if it's valid. An invalid file is adopted too, so write_model
+    /// can then fix it.
+    pub problems: Vec<crate::ModelProblem>,
+}
+
+impl Operation for AdoptModel {
+    const NAME: &'static str = "adopt_model";
+    const DESCRIPTION: &'static str = "Accepts a model file as it is now, after it was changed outside crabsim, such as by a text editor, a harness's own file tools or git, or when crabsim never saved it. Until then crabsim reads and runs it but won't change it, refusing with changed_outside, so that an outside change is never overwritten or taken in by accident. Look at the file with read_model first. It changes nothing in the file, follows the same editor rules as a change, and gives the file's problems, if any: an invalid file is adopted too, so write_model can fix it.";
+    const EFFECT: Effect = Effect::Additive;
+    type Input = PathInput;
+    type Output = AdoptModelOutput;
+
+    fn run(catalogue: &Catalogue, input: PathInput) -> Result<AdoptModelOutput, OperationError> {
+        let mut editing = before_adopt(catalogue, &input.path)?;
+        let (_, text) = crate::model_files::read_file(catalogue, &input.path)?;
+        editing.record(&text);
+        let problems = crabsim_model::load(&text).err().unwrap_or_default().iter().map(crate::ModelProblem::from).collect();
+        Ok(AdoptModelOutput { path: input.path, hash: crate::edit::hash(&text), problems })
+    }
 }
 
 // --- claim_model ---

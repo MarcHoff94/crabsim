@@ -79,6 +79,9 @@ pub struct ValidateModelOutput {
     pub valid: bool,
     /// Every problem, in file order, each with a JSON Pointer to where it is.
     pub problems: Vec<ModelProblem>,
+    /// For a file: it was changed outside crabsim, or crabsim never saved it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub changed_outside: Option<bool>,
 }
 
 impl Operation for ValidateModel {
@@ -89,13 +92,17 @@ impl Operation for ValidateModel {
     type Output = ValidateModelOutput;
 
     fn run(catalogue: &Catalogue, input: ValidateModelInput) -> Result<ValidateModelOutput, OperationError> {
-        let text = match (input.path, input.text) {
-            (Some(path), None) => read_file(catalogue, &path)?.1,
-            (None, Some(text)) => text,
+        let (text, changed_outside) = match (input.path, input.text) {
+            (Some(path), None) => {
+                let text = read_file(catalogue, &path)?.1;
+                let changed = crate::editing::changed_outside(catalogue, &path, &text)?;
+                (text, Some(changed))
+            }
+            (None, Some(text)) => (text, None),
             _ => return Err(OperationError::invalid_input("give either `path` or `text`, not both and not neither")),
         };
         let problems = problems_of(&text);
-        Ok(ValidateModelOutput { valid: problems.is_empty(), problems })
+        Ok(ValidateModelOutput { valid: problems.is_empty(), problems, changed_outside })
     }
 }
 
@@ -171,18 +178,24 @@ pub struct ReadModelOutput {
     /// The file's text, exactly as it is: JSON whose schema model_file_format gives.
     #[schemars(schema_with = "model_text_schema")]
     pub text: String,
+    /// SHA-256 of the text, for `expected_hash` when changing it.
+    pub hash: String,
+    /// The file was changed outside crabsim, or crabsim never saved it: adopt_model before
+    /// changing it.
+    pub changed_outside: bool,
 }
 
 impl Operation for ReadModel {
     const NAME: &'static str = "read_model";
-    const DESCRIPTION: &'static str = "Reads a model file in the models folder and returns its text exactly as it is.";
+    const DESCRIPTION: &'static str = "Reads a model file in the models folder and returns its text exactly as it is, its hash for edit_model's or write_model's `expected_hash`, and `changed_outside`: true when the file was written outside crabsim since crabsim last saved it, or crabsim never saved it, so it must be adopted with adopt_model before crabsim changes it.";
     const EFFECT: Effect = Effect::ReadOnly;
     type Input = PathInput;
     type Output = ReadModelOutput;
 
     fn run(catalogue: &Catalogue, input: PathInput) -> Result<ReadModelOutput, OperationError> {
         let (_, text) = read_file(catalogue, &input.path)?;
-        Ok(ReadModelOutput { path: input.path, text })
+        let changed_outside = crate::editing::changed_outside(catalogue, &input.path, &text)?;
+        Ok(ReadModelOutput { hash: crate::edit::hash(&text), changed_outside, path: input.path, text })
     }
 }
 
@@ -197,6 +210,13 @@ pub struct WriteModelInput {
     pub path: String,
     #[schemars(schema_with = "model_text_schema")]
     pub text: String,
+    /// Replace a file already at `path`. Without it, an existing file is refused: change it with
+    /// edit_model instead.
+    #[serde(default)]
+    pub overwrite: bool,
+    /// With `overwrite`, the hash of the file as you read it: refused as a conflict if it has
+    /// changed since.
+    pub expected_hash: Option<String>,
 }
 
 /// How a model was saved.
@@ -219,22 +239,29 @@ pub struct WriteModelOutput {
 
 impl Operation for WriteModel {
     const NAME: &'static str = "write_model";
-    const DESCRIPTION: &'static str = "Saves a model file in the models folder, replacing any file already there. A valid model is saved in crabsim's canonical form. A model with problems is saved exactly as given, so work in progress isn't lost, and its problems come back to fix.";
+    const DESCRIPTION: &'static str = "Saves a whole model file in the models folder, such as a new model. A file already at the path is refused unless `overwrite` is true: to change a model, edit_model is usually better. A valid model is saved in crabsim's canonical form. A model with problems is saved exactly as given, so work in progress isn't lost, and its problems come back to fix. Only the file's editor may replace it (claim_model), not a file changed outside crabsim until adopt_model, and with `expected_hash` only the version you read.";
     const EFFECT: Effect = Effect::Destructive;
     type Input = WriteModelInput;
     type Output = WriteModelOutput;
 
     fn run(catalogue: &Catalogue, input: WriteModelInput) -> Result<WriteModelOutput, OperationError> {
         let file = catalogue.folder().model_file(&input.path)?;
-        let _editing = crate::editing::before_change(catalogue, &input.path)?;
+        let mut editing = crate::editing::before_change(catalogue, &input.path, input.expected_hash.as_deref())?;
         if file.is_dir() {
             return Err(OperationError::invalid_input(format!("`{}` is a folder", input.path)));
+        }
+        if file.is_file() && !input.overwrite {
+            return Err(OperationError::new(
+                ErrorKind::AlreadyExists,
+                format!("`{}` already exists: change it with edit_model, or give `overwrite: true` to replace it", input.path),
+            ));
         }
         let (text, saved, problems) = match crabsim_model::load(&input.text) {
             Ok(model) => (model.save(), Saved::Canonical, Vec::new()),
             Err(problems) => (input.text, Saved::AsGiven, problems.iter().map(ModelProblem::from).collect()),
         };
         write(&file, &text).map_err(|error| OperationError::run_error(format!("`{}` can't be written: {error}", input.path)))?;
+        editing.record(&text);
         Ok(WriteModelOutput { path: input.path, saved, problems })
     }
 }
@@ -289,6 +316,12 @@ impl Operation for CopyModel {
         };
         std::io::Write::write_all(&mut file, text.as_bytes())
             .map_err(|error| OperationError::run_error(format!("`{}` can't be written: {error}", input.to)))?;
+        // A copy of a file crabsim saved is crabsim's own too. A copy of one changed outside isn't,
+        // so the outside change can't slip in through it.
+        let mut editing = catalogue.editing()?;
+        if editing.recorded(&crate::editing::key_of(catalogue, &input.from)?, &text) {
+            editing.record_at(crate::editing::key_of(catalogue, &input.to)?, &text);
+        }
         Ok(CopyModelOutput { path: input.to })
     }
 }
@@ -305,15 +338,16 @@ pub struct DeleteModelOutput {
 
 impl Operation for DeleteModel {
     const NAME: &'static str = "delete_model";
-    const DESCRIPTION: &'static str = "Deletes a model file in the models folder. Files only, never folders. Results of runs of it stay in the results store.";
+    const DESCRIPTION: &'static str = "Deletes a model file in the models folder. Files only, never folders. Results of runs of it stay in the results store. Only the file's editor may delete it (claim_model), and not a file changed outside crabsim until adopt_model.";
     const EFFECT: Effect = Effect::Destructive;
     type Input = PathInput;
     type Output = DeleteModelOutput;
 
     fn run(catalogue: &Catalogue, input: PathInput) -> Result<DeleteModelOutput, OperationError> {
         let (file, _) = read_file(catalogue, &input.path)?;
-        let _editing = crate::editing::before_change(catalogue, &input.path)?;
+        let mut editing = crate::editing::before_change(catalogue, &input.path, None)?;
         std::fs::remove_file(&file).map_err(|error| OperationError::run_error(format!("`{}` can't be deleted: {error}", input.path)))?;
+        editing.forget();
         Ok(DeleteModelOutput { deleted: input.path })
     }
 }

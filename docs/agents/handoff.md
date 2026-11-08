@@ -377,6 +377,7 @@ An agent should never need to read a whole model: a model of 6,000 objects is pr
 - Shared class libraries and how they're versioned, together with a class library and explorer in the UI, with folders, deriving and duplicating there: its own design round.
 - A built-in crabsim agent the user can opt in to give control of the edit queue, which knows the overall task, delegates to subagents and manages their access to the model, perhaps to parts of it. It would bring the queue's control back in line with the AI-native pillar.
 - The edit queue notifying a waiting agent instead of being polled: a `claim_model` call that stays open with progress notifications, or MCP resource subscriptions.
+- **The security implications** of the editor right and of detecting outside changes, which the owner wants revisited (2026-11-08): both guard against accidents, not against someone determined. See issue 45's Out of Scope.
 - Sub-models: classes made of several objects.
 
 JSON is the only model file format: YAML is out.
@@ -412,7 +413,7 @@ Done on 2026-11-07: the wiki was rewritten against today's code, with four pages
 
 ## Possible next steps
 
-1. **The rest of slice 2, [spec issue 45](https://github.com/MarcHoff94/crabsim/issues/45):** PRs 1 (#47), 1b (#48), 2 (#49, `edit_model` and `get_attributes`) and 3a (the editor and the edit queue, with the user's controls and blocking) are done or in review. PR 3 was split, as issue 45 records. Next is PR 3b: outside changes and `adopt_model`, `expected_hash` with `conflict`, agents refused the user's runs, and `write_model` refusing to overwrite without `overwrite: true`. Then PR 4, the CLI.
+1. **The rest of slice 2, [spec issue 45](https://github.com/MarcHoff94/crabsim/issues/45):** PRs 1 (#47), 1b (#48), 2 (#49), 3a (#50, the editor and the edit queue) and 3b (outside changes and `adopt_model`, `expected_hash`, agents refused the user's runs, `write_model`'s `overwrite`) are done or in review. Next is PR 4, the CLI: `edit`, `attributes`, `adopt` and the queue controls, with `--take-over`. Every model file written before slice 2, such as those in `C:\Users\marcu\crabsim-models`, needs `adopt_model` once before crabsim changes it.
 2. **`compare_runs`,** its own small slice after slice 2, as issue 45's Further Notes describe it.
 3. **Try `crabsim-mcp` from a harness again** after slice 2, from `C:\Users\marcu\crabsim-trial`, whose `.mcp.json` starts a copy of the binary in `C:\Users\marcu\AppData\Local\crabsim\bin` on `C:\Users\marcu\crabsim-models`. Copy a fresh build there first: a running server locks its binary on Windows. `TRIAL.md` there holds the first trial's tasks, and `REPORT.md` its findings. Still unchecked: what a harness does with MCP progress notifications and resource subscriptions, for the queue's notifications.
 4. Slice 3, `describe_model`, graph operations and exports, then crabsim's first skills, as issue 28's order of work says, each with its own design round first.

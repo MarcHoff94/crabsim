@@ -21,6 +21,10 @@ pub enum ErrorKind {
     AlreadyExists,
     /// Something went wrong while running or storing, such as a file that can't be written.
     RunError,
+    /// Someone else may change this model file now: claim_model to wait your turn.
+    NotEditor,
+    /// The user has blocked this agent from changing models in this folder.
+    Blocked,
 }
 
 /// One thing wrong with a model, as `crabsim-model` reports it.

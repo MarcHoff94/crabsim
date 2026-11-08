@@ -15,6 +15,7 @@
 //! never commands, never the network.
 
 mod edit;
+mod editing;
 mod error;
 mod folder;
 mod jobs;
@@ -23,6 +24,7 @@ mod process;
 mod results;
 mod store;
 
+pub use crate::editing::{EDITING_FILE, EDIT_TIMEOUT};
 pub use crate::error::{ErrorKind, ModelProblem, OperationError};
 pub use crate::folder::{ModelsFolder, CRABSIM_FOLDER};
 pub use crate::jobs::{observation_seed, RunState, MAX_OBSERVATIONS};
@@ -46,6 +48,9 @@ pub trait Operation {
     /// Whether it only reads, or may change or delete what's there, for a harness deciding
     /// whether to ask the user first.
     const EFFECT: Effect;
+    /// Only for the user, through the UI or the CLI, such as controlling the edit queue: the MCP
+    /// server doesn't offer it, and the catalogue refuses it to an agent (ADR 0011).
+    const USER_ONLY: bool = false;
     /// Always a JSON object.
     type Input: DeserializeOwned + JsonSchema;
     /// Always a JSON object.
@@ -72,6 +77,8 @@ pub struct OperationInfo {
     pub name: &'static str,
     pub description: &'static str,
     pub effect: Effect,
+    /// Only for the user: a front-end for agents leaves it out.
+    pub user_only: bool,
     /// The JSON Schema of its input, always an object.
     pub input_schema: Value,
     /// The JSON Schema of its output, always an object.
@@ -91,6 +98,7 @@ fn entry<O: Operation>() -> Entry {
             name: O::NAME,
             description: O::DESCRIPTION,
             effect: O::EFFECT,
+            user_only: O::USER_ONLY,
             input_schema: schema_for::<O::Input>(Nulls::Refuse),
             output_schema: schema_for::<O::Output>(Nulls::Allow),
         },
@@ -185,11 +193,13 @@ pub struct Settings {
     pub source: Source,
     /// How many threads run observations. One per CPU core if left out.
     pub threads: Option<usize>,
+    /// How long an agent's editor right, or its place in an edit queue, lasts unused.
+    pub edit_timeout: std::time::Duration,
 }
 
 impl Settings {
     pub fn new(models: impl Into<PathBuf>, source: Source) -> Settings {
-        Settings { models: models.into(), source, threads: None }
+        Settings { models: models.into(), source, threads: None, edit_timeout: EDIT_TIMEOUT }
     }
 }
 
@@ -201,6 +211,9 @@ pub struct Catalogue {
     store: Mutex<Option<Store>>,
     entries: Vec<Entry>,
     jobs: jobs::Jobs,
+    edit_timeout: std::time::Duration,
+    /// The name an agent's harness gave, for the edit queue.
+    client_name: Mutex<String>,
     /// This process's lock, taken with the store. Last, so it is dropped last: until its jobs have
     /// stopped, no other process may take their runs for interrupted.
     process: std::sync::OnceLock<process::ProcessLock>,
@@ -213,7 +226,16 @@ impl Catalogue {
         let folder = ModelsFolder::open(&settings.models)?;
         let threads = settings.threads.unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |cores| cores.get()));
         let jobs = jobs::Jobs::new(folder.crabsim_folder(), threads);
-        Ok(Catalogue { folder, source: settings.source, store: Mutex::new(None), entries: model_files::entries(), jobs, process: std::sync::OnceLock::new() })
+        Ok(Catalogue {
+            folder,
+            source: settings.source,
+            store: Mutex::new(None),
+            entries: model_files::entries(),
+            jobs,
+            edit_timeout: settings.edit_timeout,
+            client_name: Mutex::new("an agent".to_string()),
+            process: std::sync::OnceLock::new(),
+        })
     }
 
     /// Every operation, with its description and schemas.
@@ -227,7 +249,34 @@ impl Catalogue {
             let names: Vec<_> = self.operations().map(|operation| operation.name).collect();
             OperationError::invalid_input(format!("no operation is called `{name}`. There are: {}", names.join(", ")))
         })?;
+        if entry.info.user_only && self.source == Source::Mcp {
+            return Err(OperationError::invalid_input(format!("`{name}` is only for the user, through the UI or the CLI")));
+        }
         (entry.handler)(self, input)
+    }
+
+    /// The name an agent's harness gave when it connected, such as `claude-code`, which the edit
+    /// queue shows the user.
+    pub fn set_client_name(&self, name: &str) {
+        *self.client_name.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = name.to_string();
+    }
+
+    pub(crate) fn client_name(&self) -> String {
+        self.client_name.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone()
+    }
+
+    pub(crate) fn edit_timeout(&self) -> std::time::Duration {
+        self.edit_timeout
+    }
+
+    /// This process's lock id, taking the lock on first use.
+    pub(crate) fn process_lock(&self) -> Result<&str, OperationError> {
+        if let Some(lock) = self.process.get() {
+            return Ok(lock.id());
+        }
+        let lock = process::ProcessLock::acquire(&self.folder.crabsim_folder())
+            .map_err(|error| OperationError::run_error(format!("this process's lock in `.crabsim` can't be made: {error}")))?;
+        Ok(self.process.get_or_init(|| lock).id())
     }
 
     pub fn folder(&self) -> &ModelsFolder {
@@ -254,11 +303,9 @@ impl Catalogue {
         if store.is_none() {
             let crabsim_folder = self.folder.crabsim_folder();
             let opened = Store::open(&crabsim_folder)?;
-            let lock = process::ProcessLock::acquire(&crabsim_folder)
-                .map_err(|error| OperationError::run_error(format!("this process's lock in the results store's folder can't be made: {error}")))?;
-            let lock = self.process.get_or_init(|| lock);
-            process::tidy(&crabsim_folder, lock.id());
-            opened.sweep(lock.id())?;
+            let id = self.process_lock()?;
+            process::tidy(&crabsim_folder, id);
+            opened.sweep(id)?;
             *store = Some(opened);
         }
         Ok(StoreGuard(store))

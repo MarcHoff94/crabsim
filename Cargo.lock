@@ -2603,6 +2603,7 @@ name = "crabsim-mcp"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "crabsim",
  "crabsim-catalogue",
  "env_logger",
  "rmcp",

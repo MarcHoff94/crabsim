@@ -10,6 +10,7 @@ name = "crabsim-mcp"
 path = "src/main.rs"
 
 [dependencies]
+crabsim = { path = ".." }
 crabsim-catalogue = { path = "../catalogue" }
 # Pinned: the MCP SDK changes quickly, and this is the version the design round chose.
 rmcp = { version = "=3.9.0", features = ["server", "transport-io"] }

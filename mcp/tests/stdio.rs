@@ -115,8 +115,11 @@ fn an_agent_lists_the_tools_validates_runs_and_reads_results_over_stdio() {
     let listed = server.request("tools/list", json!({}));
     let tools = listed["tools"].as_array().unwrap();
     let tool = |name: &str| tools.iter().find(|tool| tool["name"] == name).unwrap_or_else(|| panic!("no tool {name}: {listed}")).clone();
-    assert_eq!(tools.len(), 16, "{listed}");
-    for read_only in ["validate_model", "list_models", "read_model", "model_file_format", "get_attributes", "run_status", "run_results", "query_results"] {
+    assert_eq!(tools.len(), 19, "{listed}");
+    for users_own in ["take_model", "give_model", "move_in_queue", "remove_from_queue", "block_agent", "unblock_agent"] {
+        assert!(!tools.iter().any(|tool| tool["name"] == users_own), "{users_own} is the user's own");
+    }
+    for read_only in ["validate_model", "list_models", "read_model", "model_file_format", "get_attributes", "get_edit_queue", "run_status", "run_results", "query_results"] {
         assert_eq!(tool(read_only)["annotations"]["readOnlyHint"], true, "{read_only}");
     }
     for destructive in ["write_model", "edit_model", "delete_model", "forget_run"] {
@@ -156,6 +159,11 @@ fn an_agent_lists_the_tools_validates_runs_and_reads_results_over_stdio() {
     // The text content holds the same, for clients that read only text.
     let text: Value = serde_json::from_str(results["content"][0]["text"].as_str().unwrap()).unwrap();
     assert_eq!(&text, content);
+
+    // The edit queue shows the agent by the name its harness gave when it connected.
+    let claimed = server.call("claim_model", json!({ "path": "small.json", "purpose": "checking the name" }));
+    assert_eq!(claimed["structuredContent"]["state"], "granted", "{claimed}");
+    assert_eq!(claimed["structuredContent"]["file"]["editor"]["client"], "crabsim-test", "{claimed}");
 
     // A failure comes back as a tool result marked as an error, for the agent to read.
     let failed = server.call("read_model", json!({ "path": "../outside.json" }));

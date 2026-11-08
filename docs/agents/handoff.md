@@ -412,7 +412,7 @@ Done on 2026-11-07: the wiki was rewritten against today's code, with four pages
 
 ## Possible next steps
 
-1. **The rest of slice 2, [spec issue 45](https://github.com/MarcHoff94/crabsim/issues/45):** PRs 1 (#47), 1b (#48) and 2 (`edit_model` and `get_attributes`, timed on the 6,006-object model as a file) are done or in review. Next is PR 3, the editor and edit queue, with agents refused the user's runs and `write_model` refusing to overwrite without `overwrite: true`, then PR 4, the CLI.
+1. **The rest of slice 2, [spec issue 45](https://github.com/MarcHoff94/crabsim/issues/45):** PRs 1 (#47), 1b (#48), 2 (#49, `edit_model` and `get_attributes`) and 3a (the editor and the edit queue, with the user's controls and blocking) are done or in review. PR 3 was split, as issue 45 records. Next is PR 3b: outside changes and `adopt_model`, `expected_hash` with `conflict`, agents refused the user's runs, and `write_model` refusing to overwrite without `overwrite: true`. Then PR 4, the CLI.
 2. **`compare_runs`,** its own small slice after slice 2, as issue 45's Further Notes describe it.
 3. **Try `crabsim-mcp` from a harness again** after slice 2, from `C:\Users\marcu\crabsim-trial`, whose `.mcp.json` starts a copy of the binary in `C:\Users\marcu\AppData\Local\crabsim\bin` on `C:\Users\marcu\crabsim-models`. Copy a fresh build there first: a running server locks its binary on Windows. `TRIAL.md` there holds the first trial's tasks, and `REPORT.md` its findings. Still unchecked: what a harness does with MCP progress notifications and resource subscriptions, for the queue's notifications.
 4. Slice 3, `describe_model`, graph operations and exports, then crabsim's first skills, as issue 28's order of work says, each with its own design round first.

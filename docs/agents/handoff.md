@@ -397,6 +397,7 @@ The grilling session ended here on 2026-11-07, with nothing left open.
 
 - **The wiki hook stays off,** by the owner's choice: `core.hooksPath` is unset on this PC, so run `/update-wiki` by hand after changes to `src/`. The command only looks at the last commit and uncommitted changes, so after several commits check every page against the code, as the full rewrite on 2026-11-07 did.
 - **Not decided:** whether to replace the new-events `Vec`, and whether to tune statistics, which cost about 7 to 12% of a headless run.
+- **The MCP tool list's size, [issue 58](https://github.com/MarcHoff94/crabsim/issues/58):** 80.6 KB after slice 3's PR 1, of which 36.8 KB (an estimated 10k to 12k tokens) is what Claude Code shows the model. To monitor, measuring again after each slice. The owner chose on 2026-11-08 to finish slice 3, then update the UI and start on the domain model (build step 7), before a design round on shrinking it.
 
 Done on 2026-11-07: the wiki was rewritten against today's code, with four pages renamed and `wiki.html` rebuilt from it. The duplicate `docs/wiki/`, `docs/ExtensionGuide.md`, the stale `.github/copilot-instructions.md` and the tracked `crabsim.log` were deleted, and `*.log` is ignored. `rand` went to 0.9.3 for the Dependabot alert, with identical statistics on 5 seeds over 30 simulated days. Merged branches, the app's old worktrees and the 12 GB `ui-prototype/` build folder were deleted.
 

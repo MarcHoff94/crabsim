@@ -469,6 +469,7 @@ pub struct StartRunInput {
     pub model: String,
     /// The experiment's seed. Observation k gets its own seed from it, so this seed alone
     /// reproduces every observation.
+    #[serde(default)]
     pub seed: u64,
     /// How long each observation runs after the warm-up, in simulated time written as the UI
     /// shows it, such as "8:00:00", "30d" or "365d".
@@ -477,10 +478,16 @@ pub struct StartRunInput {
     /// "1d". None if left out.
     pub warm_up: Option<String>,
     /// How many observations, from 1 to 10,000. They run in parallel, one per CPU core.
+    #[serde(default = "ten")]
     #[schemars(range(min = 1, max = 10_000))]
     pub observations: u32,
     /// A name for the run, such as "baseline" or "two more mills".
     pub label: Option<String>,
+}
+
+/// The observations of a run started without saying how many: enough for a confidence interval.
+fn ten() -> u32 {
+    10
 }
 
 #[derive(Serialize, JsonSchema)]

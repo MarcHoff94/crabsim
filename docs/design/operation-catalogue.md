@@ -17,11 +17,12 @@ An operation implements the `Operation` trait: `NAME`, `DESCRIPTION`, `EFFECT` (
 
 - **Names** are snake case, verb first.
 - **Inputs and outputs** are always JSON objects. Input schemas leave `null` out of optional fields, as the model file's schema does: leave a field out instead.
-- **A model inside an input** is the model file's text, a string whose schema carries the model file's own schema as `contentSchema`, generated from `crabsim_model::schema`. So the two can't disagree, and a harness doesn't refuse a draft that doesn't fit the schema yet, which `write_model` must be able to save.
+- **A model inside an input or output** is the model file's text: a string marked `contentMediaType: application/json`, so a harness never refuses a draft that doesn't fit the schema yet, which `write_model` must be able to save. Its schema, generated from `crabsim_model::schema`, comes from `model_file_format` alone, with a worked example. Until slice 2 the schema rode along in every operation a model passes through as `contentSchema`, which JSON Schema treats as information only, at about 7 KB each, so a harness carried three copies in every session. Leaving them out took the tool list from about 46 KB to about 28 KB.
+- **Defaults** of an input are in its schema, as `default`, so an agent sees them.
 - **Errors** are structured: a `kind`, a `message` and, for an invalid model, every `problem` as `crabsim-model` reports it (JSON Pointer, name, message). The kinds are `invalid_input`, `invalid_model`, `not_found`, `outside_models_folder`, `already_exists` and `run_error`. Over MCP they are tool results marked as errors, so the agent reads them, rather than protocol errors its harness would hide.
-- **Effects** become MCP's hints: read-only for `validate_model`, `list_models`, `read_model`, `run_status`, `run_results` and `query_results`, destructive for `write_model`, `delete_model` and `forget_run`, and neither for the rest.
+- **Effects** become MCP's hints: read-only for `validate_model`, `list_models`, `read_model`, `model_file_format`, `run_status`, `run_results` and `query_results`, destructive for `write_model`, `delete_model` and `forget_run`, and neither for the rest.
 
-Slice 1's operations:
+Slice 1's operations, with `model_file_format` from slice 2:
 
 | Operation | Does |
 |---|---|
@@ -31,10 +32,11 @@ Slice 1's operations:
 | `write_model { path, text }` | Saves a valid model in canonical form, an invalid one exactly as given, returning its problems either way |
 | `copy_model { from, to }` | Copies, refused if `to` exists |
 | `delete_model { path }` | Deletes a file, never a folder |
-| `start_run { model, seed, length, warm_up?, observations, label? }` | Starts a job and returns its id at once |
+| `model_file_format {}` | The model file's JSON Schema and a small valid example in canonical form |
+| `start_run { model, seed?, length, warm_up?, observations?, label? }` | Starts a job and returns its id at once. Seed 0 and 10 observations if left out |
 | `run_status { run }` | Queued, running, done, failed, cancelled or interrupted, observations done, and where each running one has reached |
 | `cancel_run { run }` | Stops a job, returning once nothing of it runs |
-| `run_results { run, objects?, classes? }` | A short summary, or the chosen objects |
+| `run_results { run, objects?, classes?, values? }` | A short summary, or the chosen objects, with each observation's values if asked |
 | `query_results { sql }` | One read-only SQL query on the store |
 | `label_run { run, label? }` | Sets or clears a run's label |
 | `forget_run { run }` | Deletes a run's results |
@@ -96,7 +98,8 @@ One SQLite database, `<models folder>/.crabsim/results.sqlite`, created on first
 
 ## Reading results
 
-- **`run_results { run, objects?, classes? }`** gives the settings, each observation's seed, events, wall time and any error, and for every figure the mean over the observations that ran to their end, a 95% confidence interval (Student's *t*, none for fewer than two values), the minimum and the maximum, beside each observation's own value. By default, a short summary: every Drain, plus the 10 objects with the highest mean blocked share and the 10 with the highest mean failed share, leaving out shares of 0, so even a 6,000-object model's results fit in an agent's context. With `objects` (instance names) or `classes` (every instance whose chain of classes includes one of them, built-in classes too), exactly those instead.
+- **`run_results { run, objects?, classes?, values? }`** gives the settings, the events and wall time of all observations added up, every observation that failed with its seed, error and time, and for every figure the mean over the observations that ran to their end, a 95% confidence interval (Student's *t*, none for fewer than two values), the minimum and the maximum. By default, a short summary: every Drain, plus the 10 objects with the highest mean blocked share and the 10 with the highest mean failed share, leaving out shares of 0. With `objects` (instance names) or `classes` (every instance whose chain of classes includes one of them, built-in classes too), exactly those instead.
+- **The same size whatever the number of observations:** each observation's own figures, and each observation's seed, events and wall time, come only with `values: true`. A figure that is 0 in every observation, such as a Source's `failures`, is left out. Numbers are shown to 4 significant digits but never fewer than their whole number, so 0.74604 is 0.746 and 131,650.75 is 131,651. The store keeps every digit, for `query_results`. The first trial of the MCP server as a harness drives it found the summary at 31 KB for 8 observations of the demo model and 162 KB for 100, more than a harness usually accepts from one tool. Now it is about 10 KB for 8 observations and 9 KB for 100.
 - **`query_results { sql }`** runs one `SELECT` (or `WITH ... SELECT`) on a connection of its own that is read-only, can't attach another database, stops after 5 seconds and returns at most 1,000 rows, saying if more matched. Its description holds the tables and statistic names, so an agent can write the query.
 - **`label_run`** changes a run's label, and **`forget_run`** deletes a run's rows from all three tables, refused while it's still running.
 
@@ -104,9 +107,9 @@ One SQLite database, `<models folder>/.crabsim/results.sqlite`, created on first
 
 `crabsim` gains subcommands, each calling catalogue operations through `call(name, JSON)`, with the same scope rules on its models folder:
 
-- `crabsim run --models <folder> --model <path> [--seed --length --warm-up --observations --label]`: starts a run with source `cli`, waits for it, showing progress, and prints the results.
+- `crabsim run --models <folder> --model <path> [--seed --length --warm-up --observations --label]`: starts a run with source `cli`, waits for it, showing progress, and prints the results. Seed 0 and 10 observations by default, as for agents.
 - `crabsim runs --models <folder>`: lists runs, newest first.
-- `crabsim results --models <folder> <run> [--object ...] [--class ...]`: the `run_results` summary, as tables.
+- `crabsim results --models <folder> <run> [--object ...] [--class ...] [--values]`: the `run_results` summary, as tables, with every observation in a table of its own with `--values`.
 - `crabsim query --models <folder> "<sql>"`: `query_results`, as a table.
 
 Without a subcommand, `crabsim` behaves exactly as before: one run, printed, nothing saved. That suits a bigger machine running long runs with no models folder.

@@ -52,22 +52,40 @@ fn operations_are_marked_read_only_or_destructive() {
 }
 
 #[test]
-fn a_model_in_an_operations_input_has_the_model_files_own_schema() {
+fn model_file_format_gives_the_model_files_own_schema_and_a_valid_canonical_example() {
+    let setup = Setup::new("format");
+    let format = setup.ok("model_file_format", json!({}));
+    assert_eq!(format["schema"], crabsim_model::schema::schema());
+    let example = format["example"].as_str().unwrap();
+    let model = crabsim_model::load(example).unwrap_or_else(|problems| panic!("the example has problems: {problems:?}"));
+    assert_eq!(model.save(), example, "the example is in canonical form");
+    assert!(!model.classes.is_empty(), "the example shows a derived class");
+    let validator = jsonschema::validator_for(&format["schema"]).unwrap();
+    assert!(validator.is_valid(&serde_json::from_str::<Value>(example).unwrap()), "the example passes the schema");
+}
+
+/// The model file's schema is about 7 KB, so it comes from `model_file_format` alone rather than
+/// in every operation a model passes through, which a harness would carry in every session.
+#[test]
+fn a_model_in_an_operation_is_json_text_pointing_to_model_file_format() {
     let setup = Setup::new("schemas");
-    let model_schema = crabsim_model::schema::schema();
-    for name in ["validate_model", "write_model"] {
-        let input = &setup.catalogue.operations().find(|o| o.name == name).unwrap().input_schema;
-        let text = &input["properties"]["text"];
-        assert_eq!(text["type"], "string");
-        assert_eq!(text["contentMediaType"], "application/json");
-        assert_eq!(text["contentSchema"]["$ref"], "#/$defs/ModelFile", "{name}: {text}");
-        let mut model_file = model_schema.as_object().unwrap().clone();
-        let definitions = model_file.remove("$defs").unwrap();
-        model_file.remove("$schema");
-        assert_eq!(input["$defs"]["ModelFile"], Value::Object(model_file), "{name}");
-        for (definition, schema) in definitions.as_object().unwrap() {
-            assert_eq!(&input["$defs"][definition], schema, "{name}: {definition}");
+    for operation in setup.catalogue.operations() {
+        if operation.name == "model_file_format" {
+            continue;
         }
+        for schema in [&operation.input_schema, &operation.output_schema] {
+            let text = schema.to_string();
+            assert!(!text.contains("contentSchema") && !text.contains("ModelFile"), "{} carries the model file's schema", operation.name);
+        }
+    }
+    for (name, text) in [
+        ("validate_model", &setup.catalogue.operations().find(|o| o.name == "validate_model").unwrap().input_schema["properties"]["text"]),
+        ("write_model", &setup.catalogue.operations().find(|o| o.name == "write_model").unwrap().input_schema["properties"]["text"]),
+        ("read_model", &setup.catalogue.operations().find(|o| o.name == "read_model").unwrap().output_schema["properties"]["text"]),
+    ] {
+        assert_eq!(text["type"], "string", "{name}");
+        assert_eq!(text["contentMediaType"], "application/json", "{name}");
+        assert!(text["description"].as_str().unwrap().contains("model_file_format"), "{name}: {text}");
     }
 }
 
@@ -85,7 +103,8 @@ fn the_shortest_inputs_an_operation_accepts_pass_its_input_schema() {
         ("write_model", json!({ "path": "line.json", "text": SMALL })),
         ("copy_model", json!({ "from": "line.json", "to": "copy.json" })),
         ("delete_model", json!({ "path": "line.json" })),
-        ("start_run", json!({ "model": "line.json", "seed": 0, "length": "1d", "observations": 1 })),
+        ("model_file_format", json!({})),
+        ("start_run", json!({ "model": "line.json", "length": "1d" })),
         ("run_status", json!({ "run": "run-1" })),
         ("cancel_run", json!({ "run": "run-1" })),
         ("run_results", json!({ "run": "run-1" })),

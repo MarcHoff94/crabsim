@@ -141,6 +141,11 @@ fn tidy(value: &mut Value, nulls: Nulls) {
                         fields.extend(only);
                     }
                 }
+                // `#[serde(default)]` on an optional field, which keeps it optional where a schema
+                // is written by hand, makes its default `null`, which the input refuses.
+                if fields.get("default") == Some(&Value::Null) {
+                    fields.remove("default");
+                }
             }
             if let Some(Value::String(description)) = fields.get_mut("description") {
                 *description = description.replace('\n', " ");

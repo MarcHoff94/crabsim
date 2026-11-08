@@ -115,8 +115,8 @@ fn an_agent_lists_the_tools_validates_runs_and_reads_results_over_stdio() {
     let listed = server.request("tools/list", json!({}));
     let tools = listed["tools"].as_array().unwrap();
     let tool = |name: &str| tools.iter().find(|tool| tool["name"] == name).unwrap_or_else(|| panic!("no tool {name}: {listed}")).clone();
-    assert_eq!(tools.len(), 13, "{listed}");
-    for read_only in ["validate_model", "list_models", "read_model", "run_status", "run_results", "query_results"] {
+    assert_eq!(tools.len(), 14, "{listed}");
+    for read_only in ["validate_model", "list_models", "read_model", "model_file_format", "run_status", "run_results", "query_results"] {
         assert_eq!(tool(read_only)["annotations"]["readOnlyHint"], true, "{read_only}");
     }
     for destructive in ["write_model", "delete_model", "forget_run"] {
@@ -149,7 +149,8 @@ fn an_agent_lists_the_tools_validates_runs_and_reads_results_over_stdio() {
     let results = server.call("run_results", json!({ "run": run }));
     let content = &results["structuredContent"];
     assert_eq!(content["source"], "mcp");
-    assert_eq!(content["observation_runs"].as_array().unwrap().len(), 2);
+    assert_eq!(content["observations"], 2);
+    assert_eq!(content["failed_observations"], json!([]));
     assert_eq!(content["objects"][0]["name"], "Out");
     assert!(content["objects"][0]["figures"]["mus_in"]["mean"].as_f64().unwrap() > 0.0, "{content}");
     // The text content holds the same, for clients that read only text.

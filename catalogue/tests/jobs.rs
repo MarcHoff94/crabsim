@@ -63,6 +63,22 @@ fn a_run_starts_at_once_and_is_polled_until_done() {
 }
 
 #[test]
+fn a_start_with_only_a_model_and_a_length_has_seed_0_and_10_observations() {
+    let setup = Setup::new("defaults");
+    write_models(&setup.folder);
+    let run = setup.start(json!({ "model": "small.json", "length": "1:00:00" }));
+    assert_eq!(setup.finished(&run)["observations"], 10);
+    let results = setup.ok("run_results", json!({ "run": run, "values": true }));
+    assert_eq!(results["seed"], "0");
+    assert_eq!(results["observations"], 10);
+    assert_eq!(results["observation_runs"][0]["seed"], splitmix64(1).to_string());
+    let input = &setup.catalogue.operations().find(|o| o.name == "start_run").unwrap().input_schema;
+    assert_eq!(input["properties"]["seed"]["default"], 0, "the defaults are in the schema, for the agent");
+    assert_eq!(input["properties"]["observations"]["default"], 10);
+    assert_eq!(input["required"], json!(["model", "length"]));
+}
+
+#[test]
 fn an_invalid_model_is_refused_at_start_with_every_problem() {
     let setup = Setup::new("invalid");
     setup.folder.write("broken.json", BROKEN);
@@ -168,7 +184,7 @@ fn a_run_error_fails_only_its_observation_with_its_error_and_time() {
 
     let run = setup.start(json!({ "model": "loop.json", "seed": seed, "length": "30", "observations": 4 }));
     let status = setup.finished(&run);
-    let results = setup.ok("run_results", json!({ "run": run, "objects": ["Gate"] }));
+    let results = setup.ok("run_results", json!({ "run": run, "objects": ["Gate"], "values": true }));
     let mut failed = 0;
     for (k, observation) in results["observation_runs"].as_array().unwrap().iter().enumerate() {
         assert_eq!(observation["seed"], splitmix64(seed + k as u64 + 1).to_string());
@@ -185,6 +201,11 @@ fn a_run_error_fails_only_its_observation_with_its_error_and_time() {
             }
         }
     }
+    // Without each observation's values, the failed ones still show, with their seeds and errors.
+    let summary = setup.ok("run_results", json!({ "run": run, "objects": ["Gate"] }));
+    let shown: Vec<&Value> = summary["failed_observations"].as_array().unwrap().iter().collect();
+    let failing: Vec<&Value> = results["observation_runs"].as_array().unwrap().iter().filter(|observation| !observation["error"].is_null()).collect();
+    assert_eq!(shown, failing);
     assert_eq!(status["state"], "done", "a run with any observation that ran to its end is done");
     assert_eq!(status["failed"], failed);
     assert_eq!(status["ended"], 4);

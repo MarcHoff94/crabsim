@@ -145,7 +145,13 @@ fn run_runs_an_experiment_prints_its_results_and_keeps_them() {
     assert!(printed.starts_with("run-1 \"baseline\": demo.json, seed 4, 3 observations of 02:00:00"), "{printed}");
     assert!(printed.contains("Drain (Drain, Drain): drain"), "{printed}");
     assert!(printed.contains("throughput_per_hour"), "{printed}");
+    assert!(printed.contains("3 observations ended, none failed:"), "{printed}");
+    assert!(!printed.contains("Observation"), "no table of observations by default: {printed}");
     assert!(models.0.join(".crabsim/results.sqlite").is_file());
+
+    let detailed = stdout(&crabsim(&["results", "--models", models.arg(), "run-1", "--values"]));
+    let table: Vec<&str> = detailed.lines().skip_while(|line| !line.starts_with("Observation")).take(4).collect();
+    assert_eq!(table.len(), 4, "a header and 3 observations: {detailed}");
 
     // Each observation's reported seed reproduces it as a single run, also from the CLI.
     let query = crabsim(&["query", "--models", models.arg(), "SELECT o.seed, s.value FROM observations o JOIN statistics s ON s.run = o.run AND s.observation = o.number WHERE s.object = 'Drain' AND s.statistic = 'mus_in' ORDER BY o.number"]);
@@ -176,7 +182,7 @@ fn runs_lists_the_runs_newest_first_and_results_prints_one() {
     let results = crabsim(&["results", "--models", models.arg(), "run-1", "--object", "Station 1"]);
     assert!(results.status.success(), "{results:?}");
     let printed = stdout(&results);
-    assert!(printed.starts_with("run-1 \"first\""), "{printed}");
+    assert!(printed.starts_with("run-1 \"first\": demo.json, seed 0, 10 observations"), "the defaults: {printed}");
     assert!(printed.contains("Station 1 (Demo station, Station): chosen"), "{printed}");
     assert!(!printed.contains("Drain (Drain"), "only what was asked for: {printed}");
 

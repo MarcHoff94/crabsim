@@ -1,2 +1,4 @@
 /target
 *.log
+# crabsim's own state in a models folder: locks, the edit state and the results store.
+.crabsim/

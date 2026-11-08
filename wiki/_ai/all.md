@@ -167,7 +167,7 @@ Discrete-event material-flow simulator in Rust, built for speed. Engine library 
 
 #### Facts
 - `LiveSession` owns a thread that builds the run from a closure, computes ahead into a buffer of instants, and releases by a `Clock`; the user sees shown time, the run is at computed time (ADR 0002)
-- Commands: start, halt, reset, set_speed, set_time_mode, go_back, step_forward, step_back, locate_step_back, set_reset_keeps_changes, request_state, pause, resume, force_failure, end_forced_failure, set_process_time, clear_statistics
+- Commands: start, halt, reset, set_speed, set_time_mode, go_back, step_forward, step_back, locate_step_back, set_reset_keeps_changes, set_end_time, request_state, pause, resume, force_failure, end_forced_failure, set_process_time, clear_statistics
 - Outputs: `Occurrences`, `ShownTime`, `State` (only at Init, after Reset, after going back, on request), `Status`, `Error`, `StepBackTarget { shown, to }` (answer to `locate_step_back`, changes nothing)
 - UI step back: `ViewState::step_back()` gives `Now`, `Confirm(to)` or `Locate`; on `Locate` the window halts, sends `locate_step_back`, and `located_step_back()` decides once answered; any other command cancels
 - Time modes: `Continuous`, `Skipping` (no gap longer than 0.25 s wall time by default)

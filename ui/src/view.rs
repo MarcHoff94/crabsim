@@ -652,7 +652,7 @@ impl ViewState {
         }
         let known = match self.status {
             SessionStatus::Advancing => None,
-            SessionStatus::Halted | SessionStatus::Failed => self.marks.step_back_target(self.picture.shown()),
+            SessionStatus::Halted | SessionStatus::ReachedEnd | SessionStatus::Failed => self.marks.step_back_target(self.picture.shown()),
         };
         match known {
             Some(to) => self.decide_step_back(to),

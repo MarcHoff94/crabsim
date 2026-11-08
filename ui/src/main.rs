@@ -513,6 +513,7 @@ fn top_bar(ui: &mut egui::Ui, view: &ViewState, jump_text: &mut String) -> Optio
         ui.label(match view.status() {
             SessionStatus::Advancing => "Running",
             SessionStatus::Halted => "Halted",
+            SessionStatus::ReachedEnd => "Reached the end time",
             SessionStatus::Failed => "Run error",
         });
         ui.separator();

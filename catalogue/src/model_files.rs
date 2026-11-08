@@ -63,6 +63,9 @@ pub struct ValidateModelInput {
     /// A model file in the models folder, such as `line.json`.
     pub path: Option<String>,
     /// A model file's text, such as a draft not saved yet.
+    // `schema_with` hides the `Option` from schemars, so `default` is what keeps `text` optional
+    // in the schema.
+    #[serde(default)]
     #[schemars(schema_with = "model_text_schema")]
     pub text: Option<String>,
 }

@@ -84,7 +84,7 @@ fn descriptions_say_what_their_outputs_mean() {
     for (name, parts) in [
         ("run_status", &["`here`"][..]),
         ("run_results", &["added up", "`why`", "busiest", "20 or fewer", "mean_lead_time_s"][..]),
-        ("start_run", &["paired", "position", "10 observations"][..]),
+        ("start_run", &["paired", "stream", "10 observations", "`wait`"][..]),
     ] {
         for part in parts {
             assert!(description(name).contains(part), "{name} doesn't say {part}: {}", description(name));
@@ -229,7 +229,7 @@ fn read_model_gives_the_files_text_exactly() {
     assert_eq!(read["path"], "small.json");
     assert_eq!(read["text"], SMALL);
     assert_eq!(read["changed_outside"], true, "crabsim never saved it");
-    assert_eq!(read["hash"].as_str().unwrap().len(), 64);
+    assert_eq!(read["file_hash"].as_str().unwrap().len(), 64);
     assert_eq!(setup.err("read_model", json!({ "path": "gone.json" }))["kind"], "not_found");
     assert_eq!(setup.err("read_model", json!({ "path": "notes.txt" }))["kind"], "invalid_input");
 }
@@ -261,7 +261,7 @@ fn copy_model_copies_but_never_overwrites() {
     setup.folder.write("other.json", BROKEN);
 
     let copied = setup.ok("copy_model", json!({ "from": "small.json", "to": "variants/small 2.json" }));
-    assert_eq!(copied, json!({ "path": "variants/small 2.json" }));
+    assert_eq!(copied, json!({ "path": "variants/small 2.json", "changed_outside": true }), "a copy of a file written by hand");
     assert_eq!(setup.folder.read("variants/small 2.json"), SMALL);
 
     let refused = setup.err("copy_model", json!({ "from": "small.json", "to": "other.json" }));

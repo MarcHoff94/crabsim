@@ -483,6 +483,9 @@ pub struct StartRunInput {
     pub observations: u32,
     /// A name for the run, such as "baseline" or "two more mills".
     pub label: Option<String>,
+    /// Seconds to wait, from 1 to 60, for the run to end before answering, as run_status would.
+    /// Left out, the answer comes at once.
+    pub wait: Option<u32>,
 }
 
 /// The observations of a run started without saying how many: enough for a confidence interval.
@@ -498,11 +501,14 @@ pub struct StartRunOutput {
     /// The model file was changed outside crabsim, or crabsim never saved it. It runs all the
     /// same, as it is now.
     pub changed_outside: bool,
+    /// With `wait`, how the run stands when it ended or the wait was up, as run_status says.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<RunStatusOutput>,
 }
 
 impl Operation for StartRun {
     const NAME: &'static str = "start_run";
-    const DESCRIPTION: &'static str = "Starts an experiment on a model file in the models folder: its observations run in the background, in parallel, one per CPU core, and their results go into the results store. Returns the run's id at once: poll run_status until it's done, then read run_results. The model is read and checked now, and an invalid one is refused with every problem. Later changes to the file don't reach the run. Observation k (from 1) gets the seed splitmix64(seed + k), reported with its results. Runs with the same seed are paired, even of different models: each object's random numbers come from the seed and the object's position among the model's instances, so a variant that keeps the instance order gets common random numbers, and their difference has a far narrower interval than either alone. 10 observations is a start: run more if an interval is too wide to decide.";
+    const DESCRIPTION: &'static str = "Starts an experiment on a model file in the models folder: its observations run in the background, in parallel, one per CPU core, and their results go into the results store. Returns the run's id at once, or with `wait` once it ended: poll run_status until it's done, then read run_results. The model is read and checked now, and an invalid one is refused with every problem. Later changes to the file don't reach the run. Observation k (from 1) gets the seed splitmix64(seed + k), reported with its results. Give `wait`, up to 60 seconds, to have a short run's end waited for, saving a call to run_status. Runs with the same seed and number of observations are paired, even of different models: each instance's random numbers come from the seed and its stream, which it keeps through every edit, so a variant gets common random numbers with its original, and their difference has a far narrower interval than either alone. 10 observations is a start: run more if an interval is too wide to decide.";
     const EFFECT: Effect = Effect::Additive;
     type Input = StartRunInput;
     type Output = StartRunOutput;
@@ -529,10 +535,14 @@ impl Operation for StartRun {
             })
             .collect();
 
+        if input.wait.is_some_and(|wait| !(1..=60).contains(&wait)) {
+            return Err(OperationError::invalid_input("`wait` must be from 1 to 60 seconds"));
+        }
+        let who = catalogue.who()?;
         let store = catalogue.store()?;
         store.connection().execute(
-            "INSERT INTO runs (model_path, model_text, model_hash, seed, length_s, warm_up_s, observations, label, source, crabsim_version, started, state, process)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'queued', ?11)",
+            "INSERT INTO runs (model_path, model_text, model_hash, seed, length_s, warm_up_s, observations, label, source, crabsim_version, started, state, process, crabsim_build, agent)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'queued', ?11, ?12, ?13)",
             params![
                 input.model,
                 canonical,
@@ -545,13 +555,26 @@ impl Operation for StartRun {
                 catalogue.source().name(),
                 env!("CARGO_PKG_VERSION"),
                 catalogue.process_id(),
+                env!("CRABSIM_BUILD"),
+                who,
             ],
         )?;
         let id = format!("run-{}", store.connection().last_insert_rowid());
         drop(store);
         let plan = Plan { id: id.clone(), model: model.to_description(), objects, seed: input.seed, length, warm_up, observations: input.observations };
         catalogue.jobs().submit(plan);
-        Ok(StartRunOutput { run: id, state: RunState::Queued, changed_outside })
+        let Some(wait) = input.wait else {
+            return Ok(StartRunOutput { run: id, state: RunState::Queued, changed_outside, status: None });
+        };
+        // Waits for a short run, saving the agent a call to run_status.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(u64::from(wait));
+        loop {
+            let status = RunStatus::run(catalogue, RunInput { run: id.clone() })?;
+            if !matches!(status.state, RunState::Queued | RunState::Running) || std::time::Instant::now() >= deadline {
+                return Ok(StartRunOutput { run: id, state: status.state, changed_outside, status: Some(status) });
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
     }
 }
 

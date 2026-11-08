@@ -208,6 +208,10 @@ pub struct RunResultsOutput {
     /// Who started it: mcp or cli.
     pub source: String,
     pub crabsim_version: String,
+    /// The git commit crabsim was built from, `-dirty` with uncommitted changes, or unknown.
+    pub crabsim_build: String,
+    /// Who started it: such as `agent-3 (claude-code)`, or the user. Unknown for older runs.
+    pub agent: String,
     pub started: String,
     pub finished: Option<String>,
     /// The events of every observation that ended, added up.
@@ -260,7 +264,7 @@ impl Operation for RunResults {
         let connection = store.connection();
         let run = connection
             .query_row(
-                "SELECT label, state, model_path, model_text, model_hash, seed, length_s, warm_up_s, observations, source, crabsim_version, started, finished FROM runs WHERE number = ?1",
+                "SELECT label, state, model_path, model_text, model_hash, seed, length_s, warm_up_s, observations, source, crabsim_version, started, finished, coalesce(crabsim_build, 'unknown'), coalesce(agent, 'unknown') FROM runs WHERE number = ?1",
                 [number],
                 |row| {
                     Ok((
@@ -277,12 +281,14 @@ impl Operation for RunResults {
                         row.get::<_, String>(10)?,
                         row.get::<_, String>(11)?,
                         row.get::<_, Option<String>>(12)?,
+                        row.get::<_, String>(13)?,
+                        row.get::<_, String>(14)?,
                     ))
                 },
             )
             .optional()?
             .ok_or_else(|| OperationError::not_found(format!("there is no run `{id}` in the results store")))?;
-        let (label, state, model_path, model_text, model_hash, seed, length, warm_up, observations, source, version, started, finished) = run;
+        let (label, state, model_path, model_text, model_hash, seed, length, warm_up, observations, source, version, started, finished, build, agent) = run;
         let state = catalogue.jobs_status(&id).unwrap_or(RunState::from_name(&state));
 
         let mut statement =
@@ -369,6 +375,8 @@ impl Operation for RunResults {
             observations,
             source,
             crabsim_version: version,
+            crabsim_build: build,
+            agent,
             started,
             finished,
             events,
@@ -531,7 +539,7 @@ pub struct ForgetRunOutput {
 
 impl Operation for ForgetRun {
     const NAME: &'static str = "forget_run";
-    const DESCRIPTION: &'static str = "Deletes a run and all its results from the results store, for good. Refused while the run is still queued or running here: cancel it first.";
+    const DESCRIPTION: &'static str = "Deletes a run and all its results from the results store, for good. An agent may forget only the runs its own session started, and never the user's. Refused while the run is still queued or running here: cancel it first.";
     const EFFECT: Effect = Effect::Destructive;
     type Input = crate::jobs::RunInput;
     type Output = ForgetRunOutput;
@@ -539,6 +547,17 @@ impl Operation for ForgetRun {
     fn run(catalogue: &Catalogue, input: crate::jobs::RunInput) -> Result<ForgetRunOutput, OperationError> {
         let number = run_number(&input.run)?;
         refuse_users_run(catalogue, number, &input.run, "forget")?;
+        if catalogue.source() == crate::Source::Mcp {
+            let process: Option<Option<String>> = catalogue.store()?.connection().query_row("SELECT process FROM runs WHERE number = ?1", [number], |row| row.get(0)).optional()?;
+            if let Some(process) = process
+                && process.as_deref() != Some(catalogue.process_id())
+            {
+                return Err(OperationError::invalid_input(format!(
+                    "`{}` was started by another agent session, so this one can't forget it: an agent forgets only its own runs. Label it instead, or ask the user",
+                    input.run
+                )));
+            }
+        }
         if catalogue.jobs_status(&input.run).is_some_and(|state| matches!(state, RunState::Queued | RunState::Running)) {
             return Err(OperationError::invalid_input(format!("`{}` is still running: cancel it first", input.run)));
         }

@@ -367,6 +367,17 @@ impl Editing {
     }
 }
 
+impl Catalogue {
+    /// Who is using this catalogue, as runs record it: such as `agent-3 (claude-code)`, or the user.
+    pub(crate) fn who(&self) -> Result<String, OperationError> {
+        let editing = self.editing()?;
+        Ok(match &editing.asker {
+            Asker::User => "the user".to_string(),
+            Asker::Agent(process) => editing.agent(process).map_or_else(|| "an agent".to_string(), |agent| format!("{} ({})", agent.id, agent.client)),
+        })
+    }
+}
+
 /// The key of a model file in the edit state: its path in the models folder, as listed.
 fn key(catalogue: &Catalogue, path: &str) -> Result<String, OperationError> {
     let file = catalogue.folder().model_file(path)?;
@@ -505,8 +516,11 @@ pub struct AdoptModel;
 #[derive(Serialize, JsonSchema)]
 pub struct AdoptModelOutput {
     pub path: String,
-    /// The SHA-256 of the file as adopted.
-    pub hash: String,
+    /// The SHA-256 of the file's bytes as adopted.
+    pub file_hash: String,
+    /// The SHA-256 of the model in canonical form, as runs record it. Only for a valid model.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_hash: Option<String>,
     /// Every problem in it, empty if it's valid. An invalid file is adopted too, so write_model
     /// can then fix it.
     pub problems: Vec<crate::ModelProblem>,
@@ -514,7 +528,7 @@ pub struct AdoptModelOutput {
 
 impl Operation for AdoptModel {
     const NAME: &'static str = "adopt_model";
-    const DESCRIPTION: &'static str = "Accepts a model file as it is now, after it was changed outside crabsim, such as by a text editor, a harness's own file tools or git, or when crabsim never saved it. Until then crabsim reads and runs it but won't change it, refusing with changed_outside, so that an outside change is never overwritten or taken in by accident. Look at the file with read_model first. It changes nothing in the file, follows the same editor rules as a change, and gives the file's problems, if any: an invalid file is adopted too, so write_model can fix it.";
+    const DESCRIPTION: &'static str = "Accepts a model file as it is now, after it was changed outside crabsim, such as by a text editor, a harness's own file tools or git, or when crabsim never saved it. Until then crabsim reads and runs it but won't change it, refusing with changed_outside, so that an outside change is never overwritten or taken in by accident. Look at the file with read_model first, or, for a copy, compare its file_hash with one you trust, such as its source's. It changes nothing in the file, follows the same editor rules as a change, and gives the file's problems, if any: an invalid file is adopted too, so write_model can fix it.";
     const EFFECT: Effect = Effect::Additive;
     type Input = PathInput;
     type Output = AdoptModelOutput;
@@ -524,7 +538,7 @@ impl Operation for AdoptModel {
         let (_, text) = crate::model_files::read_file(catalogue, &input.path)?;
         editing.record(&text);
         let problems = crabsim_model::load(&text).err().unwrap_or_default().iter().map(crate::ModelProblem::from).collect();
-        Ok(AdoptModelOutput { path: input.path, hash: crate::edit::hash(&text), problems })
+        Ok(AdoptModelOutput { path: input.path, file_hash: crate::edit::hash(&text), model_hash: crate::edit::model_hash(&text), problems })
     }
 }
 

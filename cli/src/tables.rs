@@ -88,11 +88,12 @@ pub fn results(results: &Value) -> String {
         cell(&results["state"]),
     );
     text += &format!(
-        "Started {} by {}, finished {}, crabsim {}, model SHA-256 {}\n\n",
+        "Started {} by {}, finished {}, crabsim {} ({}), model SHA-256 {}\n\n",
         cell(&results["started"]),
-        cell(&results["source"]),
+        cell(&results["agent"]),
         if results["finished"].is_null() { "not yet".to_string() } else { cell(&results["finished"]) },
         cell(&results["crabsim_version"]),
+        cell(&results["crabsim_build"]),
         cell(&results["model_hash"]).chars().take(12).collect::<String>(),
     );
     let failed = results["failed_observations"].as_array().map_or(0, Vec::len);
@@ -148,7 +149,7 @@ pub fn results(results: &Value) -> String {
 /// What `edit_model` did.
 pub fn edited(edited: &Value) -> String {
     let count = edited["changes"].as_u64().unwrap_or_default();
-    let mut text = format!("{count} change{} applied to {}, now SHA-256 {}\n", if count == 1 { "" } else { "s" }, cell(&edited["path"]), cell(&edited["hash"]));
+    let mut text = format!("{count} change{} applied to {}, now SHA-256 {}\n", if count == 1 { "" } else { "s" }, cell(&edited["path"]), cell(&edited["file_hash"]));
     let also = &edited["also_removed"];
     for (what, key) in [("instances", "instances"), ("classes", "classes")] {
         let names: Vec<String> = also[key].as_array().into_iter().flatten().map(cell).collect();
@@ -198,7 +199,7 @@ pub fn attributes(name: &str, got: &Value) -> String {
 
 /// What `adopt_model` did.
 pub fn adopted(adopted: &Value) -> String {
-    let mut text = format!("{} adopted as it is, SHA-256 {}\n", cell(&adopted["path"]), cell(&adopted["hash"]));
+    let mut text = format!("{} adopted as it is, SHA-256 {}\n", cell(&adopted["path"]), cell(&adopted["file_hash"]));
     let problems = adopted["problems"].as_array().map_or(0, Vec::len);
     if problems > 0 {
         text += &format!("It has {problems} problem{}: crabsim validate it, or write it again\n", if problems == 1 { "" } else { "s" });

@@ -71,6 +71,39 @@ fn a_model_in_an_operations_input_has_the_model_files_own_schema() {
     }
 }
 
+/// A harness may check a tool's input against its schema before calling it, so every input an
+/// operation accepts must pass that schema, above all the shortest ones that leave out optional
+/// fields.
+#[test]
+fn the_shortest_inputs_an_operation_accepts_pass_its_input_schema() {
+    let setup = Setup::new("short-inputs");
+    let inputs = [
+        ("validate_model", json!({ "path": "line.json" })),
+        ("validate_model", json!({ "text": SMALL })),
+        ("list_models", json!({})),
+        ("read_model", json!({ "path": "line.json" })),
+        ("write_model", json!({ "path": "line.json", "text": SMALL })),
+        ("copy_model", json!({ "from": "line.json", "to": "copy.json" })),
+        ("delete_model", json!({ "path": "line.json" })),
+        ("start_run", json!({ "model": "line.json", "seed": 0, "length": "1d", "observations": 1 })),
+        ("run_status", json!({ "run": "run-1" })),
+        ("cancel_run", json!({ "run": "run-1" })),
+        ("run_results", json!({ "run": "run-1" })),
+        ("label_run", json!({ "run": "run-1" })),
+        ("forget_run", json!({ "run": "run-1" })),
+        ("query_results", json!({ "sql": "SELECT 1" })),
+    ];
+    for operation in setup.catalogue.operations() {
+        assert!(inputs.iter().any(|(name, _)| *name == operation.name), "add the shortest input of {} here", operation.name);
+    }
+    for (name, input) in inputs {
+        let schema = &setup.catalogue.operations().find(|o| o.name == name).unwrap().input_schema;
+        let validator = jsonschema::validator_for(schema).unwrap();
+        let errors: Vec<_> = validator.iter_errors(&input).map(|error| error.to_string()).collect();
+        assert!(errors.is_empty(), "{name} accepts {input}, but its schema refuses it: {errors:?}");
+    }
+}
+
 #[test]
 fn an_unknown_operation_or_an_input_that_doesnt_fit_is_invalid_input() {
     let setup = Setup::new("bad-input");

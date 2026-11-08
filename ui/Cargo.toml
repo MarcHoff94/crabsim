@@ -9,3 +9,8 @@ publish = false
 crabsim = { path = ".." }
 bevy = "=0.20.1"
 bevy_egui = "=0.43.1"
+# The models folder, reached only through the operation catalogue, as the user (spec issue 63).
+crabsim-catalogue = { path = "../catalogue" }
+crabsim-model = { path = "../model" }
+serde_json = "1"
+clap = { version = "4.5", features = ["derive"] }

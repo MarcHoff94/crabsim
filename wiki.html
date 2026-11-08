@@ -1084,7 +1084,12 @@ A checkpoint is a clone of the run plus how much of the intervention log is in i
 
 ## UI
 
-`crabsim-ui` (`ui/`) is a Bevy application with egui panels (ADR 0006). It runs the demo model in a live session at 60 times real time and draws it in 2D, as flat meshes under an orthographic camera:
+`crabsim-ui` (`ui/`) is a Bevy application with egui panels (ADR 0006). Started with `--models <folder>`, it lists the folder's model files and runs the one clicked. Without a folder, or when another window has it, it runs the demo model. It runs the model in a live session at 60 times real time and draws it in 2D, as flat meshes under an orthographic camera:
+
+- a "Models" panel listing the folder's model files, marking those with problems; a model that can't run shows `describe_model`'s summary and every problem instead, and the model open stays; one clicked while a run is in progress replaces it once confirmed,
+- instances a file leaves unplaced laid out by the window: in columns by the fewest connections from a Source when nothing is placed, or in a row below the placed ones, never saved,
+- the model's name, a seed (only before Init or after Reset, kept across models) and an end time in the top bar,
+- the folder reached only through the catalogue as `Source::Ui`, holding `.crabsim/user.lock`, and a banner when another window has the folder,
 
 - state colours, connections, and names that shrink with the model,
 - pan and zoom, and a click to select,
@@ -1096,6 +1101,7 @@ A checkpoint is a clone of the run plus how much of the intervention log is in i
 
 Its logic is in plain Rust, tested without a window:
 
+- `ui/src/workspace.rs` — what the window works on: the models folder through the catalogue, the model list, the model open and laid out, its problems, the seed, and sessions built from them.
 - `ui/src/view.rs` — the view state: from the `ModelDescription`, the session's outputs and wall time, it works out what is drawn, which controls are offered and whether frames are needed. A halted window draws nothing once things settle.
 - `ui/src/camera.rs` — where the view looks and how close.
 - `ui/src/marks.rs` — the interventions made, mirroring the session's log.

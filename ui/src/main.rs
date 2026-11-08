@@ -1,9 +1,14 @@
-//! crabsim's UI: a Bevy application with egui panels (ADR 0006). It runs the demo model in a live
-//! session and draws it in 2D, as flat meshes under an orthographic 3D camera, the way a 3D view
-//! will draw it too. What to draw comes from `crabsim_ui::view`, which is tested without a window.
-//! UI stage 1 is described in docs/agents/handoff.md, "UI design".
+//! crabsim's UI: a Bevy application with egui panels (ADR 0006). It runs a model in a live session
+//! and draws it in 2D, as flat meshes under an orthographic 3D camera, the way a 3D view will draw
+//! it too. What to draw comes from `crabsim_ui::view`, and what the window works on from
+//! `crabsim_ui::workspace`, both tested without a window. UI stage 1 is described in
+//! docs/agents/handoff.md, "UI design", and stage 2 in spec issue 63.
 //!
 //! cargo run -p crabsim-ui --profile ui
+//! cargo run -p crabsim-ui --profile ui -- --models <folder>
+//!
+//! With a models folder, the window lists its model files and runs the one clicked. Without one,
+//! or when another window has the folder, it runs the built-in demo.
 //!
 //! Drag with any mouse button to pan, and use the wheel to zoom.
 
@@ -15,20 +20,32 @@ use bevy::{
     winit::{UpdateMode, WinitSettings},
 };
 use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui, input::egui_wants_any_pointer_input};
-use crabsim::{LiveSession, SessionStatus, SimTime, TimeMode, WallClock, demo};
+use clap::Parser;
+use crabsim::{LiveSession, SessionStatus, SimTime, TimeMode, WallClock};
 use crabsim_ui::camera::Camera as ViewCamera;
 use crabsim_ui::view::{
-    Control, DEFAULT_SPEED, Details, Inspection, Intervention, JumpProblem, MAX_SPEED, MIN_SPEED, Mark, Point,
-    MU_METRES, Shade, StepBack, ViewState, format_time, format_time_exact, label_size, parse_time,
+    Control, DEFAULT_SPEED, Details, EndTimeProblem, Inspection, Intervention, JumpProblem, MAX_SPEED, MIN_SPEED, Mark,
+    Point, MU_METRES, Shade, StepBack, ViewState, format_time, format_time_exact, label_size, parse_time,
 };
+use crabsim_ui::workspace::Workspace;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Duration;
 
-const SEED: u64 = 0;
+#[derive(Parser)]
+#[command(name = "crabsim-ui", about = "crabsim's window: runs models live and draws them in 2D")]
+struct Opts {
+    /// A models folder whose model files to list and run. It must not hold source code. Without
+    /// one, the window runs the built-in demo model.
+    #[arg(long)]
+    models: Option<PathBuf>,
+}
+
 const BACKGROUND: Color = Color::srgb(0.10, 0.11, 0.13);
 const CONNECTION: Color = Color::srgba(0.65, 0.67, 0.75, 0.6);
 const INSPECTOR_WIDTH: f32 = 280.0;
+const MODELS_WIDTH: f32 = 230.0;
 /// The longest wait between frames while anything can change: about 60 frames a second.
 const FRAME_INTERVAL: Duration = Duration::from_micros(16_667);
 
@@ -48,10 +65,12 @@ const SHADES: [Shade; 7] =
     [Shade::Unknown, Shade::Idle, Shade::Working, Shade::Blocked, Shade::Paused, Shade::Failed, Shade::ForcedFailure];
 
 fn main() {
-    let model = demo::model();
-    let view = ViewState::new(&model);
-    let session = LiveSession::new(move || model.build(SEED), WallClock::new());
+    let opts = Opts::parse();
+    let workspace = Workspace::open(opts.models.as_deref());
+    let view = ViewState::new(workspace.description());
+    let session = workspace.session(WallClock::new());
     session.set_speed(DEFAULT_SPEED).expect("a positive speed");
+    let seed_text = workspace.seed().to_string();
 
     App::new()
         .insert_resource(ClearColor(BACKGROUND))
@@ -76,12 +95,18 @@ fn main() {
             press: None,
             process_time_text: (None, String::new()),
             pending: None,
+            workspace,
+            seed_text,
+            end_text: String::new(),
+            replacing: None,
+            rebuild_scene: false,
         })
         .insert_resource(Session(Mutex::new(session)))
         .add_systems(Startup, setup)
         .add_systems(
             Update,
             (
+                rebuild_scene,
                 drain_session,
                 request_details,
                 apply_shades,
@@ -117,6 +142,16 @@ struct Ui {
     process_time_text: (Option<u32>, String),
     /// Going back that drops interventions, waiting for the user to confirm it.
     pending: Option<GoingBack>,
+    /// The models folder and the model open.
+    workspace: Workspace,
+    /// What has been typed into the seed field.
+    seed_text: String,
+    /// What has been typed into the end time field.
+    end_text: String,
+    /// A model chosen while a run is in progress, waiting for the user to confirm replacing it.
+    replacing: Option<String>,
+    /// The view changed model or seed, so the objects are drawn afresh.
+    rebuild_scene: bool,
 }
 
 /// A way of going back that waits for confirmation, and the time it goes to.
@@ -174,11 +209,26 @@ fn setup(
             (shade, material_assets.add(StandardMaterial { base_color: shade_colour(shade), unlit: true, ..default() }))
         })
         .collect();
-    // Objects of the same size share a mesh.
+    let entities = spawn_objects(&mut commands, &ui.view, &mut meshes, &materials);
+    let count = ui.view.objects().len();
+    commands.insert_resource(Scene { entities, drawn: vec![Shade::Unknown; count], materials });
+    commands.insert_resource(MuPool {
+        entities: Vec::new(),
+        shown: 0,
+        mesh: meshes.add(Circle::new(MU_METRES as f32 / 2.0)),
+        material: material_assets.add(StandardMaterial { base_color: MU_COLOUR, unlit: true, ..default() }),
+    });
+}
+
+/// An entity for each object of the view, unshaded. Objects of the same size share a mesh.
+fn spawn_objects(
+    commands: &mut Commands,
+    view: &ViewState,
+    meshes: &mut Assets<Mesh>,
+    materials: &HashMap<Shade, Handle<StandardMaterial>>,
+) -> Vec<Entity> {
     let mut sizes: HashMap<(u64, u64), Handle<Mesh>> = HashMap::new();
-    let entities = ui
-        .view
-        .objects()
+    view.objects()
         .iter()
         .map(|object| {
             let mesh = sizes
@@ -189,15 +239,28 @@ fn setup(
                 .with_rotation(Quat::from_rotation_z((object.rotation_degrees as f32).to_radians()));
             commands.spawn((Mesh3d(mesh), MeshMaterial3d(materials[&Shade::Unknown].clone()), transform)).id()
         })
-        .collect();
-    let count = ui.view.objects().len();
-    commands.insert_resource(Scene { entities, drawn: vec![Shade::Unknown; count], materials });
-    commands.insert_resource(MuPool {
-        entities: Vec::new(),
-        shown: 0,
-        mesh: meshes.add(Circle::new(MU_METRES as f32 / 2.0)),
-        material: material_assets.add(StandardMaterial { base_color: MU_COLOUR, unlit: true, ..default() }),
-    });
+        .collect()
+}
+
+/// Draws the objects afresh after the view changed model or seed: the old entities and MUs go.
+fn rebuild_scene(
+    mut commands: Commands,
+    mut ui: ResMut<Ui>,
+    mut scene: ResMut<Scene>,
+    mut pool: ResMut<MuPool>,
+    mut meshes: ResMut<Assets<Mesh>>,
+) {
+    if !ui.rebuild_scene {
+        return;
+    }
+    ui.rebuild_scene = false;
+    for entity in scene.entities.drain(..).chain(pool.entities.drain(..)) {
+        commands.entity(entity).despawn();
+    }
+    pool.shown = 0;
+    let entities = spawn_objects(&mut commands, &ui.view, &mut meshes, &scene.materials);
+    scene.drawn = vec![Shade::Unknown; entities.len()];
+    scene.entities = entities;
 }
 
 /// Reads every output waiting, every frame: past a backlog the session stops releasing.
@@ -377,8 +440,18 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
     let ui = &mut *ui;
     let wall = time.elapsed();
     let mut request = None;
-    let top = egui::Panel::top("top bar").show(&mut root, |panel| request = top_bar(panel, &ui.view, &mut ui.jump_text));
+    let top = egui::Panel::top("top bar").show(&mut root, |panel| {
+        request = top_bar(panel, &ui.view, &ui.workspace, &mut ui.jump_text, &mut ui.seed_text, &mut ui.end_text)
+    });
     let mut bottom_of_bars = top.response.rect.bottom();
+    if let Some(banner) = ui.workspace.banner() {
+        let shown = egui::Panel::top("folder banner")
+            .frame(egui::Frame::new().fill(egui::Color32::from_rgb(110, 80, 20)).inner_margin(6.0))
+            .show(&mut root, |panel| {
+                panel.colored_label(egui::Color32::WHITE, banner);
+            });
+        bottom_of_bars = shown.response.rect.bottom();
+    }
     if let Some(error) = ui.view.error() {
         let banner = egui::Panel::top("error banner")
             .frame(egui::Frame::new().fill(egui::Color32::from_rgb(120, 25, 25)).inner_margin(6.0))
@@ -396,8 +469,16 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
             intervention = inspector(panel, inspection.as_ref(), &mut ui.process_time_text.1);
         });
     });
+    let mut chosen = None;
+    let mut left_edge = ctx.viewport_rect().left();
+    if ui.workspace.has_folder() {
+        let left = egui::Panel::left("models").exact_size(MODELS_WIDTH).show(&mut root, |panel| {
+            egui::ScrollArea::vertical().show(panel, |panel| chosen = models_panel(panel, &mut ui.workspace));
+        });
+        left_edge = left.response.rect.right();
+    }
     let canvas = egui::Rect::from_min_max(
-        egui::pos2(ctx.viewport_rect().left(), bottom_of_bars),
+        egui::pos2(left_edge, bottom_of_bars),
         egui::pos2(right.response.rect.left(), ctx.viewport_rect().bottom()),
     );
     ui.canvas = Some(canvas);
@@ -433,6 +514,26 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
     });
     let request = request.or_else(|| confirm_going_back(&ctx, ui));
 
+    // A model clicked replaces the run, so a run in progress is replaced only once confirmed.
+    if let Some(path) = chosen {
+        if ui.view.allows(Control::Init) {
+            open_model(ui, &session, &path, wall);
+        } else {
+            ui.replacing = Some(path);
+        }
+    }
+    if let Some(path) = confirm_replacing(&ctx, ui) {
+        open_model(ui, &session, &path, wall);
+    }
+    let request = match request {
+        Some(Request::Seed(seed)) => {
+            ui.workspace.set_seed(seed);
+            replace_session(ui, &session, false, wall);
+            None
+        }
+        other => other,
+    };
+
     if let Some(request) = request {
         let locating = matches!(request, Request::LocateStepBack);
         let session = session.0.lock().expect("the session lock is never poisoned");
@@ -452,6 +553,11 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
             Request::GoBack(to) => session.go_back(to),
             // Shown time has to stand still for the answer to hold.
             Request::LocateStepBack => session.halt().and_then(|()| session.locate_step_back()),
+            Request::EndTime(end) => {
+                ui.view.set_end_time(end);
+                session.set_end_time(end)
+            }
+            Request::Seed(_) => unreachable!("handled above"),
         };
         ui.view.commanded(wall);
         match sent {
@@ -475,6 +581,113 @@ enum Request {
     GoBack(SimTime),
     /// Ask the session where stepping back goes, before deciding whether to ask the user.
     LocateStepBack,
+    /// Set or clear the end time.
+    EndTime(Option<SimTime>),
+    /// Run with this seed from now on, which means a new session.
+    Seed(u64),
+}
+
+/// Opens the model at `path` in the folder: a new view and session for it. One with problems
+/// opens nothing, and the workspace keeps its problems for the models panel.
+fn open_model(ui: &mut Ui, session: &Session, path: &str, wall: Duration) {
+    if ui.workspace.open_model(path) {
+        replace_session(ui, session, true, wall);
+    }
+}
+
+/// A new session on the workspace's model and seed, and a view of it keeping the window's speed,
+/// time mode and end time. A new model is fitted into the canvas, and the same one keeps the view
+/// where it was.
+fn replace_session(ui: &mut Ui, session: &Session, new_model: bool, wall: Duration) {
+    let view = ViewState::with_settings_of(ui.workspace.description(), &ui.view);
+    let fresh = ui.workspace.session(WallClock::new());
+    let settled = fresh
+        .set_speed(view.speed())
+        .and_then(|()| fresh.set_time_mode(view.time_mode()))
+        .and_then(|()| fresh.set_end_time(view.end_time()));
+    *session.0.lock().expect("the session lock is never poisoned") = fresh;
+    ui.view = view;
+    ui.pending = None;
+    ui.seed_text = ui.workspace.seed().to_string();
+    if new_model {
+        ui.camera_moved = false;
+        ui.camera = None;
+    }
+    ui.rebuild_scene = true;
+    ui.view.commanded(wall);
+    if let Err(error) = settled {
+        ui.view.observe(&crabsim::SessionOutput::Error(error), wall);
+    }
+}
+
+/// Asks before a model chosen replaces a run in progress. Returns the model once confirmed.
+fn confirm_replacing(ctx: &egui::Context, ui: &mut Ui) -> Option<String> {
+    let path = ui.replacing.clone()?;
+    let mut answer = None;
+    let modal = egui::Modal::new(egui::Id::new("confirm replacing")).show(ctx, |modal| {
+        modal.set_max_width(420.0);
+        modal.heading(format!("Open {path}?"));
+        modal.label("The run in progress ends, with everything it has done.");
+        modal.add_space(8.0);
+        modal.horizontal(|row| {
+            if row.button("Open").clicked() {
+                answer = Some(true);
+            }
+            if row.button("Cancel").clicked() {
+                answer = Some(false);
+            }
+        });
+    });
+    if modal.should_close() && answer.is_none() {
+        answer = Some(false);
+    }
+    let answer = answer?;
+    ui.replacing = None;
+    answer.then_some(path)
+}
+
+/// The folder's model files, each marked with how many problems it has, and why the one last
+/// chosen can't run. Returns the model clicked, if any.
+fn models_panel(ui: &mut egui::Ui, workspace: &mut Workspace) -> Option<String> {
+    let mut chosen = None;
+    ui.horizontal(|row| {
+        row.heading("Models");
+        if row.small_button("Refresh").on_hover_text("List the folder's model files again").clicked() {
+            workspace.refresh();
+        }
+    });
+    if workspace.models().is_empty() {
+        ui.label("No model files in this folder yet.");
+    }
+    for entry in workspace.models() {
+        let open = workspace.opened() == Some(entry.path.as_str());
+        let label = if entry.problems > 0 { format!("⚠ {}  ({})", entry.path, entry.problems) } else { entry.path.clone() };
+        let clicked = ui.selectable_label(open, label).on_hover_text(if entry.problems > 0 {
+            format!("{} problem{}: it can't run until they are fixed", entry.problems, plural(entry.problems))
+        } else {
+            "Click to run it".to_string()
+        });
+        if clicked.clicked() && !open {
+            chosen = Some(entry.path.clone());
+        }
+    }
+    if let Some(report) = workspace.problems().cloned() {
+        ui.add_space(8.0);
+        ui.separator();
+        ui.label(egui::RichText::new(format!("{} can't run", report.path)).strong().color(egui::Color32::from_rgb(240, 120, 120)));
+        for line in &report.summary {
+            ui.label(egui::RichText::new(line).weak());
+        }
+        ui.add_space(4.0);
+        ui.label(format!("{} problem{}:", report.problems.len(), plural(report.problems.len())));
+        for problem in &report.problems {
+            ui.label(format!("•  {problem}"));
+        }
+        if ui.small_button("Close").clicked() {
+            workspace.dismiss_problems();
+        }
+    }
+    chosen
 }
 
 /// What to send for a step back the view has decided on: the step itself, a question to the
@@ -492,9 +705,29 @@ fn stepping_back(ui: &mut Ui, decided: StepBack) -> Option<Request> {
 
 /// The run controls, shown time, going back to a time, speed and time mode. `jump_text` is what
 /// has been typed into the field for going back. Returns what was asked for, if anything.
-fn top_bar(ui: &mut egui::Ui, view: &ViewState, jump_text: &mut String) -> Option<Request> {
+fn top_bar(
+    ui: &mut egui::Ui,
+    view: &ViewState,
+    workspace: &Workspace,
+    jump_text: &mut String,
+    seed_text: &mut String,
+    end_text: &mut String,
+) -> Option<Request> {
     let mut request = None;
     ui.horizontal_wrapped(|ui| {
+        ui.label(egui::RichText::new(workspace.opened().unwrap_or("Demo model")).strong());
+        ui.label("seed");
+        let seed_field = ui
+            .add_enabled(view.allows_seed(), egui::TextEdit::singleline(seed_text).desired_width(70.0))
+            .on_disabled_hover_text("The seed can change only before Init or after Reset");
+        let typed_seed = seed_text.trim().parse::<u64>().ok();
+        if seed_field.lost_focus() {
+            match typed_seed {
+                Some(seed) if seed != workspace.seed() => request = Some(Request::Seed(seed)),
+                _ => *seed_text = workspace.seed().to_string(),
+            }
+        }
+        ui.separator();
         let mut button = |ui: &mut egui::Ui, control: Control, label: &str| {
             if ui.add_enabled(view.allows(control), egui::Button::new(label)).clicked() {
                 request = Some(Request::Control(control));
@@ -516,6 +749,25 @@ fn top_bar(ui: &mut egui::Ui, view: &ViewState, jump_text: &mut String) -> Optio
             SessionStatus::ReachedEnd => "Reached the end time",
             SessionStatus::Failed => "Run error",
         });
+        ui.separator();
+
+        ui.label("End at");
+        let hint = view.end_time().map_or_else(|| "no end".to_string(), format_time);
+        let field = ui.add(egui::TextEdit::singleline(end_text).desired_width(90.0).hint_text(hint));
+        let end = view.end_time_target(end_text);
+        let set = ui.add_enabled(end.is_ok(), egui::Button::new("Set")).on_disabled_hover_text(match end {
+            Err(EndTimeProblem::NotATime) => "Type a time such as 8:00:00 or 30d",
+            Err(EndTimeProblem::NotLater) => "Only a time later than the one shown",
+            Ok(_) => "",
+        });
+        let entered = field.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+        if let (true, Ok(end)) = (set.clicked() || entered, end) {
+            request = Some(Request::EndTime(Some(end)));
+            end_text.clear();
+        }
+        if view.end_time().is_some() && ui.button("Clear").on_hover_text("Run with no end time").clicked() {
+            request = Some(Request::EndTime(None));
+        }
         ui.separator();
 
         ui.label("Go back to");

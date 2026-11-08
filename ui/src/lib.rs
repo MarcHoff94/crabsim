@@ -4,3 +4,4 @@
 pub mod camera;
 pub mod marks;
 pub mod view;
+pub mod workspace;

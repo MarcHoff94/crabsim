@@ -11,7 +11,7 @@ Written 2026-11-07 at the end of a working session, and updated after each step 
 - **Slice 2** ([spec issue 45](https://github.com/MarcHoff94/crabsim/issues/45), PRs 47 to 52): `edit_model` and `get_attributes`, an editor per model file with an edit queue the user controls (ADR 0011), changes from outside detected and adopted, and the first harness trial's fixes. Then `compare_runs` (#53), a random-number stream per instance (#54, ADR 0012) and the second harness trial's fixes (#55).
 - **Slice 3** ([spec issue 56](https://github.com/MarcHoff94/crabsim/issues/56), PRs 59 to 61): `describe_model`, `query_model` with seven kinds of graph question, `export_model` into `exports/`, and the CLI's `describe`, `graph` and `export`.
 
-**Next, in the owner's order of 2026-11-08: update the UI, then start on the domain model (build step 7).** The UI update has no design yet: see "Possible next steps".
+**Next, in the owner's order of 2026-11-08: UI stage 2, [spec issue 63](https://github.com/MarcHoff94/crabsim/issues/63), then the domain model (build step 7).** See "Possible next steps".
 
 ## Start here
 
@@ -19,7 +19,7 @@ Written 2026-11-07 at the end of a working session, and updated after each step 
 2. Read `GLOSSARY.md` and `docs/adr/`.
 3. Read "Agreed design" below. Most of it isn't recorded anywhere else.
 4. Read "UI design" below, ADR 0006 and `docs/design/ui-prototype.md` when working on the UI.
-5. For AI-native work, read "AI-native" below, ADR 0007 to 0012, `docs/design/model-file.md`, `docs/design/operation-catalogue.md`, and spec issue 28 with its slices 37, 45 and 56 (`gh issue view 28`).
+5. For AI-native work, read "AI-native" below, ADR 0007 to 0012, `docs/design/model-file.md`, `docs/design/operation-catalogue.md`, and spec issue 28 with its sub-issues 37, 45, 56 and 63 (`gh issue view 28`).
 6. Then go on from "Possible next steps".
 
 ## Current state
@@ -29,7 +29,7 @@ Checked on 2026-11-08, on Rust 1.99.1, at `master` after PR 61 (`4e0f772`): 492 
 | Where | State |
 |---|---|
 | `master` on GitHub | Steps 1 to 6 of the build order, all of the UI's order of work, and steps 1 to 4 of the AI-native order of work through slice 3 of the catalogue, through PR 61 |
-| Open issues | Specs #3 (only build step 7 left) and #28 (steps 5 to 8 left), and #58, the MCP tool list's size, to monitor |
+| Open issues | Specs #3 (only build step 7 left), #28 (steps 5 to 8 left) and #63 (UI stage 2, designed, not built), and #58, the MCP tool list's size, to monitor |
 | `prototype/restore-replay` | The throwaway prototype from build step 5. Keep it, and never merge it |
 | `prototype/ui-bevy` | The throwaway UI prototype from UI step 2, with temporary counters in the session. Keep it, and never merge it |
 | Merged branches still on GitHub | 23, from `feat/headless-cli` to `feat/cli-graph`, all merged into `master`: safe to delete (`git branch -r --merged origin/master`). The old worktree `crabsim-catalogue` was removed on 2026-11-08 |
@@ -422,11 +422,7 @@ Done on 2026-11-07: the wiki was rewritten against today's code, with four pages
 
 In the owner's order of 2026-11-08:
 
-1. **Update the UI.** Not designed yet, so it starts with a design round. What has piled up for it since UI stage 1:
-   - The UI runs only the demo built in code. It could open a models folder and load model files through the catalogue, as the CLI does.
-   - The user's side of the edit queue (ADR 0011): the UI as the user's main front-end, holding `.crabsim/user.lock` so one window owns a models folder, and the user taking the editor right from an agent. **The owner wants to test taking the right from an agent in the UI**, which the second harness trial left untried.
-   - The results views planned in `docs/design/operation-catalogue.md`: a list of runs, comparing runs, the model coloured by a figure, an object's figures across runs.
-   - Changing a model in an open UI after Reset or before Init, through operations, as "AI-native" describes.
+1. **UI stage 2, [spec issue 63](https://github.com/MarcHoff94/crabsim/issues/63),** designed with the owner on 2026-11-08 in five rounds. The UI opens a models folder (`--models`) and runs its model files, laying out unplaced instances by flow and showing a model's problems instead of running it. It reaches the folder only through the catalogue, in-process, as a new `Source::Ui` that counts as the user. It checks the open model and the edit queue about once a second, behind one seam a file watcher could replace: it rebuilds the model at once when no run is in progress, and otherwise says Reset will use it. An "Editing" tab gives the user's queue controls, each checked against the latest queue before it acts. One window holds `.crabsim/user.lock`, and the CLI's changing commands are refused while it does. The top bar gains a seed, changeable before Init or after Reset, and an **End time**, a new live-session setting at which the run halts exactly. Build it in five PRs: the end time, the user lock with `Source::Ui`, opening a folder, picking up changes, then the Editing tab. After that the owner can try taking the editor right from an agent in the UI.
 2. **Step 7 of the build order,** the domain work: stops on Source, Buffer and Drain with failure profiles (and what becomes of `StopCtrl`), fixing Buffer with dwelling time, the failure time bases, and Station capacity with start modes and the exit-strategy seam. Drag and drop, forms and the layout image wait for it. Each new attribute arrives with its operation and its mid-run behaviour (ADR 0008).
 3. **The rest of issue 28:** crabsim's first skills, as the test that the operations are enough (step 5), experiments and studies (6), live-session operations and class changes as interventions (7), then in-app agents (8).
 4. **The MCP tool list's size, [issue 58](https://github.com/MarcHoff94/crabsim/issues/58):** a design round on shrinking it, when the owner chooses. Measure it again after each slice.

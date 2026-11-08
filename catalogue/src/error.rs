@@ -25,6 +25,11 @@ pub enum ErrorKind {
     NotEditor,
     /// The user has blocked this agent from changing models in this folder.
     Blocked,
+    /// The file was written outside crabsim since crabsim last saved it, or crabsim never saved
+    /// it: adopt_model accepts it as it is.
+    ChangedOutside,
+    /// The file isn't the version `expected_hash` names any more: read it again.
+    Conflict,
 }
 
 /// One thing wrong with a model, as `crabsim-model` reports it.

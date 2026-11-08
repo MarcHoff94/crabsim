@@ -32,7 +32,9 @@ impl Folder {
 
     fn with_timeout(name: &str, timeout: Duration) -> Folder {
         let folder = TempFolder::new(name);
-        folder.write("line.json", &crabsim_model::load(LINE).unwrap().save());
+        // Saved by crabsim, as the user, so it isn't changed outside.
+        let user = Catalogue::open(Settings::new(&folder.path, Source::Cli)).unwrap();
+        user.call("write_model", json!({ "path": "line.json", "text": LINE })).unwrap();
         Folder { folder, timeout }
     }
 
@@ -260,7 +262,7 @@ fn only_the_user_controls_the_queue() {
 #[test]
 fn an_agent_keeps_its_id_across_files_and_the_state_is_readable_json() {
     let folder = Folder::new("ids");
-    folder.folder.write("other.json", &crabsim_model::load(LINE).unwrap().save());
+    Catalogue::open(Settings::new(&folder.folder.path, Source::Cli)).unwrap().call("write_model", json!({ "path": "other.json", "text": LINE })).unwrap();
     let (a, b) = (folder.agent(), folder.agent());
     a.claim("working");
     b.ok("claim_model", json!({ "path": "other.json", "purpose": "elsewhere" }));
@@ -279,9 +281,9 @@ fn write_model_and_delete_model_follow_the_same_rules() {
     let (a, b) = (folder.agent(), folder.agent());
     a.claim("working");
     let text = crabsim_model::load(LINE).unwrap().save();
-    assert_eq!(b.err("write_model", json!({ "path": "line.json", "text": text }))["kind"], "not_editor");
+    assert_eq!(b.err("write_model", json!({ "path": "line.json", "text": text, "overwrite": true }))["kind"], "not_editor");
     assert_eq!(b.err("delete_model", json!({ "path": "line.json" }))["kind"], "not_editor");
-    a.ok("write_model", json!({ "path": "line.json", "text": text }));
+    a.ok("write_model", json!({ "path": "line.json", "text": text, "overwrite": true }));
     b.ok("write_model", json!({ "path": "new.json", "text": text }));
     b.ok("validate_model", json!({ "path": "line.json" }));
     b.ok("copy_model", json!({ "from": "line.json", "to": "copy.json" }));

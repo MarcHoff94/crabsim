@@ -19,7 +19,7 @@ An operation implements the `Operation` trait: `NAME`, `DESCRIPTION`, `EFFECT` (
 - **Inputs and outputs** are always JSON objects. Input schemas leave `null` out of optional fields, as the model file's schema does: leave a field out instead.
 - **A model inside an input or output** is the model file's text: a string marked `contentMediaType: application/json`, so a harness never refuses a draft that doesn't fit the schema yet, which `write_model` must be able to save. Its schema, generated from `crabsim_model::schema`, comes from `model_file_format` alone, with a worked example. Until slice 2 the schema rode along in every operation a model passes through as `contentSchema`, which JSON Schema treats as information only, at about 7 KB each, so a harness carried three copies in every session. Leaving them out took the tool list from about 46 KB to about 28 KB, and the longer descriptions after the first harness trial brought it to about 29 KB.
 - **Defaults** of an input are in its schema, as `default`, so an agent sees them.
-- **Errors** are structured: a `kind`, a `message` and, for an invalid model, every `problem` as `crabsim-model` reports it (JSON Pointer, name, message). The kinds are `invalid_input`, `invalid_model`, `not_found`, `outside_models_folder`, `already_exists` and `run_error`. Over MCP they are tool results marked as errors, so the agent reads them, rather than protocol errors its harness would hide.
+- **Errors** are structured: a `kind`, a `message` and, for an invalid model, every `problem` as `crabsim-model` reports it (JSON Pointer, name, message). The kinds are `invalid_input`, `invalid_model`, `not_found`, `outside_models_folder`, `already_exists`, `run_error`, and from slice 2 `not_editor`, `blocked`, `changed_outside` and `conflict`. Over MCP they are tool results marked as errors, so the agent reads them, rather than protocol errors its harness would hide.
 - **What an output means is in the description,** not only in the output schema, because a harness may not show output schemas to the model: the first harness trial's agent never saw them, and asked what `here` and a summed `wall_time_s` meant.
 - **Effects** become MCP's hints: read-only for `validate_model`, `list_models`, `read_model`, `model_file_format`, `get_attributes`, `run_status`, `run_results` and `query_results`, destructive for `write_model`, `edit_model`, `delete_model` and `forget_run`, and neither for the rest.
 
@@ -30,7 +30,8 @@ Slice 1's operations, with `model_file_format`, `edit_model` and `get_attributes
 | `validate_model { path? , text? }` | Every problem in a model, by path or by text |
 | `list_models { folder? }` | The `.json` files in the folder or a subfolder, and below |
 | `read_model { path }` | A file's text, exactly |
-| `write_model { path, text }` | Saves a valid model in canonical form, an invalid one exactly as given, returning its problems either way |
+| `write_model { path, text, overwrite?, expected_hash? }` | Saves a valid model in canonical form, an invalid one exactly as given, returning its problems either way. An existing file only with `overwrite: true` |
+| `adopt_model { path }` | Accepts a file changed outside crabsim as it is, so crabsim may change it again |
 | `copy_model { from, to }` | Copies, refused if `to` exists |
 | `delete_model { path }` | Deletes a file, never a folder |
 | `edit_model { path, changes }` | Applies a batch of typed changes to a valid model, all or nothing, and saves it canonical |
@@ -70,6 +71,20 @@ Slice 2's PR 3a, from spec issue 45 and ADR 0011. Only one editor may change a m
 - **The state** is one JSON file, `.crabsim/editing.json`: the agents, and per file its editor and queue, with times as milliseconds since 1970. It's read and written only while holding an OS lock on `.crabsim/editing.lock`, and written to a temporary file renamed over the old one, so a crash never leaves half of it. A database was rejected because it's little data: no tables or migrations, and readable while debugging. Every call first sweeps it: agents whose process ended go, rights and places past the timeout go, and free rights pass on.
 - **A change holds the lock until its file is written,** so two changes nobody claimed can't both go through. Other processes wait for that long: tens of milliseconds, about 85 ms for one change to a 6,006-object model.
 - **Copied along with a models folder,** the state names processes that don't hold the copy, so they count as ended.
+
+## Changes from outside crabsim
+
+Slice 2's PR 3b, from spec issue 45 and ADR 0011. The editor right covers only changes made through crabsim, and crabsim can't stop another program writing a model file: a text editor, a harness's own file tools, git, or a copy dropped in. So it notices.
+
+- **Records:** each time crabsim saves a model file (`edit_model`, `write_model`) or adopts it, the edit state records the file's SHA-256 under its path, beside the queues in `.crabsim/editing.json`. Deleting a file forgets its record.
+- **Changed outside** is a file whose hash differs from its record, or that has no record: one from before slice 2, or one that appeared. `edit_model`, `write_model` and `delete_model` refuse it with `changed_outside`, so an outside change is never built on unchecked or overwritten. Reads and runs still work, and `read_model`, `validate_model` (by path), `get_attributes` and `start_run` report `changed_outside: true`, so a run says it used an unadopted version.
+- **`adopt_model { path }`** records the file as it is, after the same editor rules as a change. It accepts an invalid file too, giving its problems, because `write_model` would otherwise refuse to fix a file that adopting refused to accept.
+- **A copy** is recorded only if its source was crabsim's own, so an outside change can't slip in through `copy_model`.
+- **`expected_hash`** on `edit_model` and `write_model`, from `read_model` or `get_attributes`, refuses a change with `conflict` if the file isn't that version any more, also after a change through crabsim. It's optional, since the editor right prevents most of this.
+- **`write_model`** refuses an existing file unless given `overwrite: true`, as `copy_model` never overwrites. `edit_model` is the way to change a model.
+- **The user's runs:** over MCP, `forget_run` and `label_run` are refused on runs whose source isn't `mcp`. Agents still read them.
+- **Its limits:** this guards against accidents, not against someone determined. Any program can still write a model file or `editing.json`, and an agent can run the CLI through its harness's shell and count as the user. The owner wants these security implications revisited later (spec issue 45, Out of Scope).
+- **The cost:** a hash of the file per change and per read that reports it, beside the edit state's lock. On the 6,006-object model (1.66 MB) the medians didn't move measurably from PR 2's: `get_attributes` 21.7 ms, `edit_model` with one change 85.1 ms and `validate_model` 20.6 ms, median of 7 in release, one run each on the owner's PC.
 
 ## Scope: what crabsim's operations can touch
 

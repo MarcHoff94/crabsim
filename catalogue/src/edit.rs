@@ -459,6 +459,9 @@ pub struct EditModelInput {
     pub path: String,
     /// The changes, applied in order, all or nothing. Each names its kind in `change`.
     pub changes: Vec<Change>,
+    /// The hash of the file as you read it, from read_model or get_attributes: the batch is
+    /// refused as a conflict if the file has changed since.
+    pub expected_hash: Option<String>,
 }
 
 #[derive(Serialize, JsonSchema)]
@@ -479,14 +482,14 @@ pub struct EditModelOutput {
 
 impl Operation for EditModel {
     const NAME: &'static str = "edit_model";
-    const DESCRIPTION: &'static str = "Changes a valid model file in the models folder with a batch of changes, applied in order, all or nothing, then saves it in canonical form. Each change is an object naming its kind in `change`: add_instance, remove_instance, rename_instance, move_instance, set_class, duplicate_instance, connect, disconnect, add_class, remove_class, rename_class, set_parent, duplicate_class, set_attribute, restore_inheritance or set_model_description. Values are written as in a model file, such as \"0:45\" for a time (model_file_format gives the format). Only the result is checked, so a batch may pass through invalid states, such as adding a Source and then setting its interval. A change that can't apply, such as one naming an unknown instance, refuses the batch with invalid_input naming its place, such as changes/2. A result with problems refuses it with invalid_model and every problem, each pointing into the file the batch would have produced. Either way the file is unchanged. On success it gives the file's new hash, what else was removed, such as the connections of a removed instance, and `instance_order_changed`, true when an instance was removed: random numbers follow an object's position among the instances, so runs before and after are then no longer paired. Renaming keeps the order, and new instances go at the end.";
+    const DESCRIPTION: &'static str = "Changes a valid model file in the models folder with a batch of changes, applied in order, all or nothing, then saves it in canonical form. Each change is an object naming its kind in `change`: add_instance, remove_instance, rename_instance, move_instance, set_class, duplicate_instance, connect, disconnect, add_class, remove_class, rename_class, set_parent, duplicate_class, set_attribute, restore_inheritance or set_model_description. Values are written as in a model file, such as \"0:45\" for a time (model_file_format gives the format). Only the result is checked, so a batch may pass through invalid states, such as adding a Source and then setting its interval. A change that can't apply, such as one naming an unknown instance, refuses the batch with invalid_input naming its place, such as changes/2. A result with problems refuses it with invalid_model and every problem, each pointing into the file the batch would have produced. Either way the file is unchanged. Give `expected_hash`, the hash read_model or get_attributes gave, to have the batch refused as a conflict if the file changed since you read it. Only the file's editor may change it (claim_model), and not a file changed outside crabsim until adopt_model. On success it gives the file's new hash, what else was removed, such as the connections of a removed instance, and `instance_order_changed`, true when an instance was removed: random numbers follow an object's position among the instances, so runs before and after are then no longer paired. Renaming keeps the order, and new instances go at the end.";
     const EFFECT: Effect = Effect::Destructive;
     type Input = EditModelInput;
     type Output = EditModelOutput;
 
     fn run(catalogue: &Catalogue, input: EditModelInput) -> Result<EditModelOutput, OperationError> {
+        let mut editing = crate::editing::before_change(catalogue, &input.path, input.expected_hash.as_deref())?;
         let (file, text) = read_file(catalogue, &input.path)?;
-        let _editing = crate::editing::before_change(catalogue, &input.path)?;
         let model = crabsim_model::load(&text).map_err(|problems| {
             let mut error = OperationError::invalid_model(&format!("`{}`", input.path), &problems);
             error.message = format!("{}, so edit_model can't change it: fix it with write_model first", error.message);
@@ -506,6 +509,7 @@ impl Operation for EditModel {
             .map_err(|problems| OperationError::invalid_model("the model these changes would make", &problems))?
             .save();
         std::fs::write(&file, &edited).map_err(|error| OperationError::run_error(format!("`{}` can't be written: {error}", input.path)))?;
+        editing.record(&edited);
         Ok(EditModelOutput {
             path: input.path,
             hash: hash(&edited),
@@ -561,6 +565,9 @@ pub struct GetAttributesOutput {
     pub path: String,
     /// SHA-256 of the file as it is now.
     pub hash: String,
+    /// The file was changed outside crabsim, or crabsim never saved it: adopt_model before
+    /// changing it.
+    pub changed_outside: bool,
     pub built_in_class: String,
     /// Its classes, nearest first, ending with the built-in class.
     pub chain: Vec<String>,
@@ -617,9 +624,11 @@ impl Operation for GetAttributes {
                 AttributeValue { attribute: attribute.name().to_string(), value, from, class }
             })
             .collect();
+        let changed_outside = crate::editing::changed_outside(catalogue, &input.path, &text)?;
         Ok(GetAttributesOutput {
             path: input.path,
             hash: hash(&text),
+            changed_outside,
             built_in_class: built_in.to_string(),
             chain,
             attributes,

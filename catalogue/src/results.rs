@@ -455,6 +455,19 @@ fn model_order(model_text: &str) -> HashMap<String, usize> {
         .unwrap_or_default()
 }
 
+/// Refuses an agent a change to a run the user started: agents may read the user's runs, but
+/// only the user may relabel or forget them (ADR 0011).
+fn refuse_users_run(catalogue: &Catalogue, number: i64, run: &str, what: &str) -> Result<(), OperationError> {
+    if catalogue.source() != crate::Source::Mcp {
+        return Ok(());
+    }
+    let source: Option<String> = catalogue.store()?.connection().query_row("SELECT source FROM runs WHERE number = ?1", [number], |row| row.get(0)).optional()?;
+    if source.as_deref().is_some_and(|source| source != crate::Source::Mcp.name()) {
+        return Err(OperationError::invalid_input(format!("`{run}` was started by the user, so only the user can {what} it. Agents may read it")));
+    }
+    Ok(())
+}
+
 // --- label_run ---
 
 pub struct LabelRun;
@@ -483,6 +496,7 @@ impl Operation for LabelRun {
 
     fn run(catalogue: &Catalogue, input: LabelRunInput) -> Result<LabelRunOutput, OperationError> {
         let number = run_number(&input.run)?;
+        refuse_users_run(catalogue, number, &input.run, "relabel")?;
         let changed = catalogue.store()?.connection().execute("UPDATE runs SET label = ?2 WHERE number = ?1", params![number, input.label])?;
         if changed == 0 {
             return Err(OperationError::not_found(format!("there is no run `{}` in the results store", input.run)));
@@ -510,6 +524,7 @@ impl Operation for ForgetRun {
 
     fn run(catalogue: &Catalogue, input: crate::jobs::RunInput) -> Result<ForgetRunOutput, OperationError> {
         let number = run_number(&input.run)?;
+        refuse_users_run(catalogue, number, &input.run, "forget")?;
         if catalogue.jobs_status(&input.run).is_some_and(|state| matches!(state, RunState::Queued | RunState::Running)) {
             return Err(OperationError::invalid_input(format!("`{}` is still running: cancel it first", input.run)));
         }

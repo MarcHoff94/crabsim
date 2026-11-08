@@ -115,7 +115,7 @@ fn an_agent_lists_the_tools_validates_runs_and_reads_results_over_stdio() {
     let listed = server.request("tools/list", json!({}));
     let tools = listed["tools"].as_array().unwrap();
     let tool = |name: &str| tools.iter().find(|tool| tool["name"] == name).unwrap_or_else(|| panic!("no tool {name}: {listed}")).clone();
-    assert_eq!(tools.len(), 19, "{listed}");
+    assert_eq!(tools.len(), 20, "{listed}");
     for users_own in ["take_model", "give_model", "move_in_queue", "remove_from_queue", "block_agent", "unblock_agent"] {
         assert!(!tools.iter().any(|tool| tool["name"] == users_own), "{users_own} is the user's own");
     }
@@ -135,7 +135,7 @@ fn an_agent_lists_the_tools_validates_runs_and_reads_results_over_stdio() {
     // Validate, start a short run, poll it and read its results.
     let validated = server.call("validate_model", json!({ "path": "small.json" }));
     assert_eq!(validated["isError"], false, "{validated}");
-    assert_eq!(validated["structuredContent"], json!({ "valid": true, "problems": [] }));
+    assert_eq!(validated["structuredContent"], json!({ "valid": true, "problems": [], "changed_outside": true }), "written by the test, not by crabsim");
 
     let started = server.call("start_run", json!({ "model": "small.json", "seed": 3, "length": "2:00:00", "observations": 2 }));
     let run = started["structuredContent"]["run"].as_str().unwrap().to_string();

@@ -135,6 +135,7 @@ fn the_shortest_inputs_an_operation_accepts_pass_its_input_schema() {
         ("edit_model", json!({ "path": "line.json", "changes": [{ "change": "remove_instance", "name": "Mill" }] })),
         ("edit_model", json!({ "path": "line.json", "changes": [{ "change": "set_attribute", "target": { "class": "Mill" }, "attribute": "process_time", "value": "1:00" }] })),
         ("get_attributes", json!({ "path": "line.json", "target": { "instance": "Mill" } })),
+        ("adopt_model", json!({ "path": "line.json" })),
         ("claim_model", json!({ "path": "line.json", "purpose": "adding a mill" })),
         ("release_model", json!({ "path": "line.json" })),
         ("get_edit_queue", json!({})),
@@ -184,13 +185,15 @@ fn validate_model_reports_every_problem_by_path_or_by_text() {
 
     let by_path = setup.ok("validate_model", json!({ "path": "broken.json" }));
     let by_text = setup.ok("validate_model", json!({ "text": BROKEN }));
-    assert_eq!(by_path, by_text);
+    assert_eq!(by_path["problems"], by_text["problems"]);
+    assert_eq!(by_path["changed_outside"], true, "only a file can be changed outside");
+    assert!(by_text.get("changed_outside").is_none());
     assert_eq!(by_path["valid"], false);
     assert_eq!(by_path["problems"], problems_of(BROKEN));
     assert_eq!(by_path["problems"].as_array().unwrap().len(), 3);
 
     let valid = setup.ok("validate_model", json!({ "path": "plant/small.json" }));
-    assert_eq!(valid, json!({ "valid": true, "problems": [] }));
+    assert_eq!(valid, json!({ "valid": true, "problems": [], "changed_outside": true }));
 
     let missing = setup.err("validate_model", json!({ "path": "nothing.json" }));
     assert_eq!(missing["kind"], "not_found");
@@ -222,7 +225,10 @@ fn read_model_gives_the_files_text_exactly() {
     let setup = Setup::new("read");
     setup.folder.write("small.json", SMALL);
     let read = setup.ok("read_model", json!({ "path": "small.json" }));
-    assert_eq!(read, json!({ "path": "small.json", "text": SMALL }));
+    assert_eq!(read["path"], "small.json");
+    assert_eq!(read["text"], SMALL);
+    assert_eq!(read["changed_outside"], true, "crabsim never saved it");
+    assert_eq!(read["hash"].as_str().unwrap().len(), 64);
     assert_eq!(setup.err("read_model", json!({ "path": "gone.json" }))["kind"], "not_found");
     assert_eq!(setup.err("read_model", json!({ "path": "notes.txt" }))["kind"], "invalid_input");
 }
@@ -242,7 +248,7 @@ fn write_model_saves_a_valid_model_canonical_and_an_invalid_one_as_given_with_it
     assert_eq!(setup.folder.read("draft.json"), BROKEN);
 
     let not_json = "{ this is work in progress";
-    let written = setup.ok("write_model", json!({ "path": "draft.json", "text": not_json }));
+    let written = setup.ok("write_model", json!({ "path": "draft.json", "text": not_json, "overwrite": true }));
     assert_eq!(written["saved"], "as_given");
     assert_eq!(setup.folder.read("draft.json"), not_json, "it replaces what was there");
 }
@@ -268,6 +274,7 @@ fn delete_model_deletes_files_only() {
     let setup = Setup::new("delete");
     setup.folder.write("small.json", SMALL);
     setup.folder.write("plant.json/inside.json", SMALL);
+    setup.ok("adopt_model", json!({ "path": "small.json" }));
 
     assert_eq!(setup.ok("delete_model", json!({ "path": "small.json" })), json!({ "deleted": "small.json" }));
     assert!(!setup.folder.join("small.json").exists());

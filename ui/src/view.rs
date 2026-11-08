@@ -97,6 +97,14 @@ pub enum JumpProblem {
     NotEarlier,
 }
 
+/// Why a time typed in as the end time can't be used.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EndTimeProblem {
+    NotATime,
+    /// An end time has to be later than shown time.
+    NotLater,
+}
+
 /// How much simulation time passes per unit of wall time to start with: 60 times real time, which
 /// shows the demo at about 30 events a second.
 pub const DEFAULT_SPEED: f64 = 60.0;
@@ -171,6 +179,8 @@ pub struct ViewState {
     marks: Marks,
     /// Whether the window asked the session where stepping back goes and awaits the answer.
     locating: bool,
+    /// Where the session halts by itself, as last set.
+    end_time: Option<SimTime>,
 }
 
 /// What the inspector says about the selected object.
@@ -270,7 +280,18 @@ impl ViewState {
             last_request: None,
             marks: Marks::default(),
             locating: false,
+            end_time: None,
         }
+    }
+
+    /// A view of `model` that keeps the window's settings from `old`: its speed, time mode and
+    /// end time, which the window gives the new session too.
+    pub fn with_settings_of(model: &ModelDescription, old: &ViewState) -> ViewState {
+        let mut view = ViewState::new(model);
+        view.speed = old.speed;
+        view.time_mode = old.time_mode;
+        view.end_time = old.end_time;
+        view
     }
 
     /// Takes in one output from the session, read at wall time `wall`.
@@ -380,6 +401,32 @@ impl ViewState {
     /// Whether the run reported an error, so that only Reset or going back gets it going again.
     pub fn run_failed(&self) -> bool {
         self.status == SessionStatus::Failed
+    }
+
+    /// The end time, as last set.
+    pub fn end_time(&self) -> Option<SimTime> {
+        self.end_time
+    }
+
+    /// Notes the end time the window gave the session.
+    pub fn set_end_time(&mut self, end: Option<SimTime>) {
+        self.end_time = end;
+    }
+
+    /// The end time for `typed`, as the end time field takes it: later than shown time, in the
+    /// form shown time is written, such as `30d`.
+    pub fn end_time_target(&self, typed: &str) -> Result<SimTime, EndTimeProblem> {
+        let end = parse_time(typed).ok_or(EndTimeProblem::NotATime)?;
+        if end <= self.picture.shown() {
+            return Err(EndTimeProblem::NotLater);
+        }
+        Ok(end)
+    }
+
+    /// Whether the seed can change now: only before Init or after Reset, since a run draws its
+    /// random numbers from the seed from Init on.
+    pub fn allows_seed(&self) -> bool {
+        !self.initialised && self.status == SessionStatus::Halted
     }
 
     /// The time to go back to for `typed`, as the jump field takes it: earlier than or at shown

@@ -2630,7 +2630,11 @@ version = "0.1.0"
 dependencies = [
  "bevy",
  "bevy_egui",
+ "clap",
  "crabsim",
+ "crabsim-catalogue",
+ "crabsim-model",
+ "serde_json",
 ]
 
 [[package]]

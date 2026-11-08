@@ -174,8 +174,8 @@ Discrete-event material-flow simulator in Rust, built for speed. Engine library 
 - Interventions act at shown time, discard the computed future and go in an intervention log; Pause and forced failure reach the run through `schedule_event`
 - Checkpoint = clone of the run + log position; going back restores the nearest earlier one and replays with recording off; every 100,000 events within 256 MB, thinning the older half, Init's always kept
 - `Picture`: what the user knows at shown time, fed every output in order; statistics and waiting predecessors only from a full state
-- UI (`ui/`): Bevy + egui, demo at 60x real time, 2D flat meshes, controls, inspector, intervention marks, MUs in holders when zoomed in and slow
-- UI logic in plain Rust: `view.rs` (view state), `camera.rs`, `marks.rs`; `main.rs` only draws
+- UI (`ui/`): Bevy + egui; `--models <folder>` lists model files (problems marked and shown instead of running) and runs the one clicked, through the catalogue as `Source::Ui` holding `.crabsim/user.lock`; demo without a folder or when another window has it; unplaced instances laid out (columns by flow, or a row below), never saved; seed (before Init or after Reset) and end time in the top bar; 60x real time, 2D flat meshes, controls, inspector, intervention marks, MUs in holders when zoomed in and slow
+- UI logic in plain Rust: `workspace.rs` (folder, models, layout, seed, sessions), `view.rs` (view state), `camera.rs`, `marks.rs`; `main.rs` only draws
 
 #### Invariants
 - Sending never blocks the session thread; past 256 unread outputs it stops releasing, drops nothing

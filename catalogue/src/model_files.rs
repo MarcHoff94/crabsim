@@ -22,6 +22,7 @@ pub(crate) fn entries() -> Vec<Entry> {
     entries.extend(crate::editing::entries());
     entries.extend(crate::jobs::entries());
     entries.extend(crate::results::entries());
+    entries.extend(crate::compare::entries());
     entries.extend(crate::store::entries());
     entries
 }

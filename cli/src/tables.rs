@@ -234,3 +234,50 @@ pub fn queue(queue: &Value) -> String {
     }
     text
 }
+
+/// What `compare_runs` gives, as a table per object.
+pub fn compared(compared: &Value) -> String {
+    let side = |side: &Value| {
+        let label = side["label"].as_str().map_or(String::new(), |label| format!(" \"{label}\""));
+        format!("{}{label}", cell(&side["run"]))
+    };
+    let pairing = match compared["pairing"].as_str() {
+        Some("paired") => "paired".to_string(),
+        _ => format!("not paired, because {}", cell(&compared["why_unpaired"])),
+    };
+    let mut text = format!("{} minus {}: {pairing}\n", side(&compared["b"]), side(&compared["a"]));
+    for dropped in compared["dropped"].as_array().into_iter().flatten() {
+        text += &format!("Left out: {}\n", cell(&dropped["reason"]));
+    }
+    for object in compared["objects"].as_array().into_iter().flatten() {
+        let unpaired = object.get("why_unpaired").map_or(String::new(), |why| format!(" (not paired: {})", cell(why)));
+        text += &format!("\n{}{unpaired}\n", cell(&object["name"]));
+        let mut rows = Vec::new();
+        for statistic in crabsim_catalogue::STATISTICS {
+            let Some(figure) = object["figures"].get(statistic) else { continue };
+            let interval = match figure["ci95"].as_array() {
+                Some(bounds) => format!("{} to {}", amount(statistic, &bounds[0]), amount(statistic, &bounds[1])),
+                None => String::new(),
+            };
+            let relative = figure["relative"].as_f64().map_or(String::new(), |share| format!("{:+.1} %", share * 100.0));
+            rows.push(vec![
+                statistic.to_string(),
+                amount(statistic, &figure["a"]),
+                amount(statistic, &figure["b"]),
+                amount(statistic, &figure["difference"]),
+                interval,
+                relative,
+                if figure["clear"] == true { "yes".to_string() } else { "no".to_string() },
+                cell(&figure["method"]),
+            ]);
+        }
+        text += &table(&["Statistic", "a", "b", "Difference", "95% interval", "Relative", "Clear", "Method"], &rows);
+    }
+    for (which, key) in [("a", "only_in_a"), ("b", "only_in_b")] {
+        let names: Vec<String> = compared[key].as_array().into_iter().flatten().map(cell).collect();
+        if !names.is_empty() {
+            text += &format!("\nOnly in {which}'s model: {}\n", names.join(", "));
+        }
+    }
+    text
+}

@@ -43,6 +43,10 @@ A model with chosen attribute values and a defined random seed, run as one or mo
 One simulation run of an experiment. Observations of one experiment differ only in their seeds, which all follow from the experiment's seed.
 _Avoid_: Replication
 
+**Paired runs**:
+Two runs whose observation *k* used the same seed, so an object at the same place among the instances in both models drew the same random numbers. Their difference then has a far narrower interval than either run alone, which is what makes comparing two variants of a model cheap.
+_Avoid_: Matched runs
+
 **Simulation study**:
 Several experiments of one model, each changing different attribute values, each run as a defined number of observations. By default, observation *k* of every experiment uses the same seed, so the experiments differ by their values and not by chance.
 

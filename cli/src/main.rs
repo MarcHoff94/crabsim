@@ -141,6 +141,22 @@ enum Command {
         /// The model file, such as `line.json`.
         path: String,
     },
+    /// Compares two runs, such as a model and a variant: each figure's difference b minus a with
+    /// its 95% interval, paired where the runs drew the same random numbers.
+    Compare {
+        #[arg(long)]
+        models: PathBuf,
+        /// The base run, such as `run-3`.
+        a: String,
+        /// The run compared with it.
+        b: String,
+        /// An instance to compare instead of the default. Give it more than once for more.
+        #[arg(long = "object")]
+        objects: Vec<String>,
+        /// A class whose instances to compare instead of the default.
+        #[arg(long = "class")]
+        classes: Vec<String>,
+    },
     /// Shows who may change model files and who waits, and controls it, as the user.
     Queue {
         #[command(subcommand)]
@@ -276,6 +292,18 @@ fn main() -> ExitCode {
         Some(Command::Adopt { models, path }) => catalogue(&models).and_then(|catalogue| {
             let adopted = catalogue.call("adopt_model", json!({ "path": path }))?;
             print!("{}", tables::adopted(&adopted));
+            Ok(true)
+        }),
+        Some(Command::Compare { models, a, b, objects, classes }) => catalogue(&models).and_then(|catalogue| {
+            let mut input = json!({ "a": a, "b": b });
+            if !objects.is_empty() {
+                input["objects"] = json!(objects);
+            }
+            if !classes.is_empty() {
+                input["classes"] = json!(classes);
+            }
+            let compared = catalogue.call("compare_runs", input)?;
+            print!("{}", tables::compared(&compared));
             Ok(true)
         }),
         Some(Command::Queue { action }) => queue(action),

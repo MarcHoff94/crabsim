@@ -750,7 +750,7 @@ pub struct QueueOutput {
 
 impl Operation for TakeModel {
     const NAME: &'static str = "take_model";
-    const DESCRIPTION: &'static str = "For the user: takes the right to change a model file now, from any agent that holds it, which isn't queued again. The user's right never runs out: release_model gives it back to the first waiting agent.";
+    const DESCRIPTION: &'static str = "For the user: takes the right to change a model file now, from any agent that holds it, which then waits first in line, keeping its purpose. The user's right never runs out: release_model gives it back to the first waiting agent, so an agent interrupted carries on where it was.";
     const EFFECT: Effect = Effect::Additive;
     const CHANGES_MODELS: bool = true;
     const USER_ONLY: bool = true;
@@ -762,7 +762,13 @@ impl Operation for TakeModel {
         let path = key(catalogue, &input.path)?;
         let mut editing = catalogue.editing()?;
         let now = editing.now;
-        editing.file(&path).editor = Some(Editor { process: None, purpose: None, since: now, last_active: now });
+        let file = editing.file(&path);
+        // An agent interrupted waits first in line, so releasing gives it back its right.
+        if let Some(Editor { process: Some(process), purpose, .. }) = file.editor.take() {
+            let purpose = purpose.unwrap_or_default();
+            file.queue.insert(0, Waiting { process, purpose, asked: now, last_asked: now });
+        }
+        file.editor = Some(Editor { process: None, purpose: None, since: now, last_active: now });
         Ok(QueueOutput { file: editing.view(&path) })
     }
 }

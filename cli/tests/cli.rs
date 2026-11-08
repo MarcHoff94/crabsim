@@ -369,6 +369,8 @@ fn the_user_sees_and_controls_the_edit_queue() {
     assert_eq!(queue()["editor"]["user"], true);
     assert!(crabsim_with_stdin(&["edit", "--models", models.arg(), "demo.json", "-"], SLOWER).status.success(), "the user holds the right now");
     assert!(crabsim(&["queue", "release", "--models", models.arg(), "demo.json"]).status.success());
+    assert_eq!(queue()["editor"]["agent"], first_id.as_str(), "the agent interrupted waited first in line");
+    first.call("release_model", serde_json::json!({ "path": "demo.json" })).unwrap();
     assert_eq!(queue()["editor"]["agent"], second_id.as_str());
 
     let third = agent(&models);

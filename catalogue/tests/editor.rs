@@ -172,7 +172,7 @@ fn an_unused_right_passes_on_after_the_timeout_and_a_queued_agent_that_stops_ask
 }
 
 #[test]
-fn the_user_takes_the_right_at_once_and_releases_it_to_the_first_waiting() {
+fn the_user_takes_the_right_at_once_and_the_agent_waits_first_in_line_to_get_it_back() {
     let folder = Folder::new("take");
     let (a, b, user) = (folder.agent(), folder.agent(), folder.user());
     a.claim("working");
@@ -184,9 +184,11 @@ fn the_user_takes_the_right_at_once_and_releases_it_to_the_first_waiting() {
     assert!(lost["message"].as_str().unwrap().contains("the user"), "{lost}");
     user.change().unwrap();
     assert_eq!(user.queue()["editor"]["user"], true);
-    assert_eq!(waiting(&user.queue()), [b.id()], "a, which lost the right, isn't queued again");
+    assert_eq!(waiting(&user.queue()), [a.id(), b.id()], "a, interrupted, waits first in line");
+    assert_eq!(user.queue()["queue"][0]["purpose"], "working", "keeping its purpose");
     user.ok("release_model", json!({ "path": "line.json" }));
-    assert_eq!(b.claim("next")["state"], "granted");
+    assert_eq!(a.claim("working")["state"], "granted", "releasing gives a its right back");
+    assert_eq!(waiting(&user.queue()), [b.id()]);
 }
 
 #[test]

@@ -27,6 +27,7 @@ use crabsim_ui::view::{
     Point, MU_METRES, Shade, StepBack, ViewState, format_time, format_time_exact, label_size, parse_time,
 };
 use crabsim_ui::attributes::{Form, RepairKind};
+use crabsim_ui::editing::{ActRefusal, Agent, Holder, Queue, QueueAction};
 use crabsim_ui::workspace::{AttributeView, ModelChange, Refusal, ValueFrom, Workspace};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -107,9 +108,14 @@ fn main() {
             attributes: None,
             forms: HashMap::new(),
             refused: None,
+            tab: Tab::Inspector,
+            queue: None,
+            queue_stamp: None,
+            queue_note: None,
+            confirm_take: None,
         })
         .insert_resource(Session(Mutex::new(session)))
-        .insert_resource(WatchedFile(Arc::new(Mutex::new(None))))
+        .insert_resource(WatchedFile(Arc::new(Mutex::new(Vec::new()))))
         .add_systems(Startup, (setup, watch_the_open_file))
         .add_systems(
             Update,
@@ -168,6 +174,23 @@ struct Ui {
     /// The last change refused, for its attribute: why, and the change to make anyway if an agent
     /// holds the file.
     refused: Option<(String, Refusal, Option<AttributeChange>)>,
+    /// Which tab the right-hand column shows.
+    tab: Tab,
+    /// The edit queue as last read, while the Editing tab shows it.
+    queue: Option<Result<Queue, String>>,
+    /// The edit state file's size and modified time when the queue was read.
+    queue_stamp: Option<(u64, Option<std::time::SystemTime>)>,
+    /// Why the last control did nothing, such as the queue having changed.
+    queue_note: Option<String>,
+    /// Taking the right from this agent, waiting for the user to confirm it.
+    confirm_take: Option<(Agent, Queue)>,
+}
+
+/// The tabs of the right-hand column.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Tab {
+    Inspector,
+    Editing,
 }
 
 /// A change to one attribute of the selected instance, asked for in the inspector.
@@ -198,16 +221,17 @@ const CLICK_SLOP: f32 = 4.0;
 const SELECTION: Color = Color::srgb(1.0, 1.0, 1.0);
 const MU_COLOUR: Color = Color::srgb(0.96, 0.96, 0.93);
 
-/// The model file open, which a thread of its own watches while the window is idle.
+/// The model file open and the edit state, which a thread of its own watches while the window is
+/// idle.
 #[derive(Resource)]
-struct WatchedFile(Arc<Mutex<Option<PathBuf>>>);
+struct WatchedFile(Arc<Mutex<Vec<PathBuf>>>);
 
 /// How often the watcher looks at the open file while the window is idle.
 const WATCH_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Wakes the window when the open model file's size or modified time changes, such as when an
-/// agent edits it, so a halted window stays idle until then. While the window draws frames, it
-/// checks the file itself, each frame.
+/// agent edits it, or the edit state's does, such as when an agent claims a model, so a halted
+/// window stays idle until then. While the window draws frames, it checks them itself, each frame.
 fn watch_the_open_file(watched: Res<WatchedFile>, proxy: Res<EventLoopProxyWrapper>) {
     let file = watched.0.clone();
     let proxy = (**proxy).clone();
@@ -215,8 +239,9 @@ fn watch_the_open_file(watched: Res<WatchedFile>, proxy: Res<EventLoopProxyWrapp
         let mut seen = None;
         loop {
             std::thread::sleep(WATCH_INTERVAL);
-            let path = file.lock().expect("the watched path's lock is never poisoned").clone();
-            let stamp = path.and_then(|path| std::fs::metadata(path).ok()).map(|metadata| (metadata.len(), metadata.modified().ok()));
+            let paths = file.lock().expect("the watched paths' lock is never poisoned").clone();
+            let stamp: Vec<_> = paths.iter().map(|path| stamp_of(path)).collect();
+            let stamp = Some(stamp);
             if stamp != seen {
                 seen = stamp;
                 if proxy.send_event(WinitUserEvent::WakeUp).is_err() {
@@ -227,16 +252,21 @@ fn watch_the_open_file(watched: Res<WatchedFile>, proxy: Res<EventLoopProxyWrapp
     });
 }
 
+/// A file's size and modified time, which change whenever it is written.
+fn stamp_of(path: &std::path::Path) -> Option<(u64, Option<std::time::SystemTime>)> {
+    std::fs::metadata(path).ok().map(|metadata| (metadata.len(), metadata.modified().ok()))
+}
+
 /// Notices that the open model file changed. With no run in progress the window uses the new
 /// model at once, and otherwise it says that Reset will.
 fn pick_up_changes(mut ui: ResMut<Ui>, session: Res<Session>, watched: Res<WatchedFile>, time: Res<Time<Real>>) {
     let wall = time.elapsed();
     let ui = &mut *ui;
     {
-        let file = ui.workspace.watched_file();
-        let mut watching = watched.0.lock().expect("the watched path's lock is never poisoned");
-        if *watching != file {
-            *watching = file;
+        let files: Vec<PathBuf> = ui.workspace.watched_file().into_iter().chain(ui.workspace.editing_file()).collect();
+        let mut watching = watched.0.lock().expect("the watched paths' lock is never poisoned");
+        if *watching != files {
+            *watching = files;
         }
     }
     match ui.workspace.check() {
@@ -572,16 +602,57 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
         ui.refused = None;
     }
     let editable = ui.view.reloads_now();
+    // The edit queue, read when the Editing tab opens and whenever the edit state changes.
+    if ui.tab == Tab::Editing && ui.workspace.has_folder() {
+        let stamp = ui.workspace.editing_file().and_then(|file| stamp_of(&file));
+        if ui.queue.is_none() || stamp != ui.queue_stamp {
+            ui.queue = Some(ui.workspace.edit_queue());
+            ui.queue_stamp = stamp;
+        }
+    }
     let mut intervention = None;
     let mut attribute_change = None;
+    let mut queue_action = None;
     let right = egui::Panel::right("inspector").exact_size(INSPECTOR_WIDTH).show(&mut root, |panel| {
-        egui::ScrollArea::vertical().show(panel, |panel| {
-            intervention = inspector(panel, inspection.as_ref(), &mut ui.process_time_text.1);
-            if let Some((_, attributes)) = &ui.attributes {
-                attribute_change = attributes_section(panel, attributes, &mut ui.forms, editable, ui.refused.as_ref());
+        panel.horizontal(|row| {
+            for (tab, label) in [(Tab::Inspector, "Inspector"), (Tab::Editing, "Editing")] {
+                if row.selectable_label(ui.tab == tab, label).clicked() && ui.tab != tab {
+                    ui.tab = tab;
+                    ui.queue = None;
+                    ui.queue_note = None;
+                }
             }
         });
+        panel.separator();
+        egui::ScrollArea::vertical().show(panel, |panel| match ui.tab {
+            Tab::Inspector => {
+                intervention = inspector(panel, inspection.as_ref(), &mut ui.process_time_text.1);
+                if let Some((_, attributes)) = &ui.attributes {
+                    attribute_change = attributes_section(panel, attributes, &mut ui.forms, editable, ui.refused.as_ref());
+                }
+            }
+            Tab::Editing => queue_action = editing_tab(panel, ui.workspace.opened(), ui.queue.as_ref(), ui.queue_note.as_deref()),
+        });
     });
+    // Taking the right from an agent asks first, naming it and its purpose.
+    if let Some(action) = queue_action {
+        let shown = ui.queue.as_ref().and_then(|queue| queue.as_ref().ok()).cloned().unwrap_or_default();
+        let holder = ui.workspace.opened().and_then(|path| shown.agent_holding(path)).cloned();
+        match (action, holder) {
+            (QueueAction::Take, Some(agent)) => ui.confirm_take = Some((agent, shown)),
+            (action, _) => act_on_queue(ui, &shown, action),
+        }
+        ui.view.commanded(wall);
+    }
+    if let Some((agent, shown)) = ui.confirm_take.clone()
+        && let Some(confirmed) = confirm_taking(&ctx, &agent)
+    {
+        ui.confirm_take = None;
+        if confirmed {
+            act_on_queue(ui, &shown, QueueAction::Take);
+        }
+        ui.view.commanded(wall);
+    }
     if let (Some((change, take_over)), Some(id)) = (attribute_change, selected) {
         let name = ui.view.objects()[id as usize].name.clone();
         let done = match &change {
@@ -1165,6 +1236,163 @@ fn inspector(ui: &mut egui::Ui, inspection: Option<&Inspection>, process_time_te
             }
         });
         ui.label(egui::RichText::new(format!("as of {}", format_time_exact(details.as_of))).weak().small());
+    }
+    asked
+}
+
+/// Does one of the user's controls of the edit queue, if the queue is still as shown. Either way
+/// the tab shows the queue as it is now, and why nothing was done, if it wasn't.
+fn act_on_queue(ui: &mut Ui, shown: &Queue, action: QueueAction) {
+    match ui.workspace.act(shown, action) {
+        Ok(now) => {
+            ui.queue = Some(Ok(now));
+            ui.queue_note = None;
+        }
+        Err(ActRefusal::Changed { now, what }) => {
+            ui.queue = Some(Ok(now));
+            ui.queue_note = Some(format!("{what} Nothing was done: look again and decide."));
+        }
+        Err(ActRefusal::Refused(why)) => ui.queue_note = Some(why),
+    }
+    ui.queue_stamp = ui.workspace.editing_file().and_then(|file| stamp_of(&file));
+}
+
+/// Asks before taking the right to change the model from the agent that holds it. `Some(true)`
+/// once confirmed, `Some(false)` once cancelled.
+fn confirm_taking(ctx: &egui::Context, agent: &Agent) -> Option<bool> {
+    let mut answer = None;
+    let modal = egui::Modal::new(egui::Id::new("confirm taking")).show(ctx, |modal| {
+        modal.set_max_width(420.0);
+        modal.heading(format!("Take the right from {}?", agent.agent));
+        modal.label(format!("{} ({}) is changing this model: {}.", agent.agent, agent.client, agent.purpose));
+        modal.label("It waits first in line, and gets the right back when you release it.");
+        modal.add_space(8.0);
+        modal.horizontal(|row| {
+            if row.button("Take it").clicked() {
+                answer = Some(true);
+            }
+            if row.button("Cancel").clicked() {
+                answer = Some(false);
+            }
+        });
+    });
+    if modal.should_close() && answer.is_none() {
+        answer = Some(false);
+    }
+    answer
+}
+
+/// Who may change the open model and who waits, the other files someone edits or waits for, and
+/// the blocked agents, with the user's controls. Returns the control used, if any.
+fn editing_tab(ui: &mut egui::Ui, opened: Option<&str>, queue: Option<&Result<Queue, String>>, note: Option<&str>) -> Option<QueueAction> {
+    ui.heading("Editing");
+    let mut asked = None;
+    let queue = match queue {
+        Some(Ok(queue)) => queue,
+        Some(Err(error)) => {
+            ui.label(egui::RichText::new(error).weak());
+            return None;
+        }
+        None => {
+            ui.label(egui::RichText::new("No models folder is open.").weak());
+            return None;
+        }
+    };
+    if let Some(note) = note {
+        ui.colored_label(egui::Color32::from_rgb(240, 200, 80), note);
+        ui.add_space(4.0);
+    }
+    let agent_line = |agent: &Agent| format!("{} ({}): {}", agent.agent, agent.client, agent.purpose);
+    match opened {
+        None => {
+            ui.label(egui::RichText::new("Open a model to see who may change it.").weak());
+        }
+        Some(path) => {
+            let file = queue.file(path);
+            ui.label(egui::RichText::new(path).strong());
+            match &file.editor {
+                None => {
+                    ui.label("Nobody holds the right to change it.");
+                    if ui.button("Take").on_hover_text("Hold the right to change this model until you release it").clicked() {
+                        asked = Some(QueueAction::Take);
+                    }
+                }
+                Some(Holder::User { since }) => {
+                    ui.label(format!("You hold the right, since {since}."));
+                    if ui.button("Release").on_hover_text("Give it to the first waiting agent").clicked() {
+                        asked = Some(QueueAction::Release);
+                    }
+                }
+                Some(Holder::Agent(agent)) => {
+                    ui.label(format!("{} holds the right, since {}.", agent_line(agent), agent.since));
+                    ui.horizontal(|row| {
+                        if row.button("Take").on_hover_text("Take the right now. The agent waits first in line").clicked() {
+                            asked = Some(QueueAction::Take);
+                        }
+                        if row.button("Remove").on_hover_text("Take the right away from it").clicked() {
+                            asked = Some(QueueAction::Remove(agent.agent.clone()));
+                        }
+                        if row.button("Block").on_hover_text("Block this agent session from changing models in the folder").clicked() {
+                            asked = Some(QueueAction::Block(agent.agent.clone()));
+                        }
+                    });
+                }
+            }
+            ui.add_space(6.0);
+            if file.queue.is_empty() {
+                ui.label(egui::RichText::new("Nobody waits for it.").weak());
+            } else {
+                ui.label(egui::RichText::new("Waiting, in the order they'll get it").strong());
+            }
+            let last = file.queue.len().saturating_sub(1);
+            for (place, agent) in file.queue.iter().enumerate() {
+                ui.label(format!("{}. {}", place + 1, agent_line(agent)));
+                ui.horizontal(|row| {
+                    if row.small_button("Give").on_hover_text("Give it the right now").clicked() {
+                        asked = Some(QueueAction::Give(agent.agent.clone()));
+                    }
+                    if row.add_enabled(place > 0, egui::Button::new("▲").small()).on_hover_text("Move up").clicked() {
+                        asked = Some(QueueAction::Up(agent.agent.clone()));
+                    }
+                    if row.add_enabled(place < last, egui::Button::new("▼").small()).on_hover_text("Move down").clicked() {
+                        asked = Some(QueueAction::Down(agent.agent.clone()));
+                    }
+                    if row.small_button("Remove").clicked() {
+                        asked = Some(QueueAction::Remove(agent.agent.clone()));
+                    }
+                    if row.small_button("Block").clicked() {
+                        asked = Some(QueueAction::Block(agent.agent.clone()));
+                    }
+                });
+            }
+        }
+    }
+    let others = queue.others(opened.unwrap_or_default());
+    if !others.is_empty() {
+        ui.add_space(8.0);
+        ui.separator();
+        ui.label(egui::RichText::new("Other files").strong());
+        for file in others {
+            let who = match &file.editor {
+                None => "nobody".to_string(),
+                Some(Holder::User { .. }) => "you".to_string(),
+                Some(Holder::Agent(agent)) => agent.agent.clone(),
+            };
+            ui.label(format!("{}: {who} edits, {} waiting", file.path, file.queue.len()));
+        }
+    }
+    if !queue.blocked.is_empty() {
+        ui.add_space(8.0);
+        ui.separator();
+        ui.label(egui::RichText::new("Blocked").strong());
+        for (agent, client) in &queue.blocked {
+            ui.horizontal(|row| {
+                row.label(format!("{agent} ({client})"));
+                if row.small_button("Unblock").clicked() {
+                    asked = Some(QueueAction::Unblock(agent.clone()));
+                }
+            });
+        }
     }
     asked
 }

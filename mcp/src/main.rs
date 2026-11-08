@@ -30,6 +30,7 @@ struct Opts {
 
 /// What a harness shows its agent about the server as a whole.
 const INSTRUCTIONS: &str = "crabsim is a discrete-event material-flow simulator. Models are JSON files in one models folder, named by their path inside it. \
+Start with model_file_format, which explains how models are written and how their objects behave. \
 Typical work: list_models, read_model, write_model or validate_model; then start_run, poll run_status until it's done, and read run_results. \
 Every run's results stay in a results store, which query_results reads with SQL to compare runs and models.";
 

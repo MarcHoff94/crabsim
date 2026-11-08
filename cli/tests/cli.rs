@@ -143,7 +143,9 @@ fn run_runs_an_experiment_prints_its_results_and_keeps_them() {
     assert!(output.status.success(), "{output:?}");
     let printed = stdout(&output);
     assert!(printed.starts_with("run-1 \"baseline\": demo.json, seed 4, 3 observations of 02:00:00"), "{printed}");
-    assert!(printed.contains("Drain (Drain, Drain): drain"), "{printed}");
+    assert!(printed.contains("Drain (Drain, Drain): all"), "a model this small is shown whole: {printed}");
+    let lead_time = printed.lines().find(|line| line.starts_with("mean_lead_time_s")).expect("lead time is shown");
+    assert!(lead_time.contains("00:0"), "as a time, as the UI shows it: {lead_time}");
     assert!(printed.contains("throughput_per_hour"), "{printed}");
     assert!(printed.contains("3 observations ended, none failed:"), "{printed}");
     assert!(!printed.contains("Observation"), "no table of observations by default: {printed}");

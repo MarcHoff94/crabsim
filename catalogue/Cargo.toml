@@ -13,7 +13,7 @@ serde_json = { version = "1", features = ["preserve_order"] }
 # The same pinned version as `crabsim-model`, so operation schemas and the model file's schema agree.
 schemars = "=1.2.3"
 # The results store, with SQLite compiled in so nothing has to be installed (ADR 0010).
-rusqlite = { version = "0.41", default-features = false, features = ["bundled", "hooks", "limits"] }
+rusqlite = { version = "0.41", default-features = false, features = ["bundled", "functions", "hooks", "limits"] }
 # The hash of each run's canonical model text.
 sha2 = "0.11"
 log = "0.4"

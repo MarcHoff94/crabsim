@@ -347,23 +347,36 @@ const EXAMPLE: &str = r#"{
 #[serde(deny_unknown_fields)]
 pub struct ModelFileFormatInput {}
 
+/// How the built-in classes behave, which the schema can't say.
+const SEMANTICS: &str = "An MU (moveable unit) is one item flowing through the model. Objects pass MUs to their `successors` by push: an object holding a finished MU offers it on, and a move takes no simulated time. \
+The successors are tried round-robin, starting after the one that took the last MU, skipping any that can't take one now. When none can, the object is blocked: it keeps the MU and waits, and when a successor frees up, the predecessor that has waited longest gets it first. \
+A Source creates one MU, which takes its `interval`, then offers it on. It creates the next only once that one has left, so a blocked Source falls behind and loses arrivals rather than piling them up. An interval of 0 creates the next MU as soon as one leaves. \
+A Station holds one MU at a time and works on it for its `process_time`, then offers it on, blocked until a successor takes it. With `failures`, it fails at random: `availability` is the share of time it isn't failed, the time between failures follows from it and the mean repair time, and while it's failed its work is frozen and it takes and releases nothing. A Station with a process time of 0 is a dummy Station that passes MUs straight on. `starting_mus` puts an MU in it at the start. \
+A Buffer holds up to `capacity` MUs, but is known not to pass them on correctly yet: don't use it. \
+A Drain takes every MU it's offered at once, so it's never blocked, and measures throughput and lead time, from leaving the Source to entering the Drain. Only Stations can fail so far. \
+Instances are built in file order, and each object's random numbers come from the run's seed and its position among the instances, so keep the order of instances when comparing variants of a model. \
+Statistics per object: working_share, blocked_share, idle_share, failed_share and paused_share of the time after the warm-up, MUs in and out, failures, and achieved availability. A model never has a bottleneck by name: look for the object that is busiest while what comes before it is blocked and what comes after it is idle.";
+
 #[derive(Serialize, JsonSchema)]
 pub struct ModelFileFormatOutput {
     /// The model file's JSON Schema (draft 2020-12), with every field, attribute and rule.
     pub schema: serde_json::Value,
+    /// How the built-in classes behave: Source, Station, Buffer and Drain, how MUs move, failures
+    /// and what is measured.
+    pub semantics: String,
     /// A small valid model in canonical form, as crabsim saves it.
     pub example: String,
 }
 
 impl Operation for ModelFileFormat {
     const NAME: &'static str = "model_file_format";
-    const DESCRIPTION: &'static str = "Gives the format of crabsim's model files: their JSON Schema, with every field, attribute and rule, and a small valid example in canonical form. Read it before writing a model. Times are text such as \"90\", \"1:30\" or \"2d 06:00:00\", and an instance or class sets only the attributes it changes from its class.";
+    const DESCRIPTION: &'static str = "Gives the format of crabsim's model files: their JSON Schema, with every field, attribute and rule, how the built-in classes Source, Station, Buffer and Drain behave and how MUs move between them, and a small valid example in canonical form. Read it before writing or judging a model. Times are text such as \"90\", \"1:30\" or \"2d 06:00:00\", and an instance or class sets only the attributes it changes from its class.";
     const EFFECT: Effect = Effect::ReadOnly;
     type Input = ModelFileFormatInput;
     type Output = ModelFileFormatOutput;
 
     fn run(_: &Catalogue, _: ModelFileFormatInput) -> Result<ModelFileFormatOutput, OperationError> {
         let example = crabsim_model::load(EXAMPLE).expect("the example is a valid model").save();
-        Ok(ModelFileFormatOutput { schema: crabsim_model::schema::schema(), example })
+        Ok(ModelFileFormatOutput { schema: crabsim_model::schema::schema(), semantics: SEMANTICS.to_string(), example })
     }
 }

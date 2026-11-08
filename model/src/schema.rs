@@ -24,12 +24,13 @@ pub struct Time(pub String);
 pub struct Name(pub String);
 
 /// A crabsim model file. It holds the model only: a run's seed, length and warm-up are not part
-/// of it. See docs/design/model-file.md in the crabsim repository.
+/// of it.
 #[derive(JsonSchema)]
 #[serde(deny_unknown_fields)]
 #[schemars(title = "crabsim model file")]
 pub struct ModelFile {
-    /// Where this schema is, for editors. crabsim ignores it and keeps it when saving.
+    /// Where this schema is, for editors. crabsim ignores it, keeps it when saving, and never
+    /// needs the file it names to exist.
     #[serde(rename = "$schema")]
     pub schema: Option<String>,
     /// The format's version. Only 1 exists.

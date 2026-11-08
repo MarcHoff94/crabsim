@@ -13,6 +13,7 @@ mod build;
 mod check;
 mod read;
 pub mod schema;
+mod suggest;
 mod write;
 
 use crabsim::{Dimensions, ObjectKind, Position, SimTime};

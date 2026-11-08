@@ -31,8 +31,15 @@ pub const STATISTICS: [&str; 11] = [
     "mean_lead_time_s",
 ];
 
-/// How many of the most blocked and of the most failed objects a summary shows.
+/// How many of the busiest, the most blocked and the most failed objects a summary shows.
 const SUMMARY_TOP: usize = 10;
+
+/// A model with at most this many instances is shown whole in a summary, since picking the most
+/// of anything from so few would pick nearly all of them anyway.
+const SMALL_MODEL: usize = 20;
+
+/// The blocked share below which an object isn't worth showing as most blocked.
+const BLOCKED_FLOOR: f64 = 0.01;
 
 /// An object's figures at the end of an observation, by their names in the store. A figure that
 /// doesn't exist, such as a share before any time was measured, is left out.
@@ -95,49 +102,47 @@ fn shown(value: f64) -> f64 {
     (value * scale).round() / scale
 }
 
-/// A number, or a time shown as the UI shows it.
-#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
-#[serde(untagged)]
-pub enum Amount {
-    Number(f64),
-    /// Simulated time, such as "00:03:12.500".
-    Time(String),
+/// The mean of `values` and its 95% confidence interval (Student's t), the interval `None` for
+/// fewer than two values.
+fn mean_and_interval(values: &[f64]) -> (f64, Option<[f64; 2]>) {
+    let n = values.len() as f64;
+    let mean = values.iter().sum::<f64>() / n;
+    let interval = (values.len() >= 2).then(|| {
+        let variance = values.iter().map(|value| (value - mean).powi(2)).sum::<f64>() / (n - 1.0);
+        let half = t_quantile(values.len() - 1) * (variance / n).sqrt();
+        [mean - half, mean + half]
+    });
+    (mean, interval)
 }
 
-/// One figure over a run's observations.
+/// One figure over a run's observations, to 4 significant digits.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct Figure {
     /// The mean over the observations that have this figure.
-    pub mean: Amount,
+    pub mean: f64,
     /// The 95% confidence interval of the mean (Student's t), with fewer than two values none.
-    pub ci95: Option<[Amount; 2]>,
-    pub min: Amount,
-    pub max: Amount,
+    pub ci95: Option<[f64; 2]>,
+    pub min: f64,
+    pub max: f64,
     /// Each observation's own value, in order from observation 1, null where it has none, such as
     /// a failed observation. Only when asked for with `values`.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub values: Option<Vec<Option<Amount>>>,
+    pub values: Option<Vec<Option<f64>>>,
 }
 
 impl Figure {
     /// The figure from each observation's value, with each one's own value if `each`, or `None`
     /// if no observation has one, or every one has 0.
-    fn of(values: &[Option<f64>], each: bool, show: impl Fn(f64) -> Amount) -> Option<Figure> {
+    fn of(values: &[Option<f64>], each: bool) -> Option<Figure> {
         let present: Vec<f64> = values.iter().flatten().copied().collect();
         if present.iter().all(|value| *value == 0.0) {
             return None;
         }
-        let n = present.len() as f64;
-        let mean = present.iter().sum::<f64>() / n;
-        let ci95 = (present.len() >= 2).then(|| {
-            let variance = present.iter().map(|value| (value - mean).powi(2)).sum::<f64>() / (n - 1.0);
-            let half = t_quantile(present.len() - 1) * (variance / n).sqrt();
-            [show(mean - half), show(mean + half)]
-        });
+        let (mean, interval) = mean_and_interval(&present);
         let min = present.iter().copied().fold(f64::INFINITY, f64::min);
         let max = present.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-        let values = each.then(|| values.iter().map(|value| value.map(&show)).collect());
-        Some(Figure { mean: show(mean), ci95, min: show(min), max: show(max), values })
+        let values = each.then(|| values.iter().map(|value| value.map(shown)).collect());
+        Some(Figure { mean: shown(mean), ci95: interval.map(|[low, high]| [shown(low), shown(high)]), min: shown(min), max: shown(max), values })
     }
 }
 
@@ -145,8 +150,14 @@ impl Figure {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Why {
+    /// The model is small enough to show whole.
+    All,
     Drain,
+    /// Among the 10 with the highest working share: where a bottleneck is.
+    Busiest,
+    /// Among the 10 with the highest blocked share, above 1%.
     MostBlocked,
+    /// Among the 10 whose failed share's 95% interval lies above that of the median object.
     MostFailed,
     Chosen,
 }
@@ -161,8 +172,8 @@ pub struct ObjectResults {
     pub why: Vec<Why>,
     /// By statistic: mus_in, mus_out, working_share, blocked_share, idle_share, failed_share,
     /// paused_share, failures, availability, and for Drains throughput_per_hour and
-    /// mean_lead_time (as simulated time). Shares and availability are from 0 to 1. A figure that
-    /// is 0 in every observation is left out.
+    /// mean_lead_time_s, named as in the store. Shares and availability are from 0 to 1, times in
+    /// seconds. A figure that is 0 in every observation is left out.
     pub figures: BTreeMap<String, Figure>,
 }
 
@@ -237,7 +248,7 @@ pub struct RunResultsInput {
 
 impl Operation for RunResults {
     const NAME: &'static str = "run_results";
-    const DESCRIPTION: &'static str = "Reads a run's results from the results store: its settings, its events and wall time, any observation that failed with its error, and per object every figure's mean over the observations, 95% confidence interval, minimum and maximum, to 4 significant digits. Figures that are 0 in every observation are left out. By default a short summary that fits even a 6,000-object model run 10,000 times: every Drain, the 10 most blocked and the 10 most failed objects. Give `objects` or `classes` to read exactly those instead, and `values` for each observation's own figures and seed. For full precision, or anything else such as comparing runs, use query_results.";
+    const DESCRIPTION: &'static str = "Reads a run's results from the results store: its settings, `events` and `wall_time_s` (every observation's, added up: they run in parallel, so the run took less), any observation that failed with its error, and per object every figure's mean over the observations, 95% confidence interval, minimum and maximum, to 4 significant digits. Figures are named as in the store, such as blocked_share (0 to 1) and mean_lead_time_s (seconds), and those that are 0 in every observation are left out. By default a short summary whatever the model's size or number of observations: a model of 20 or fewer instances whole, and otherwise every Drain, the 10 busiest (highest working share, where a bottleneck is), the 10 most blocked above 1%, and the objects whose failed share is clearly above the rest. Each object's `why` says which of these put it there: all, drain, busiest, most_blocked, most_failed, or chosen. Give `objects` or `classes` to read exactly those instead, and `values` for each observation's own figures and seed. For full precision, comparing runs, or anything else, use query_results.";
     const EFFECT: Effect = Effect::ReadOnly;
     type Input = RunResultsInput;
     type Output = RunResultsOutput;
@@ -295,19 +306,24 @@ impl Operation for RunResults {
 
         // Which objects, and why.
         let mut chosen: Vec<(String, Why)> = Vec::new();
-        if input.objects.is_none() && input.classes.is_none() {
+        let instances = crabsim_model::load(&model_text).map_or(0, |model| model.instances.len());
+        if input.objects.is_none() && input.classes.is_none() && instances <= SMALL_MODEL {
+            let model = crabsim_model::load(&model_text).map_err(|_| OperationError::run_error(format!("the model `{id}` ran can't be read back")))?;
+            chosen.extend(model.instances.iter().map(|instance| (instance.name.clone(), Why::All)));
+        } else if input.objects.is_none() && input.classes.is_none() {
             let drains = connection.prepare("SELECT DISTINCT object FROM statistics WHERE run = ?1 AND built_in_class = 'Drain'")?.query_map([&id], |row| row.get(0))?.collect::<Result<Vec<String>, _>>()?;
             chosen.extend(drains.into_iter().map(|name| (name, Why::Drain)));
-            for (statistic, why) in [("blocked_share", Why::MostBlocked), ("failed_share", Why::MostFailed)] {
+            for (statistic, floor, why) in [("working_share", 0.0, Why::Busiest), ("blocked_share", BLOCKED_FLOOR, Why::MostBlocked)] {
                 let top = connection
                     .prepare(
-                        "SELECT object FROM statistics WHERE run = ?1 AND statistic = ?2 GROUP BY object HAVING avg(value) > 0
-                         ORDER BY avg(value) DESC, min(rowid) LIMIT ?3",
+                        "SELECT object FROM statistics WHERE run = ?1 AND statistic = ?2 GROUP BY object HAVING avg(value) > ?3
+                         ORDER BY avg(value) DESC, min(rowid) LIMIT ?4",
                     )?
-                    .query_map(params![id, statistic, SUMMARY_TOP as i64], |row| row.get(0))?
+                    .query_map(params![id, statistic, floor, SUMMARY_TOP as i64], |row| row.get(0))?
                     .collect::<Result<Vec<String>, _>>()?;
                 chosen.extend(top.into_iter().map(|name| (name, why)));
             }
+            chosen.extend(clearly_most_failed(connection, &id)?.into_iter().map(|name| (name, Why::MostFailed)));
         } else {
             let model = crabsim_model::load(&model_text).map_err(|_| OperationError::run_error(format!("the model `{id}` ran can't be read back")))?;
             for name in input.objects.iter().flatten() {
@@ -372,13 +388,8 @@ impl Operation for RunResults {
             let mut figures = BTreeMap::new();
             for statistic in STATISTICS {
                 let Some(values) = values.get(statistic) else { continue };
-                let figure = if statistic == "mean_lead_time_s" {
-                    Figure::of(values, input.values, |secs| Amount::Time(format_time_exact(SimTime::from_secs_f64(secs)))).map(|figure| ("mean_lead_time", figure))
-                } else {
-                    Figure::of(values, input.values, |value| Amount::Number(shown(value))).map(|figure| (statistic, figure))
-                };
-                if let Some((key, figure)) = figure {
-                    figures.insert(key.to_string(), figure);
+                if let Some(figure) = Figure::of(values, input.values) {
+                    figures.insert(statistic.to_string(), figure);
                 }
             }
             objects.push(ObjectResults { name: name.clone(), class, built_in_class: built_in, why: why[name].clone(), figures });
@@ -405,6 +416,36 @@ impl Operation for RunResults {
             objects,
         })
     }
+}
+
+/// The objects, at most 10, whose failed share's 95% interval lies wholly above that of the median
+/// object, by mean, so that objects failing alike, such as instances of one class, aren't ranked
+/// by chance. With fewer than two observations there are no intervals, and so none.
+fn clearly_most_failed(connection: &rusqlite::Connection, run: &str) -> Result<Vec<String>, OperationError> {
+    let mut values: Vec<(String, Vec<f64>)> = Vec::new();
+    let mut rows = connection.prepare("SELECT object, value FROM statistics WHERE run = ?1 AND statistic = 'failed_share' ORDER BY rowid")?;
+    for row in rows.query_map([run], |row| Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?)))? {
+        let (object, value) = row?;
+        match values.iter_mut().find(|(name, _)| *name == object) {
+            Some((_, found)) => found.push(value),
+            None => values.push((object, vec![value])),
+        }
+    }
+    let mut intervals: Vec<(String, f64, [f64; 2])> = values
+        .into_iter()
+        .filter_map(|(name, values)| {
+            let (mean, interval) = mean_and_interval(&values);
+            interval.map(|interval| (name, mean, interval))
+        })
+        .collect();
+    if intervals.is_empty() {
+        return Ok(Vec::new());
+    }
+    intervals.sort_by(|a, b| a.1.total_cmp(&b.1));
+    let median_high = intervals[intervals.len() / 2].2[1];
+    let mut above: Vec<(String, f64)> = intervals.into_iter().filter(|(_, _, [low, _])| *low > median_high).map(|(name, mean, _)| (name, mean)).collect();
+    above.sort_by(|a, b| b.1.total_cmp(&a.1));
+    Ok(above.into_iter().take(SUMMARY_TOP).map(|(name, _)| name).collect())
 }
 
 /// Each instance's place in the model, by name.

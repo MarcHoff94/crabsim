@@ -62,9 +62,10 @@ impl Reader {
             return None;
         };
         for key in fields.keys().filter(|key| !known.contains(&key.as_str())) {
+            let guess = crate::suggest::did_you_mean(key, known.iter().copied());
             let message = match what {
-                "attributes" => format!("unknown attribute `{key}`"),
-                _ => format!("unknown field `{key}` in {what}"),
+                "attributes" => format!("unknown attribute `{key}`{guess}"),
+                _ => format!("unknown field `{key}` in {what}{guess}"),
             };
             self.problem(format!("{pointer}/{}", escape(key)), name, message);
         }
@@ -238,11 +239,14 @@ impl Reader {
     fn time(&mut self, value: &Value, pointer: &str, name: Option<&str>) -> Option<SimTime> {
         let time = value.as_str().and_then(parse_time);
         if time.is_none() {
-            self.problem(
-                pointer.to_owned(),
-                name,
-                format!("{value} is not a time: write it as text, such as \"90\", \"1:30\", \"8:00:00\" or \"2d 06:00:00\""),
-            );
+            let message = match value.as_str() {
+                None => format!("{value} is not a time: write it as text, such as \"90\", \"1:30\", \"8:00:00\" or \"2d 06:00:00\""),
+                Some(text) if text.chars().any(|c| c.is_alphabetic() && c != 'd') => format!(
+                    "{value} is not a time: a time has no unit letters, apart from d for days, and is written such as \"10\", \"0:10\", \"8:00:00\" or \"2d 06:00:00\""
+                ),
+                Some(_) => format!("{value} is not a time, which is written such as \"90\", \"1:30\", \"8:00:00\" or \"2d 06:00:00\""),
+            };
+            self.problem(pointer.to_owned(), name, message);
         }
         time
     }

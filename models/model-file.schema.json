@@ -1,11 +1,11 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "crabsim model file",
-  "description": "A crabsim model file. It holds the model only: a run's seed, length and warm-up are not part of it. See docs/design/model-file.md in the crabsim repository.",
+  "description": "A crabsim model file. It holds the model only: a run's seed, length and warm-up are not part of it.",
   "type": "object",
   "properties": {
     "$schema": {
-      "description": "Where this schema is, for editors. crabsim ignores it and keeps it when saving.",
+      "description": "Where this schema is, for editors. crabsim ignores it, keeps it when saving, and never needs the file it names to exist.",
       "type": "string"
     },
     "format_version": {

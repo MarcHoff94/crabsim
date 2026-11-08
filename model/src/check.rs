@@ -102,7 +102,8 @@ impl<'m> Checker<'m> {
             if class.parent == class.name {
                 self.problem(owner, "/parent", "a class can't derive from itself");
             } else if !BUILT_IN_CLASSES.contains(&class.parent.as_str()) && model.class(&class.parent).is_none() {
-                self.problem(owner, "/parent", format!("unknown class `{}`", class.parent));
+                let message = self.unknown_class(&class.parent);
+                self.problem(owner, "/parent", message);
             } else if let Some(circle) = self.circle(index) {
                 self.problem(owner, "/parent", format!("the classes derive from each other in a circle: {}", circle.join(" → ")));
             }
@@ -113,6 +114,13 @@ impl<'m> Checker<'m> {
         if let Some((_, built_in)) = model.chain(&class.name) {
             self.attributes(owner, &class.attributes, built_in);
         }
+    }
+
+    /// What to say about a class that doesn't exist, which leaves what uses it unchecked.
+    fn unknown_class(&self, name: &str) -> String {
+        let known = BUILT_IN_CLASSES.iter().copied().chain(self.model.classes.iter().map(|class| class.name.as_str()));
+        let guess = crate::suggest::closest(name, known).map_or(String::new(), |class| format!(" (did you mean `{class}`?)"));
+        format!("unknown class `{name}`{guess}: its attributes weren't checked")
     }
 
     /// The circle a class is part of, starting and ending at it, if its chain comes back to it.
@@ -157,7 +165,8 @@ impl<'m> Checker<'m> {
             && !BUILT_IN_CLASSES.contains(&instance.class.as_str())
             && model.class(&instance.class).is_none()
         {
-            self.problem(owner, "/class", format!("unknown class `{}`", instance.class));
+            let message = self.unknown_class(&instance.class);
+            self.problem(owner, "/class", message);
         }
         if let Some(built_in) = self.built_in(index) {
             self.attributes(owner, &instance.attributes, built_in);
@@ -278,7 +287,10 @@ impl<'m> Checker<'m> {
                 continue;
             }
             match self.by_name.get(successor.as_str()) {
-                None => self.problem(owner, &at, format!("no instance is called `{successor}`")),
+                None => {
+                    let guess = crate::suggest::did_you_mean(successor, model.instances.iter().map(|instance| instance.name.as_str()));
+                    self.problem(owner, &at, format!("no instance is called `{successor}`{guess}"))
+                }
                 Some(&target) if target == index => self.problem(owner, &at, "an object can't be its own successor"),
                 Some(&target) if self.built_in(target) == Some("Source") => {
                     self.problem(owner, &at, format!("`{successor}` is a Source, which creates MUs and can't take any in"))

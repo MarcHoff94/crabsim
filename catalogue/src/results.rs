@@ -72,7 +72,7 @@ pub(crate) fn figures(statistics: &ObjectStatistics, now: SimTime) -> Vec<(&'sta
 
 /// The 97.5% quantile of Student's t distribution with `df` degrees of freedom, for a two-sided
 /// 95% interval.
-fn t_quantile(df: usize) -> f64 {
+pub(crate) fn t_quantile(df: usize) -> f64 {
     const TABLE: [f64; 30] = [
         12.706, 4.303, 3.182, 2.776, 2.571, 2.447, 2.365, 2.306, 2.262, 2.228, 2.201, 2.179, 2.160, 2.145, 2.131, 2.120, 2.110, 2.101,
         2.093, 2.086, 2.080, 2.074, 2.069, 2.064, 2.060, 2.056, 2.052, 2.048, 2.045, 2.042,
@@ -90,7 +90,7 @@ fn t_quantile(df: usize) -> f64 {
 
 /// `value` as results show it: to 4 significant digits, but never fewer than its whole number, so
 /// 0.74604 is 0.746, 182.85 is 182.9 and 131650.75 is 131651. The store keeps every digit.
-fn shown(value: f64) -> f64 {
+pub(crate) fn shown(value: f64) -> f64 {
     if value == 0.0 || !value.is_finite() {
         return value;
     }
@@ -305,45 +305,7 @@ impl Operation for RunResults {
         let observation_runs = input.values.then_some(observation_runs);
 
         // Which objects, and why.
-        let mut chosen: Vec<(String, Why)> = Vec::new();
-        let instances = crabsim_model::load(&model_text).map_or(0, |model| model.instances.len());
-        if input.objects.is_none() && input.classes.is_none() && instances <= SMALL_MODEL {
-            let model = crabsim_model::load(&model_text).map_err(|_| OperationError::run_error(format!("the model `{id}` ran can't be read back")))?;
-            chosen.extend(model.instances.iter().map(|instance| (instance.name.clone(), Why::All)));
-        } else if input.objects.is_none() && input.classes.is_none() {
-            let drains = connection.prepare("SELECT DISTINCT object FROM statistics WHERE run = ?1 AND built_in_class = 'Drain'")?.query_map([&id], |row| row.get(0))?.collect::<Result<Vec<String>, _>>()?;
-            chosen.extend(drains.into_iter().map(|name| (name, Why::Drain)));
-            for (statistic, floor, why) in [("working_share", 0.0, Why::Busiest), ("blocked_share", BLOCKED_FLOOR, Why::MostBlocked)] {
-                let top = connection
-                    .prepare(
-                        "SELECT object FROM statistics WHERE run = ?1 AND statistic = ?2 GROUP BY object HAVING avg(value) > ?3
-                         ORDER BY avg(value) DESC, min(rowid) LIMIT ?4",
-                    )?
-                    .query_map(params![id, statistic, floor, SUMMARY_TOP as i64], |row| row.get(0))?
-                    .collect::<Result<Vec<String>, _>>()?;
-                chosen.extend(top.into_iter().map(|name| (name, why)));
-            }
-            chosen.extend(clearly_most_failed(connection, &id)?.into_iter().map(|name| (name, Why::MostFailed)));
-        } else {
-            let model = crabsim_model::load(&model_text).map_err(|_| OperationError::run_error(format!("the model `{id}` ran can't be read back")))?;
-            for name in input.objects.iter().flatten() {
-                if !model.instances.iter().any(|instance| &instance.name == name) {
-                    return Err(OperationError::not_found(format!("the model `{id}` ran has no instance called `{name}`")));
-                }
-                chosen.push((name.clone(), Why::Chosen));
-            }
-            for class in input.classes.iter().flatten() {
-                if model.class(class).is_none() && !crabsim_model::BUILT_IN_CLASSES.contains(&class.as_str()) {
-                    return Err(OperationError::not_found(format!("the model `{id}` ran has no class called `{class}`")));
-                }
-                for instance in &model.instances {
-                    let Some((chain, built_in)) = model.chain(&instance.class) else { continue };
-                    if built_in == class || chain.iter().any(|link| &link.name == class) {
-                        chosen.push((instance.name.clone(), Why::Chosen));
-                    }
-                }
-            }
-        }
+        let chosen = choose_objects(connection, &id, &model_text, input.objects.as_deref(), input.classes.as_deref())?;
         let mut why: HashMap<String, Vec<Why>> = HashMap::new();
         for (name, reason) in chosen {
             let reasons = why.entry(name).or_default();
@@ -416,6 +378,58 @@ impl Operation for RunResults {
             objects,
         })
     }
+}
+
+/// The objects a run's results show, and why: with `objects` or `classes` exactly those, and
+/// otherwise a small model whole, or every Drain, the busiest, the most blocked and the clearly
+/// most failed. An object or class the model doesn't have is `not_found`.
+pub(crate) fn choose_objects(
+    connection: &rusqlite::Connection,
+    id: &str,
+    model_text: &str,
+    objects: Option<&[String]>,
+    classes: Option<&[String]>,
+) -> Result<Vec<(String, Why)>, OperationError> {
+    let mut chosen: Vec<(String, Why)> = Vec::new();
+    let read_back = || crabsim_model::load(model_text).map_err(|_| OperationError::run_error(format!("the model `{id}` ran can't be read back")));
+    let instances = crabsim_model::load(model_text).map_or(0, |model| model.instances.len());
+    if objects.is_none() && classes.is_none() && instances <= SMALL_MODEL {
+        chosen.extend(read_back()?.instances.iter().map(|instance| (instance.name.clone(), Why::All)));
+    } else if objects.is_none() && classes.is_none() {
+        let drains = connection.prepare("SELECT DISTINCT object FROM statistics WHERE run = ?1 AND built_in_class = 'Drain'")?.query_map([id], |row| row.get(0))?.collect::<Result<Vec<String>, _>>()?;
+        chosen.extend(drains.into_iter().map(|name| (name, Why::Drain)));
+        for (statistic, floor, why) in [("working_share", 0.0, Why::Busiest), ("blocked_share", BLOCKED_FLOOR, Why::MostBlocked)] {
+            let top = connection
+                .prepare(
+                    "SELECT object FROM statistics WHERE run = ?1 AND statistic = ?2 GROUP BY object HAVING avg(value) > ?3
+                     ORDER BY avg(value) DESC, min(rowid) LIMIT ?4",
+                )?
+                .query_map(params![id, statistic, floor, SUMMARY_TOP as i64], |row| row.get(0))?
+                .collect::<Result<Vec<String>, _>>()?;
+            chosen.extend(top.into_iter().map(|name| (name, why)));
+        }
+        chosen.extend(clearly_most_failed(connection, id)?.into_iter().map(|name| (name, Why::MostFailed)));
+    } else {
+        let model = read_back()?;
+        for name in objects.into_iter().flatten() {
+            if !model.instances.iter().any(|instance| &instance.name == name) {
+                return Err(OperationError::not_found(format!("the model `{id}` ran has no instance called `{name}`")));
+            }
+            chosen.push((name.clone(), Why::Chosen));
+        }
+        for class in classes.into_iter().flatten() {
+            if model.class(class).is_none() && !crabsim_model::BUILT_IN_CLASSES.contains(&class.as_str()) {
+                return Err(OperationError::not_found(format!("the model `{id}` ran has no class called `{class}`")));
+            }
+            for instance in &model.instances {
+                let Some((chain, built_in)) = model.chain(&instance.class) else { continue };
+                if built_in == class || chain.iter().any(|link| &link.name == class) {
+                    chosen.push((instance.name.clone(), Why::Chosen));
+                }
+            }
+        }
+    }
+    Ok(chosen)
 }
 
 /// The objects, at most 10, whose failed share's 95% interval lies wholly above that of the median

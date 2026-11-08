@@ -387,3 +387,21 @@ fn the_user_sees_and_controls_the_edit_queue() {
     assert!(crabsim(&["queue", "unblock", "--models", models.arg(), &second_id]).status.success());
     assert!(!crabsim(&["queue", "give", "--models", models.arg(), "demo.json", "agent-99"]).status.success());
 }
+
+#[test]
+fn compare_prints_each_figures_difference_and_whether_it_is_clear() {
+    let models = Models::new("compare");
+    for label in ["one", "two"] {
+        let output = crabsim(&["run", "--models", models.arg(), "--model", "demo.json", "--length", "2:00:00", "--observations", "3", "--label", label]);
+        assert!(output.status.success(), "{output:?}");
+    }
+    let output = crabsim(&["compare", "--models", models.arg(), "run-1", "run-2", "--object", "Drain"]);
+    assert!(output.status.success(), "{output:?}");
+    let printed = stdout(&output);
+    assert!(printed.starts_with("run-2 \"two\" minus run-1 \"one\": paired"), "{printed}");
+    assert!(printed.contains("Drain"), "{printed}");
+    let mus_in = printed.lines().find(|line| line.trim_start().starts_with("mus_in")).unwrap_or_else(|| panic!("{printed}"));
+    assert!(mus_in.contains("paired") && mus_in.contains("no"), "the same run twice differs by nothing, so not clearly: {mus_in}");
+    let missing = crabsim(&["compare", "--models", models.arg(), "run-1", "run-9"]);
+    assert!(!missing.status.success());
+}

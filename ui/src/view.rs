@@ -181,6 +181,8 @@ pub struct ViewState {
     locating: bool,
     /// Where the session halts by itself, as last set.
     end_time: Option<SimTime>,
+    /// The model file changed during a run, so Reset will use the new model.
+    model_changed: bool,
 }
 
 /// What the inspector says about the selected object.
@@ -281,6 +283,7 @@ impl ViewState {
             marks: Marks::default(),
             locating: false,
             end_time: None,
+            model_changed: false,
         }
     }
 
@@ -423,6 +426,21 @@ impl ViewState {
         Ok(end)
     }
 
+    /// Whether a changed model file is used at once: only with no run in progress, before Init or
+    /// after Reset. Otherwise the run carries on with its model, and Reset uses the new one.
+    pub fn reloads_now(&self) -> bool {
+        !self.initialised && self.status == SessionStatus::Halted
+    }
+
+    /// Whether the model file changed during the run, so Reset will use the new model.
+    pub fn model_changed(&self) -> bool {
+        self.model_changed
+    }
+
+    pub fn set_model_changed(&mut self, changed: bool) {
+        self.model_changed = changed;
+    }
+
     /// Whether the seed can change now: only before Init or after Reset, since a run draws its
     /// random numbers from the seed from Init on.
     pub fn allows_seed(&self) -> bool {
@@ -504,6 +522,12 @@ impl ViewState {
             // Also out of a run error, and while advancing, which halts there.
             Control::StepBack => self.initialised,
         }
+    }
+
+    /// Shows an error that didn't come from the session, such as a refused operation, until the
+    /// next command.
+    pub fn show_error(&mut self, error: String) {
+        self.error = Some(error);
     }
 
     /// The last error the session reported, until the run is reset, goes back or starts again.

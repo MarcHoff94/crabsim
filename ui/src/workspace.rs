@@ -2,12 +2,17 @@
 //! catalogue as the user (`Source::Ui`), its model files, the model open and the seed runs use.
 //! Without a folder, or when another window has it, the window runs the built-in demo. Plain Rust
 //! with no Bevy types, so it is tested without a window. See spec issue 63.
+//!
+//! `check` is the one seam for noticing that the open model file changed, such as by an agent: it
+//! compares the file's size and modified time, and only when they differ reads it again through
+//! the catalogue and compares its hash. A file watcher could take its place later.
 
 use crabsim::{demo, Clock, Dimensions, LiveSession, ModelDescription, ObjectKind, Position};
 use crabsim_catalogue::{Catalogue, ErrorKind, Settings, Source};
 use serde_json::{json, Value};
 use std::collections::VecDeque;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 /// Space left between objects the window places itself, in metres.
 const GAP: f64 = 2.0;
@@ -30,6 +35,30 @@ pub struct ProblemReport {
     pub problems: Vec<String>,
 }
 
+/// What changed in the open model file since it was last read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelChange {
+    /// It is a different model now, waiting to be used: see `apply_pending`.
+    Changed,
+    /// It has problems now, so it can't be used, and the model in use stays.
+    NowHasProblems,
+}
+
+/// A file's size and modified time, which change whenever it is written.
+type Stamp = (u64, SystemTime);
+
+fn stamp_of(file: &Path) -> Option<Stamp> {
+    let metadata = std::fs::metadata(file).ok()?;
+    Some((metadata.len(), metadata.modified().ok()?))
+}
+
+/// What the workspace knows about the open model file as it last read it.
+struct Read {
+    stamp: Option<Stamp>,
+    hash: String,
+    changed_outside: bool,
+}
+
 pub struct Workspace {
     /// Absent without a folder, or when it couldn't be opened.
     catalogue: Option<Catalogue>,
@@ -40,6 +69,10 @@ pub struct Workspace {
     description: ModelDescription,
     /// Its path, or none for the demo.
     opened: Option<String>,
+    /// The open file as last read.
+    read: Option<Read>,
+    /// The open file's model since it changed, not used yet.
+    pending: Option<ModelDescription>,
     problems: Option<ProblemReport>,
     seed: u64,
 }
@@ -54,6 +87,8 @@ impl Workspace {
             models: Vec::new(),
             description: demo::model(),
             opened: None,
+            read: None,
+            pending: None,
             problems: None,
             seed: 0,
         };
@@ -109,29 +144,112 @@ impl Workspace {
     /// Opens the model at `path` to run, laid out. One with problems isn't opened: they are kept
     /// for the window to show, and the model open before stays. Returns whether it opened.
     pub fn open_model(&mut self, path: &str) -> bool {
-        let Some(catalogue) = &self.catalogue else { return false };
-        let text = match catalogue.call("read_model", json!({ "path": path })) {
-            Ok(read) => read["text"].as_str().unwrap_or_default().to_string(),
+        match self.load(path) {
+            Some((description, read)) => {
+                self.description = description;
+                self.opened = Some(path.to_string());
+                self.read = Some(read);
+                self.pending = None;
+                self.problems = None;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The model file at `path`, laid out, and what was read, or none with its problems kept.
+    fn load(&mut self, path: &str) -> Option<(ModelDescription, Read)> {
+        let catalogue = self.catalogue.as_ref()?;
+        let stamp = catalogue.folder().model_file(path).ok().and_then(|file| stamp_of(&file));
+        let read = match catalogue.call("read_model", json!({ "path": path })) {
+            Ok(read) => read,
             Err(error) => {
                 self.problems = Some(ProblemReport { path: path.to_string(), summary: Vec::new(), problems: vec![error.to_string()] });
-                return false;
+                return None;
             }
         };
-        match crabsim_model::load(&text) {
+        let text = read["text"].as_str().unwrap_or_default();
+        let known = Read { stamp, hash: read["file_hash"].as_str().unwrap_or_default().to_string(), changed_outside: read["changed_outside"] == true };
+        match crabsim_model::load(text) {
             Ok(model) => {
                 let mut description = model.to_description();
                 lay_out(&mut description);
-                self.description = description;
-                self.opened = Some(path.to_string());
-                self.problems = None;
-                true
+                Some((description, known))
             }
             Err(problems) => {
                 let summary = catalogue.call("describe_model", json!({ "path": path })).map_or_else(|error| vec![error.to_string()], |summary| summarise(&summary));
                 self.problems = Some(ProblemReport { path: path.to_string(), summary, problems: problems.iter().map(ToString::to_string).collect() });
-                false
+                // What was read is kept, so the same broken file isn't reported again.
+                if self.opened.as_deref() == Some(path) {
+                    self.read = Some(known);
+                }
+                None
             }
         }
+    }
+
+    /// Whether the open model file changed since it was last read: cheap when it didn't, since it
+    /// compares the file's size and modified time first. A different model waits in `pending`
+    /// until the window uses it with `apply_pending`. Each change is reported once.
+    pub fn check(&mut self) -> Option<ModelChange> {
+        let path = self.opened.clone()?;
+        let file = self.watched_file()?;
+        let stamp = stamp_of(&file);
+        let read = self.read.as_mut()?;
+        if stamp.is_some() && read.stamp == stamp {
+            return None;
+        }
+        read.stamp = stamp;
+        let hash = self.catalogue.as_ref()?.call("read_model", json!({ "path": path })).ok().and_then(|read| read["file_hash"].as_str().map(str::to_string));
+        if hash.as_deref() == Some(self.read.as_ref()?.hash.as_str()) {
+            return None;
+        }
+        match self.load(&path) {
+            Some((description, read)) => {
+                self.read = Some(read);
+                self.pending = Some(description);
+                self.problems = None;
+                Some(ModelChange::Changed)
+            }
+            None => {
+                self.pending = None;
+                Some(ModelChange::NowHasProblems)
+            }
+        }
+    }
+
+    /// Whether the open file's model changed and the window hasn't used it yet.
+    pub fn has_pending(&self) -> bool {
+        self.pending.is_some()
+    }
+
+    /// Uses the changed model: `description` and `session` give it from now on.
+    pub fn apply_pending(&mut self) {
+        if let Some(description) = self.pending.take() {
+            self.description = description;
+        }
+    }
+
+    /// The open model file on disk, which the window may watch for changes.
+    pub fn watched_file(&self) -> Option<PathBuf> {
+        self.catalogue.as_ref()?.folder().model_file(self.opened.as_deref()?).ok()
+    }
+
+    /// Whether the open model file was written outside crabsim, or crabsim never saved it, so
+    /// crabsim refuses to change it until it's adopted.
+    pub fn changed_outside(&self) -> bool {
+        self.read.as_ref().is_some_and(|read| read.changed_outside)
+    }
+
+    /// Accepts the open model file as it is, so crabsim and agents may change it again.
+    pub fn adopt(&mut self) -> Result<(), String> {
+        let path = self.opened.clone().ok_or("no model file is open")?;
+        let catalogue = self.catalogue.as_ref().ok_or("no models folder is open")?;
+        catalogue.call("adopt_model", json!({ "path": path })).map_err(|error| error.to_string())?;
+        if let Some(read) = self.read.as_mut() {
+            read.changed_outside = false;
+        }
+        Ok(())
     }
 
     /// The path of the model open, or none for the demo.

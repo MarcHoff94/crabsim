@@ -54,7 +54,7 @@ pub enum Shade {
     /// No state has arrived yet.
     Unknown,
     Idle,
-    Working,
+    Busy,
     Blocked,
     Paused,
     Failed,
@@ -191,7 +191,7 @@ pub struct Inspection {
     pub id: u32,
     pub kind: ObjectKind,
     pub name: String,
-    /// Working, Blocked, Idle or Stopped.
+    /// Busy, Blocked, Idle or Stopped.
     pub state: &'static str,
     pub contents: Vec<u32>,
     /// Time left on the work in progress, frozen while stopped.
@@ -217,6 +217,81 @@ pub struct Details {
     pub statistics: ObjectStatistics,
     /// When the statistics began: at Init, or when they were last cleared.
     pub statistics_since: SimTime,
+}
+
+impl Inspection {
+    /// The object's statistics as the inspector's rows, only those that can vary for its type: a
+    /// Source only makes MUs and waits to pass them on, and a Drain only takes them in, so their
+    /// shares of time would always read 0% or 100%. None until a full state has arrived.
+    pub fn statistics_rows(&self) -> Vec<(&'static str, String)> {
+        let Some(details) = &self.details else { return Vec::new() };
+        let statistics = &details.statistics;
+        let measured = statistics.measured_time();
+        let share = |time: SimTime| match measured.as_millis() {
+            0 => "–".to_string(),
+            total => format!("{:.1} %", time.as_millis() as f64 * 100.0 / total as f64),
+        };
+        let lead_time = statistics.lead_time_mean().map(|mean| ("Mean lead time", format_time_exact(mean)));
+        match self.kind {
+            ObjectKind::Source => vec![("MUs out", statistics.mus_out.to_string()), ("Blocked", share(statistics.time_blocked))],
+            ObjectKind::Drain => {
+                let throughput = statistics.mus_per_hour(details.as_of).map_or_else(|| "–".to_string(), |per_hour| format!("{per_hour:.1} an hour"));
+                [("MUs in", statistics.mus_in.to_string()), ("Throughput", throughput)].into_iter().chain(lead_time).collect()
+            }
+            ObjectKind::Station | ObjectKind::Buffer => {
+                let mut rows = vec![
+                    ("MUs in", statistics.mus_in.to_string()),
+                    ("MUs out", statistics.mus_out.to_string()),
+                    ("Busy", share(statistics.time_busy)),
+                    ("Blocked", share(statistics.time_blocked)),
+                    ("Idle", share(statistics.time_idle)),
+                    ("Failed", share(statistics.time_failed)),
+                    ("Paused", share(statistics.time_paused)),
+                    ("Failures", statistics.failures.to_string()),
+                    ("Pauses", statistics.pauses.to_string()),
+                ];
+                if let Some(availability) = statistics.achieved_availability() {
+                    rows.push(("Availability", format!("{:.1} %", availability * 100.0)));
+                }
+                rows
+            }
+        }
+    }
+}
+
+impl Details {
+    /// The process time in force, with the configured one beside it only when they differ, such as
+    /// "00:00:20 (configured 00:00:10)". `None` for an object without one.
+    pub fn process_time_text(&self) -> Option<String> {
+        let now = self.process_time?;
+        Some(match self.configured_process_time {
+            Some(configured) if configured != now => format!("{} (configured {})", format_time_exact(now), format_time_exact(configured)),
+            _ => format_time_exact(now),
+        })
+    }
+}
+
+/// A value an intervention changed during the run, which Reset either keeps, by saving it to the
+/// model file, or drops.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Change {
+    pub object: u32,
+    /// The instance's name, as the model file has it.
+    pub name: String,
+    /// The attribute, as a model file names it, such as `process_time`.
+    pub attribute: &'static str,
+    pub value: SimTime,
+}
+
+impl Change {
+    /// Such as "Station 2's process time, 00:00:20".
+    pub fn describe(&self) -> String {
+        let attribute = match self.attribute {
+            "process_time" => "process time",
+            other => other,
+        };
+        format!("{}'s {attribute}, {}", self.name, format_time_exact(self.value))
+    }
 }
 
 /// The interventions a Station offers, and which are on.
@@ -495,7 +570,7 @@ impl ViewState {
             Some(StopCause::ForcedFailure) => Shade::ForcedFailure,
             Some(StopCause::Pause) => Shade::Paused,
             None => match object.process() {
-                ProcessState::Processing => Shade::Working,
+                ProcessState::Processing => Shade::Busy,
                 ProcessState::Blocked => Shade::Blocked,
                 ProcessState::Idle => Shade::Idle,
             },
@@ -635,7 +710,7 @@ impl ViewState {
             None => "No state yet",
             Some(pictured) if pictured.is_stopped() => "Stopped",
             Some(pictured) => match pictured.process() {
-                ProcessState::Processing => "Working",
+                ProcessState::Processing => "Busy",
                 ProcessState::Blocked => "Blocked",
                 ProcessState::Idle => "Idle",
             },
@@ -723,6 +798,30 @@ impl ViewState {
         self.marks.all()
     }
 
+    /// What Reset would keep or drop: each object's last process time set during the run, where it
+    /// differs from the one configured, in id order. Pauses and forced failures are momentary, so
+    /// they are never among them. The marks mirror the session's log, so this holds at shown time.
+    pub fn changes(&self) -> Vec<Change> {
+        let mut last: std::collections::BTreeMap<u32, SimTime> = std::collections::BTreeMap::new();
+        for mark in self.marks.all() {
+            if let Intervention::SetProcessTime(time) = mark.intervention {
+                last.insert(mark.object, time);
+            }
+        }
+        let configured = |id: u32| {
+            self.details.as_ref()?.objects.iter().find(|object| object.id == id)?.configured_process_time
+        };
+        last.into_iter()
+            .filter(|&(id, time)| configured(id) != Some(time))
+            .map(|(id, time)| Change {
+                object: id,
+                name: self.objects[id as usize].name.clone(),
+                attribute: "process_time",
+                value: time,
+            })
+            .collect()
+    }
+
     /// What a mark stands for, such as "Pause on Station 1".
     pub fn describe(&self, mark: &Mark) -> String {
         let what = match mark.intervention {
@@ -787,7 +886,7 @@ fn doing(shade: Shade) -> &'static str {
     match shade {
         Shade::Unknown => "has no state yet",
         Shade::Idle => "is idle",
-        Shade::Working => "is working",
+        Shade::Busy => "is busy",
         Shade::Blocked => "is blocked",
         Shade::Paused => "is paused",
         Shade::Failed => "has failed",

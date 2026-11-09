@@ -25,7 +25,7 @@ use clap::Parser;
 use crabsim::{LiveSession, SessionStatus, SimTime, TimeMode, WallClock};
 use crabsim_ui::camera::Camera as ViewCamera;
 use crabsim_ui::view::{
-    Control, DEFAULT_SPEED, Details, EndTimeProblem, Inspection, Intervention, JumpProblem, MAX_SPEED, MIN_SPEED, Mark,
+    Change, Control, DEFAULT_SPEED, Details, EndTimeProblem, Inspection, Intervention, JumpProblem, MAX_SPEED, MIN_SPEED, Mark,
     Point, MU_METRES, Shade, StepBack, ViewState, format_time, format_time_exact, label_size, parse_time,
 };
 use crabsim_ui::attributes::{Form, RepairKind};
@@ -64,7 +64,7 @@ fn shade_colour(shade: Shade) -> Color {
     match shade {
         Shade::Unknown => Color::srgb(0.28, 0.29, 0.32),
         Shade::Idle => Color::srgb(0.50, 0.52, 0.56),
-        Shade::Working => Color::srgb(0.20, 0.70, 0.30),
+        Shade::Busy => Color::srgb(0.20, 0.70, 0.30),
         Shade::Blocked => Color::srgb(0.95, 0.60, 0.10),
         Shade::Paused => Color::srgb(0.25, 0.45, 0.95),
         Shade::Failed => Color::srgb(0.90, 0.15, 0.15),
@@ -73,7 +73,7 @@ fn shade_colour(shade: Shade) -> Color {
 }
 
 const SHADES: [Shade; 7] =
-    [Shade::Unknown, Shade::Idle, Shade::Working, Shade::Blocked, Shade::Paused, Shade::Failed, Shade::ForcedFailure];
+    [Shade::Unknown, Shade::Idle, Shade::Busy, Shade::Blocked, Shade::Paused, Shade::Failed, Shade::ForcedFailure];
 
 fn main() {
     let opts = Opts::parse();
@@ -140,6 +140,8 @@ fn main() {
             confirm_take: None,
             moving: None,
             confirm_move: None,
+            keep_changes: false,
+            confirm_reset: None,
         })
         .insert_resource(Session(Mutex::new(session)))
         .insert_resource(WatchedFile(Arc::new(Mutex::new(Vec::new()))))
@@ -218,6 +220,21 @@ struct Ui {
     /// A move refused because an agent holds the file or it changed outside crabsim, waiting for
     /// the user to make it anyway or put the object back, with why it was refused.
     confirm_move: Option<(Moving, Refusal)>,
+    /// Whether Reset saves the values changed during the run to the model file. Off by default,
+    /// and not remembered between windows.
+    keep_changes: bool,
+    /// A Reset waiting for the user: to drop the changes it names, or to keep them anyway while an
+    /// agent holds the file.
+    confirm_reset: Option<ResetAsk>,
+}
+
+/// What a Reset with changes asks before it goes ahead.
+#[derive(Clone)]
+enum ResetAsk {
+    /// Keeping changes is off, so Reset drops these.
+    Drop(Vec<Change>),
+    /// Keeping them was refused, such as while an agent holds the file.
+    Keep(Vec<Change>, Refusal),
 }
 
 /// An object dragged on the canvas, before Init or after Reset.
@@ -687,7 +704,8 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
     }
     let mut request = None;
     let top = egui::Panel::top("top bar").show(&mut root, |panel| {
-        request = top_bar(panel, &ui.view, &ui.workspace, &mut ui.jump_text, &mut ui.seed_text, &mut ui.end_text)
+        let Ui { view, workspace, jump_text, seed_text, end_text, keep_changes, .. } = &mut *ui;
+        request = top_bar(panel, view, workspace, jump_text, seed_text, end_text, keep_changes)
     });
     let mut bottom_of_bars = top.response.rect.bottom();
     // An agent's claim on the open model, whichever tab is open.
@@ -882,13 +900,29 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
     if let Some(path) = confirm_replacing(&ctx, ui) {
         open_model(ui, &session, &path, wall);
     }
+    // Reset with values changed during the run keeps them, saved to the model file, or names those
+    // it drops first.
+    let request = match request {
+        Some(Request::Control(Control::Reset)) if !ui.view.changes().is_empty() => {
+            let changes = ui.view.changes();
+            if ui.keep_changes {
+                keep_and_reset(ui, changes, false)
+            } else {
+                ui.confirm_reset = Some(ResetAsk::Drop(changes));
+                None
+            }
+        }
+        other => other,
+    };
+    let request = request.or_else(|| confirm_reset(&ctx, ui));
     let request = match request {
         Some(Request::Seed(seed)) => {
             ui.workspace.set_seed(seed);
             replace_session(ui, &session, false, wall);
             None
         }
-        // Reset uses a model that changed during the run: a new session is at its default state.
+        // Reset uses a model that changed during the run, such as by keeping its changes: a new
+        // session is at its default state.
         Some(Request::Control(Control::Reset)) if ui.workspace.has_pending() => {
             ui.workspace.apply_pending();
             replace_session(ui, &session, false, wall);
@@ -1002,6 +1036,68 @@ fn replace_session(ui: &mut Ui, session: &Session, new_model: bool, wall: Durati
 }
 
 /// Asks before a model chosen replaces a run in progress. Returns the model once confirmed.
+fn keep_and_reset(ui: &mut Ui, changes: Vec<Change>, take_over: bool) -> Option<Request> {
+    match ui.workspace.keep_changes(&changes, take_over) {
+        Ok(()) => {
+            // Noticing the saved file now lets Reset use it, rather than the model it began with.
+            ui.workspace.check();
+            Some(Request::Control(Control::Reset))
+        }
+        Err(refusal @ Refusal::NotEditor(_)) if !take_over => {
+            ui.confirm_reset = Some(ResetAsk::Keep(changes, refusal));
+            None
+        }
+        Err(refusal) => {
+            ui.view.show_error(format!("The changes weren't kept, so nothing was reset: {refusal}"));
+            None
+        }
+    }
+}
+
+/// Asks before a Reset that drops changes, naming each, or that keeps them while an agent holds
+/// the file. Returns the Reset once confirmed.
+fn confirm_reset(ctx: &egui::Context, ui: &mut Ui) -> Option<Request> {
+    let asking = ui.confirm_reset.clone()?;
+    let mut answer = None;
+    let modal = egui::Modal::new(egui::Id::new("confirm reset")).show(ctx, |modal| {
+        modal.set_max_width(460.0);
+        let (heading, changes, go) = match &asking {
+            ResetAsk::Drop(changes) => (format!("Reset drops {} change{}", changes.len(), plural(changes.len())), changes, "Reset"),
+            ResetAsk::Keep(changes, _) => ("The changes can't be kept".to_string(), changes, "Keep anyway"),
+        };
+        modal.heading(heading);
+        if let ResetAsk::Keep(_, refusal) = &asking {
+            modal.label(refusal.to_string());
+            modal.label("Keeping them anyway saves them while the agent keeps its right:");
+        }
+        for change in changes {
+            modal.label(format!("• {}", change.describe()));
+        }
+        if matches!(asking, ResetAsk::Drop(_)) {
+            modal.label(egui::RichText::new("Tick Keep changes beside Reset to save them to the model file instead.").weak());
+        }
+        modal.add_space(8.0);
+        modal.horizontal(|row| {
+            if row.button(go).clicked() {
+                answer = Some(true);
+            }
+            if row.button("Cancel").clicked() {
+                answer = Some(false);
+            }
+        });
+    });
+    if modal.should_close() && answer.is_none() {
+        answer = Some(false);
+    }
+    let go = answer?;
+    ui.confirm_reset = None;
+    match (go, asking) {
+        (false, _) => None,
+        (true, ResetAsk::Drop(_)) => Some(Request::Control(Control::Reset)),
+        (true, ResetAsk::Keep(changes, _)) => keep_and_reset(ui, changes, true),
+    }
+}
+
 fn confirm_replacing(ctx: &egui::Context, ui: &mut Ui) -> Option<String> {
     let path = ui.replacing.clone()?;
     let mut answer = None;
@@ -1104,6 +1200,7 @@ fn top_bar(
     jump_text: &mut String,
     seed_text: &mut String,
     end_text: &mut String,
+    keep_changes: &mut bool,
 ) -> Option<Request> {
     let mut request = None;
     // Two rows, each narrower than the window's minimum width, so neither wraps or loses a
@@ -1132,6 +1229,9 @@ fn top_bar(
         {
             button(ui, control, label);
         }
+        ui.checkbox(keep_changes, "Keep changes").on_hover_text(
+            "On Reset, save the values changed during the run, such as process times, to the model file. Off, Reset drops them, naming each first.",
+        );
         ui.separator();
         button(ui, Control::StepBack, "Step back");
         button(ui, Control::StepForward, "Step forward");
@@ -1345,12 +1445,16 @@ fn inspector(ui: &mut egui::Ui, inspection: Option<&Inspection>, process_time_te
                 asked = Some(force);
             }
         });
+        // The process time in force shows once, here, with the configured one only if it differs.
+        if let Some(text) = inspection.details.as_ref().and_then(Details::process_time_text) {
+            ui.horizontal(|row| {
+                row.label("Process time");
+                row.label(egui::RichText::new(text).strong());
+            });
+        }
         ui.horizontal(|row| {
-            row.label("Process time");
-            let hint = inspection.details.as_ref().and_then(|details| details.process_time).map(format_time_exact);
-            let field = row.add(
-                egui::TextEdit::singleline(process_time_text).desired_width(80.0).hint_text(hint.unwrap_or_default()),
-            );
+            row.label("Change to");
+            let field = row.add(egui::TextEdit::singleline(process_time_text).desired_width(80.0).hint_text("such as 25"));
             let typed = parse_time(process_time_text).filter(|&time| time > SimTime::ZERO);
             let set = row
                 .add_enabled(typed.is_some(), egui::Button::new("Set"))
@@ -1368,14 +1472,6 @@ fn inspector(ui: &mut egui::Ui, inspection: Option<&Inspection>, process_time_te
         ui.add_space(8.0);
         ui.separator();
         egui::Grid::new("details").num_columns(2).spacing([12.0, 4.0]).show(ui, |grid| {
-            if let (Some(now), Some(configured)) = (details.process_time, details.configured_process_time) {
-                grid.label("Process time");
-                grid.label(format_time_exact(now));
-                grid.end_row();
-                grid.label("Configured");
-                grid.label(format_time_exact(configured));
-                grid.end_row();
-            }
             grid.label("Waiting for it");
             grid.label(if details.waiting.is_empty() { "nothing".to_string() } else { details.waiting.join(", ") });
             grid.end_row();
@@ -1383,7 +1479,7 @@ fn inspector(ui: &mut egui::Ui, inspection: Option<&Inspection>, process_time_te
         ui.add_space(6.0);
         ui.label(egui::RichText::new(format!("Statistics since {}", format_time(details.statistics_since))).strong());
         egui::Grid::new("statistics").num_columns(2).spacing([12.0, 2.0]).striped(true).show(ui, |grid| {
-            for (label, value) in statistics_rows(details) {
+            for (label, value) in inspection.statistics_rows() {
                 grid.label(label);
                 grid.label(value);
                 grid.end_row();
@@ -1597,7 +1693,8 @@ fn attribute_label(attribute: &str) -> &str {
 
 /// Every attribute of the selected instance, its value and where it comes from. Before Init or
 /// after Reset each can be changed, saved to the model file, and each set on the instance can be
-/// restored on its own. Returns the change asked for, and whether it takes over from an agent.
+/// restored on its own. During a run, when they aren't `editable`, one line says when they can
+/// change. Returns the change asked for, and whether it takes over from an agent.
 fn attributes_section(
     ui: &mut egui::Ui,
     attributes: &Result<Vec<AttributeView>, String>,
@@ -1608,6 +1705,12 @@ fn attributes_section(
     ui.add_space(8.0);
     ui.separator();
     ui.label(egui::RichText::new("Attributes").strong());
+    // During a run they can't change, and the interventions above show what does, so they fold
+    // away to one line rather than repeating values greyed out.
+    if !editable {
+        ui.label("Attributes change before Init or after Reset.");
+        return None;
+    }
     let attributes = match attributes {
         Ok(attributes) => attributes,
         Err(error) => {
@@ -1615,9 +1718,6 @@ fn attributes_section(
             return None;
         }
     };
-    if !editable {
-        ui.label(egui::RichText::new("Change them before Init or after Reset. During a run, use the interventions above.").weak().small());
-    }
     let mut asked = None;
     for view in attributes {
         ui.add_space(4.0);
@@ -1630,7 +1730,7 @@ fn attributes_section(
         ui.horizontal(|row| {
             row.label(egui::RichText::new(attribute_label(&view.attribute)).strong());
             row.label(egui::RichText::new(&from).weak().small());
-            if editable && view.from == ValueFrom::Instance {
+            if view.from == ValueFrom::Instance {
                 let restore = row.small_button("Restore").on_hover_text("Take this attribute alone back to its class's value");
                 if restore.clicked() {
                     asked = Some((AttributeChange::Restore(view.attribute.clone()), false));
@@ -1638,12 +1738,8 @@ fn attributes_section(
             }
         });
         let Some(form) = forms.get_mut(&view.attribute) else { continue };
-        if view.attribute == "failures" && view.value.is_none() && !editable {
-            ui.label("Never fails");
-            continue;
-        }
         let mut commit = false;
-        ui.add_enabled_ui(editable, |fields| {
+        ui.scope(|fields| {
             if let Some(kind) = form.repair {
                 egui::ComboBox::from_id_salt(("repair", &view.attribute)).selected_text(kind.name()).show_ui(fields, |menu| {
                     for choice in RepairKind::ALL {
@@ -1663,7 +1759,7 @@ fn attributes_section(
             });
         });
         let waiting = !form.matches(view.value.as_ref());
-        if editable && waiting {
+        if waiting {
             match form.value() {
                 Ok(value) => {
                     let apply = ui.small_button("Apply").on_hover_text("Saves it to the model file, cutting its inheritance");
@@ -1692,38 +1788,6 @@ fn attributes_section(
         }
     }
     asked
-}
-
-/// An object's statistics as rows of the inspector: counts, and each state as a share of the
-/// time measured.
-fn statistics_rows(details: &Details) -> Vec<(&'static str, String)> {
-    let statistics = &details.statistics;
-    let measured = statistics.measured_time();
-    let share = |time: SimTime| match measured.as_millis() {
-        0 => "–".to_string(),
-        total => format!("{:.1} %", time.as_millis() as f64 * 100.0 / total as f64),
-    };
-    let mut rows = vec![
-        ("MUs in", statistics.mus_in.to_string()),
-        ("MUs out", statistics.mus_out.to_string()),
-        ("Working", share(statistics.time_busy)),
-        ("Blocked", share(statistics.time_blocked)),
-        ("Idle", share(statistics.time_idle)),
-        ("Failed", share(statistics.time_failed)),
-        ("Paused", share(statistics.time_paused)),
-        ("Failures", statistics.failures.to_string()),
-        ("Pauses", statistics.pauses.to_string()),
-    ];
-    if let Some(availability) = statistics.achieved_availability() {
-        rows.push(("Availability", format!("{:.1} %", availability * 100.0)));
-    }
-    if let Some(per_hour) = statistics.mus_per_hour(details.as_of) {
-        rows.push(("MUs an hour", format!("{per_hour:.1}")));
-    }
-    if let Some(lead_time) = statistics.lead_time_mean() {
-        rows.push(("Mean lead time", format_time_exact(lead_time)));
-    }
-    rows
 }
 
 /// Each object's name under it, and counts of MUs where they aren't drawn, `text_size` pixels

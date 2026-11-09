@@ -85,7 +85,7 @@ fn the_inspector_names_the_object_and_says_what_it_is_doing() {
     let inspection = watched.view.inspection().unwrap();
     assert_eq!(inspection.name, "Station 1");
     assert_eq!(inspection.kind, ObjectKind::Station);
-    assert_eq!(inspection.state, "Working");
+    assert_eq!(inspection.state, "Busy");
     assert_eq!(inspection.contents.len(), 1);
     // Its first MU came at 5 s and takes 10 s.
     assert_eq!(inspection.remaining, Some(secs(3)));
@@ -100,7 +100,7 @@ fn a_blocked_object_names_the_mu_it_holds_and_what_each_successor_is_doing() {
     let held = watched.view.picture().object(SOURCE).unwrap().contents()[0];
     let inspection = watched.view.inspection().unwrap();
     assert_eq!(inspection.state, "Blocked");
-    assert_eq!(inspection.blocked.as_deref(), Some(format!("Holding MU {held}: Station 1 is working").as_str()));
+    assert_eq!(inspection.blocked.as_deref(), Some(format!("Holding MU {held}: Station 1 is busy").as_str()));
 
     intervene(&mut watched, STATION_1, Intervention::ForceFailure);
     let inspection = watched.view.inspection().unwrap();
@@ -140,6 +140,67 @@ fn details_come_from_a_full_state() {
     assert_eq!(details.waiting, vec!["Source"], "the Source waits for Station 1");
     assert_eq!(details.statistics.mus_in, 1);
     assert_eq!(details.statistics_since, SimTime::ZERO);
+}
+
+const DRAIN: u32 = 13;
+
+/// The labels of an object's statistics rows, after a while, as the inspector shows them.
+fn statistics_labels(watched: &mut Watched, id: u32) -> Vec<&'static str> {
+    watched.view.select(Some(id));
+    watched.details();
+    watched.view.inspection().unwrap().statistics_rows().into_iter().map(|(label, _)| label).collect()
+}
+
+#[test]
+fn each_type_shows_only_the_statistics_that_can_vary_for_it() {
+    let mut watched = halted_at(600, STATION_1);
+    assert_eq!(statistics_labels(&mut watched, SOURCE), ["MUs out", "Blocked"]);
+    assert_eq!(
+        statistics_labels(&mut watched, STATION_1),
+        ["MUs in", "MUs out", "Busy", "Blocked", "Idle", "Failed", "Paused", "Failures", "Pauses", "Availability"]
+    );
+    assert_eq!(statistics_labels(&mut watched, DRAIN), ["MUs in", "Throughput", "Mean lead time"]);
+    let rows = watched.view.inspection().unwrap().statistics_rows();
+    assert!(rows[1].1.ends_with(" an hour"), "{:?}", rows[1]);
+}
+
+#[test]
+fn process_time_names_the_configured_one_only_when_it_differs() {
+    let mut watched = halted_at(12, STATION_1);
+    watched.details();
+    let details = watched.view.inspection().unwrap().details.unwrap();
+    assert_eq!(details.process_time_text().as_deref(), Some("00:00:10"));
+    intervene(&mut watched, STATION_1, Intervention::SetProcessTime(secs(20)));
+    watched.details();
+    let details = watched.view.inspection().unwrap().details.unwrap();
+    assert_eq!(details.process_time_text().as_deref(), Some("00:00:20 (configured 00:00:10)"));
+    watched.view.select(Some(SOURCE));
+    watched.details();
+    assert_eq!(watched.view.inspection().unwrap().details.unwrap().process_time_text(), None, "a Source has none");
+}
+
+#[test]
+fn the_changes_reset_would_keep_are_each_stations_last_process_time_that_differs() {
+    let mut watched = halted_at(12, STATION_1);
+    assert!(watched.view.changes().is_empty());
+    intervene(&mut watched, STATION_1, Intervention::SetProcessTime(secs(20)));
+    intervene(&mut watched, STATION_2, Intervention::SetProcessTime(secs(30)));
+    intervene(&mut watched, STATION_1, Intervention::SetProcessTime(secs(25)));
+    intervene(&mut watched, STATION_1, Intervention::Pause);
+    let described: Vec<String> = watched.view.changes().iter().map(|change| change.describe()).collect();
+    assert_eq!(described, ["Station 1's process time, 00:00:25", "Station 2's process time, 00:00:30"]);
+
+    // Station 2 set back to what it was configured with is no change at all.
+    let configured = {
+        watched.view.select(Some(STATION_2));
+        watched.details();
+        watched.view.inspection().unwrap().details.unwrap().configured_process_time.unwrap()
+    };
+    intervene(&mut watched, STATION_2, Intervention::SetProcessTime(configured));
+    let changed: Vec<u32> = watched.view.changes().iter().map(|change| change.object).collect();
+    assert_eq!(changed, [STATION_1]);
+    let change = &watched.view.changes()[0];
+    assert_eq!((change.name.as_str(), change.attribute, change.value), ("Station 1", "process_time", secs(25)));
 }
 
 // ---------- Asking for full states ----------

@@ -1,6 +1,6 @@
 # crabsim handoff
 
-Written 2026-11-07 at the end of a working session, and updated after each step since, last on 2026-11-08 after UI stage 2 was merged. Read this first, then check it against the code and git, because it describes a moment in time.
+Written 2026-11-07 at the end of a working session, and updated after each step since, last on 2026-11-09 after the design round on claims. Read this first, then check it against the code and git, because it describes a moment in time.
 
 **The UI's order of work is done.** UI stage 1 was built in four slices, PRs 24 to 27: the demo drawn live with state colours and MUs, pan and zoom, the run controls, speed, time mode, stepping, going back to a time, the error banner, the inspector, interventions on Stations and their marks. Step 7 trimmed the CLI to a headless run of the demo, in PR 30.
 
@@ -13,7 +13,7 @@ Written 2026-11-07 at the end of a working session, and updated after each step 
 
 **UI stage 2 is done** ([spec issue 63](https://github.com/MarcHoff94/crabsim/issues/63), PRs 65 to 70): the window works on a models folder through the catalogue as the user, lists and runs its model files, picks up an agent's changes, shows and changes every attribute of an instance in the inspector, and has an Editing tab with the user's control of the edit queue. Both front-ends now always work on a model file: the built-in demo is gone from them. See "UI stage 2 (built)".
 
-**Next, in the owner's order of 2026-11-08: the domain model, build step 7, starting with a design round.** See "Possible next steps".
+**Next: the owner reviews [spec issue 73](https://github.com/MarcHoff94/crabsim/issues/73), claims instead of the edit queue (ADR 0013), designed on 2026-11-09.** Whether it is built before the domain model (build step 7) is the owner's call. See "Possible next steps".
 
 ## Start here
 
@@ -31,7 +31,7 @@ Checked on 2026-11-08, on Rust 1.99.1, at `master` after PR 70 (`424aac6`): 603 
 | Where | State |
 |---|---|
 | `master` on GitHub | Steps 1 to 6 of the build order, UI stages 1 and 2, and steps 1 to 4 of the AI-native order of work through slice 3 of the catalogue, through PR 70 |
-| Open issues | Specs #3 (only build step 7 left), #28 (steps 5 to 8 left) and #63 (UI stage 2, built: it can be closed once the Editing tab is tried with a real agent), and #58, the MCP tool list's size, to monitor |
+| Open issues | Specs #3 (only build step 7 left), #28 (steps 5 to 8 left) and #63 (UI stage 2, built: tried with a real agent on 2026-11-09, which led to #73, so it can be closed), #73 (claims instead of the edit queue, waiting for the owner's review), and #58, the MCP tool list's size, to monitor |
 | `prototype/restore-replay` | The throwaway prototype from build step 5. Keep it, and never merge it |
 | `prototype/ui-bevy` | The throwaway UI prototype from UI step 2, with temporary counters in the session. Keep it, and never merge it |
 | Merged branches still on GitHub | 8, the docs branches and UI stage 2's, all merged into `master`: safe to delete (`git branch -r --merged origin/master`). Deleting remote branches needs the owner's own hand: the permission check refuses it to an agent |
@@ -50,6 +50,7 @@ The owner merges PRs on GitHub themselves, so fetch before assuming local `maste
 - **2026-11-08:** `crabsim-mcp` was driven over stdio as a harness drives it, on a models folder outside the repository (`C:\Users\marcu\crabsim-models`). Everything worked, but `validate_model`'s schema required `text` (fixed in PR 44, with a test that every operation's shortest input passes its schema), `run_results` grew to 162 KB for 100 observations, and the tool list cost about 46 KB. The owner then held slice 2's design round before the harness trial, written up as spec issue 45, with ADR 0011 and the glossary's User, Editor and Edit queue. Slice 2's PR 1 (#47) fixed the sizes, and then an agent in Claude Code ran the first harness trial from `C:\Users\marcu\crabsim-trial`: it found the demo model's bottleneck and showed with paired intervals that a faster Station 2 raises throughput by 18.9%. Its report led to PR 1b and three more decisions in issue 45. It also showed that random numbers follow an object's position among the instances, so removing or inserting an instance breaks the pairing of runs.
 - **2026-11-08, later:** the rest of slice 2 (PRs 49 to 52), `compare_runs` (#53), streams (#54, ADR 0012) and a second harness trial with its fixes (#55). Then slice 3 was designed in a round of two rounds, written up as spec issue 56, and built in PRs 59 to 61. Measuring the MCP tool list during slice 3 showed it at 80.6 KB, up from about 29 KB, and the owner chose to watch it in issue 58 and shrink it later.
 - **2026-11-08, evening:** UI stage 2 was designed in a round of five rounds, written up as spec issue 63, and built in six PRs, 65 to 70. The owner tried PRs 3 to 5 and found that the inspector showed nothing to configure before Init. A short round then added the inspector's attributes and took the built-in demo out of both front-ends. Building the Editing tab found that the design round had wrongly assumed `take_model` kept the agent first in line, and the owner chose to make it do so.
+- **2026-11-09:** the owner tried the Editing tab with a real agent and never saw it, because single changes needed no claim. They also found objects couldn't be moved in the window, which only the prototype had done: PR 72 added moving by dragging. A design round of three rounds then dropped the edit queue for claims (ADR 0013, spec issue 73): a queue orders agents but doesn't stop one undoing another's work, and the owner wants a simple tool to see and manage the agents working at the time.
 
 ## Agreed design
 
@@ -346,6 +347,7 @@ Decided with the owner on 2026-11-07 in a design round, and written up as [spec 
 Decided with the owner on 2026-11-08 in a design round of six rounds, and written up as [spec issue 45](https://github.com/MarcHoff94/crabsim/issues/45) with user stories, every decision and the test seams. ADR 0011 holds the decisions that are hard to reverse. The short version:
 
 - **`edit_model { path, changes, expected_hash? }`:** a batch of typed changes to a model file, all or nothing, checked once at the end, refused with every problem if the result is invalid. Instances, connections, classes, attributes and the model's description. `remove_class` is refused while anything depends on it unless `delete_dependents: true`. **`get_attributes`** gives every attribute with its value and origin. Files by path, no interventions yet.
+- **Superseded by ADR 0013 (spec issue 73, not built yet):** no edit queue, a claim with a goal and what the agent is doing, granted or refused at once, needed for every change, paused when the user takes the right. The two points below describe what is built today.
 - **The editor:** one per model file. Agents `claim_model` with a required purpose and wait in the edit queue, polling for now. A one-off change goes through when nobody holds or waits. An agent's right ends on release, when its process ends, or after 10 idle minutes.
 - **The user controls the queue,** in the UI and the CLI, never over MCP: take the right at once, give it, choose who is next, remove, block and unblock an agent session. The user never waits and never times out. This is the AI-native pillar's first deliberate exception.
 - **One person's front-end per models folder:** one UI window, holding `.crabsim/user.lock`. A second window means an independent copy of the folder. While the UI has it, the CLI can only read and run.
@@ -398,7 +400,9 @@ An agent should never need to read a whole model: a model of 6,000 objects is pr
 - AI decisions inside a run (`docs/design/ai-decisions-in-runs.md`).
 - Shared class libraries and how they're versioned, together with a class library and explorer in the UI, with folders, deriving and duplicating there: its own design round.
 - A built-in crabsim agent the user can opt in to give control of the edit queue, which knows the overall task, delegates to subagents and manages their access to the model, perhaps to parts of it. It would bring the queue's control back in line with the AI-native pillar.
-- The edit queue notifying a waiting agent instead of being polled: a `claim_model` call that stays open with progress notifications, or MCP resource subscriptions.
+- Notifying a paused agent that it can carry on, instead of it finding out on its next call (replaces notifying agents waiting in the edit queue, which ADR 0013 removes).
+- An edit log of who changed what in a model file, for afterwards and for undo (out of spec 73).
+- Running a harness such as Claude Code from inside the UI. The owner has no API key now, so agents work from an IDE. Unchecked: Claude Code's CLI runs headless as a separate program (`claude -p`) with its own login, which may not need one.
 - **The security implications** of the editor right and of detecting outside changes, which the owner wants revisited (2026-11-08): both guard against accidents, not against someone determined. See issue 45's Out of Scope.
 - Sub-models: classes made of several objects.
 
@@ -436,10 +440,10 @@ Done on 2026-11-07: the wiki was rewritten against today's code, with four pages
 
 ## Possible next steps
 
-In the owner's order of 2026-11-08:
+In the owner's order of 2026-11-08, with spec 73 added on 2026-11-09:
 
 1. **Step 7 of the build order, the domain model, starting with a design round,** as UI stage 2 had. What it covers, from "Build order" and "Agreed design": stops on Source, Buffer and Drain with failure profiles, and what becomes of `StopCtrl`, which is still `todo!()`; fixing Buffer (see "Known problems") and adding dwelling time; the failure time bases; Station capacity with start modes and the exit-strategy seam. Decisions waiting for it: whether a stopped predecessor keeps its place among the blocked ("Known problems"), and how blocked predecessors give up their place once objects hold more than one MU. Each new attribute arrives with its operation, its place in the model file and its schema, its mid-run behaviour (ADR 0008), and its fields in the inspector (`ui/src/attributes.rs`), with the benchmark before and after for anything on the per-event path. Drag and drop, class editing and the layout image wait for it.
-2. **Try the Editing tab with a real agent:** an agent claims a model over MCP while the window shows it, and the owner takes the right and releases it. Stage 2's tests play agents with catalogues, but nobody has done this by hand. Then #63 can be closed.
+2. **Claims instead of the edit queue, [spec issue 73](https://github.com/MarcHoff94/crabsim/issues/73):** waiting for the owner's review, then three PRs (catalogue, CLI, UI). The owner may put it before step 7. Trying the Editing tab with a real agent, the old step 2, was done on 2026-11-09 and led to it, so #63 can be closed.
 3. **The rest of issue 28:** crabsim's first skills, as the test that the operations are enough (step 5), experiments and studies (6), live-session operations and class changes as interventions (7), then in-app agents (8).
 4. **The MCP tool list's size, [issue 58](https://github.com/MarcHoff94/crabsim/issues/58):** a design round on shrinking it, when the owner chooses. Stage 2 added no tool. Measure it again after each slice.
 

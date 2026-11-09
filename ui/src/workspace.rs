@@ -372,19 +372,25 @@ impl Workspace {
         Ok(Editors::from_json(&read))
     }
 
-    /// Does one of the user's controls, if who holds the open model and the blocked agents are
+    /// Does one of the user's controls, if who holds the model it acts on and the blocked agents are
     /// still as `shown`, which is what the user decided on. Otherwise nothing is done, and the
     /// refusal holds the state now and what changed. Gives the state after.
     pub fn act(&mut self, shown: &Editors, action: EditAction) -> Result<Editors, ActRefusal> {
-        let path = self.opened.clone().ok_or_else(|| ActRefusal::Refused("no model file is open".into()))?;
+        // Taking and releasing are for the open model. The rest need none open.
+        let opened = self.opened.clone();
+        let path = match &action {
+            EditAction::Take | EditAction::Release => opened.clone().ok_or_else(|| ActRefusal::Refused("no model file is open".into()))?,
+            EditAction::Revoke(path) => path.clone(),
+            EditAction::Block(_) | EditAction::Unblock(_) => opened.clone().unwrap_or_default(),
+        };
         let now = self.editors().map_err(ActRefusal::Refused)?;
-        if let Some(what) = shown.changes_on(&path, &now) {
+        if let Some(what) = shown.changes_on(&path, opened.as_deref(), &now) {
             return Err(ActRefusal::Changed { now, what });
         }
         let (operation, input) = match &action {
             EditAction::Take => ("take_model", json!({ "path": path })),
             EditAction::Release => ("release_model", json!({ "path": path })),
-            EditAction::Revoke => ("revoke_claim", json!({ "path": path })),
+            EditAction::Revoke(path) => ("revoke_claim", json!({ "path": path })),
             EditAction::Block(agent) => ("block_agent", json!({ "agent": agent })),
             EditAction::Unblock(agent) => ("unblock_agent", json!({ "agent": agent })),
         };

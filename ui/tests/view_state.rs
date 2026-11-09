@@ -321,6 +321,20 @@ fn time_mode_starts_continuous_and_can_skip_gaps() {
 }
 
 #[test]
+fn without_animation_no_speed_is_missed_and_the_setting_carries_over_to_a_new_model() {
+    let mut view = ViewState::new(&demo::model());
+    assert!(view.animate(), "on to begin with");
+    view.observe(&SessionOutput::Status(SessionStatus::Advancing), Duration::from_secs(10));
+    for second in 1..=6 {
+        shown_at(&mut view, 10 * second, 10.0 + second as f64);
+    }
+    assert!(view.achieved_speed().is_some(), "animated, far behind 60 times");
+    view.set_animate(false);
+    assert_eq!(view.achieved_speed(), None, "without animation there is no speed to keep up with");
+    assert!(!ViewState::with_settings_of(&demo::model(), &view).animate());
+}
+
+#[test]
 fn the_achieved_speed_shows_only_while_playback_falls_behind() {
     let mut view = ViewState::new(&demo::model());
     view.observe(&SessionOutput::Status(SessionStatus::Advancing), Duration::from_secs(10));
@@ -398,9 +412,10 @@ fn stepping_is_offered_once_initialised_and_forward_only_while_halted() {
 }
 
 #[test]
-fn a_jump_goes_only_to_an_earlier_time() {
+fn going_to_a_time_goes_back_or_on() {
     let mut watched = Watched::demo();
     assert_eq!(watched.view.jump_target("0"), Err(JumpProblem::NotInitialised));
+    assert_eq!(watched.view.jump_target("1:00"), Ok(SimTime::from_secs(60)), "on from before Init, which Init does");
     watched.session.start().unwrap();
     watched.at(12);
     watched.session.halt().unwrap();
@@ -408,7 +423,7 @@ fn a_jump_goes_only_to_an_earlier_time() {
     let view = &watched.view;
     assert_eq!(view.jump_target("00:00:05"), Ok(SimTime::from_secs(5)));
     assert_eq!(view.jump_target("00:00:12"), Ok(SimTime::from_secs(12)), "the instant on screen");
-    assert_eq!(view.jump_target("0:20"), Err(JumpProblem::NotEarlier));
+    assert_eq!(view.jump_target("0:20"), Ok(SimTime::from_secs(20)), "a later time goes on");
     assert_eq!(view.jump_target("soon"), Err(JumpProblem::NotATime));
     watched.session.go_back(SimTime::from_secs(5)).unwrap();
     watched.frame();

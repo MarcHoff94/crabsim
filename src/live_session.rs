@@ -5,6 +5,11 @@
 //! it computed. So what the user experiences follows shown time, while the run is at a later
 //! computed time. To reach an earlier instant, the session restores the nearest earlier
 //! checkpoint and replays. See ADR 0002.
+//!
+//! With animation off, a session advancing races instead: it records nothing, ignores its speed
+//! and computes as fast as the machine allows, to its end time or a time gone to, with shown time
+//! following the run and a full state now and then instead of occurrences. Halted, it records
+//! again, so stepping and going back work as ever.
 
 use crate::error::RunError;
 use crate::event::EventType;
@@ -34,6 +39,12 @@ const INSTANTS_PER_RELEASE: usize = 1_000;
 /// How many events a replay processes before it checks for commands again. A replay is faster
 /// than computing, because it records nothing.
 const EVENTS_PER_REPLAY_SLICE: usize = 10_000;
+
+/// How many events a race processes before it checks for commands again. It records nothing.
+const EVENTS_PER_RACE_SLICE: usize = 100_000;
+
+/// How often, in wall time, a race sends the run's full state, so a view can show where it is.
+const RACE_STATE_INTERVAL: Duration = Duration::from_millis(250);
 
 /// How many unread outputs a session lets build up before it stops releasing until they are
 /// read. It keeps handling commands meanwhile, and no output is ever dropped.
@@ -230,6 +241,8 @@ enum Command {
     LocateStepBack,
     SetResetKeepsChanges(bool),
     SetEndTime(Option<SimTime>),
+    SetAnimation(bool),
+    GoTo(SimTime),
     RequestState,
     Intervene(Action),
     Sync(Sender<Result<(), SessionError>>),
@@ -327,6 +340,23 @@ impl LiveSession {
 
     /// While halted, shows the next instant and stays halted. Does nothing while advancing, or if
     /// there is no next instant.
+    /// Animation on, as a session starts, releases what happens at the session's speed, with
+    /// every occurrence. Off, advancing records nothing and computes as fast as the machine
+    /// allows, sending shown time and a full state a few times a second instead, and the final
+    /// state when it stops. Results are the same either way, and halted it records again, so
+    /// stepping and going back work as ever. Turned off while advancing, it goes on from what was
+    /// computed. Turned on, it animates from where the run is.
+    pub fn set_animation(&self, on: bool) -> Result<(), SessionError> {
+        self.send(Command::SetAnimation(on))
+    }
+
+    /// Goes to `to`. An earlier time, or shown time, goes back there. A later one advances to it
+    /// and halts there: at the session's speed with animation on, as fast as possible with it
+    /// off, and no further than the end time. Halt stops it on the way.
+    pub fn go_to(&self, to: SimTime) -> Result<(), SessionError> {
+        self.send(Command::GoTo(to))
+    }
+
     pub fn step_forward(&self) -> Result<(), SessionError> {
         self.send(Command::StepForward)
     }
@@ -596,6 +626,12 @@ struct SessionThread<'a, C> {
     steps_wanted: u32,
     /// Where the session halts by itself. Nothing past it is computed or released.
     end: Option<SimTime>,
+    /// Whether advancing releases what happens at the speed, recording it. See `set_animation`.
+    animate: bool,
+    /// A later time gone to, where the session halts. Gone once there, or on Halt.
+    goal: Option<SimTime>,
+    /// When a race last sent the full state, in wall time.
+    race_state_sent: Option<Duration>,
 }
 
 impl<'a, C: Clock> SessionThread<'a, C> {
@@ -629,6 +665,9 @@ impl<'a, C: Clock> SessionThread<'a, C> {
             deferred: VecDeque::new(),
             steps_wanted: 0,
             end: None,
+            animate: true,
+            goal: None,
+            race_state_sent: None,
         }
     }
 
@@ -671,7 +710,25 @@ impl<'a, C: Clock> SessionThread<'a, C> {
     }
 
     fn has_work(&self) -> bool {
-        self.replay.is_some() || !self.deferred.is_empty() || self.can_compute() || self.steps_wanted > 0
+        self.replay.is_some() || !self.deferred.is_empty() || self.racing() || self.can_compute() || self.steps_wanted > 0
+    }
+
+    /// Advancing with animation off.
+    fn racing(&self) -> bool {
+        !self.animate && self.pace.is_some()
+    }
+
+    /// Where advancing stops: the end time, or a later time gone to, whichever comes first.
+    fn stop_at(&self) -> Option<SimTime> {
+        match (self.end, self.goal) {
+            (Some(end), Some(goal)) => Some(end.min(goal)),
+            (end, goal) => end.or(goal),
+        }
+    }
+
+    /// How a run records: everything, except while racing.
+    fn recording(&self) -> Recording {
+        if self.racing() { Recording::NOTHING } else { Recording::ALL }
     }
 
     fn do_some_work(&mut self) {
@@ -679,6 +736,8 @@ impl<'a, C: Clock> SessionThread<'a, C> {
             self.replay_some();
         } else if let Some(command) = self.deferred.pop_front() {
             self.apply(command);
+        } else if self.racing() {
+            self.race_some();
         } else {
             self.compute_some();
             self.release();
@@ -716,6 +775,8 @@ impl<'a, C: Clock> SessionThread<'a, C> {
             Command::LocateStepBack => self.locate_step_back(),
             Command::SetResetKeepsChanges(keep) => self.settings.reset_keeps_changes = keep,
             Command::SetEndTime(end) => self.set_end_time(end),
+            Command::SetAnimation(on) => self.set_animation(on),
+            Command::GoTo(to) => self.go_to(to),
             Command::StepForward => {
                 if let Some(end) = self.at_end() {
                     self.observe(SessionOutput::Error(SessionError::AtEndTime(end)));
@@ -750,7 +811,11 @@ impl<'a, C: Clock> SessionThread<'a, C> {
         self.pace = Some(Pace { wall: self.clock.elapsed(), simulation: self.shown });
         self.waiting_since = None;
         self.set_status(SessionStatus::Advancing);
-        self.compute_some();
+        if self.animate {
+            self.compute_some();
+        } else {
+            self.begin_race();
+        }
     }
 
     /// Does Init if the run needs it, reporting it, and takes the first checkpoint.
@@ -774,6 +839,13 @@ impl<'a, C: Clock> SessionThread<'a, C> {
     }
 
     fn halt(&mut self) {
+        self.goal = None;
+        if self.racing() {
+            self.pace = None;
+            self.end_race();
+            self.set_status(SessionStatus::Halted);
+            return;
+        }
         // Wall time up to now still counts, as far as the run has got.
         self.release();
         self.pace = None;
@@ -797,6 +869,8 @@ impl<'a, C: Clock> SessionThread<'a, C> {
             }
         }
         self.run.reset();
+        self.run.set_recording(Recording::ALL);
+        self.goal = None;
         if self.settings.reset_keeps_changes {
             for (id, time) in kept {
                 self.run.set_process_time(id, time).expect("only logged for a Station");
@@ -839,9 +913,161 @@ impl<'a, C: Clock> SessionThread<'a, C> {
         self.shown >= end && self.next_unreleased().is_none_or(|next| next > end)
     }
 
-    /// `time`, or the end time if that comes first. Never earlier than shown time.
+    /// `time`, or where advancing stops if that comes first. Never earlier than shown time.
     fn within_end(&self, time: SimTime) -> SimTime {
-        self.end.map_or(time, |end| time.min(end.max(self.shown)))
+        self.stop_at().map_or(time, |stop| time.min(stop.max(self.shown)))
+    }
+
+    /// Halts where advancing stops, which shown time has reached: as at the end time, or halted at
+    /// a time gone to.
+    fn arrive(&mut self, at: SimTime) {
+        if self.racing() {
+            self.pace = None;
+            self.end_race();
+        }
+        if self.end == Some(at) {
+            self.goal = None;
+            self.reach_end(at);
+        } else {
+            self.goal = None;
+            self.shown = self.shown.max(at);
+            self.report_shown_time();
+            self.pace = None;
+            self.waiting_since = None;
+            self.set_status(SessionStatus::Halted);
+        }
+    }
+
+    fn set_animation(&mut self, on: bool) {
+        if on == self.animate {
+            return;
+        }
+        if on {
+            let was_racing = self.racing();
+            self.animate = true;
+            if was_racing {
+                // Animating from where the run is, as if Start were pressed there.
+                self.end_race();
+                self.pace = Some(Pace { wall: self.clock.elapsed(), simulation: self.shown });
+                self.waiting_since = None;
+            }
+        } else {
+            self.animate = false;
+            if self.pace.is_some() {
+                self.begin_race();
+            }
+        }
+    }
+
+    fn go_to(&mut self, to: SimTime) {
+        if to <= self.shown {
+            self.go_back(to);
+            return;
+        }
+        if let Some(end) = self.at_end() {
+            self.observe(SessionOutput::Error(SessionError::AtEndTime(end)));
+            return;
+        }
+        if self.status == SessionStatus::Failed {
+            self.observe(SessionOutput::Error(SessionError::ResetRequired));
+            return;
+        }
+        self.goal = Some(to);
+        if self.pace.is_none() {
+            self.start();
+        }
+    }
+
+    /// Begins racing from what has been computed: the buffer is already in the run, so shown time
+    /// moves up to the run, finishing the instant it is in, and nothing more is recorded.
+    fn begin_race(&mut self) {
+        self.buffer.clear();
+        self.waiting_since = None;
+        if let Some(at) = self.stopped.as_ref().and_then(Stopped::due_at) {
+            self.shown = self.shown.max(at);
+            self.pace = None;
+            self.report_shown_time();
+            self.stop_here();
+            return;
+        }
+        let to = self.shown.max(self.run.time());
+        let to = self.stop_at().map_or(to, |stop| to.min(stop.max(self.shown)));
+        if let Err(failure) = self.run.advance_to(to) {
+            self.shown = self.run.time();
+            self.report_shown_time();
+            self.pace = None;
+            self.fail(failure.error);
+            return;
+        }
+        self.shown = to;
+        self.run.set_recording(Recording::NOTHING);
+        self.race_state_sent = None;
+        self.report_shown_time();
+        if let Some(stop) = self.stop_at().filter(|&stop| self.shown >= stop) {
+            self.arrive(stop);
+        }
+    }
+
+    /// Ends a race where the run is: it records again, and the full state there goes out.
+    fn end_race(&mut self) {
+        self.run.set_recording(Recording::ALL);
+        self.report_shown_time();
+        self.observe(SessionOutput::State(self.run.state()));
+    }
+
+    /// Races one slice, as far as where advancing stops, always finishing the last instant, so
+    /// the run stands at shown time with everything there done.
+    fn race_some(&mut self) {
+        let stop = self.stop_at();
+        let slice = |run: &mut SimulationRun| -> Result<bool, RunError> {
+            let reached = match stop {
+                Some(stop) => run.advance_bounded(stop, EVENTS_PER_RACE_SLICE).map_err(|failure| failure.error)?.reached,
+                None => {
+                    run.advance_events(EVENTS_PER_RACE_SLICE).map_err(|failure| failure.error)?;
+                    false
+                }
+            };
+            if !reached {
+                run.advance_to(run.time()).map_err(|failure| failure.error)?;
+            }
+            Ok(reached)
+        };
+        let raced = match catch_unwind(AssertUnwindSafe(|| slice(&mut self.run))) {
+            Ok(raced) => raced,
+            Err(panic) => resume_unwind(panic),
+        };
+        self.shown = self.shown.max(self.run.time());
+        match raced {
+            Err(error) => {
+                self.pace = None;
+                self.end_race();
+                self.fail(error);
+                return;
+            }
+            Ok(true) => {
+                let stop = stop.expect("reached only with somewhere to stop");
+                self.arrive(stop);
+                return;
+            }
+            Ok(false) => {}
+        }
+        if self.run.events_processed() - self.events_at_last_checkpoint >= self.settings.checkpoint_spacing {
+            self.take_checkpoint();
+        }
+        if self.run.next_event_time().is_none() {
+            // Nothing will ever happen again, so there is nowhere further to race.
+            self.pace = None;
+            self.end_race();
+            self.set_status(SessionStatus::Halted);
+            return;
+        }
+        let now = self.clock.elapsed();
+        let due = self.race_state_sent.is_none_or(|sent| now.saturating_sub(sent) >= RACE_STATE_INTERVAL);
+        if due && !self.outbox.is_backlogged() {
+            self.race_state_sent = Some(now);
+            self.report_shown_time();
+            self.observe(SessionOutput::State(self.run.state()));
+        }
     }
 
     /// Halts at the end time, which shown time has reached.
@@ -933,6 +1159,7 @@ impl<'a, C: Clock> SessionThread<'a, C> {
         } else if to > self.shown {
             self.observe(SessionOutput::Error(SessionError::NotInThePast { to, shown: self.shown }));
         } else {
+            self.goal = None;
             self.abandon_future_and_replay_to(to, AfterReplay::GoBack);
         }
     }
@@ -1063,6 +1290,7 @@ impl<'a, C: Clock> SessionThread<'a, C> {
             }
             AfterReplay::ReportState => unreachable!("handled above"),
         }
+        self.run.set_recording(self.recording());
     }
 
     /// How many instants at the front of the buffer are finished. The last may still be growing.
@@ -1075,7 +1303,7 @@ impl<'a, C: Clock> SessionThread<'a, C> {
     fn can_compute(&self) -> bool {
         self.run.is_initialised()
             && self.stopped.is_none()
-            && self.run.next_event_time().is_some_and(|next| self.end.is_none_or(|end| next <= end))
+            && self.run.next_event_time().is_some_and(|next| self.stop_at().is_none_or(|stop| next <= stop))
             && self.complete_instants() < self.settings.buffer_instants
     }
 
@@ -1085,8 +1313,8 @@ impl<'a, C: Clock> SessionThread<'a, C> {
         if !self.can_compute() {
             return;
         }
-        // With an end time, a slice stops there, so nothing past it is ever computed.
-        let end = self.end;
+        // With an end time or a time gone to, a slice stops there, so nothing past it is computed.
+        let end = self.stop_at();
         let slice = |run: &mut SimulationRun| match end {
             Some(end) => run.advance_bounded(end, EVENTS_PER_SLICE).map(|advance| advance.occurrences),
             None => run.advance_events(EVENTS_PER_SLICE),
@@ -1184,7 +1412,8 @@ impl<'a, C: Clock> SessionThread<'a, C> {
     /// time would then lose the time until the next release, which with a full buffer includes a
     /// whole wait for commands.
     fn release(&mut self) {
-        if self.outbox.is_backlogged() {
+        // A race moves shown time itself.
+        if self.outbox.is_backlogged() || self.racing() {
             return;
         }
         let now = self.clock.elapsed();
@@ -1225,8 +1454,8 @@ impl<'a, C: Clock> SessionThread<'a, C> {
         if self.buffer.is_empty() && stop_is_due {
             self.stop_here();
         }
-        if let Some(end) = self.end.filter(|&end| self.pace.is_some() && self.nothing_left_before_the_end(end)) {
-            self.reach_end(end);
+        if let Some(stop) = self.stop_at().filter(|&stop| self.pace.is_some() && self.nothing_left_before_the_end(stop)) {
+            self.arrive(stop);
         }
     }
 
@@ -1293,7 +1522,12 @@ impl<'a, C: Clock> SessionThread<'a, C> {
         // A backlogged session can't promise everything is waiting in `outputs`, and
         // nobody can read while a sync is waiting, so no waiter would ever be released.
         let backlogged = self.outbox.is_backlogged();
+        // A race has no pace to reach, so a sync waits for it to end.
+        let racing = self.racing();
         self.waiters.retain(|waiter| {
+            if racing && !backlogged {
+                return true;
+            }
             // A halted session goes no further than shown time, once what is due there is out.
             let goal = if halted { shown } else { waiter.goal };
             let reached = settled && shown >= goal && next.is_none_or(|next| next > goal);

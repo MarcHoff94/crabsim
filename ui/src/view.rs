@@ -94,8 +94,6 @@ pub enum JumpProblem {
     /// There is no run to go back in until Init.
     NotInitialised,
     NotATime,
-    /// Going back goes to shown time or earlier.
-    NotEarlier,
 }
 
 /// Why a time typed in as the end time can't be used.
@@ -168,6 +166,8 @@ pub struct ViewState {
     settle_until: Duration,
     speed: f64,
     time_mode: TimeMode,
+    /// Whether advancing is animated. See `LiveSession::set_animation`.
+    animate: bool,
     /// Wall time and shown time while advancing, oldest first, over the last `ACHIEVED_WINDOW`.
     pace: VecDeque<(Duration, SimTime)>,
     selected: Option<u32>,
@@ -360,17 +360,30 @@ impl ViewState {
             locating: false,
             end_time: None,
             model_changed: false,
+            animate: true,
         }
     }
 
-    /// A view of `model` that keeps the window's settings from `old`: its speed, time mode and
-    /// end time, which the window gives the new session too.
+    /// A view of `model` that keeps the window's settings from `old`: its speed, time mode, end
+    /// time and animation, which the window gives the new session too.
     pub fn with_settings_of(model: &ModelDescription, old: &ViewState) -> ViewState {
         let mut view = ViewState::new(model);
         view.speed = old.speed;
         view.time_mode = old.time_mode;
         view.end_time = old.end_time;
+        view.animate = old.animate;
         view
+    }
+
+    /// Whether advancing is animated.
+    pub fn animate(&self) -> bool {
+        self.animate
+    }
+
+    /// Notes that animation went on or off, as the window tells the session too.
+    pub fn set_animate(&mut self, on: bool) {
+        self.animate = on;
+        self.pace.clear();
     }
 
     /// Takes in one output from the session, read at wall time `wall`.
@@ -458,7 +471,7 @@ impl ViewState {
     pub fn achieved_speed(&self) -> Option<f64> {
         let (&(first_wall, first_shown), &(last_wall, last_shown)) = (self.pace.front()?, self.pace.back()?);
         let wall = last_wall.saturating_sub(first_wall);
-        if self.status != SessionStatus::Advancing || wall < ACHIEVED_MINIMUM {
+        if !self.animate || self.status != SessionStatus::Advancing || wall < ACHIEVED_MINIMUM {
             return None;
         }
         let achieved = last_shown.saturating_sub(first_shown).as_secs_f64() / wall.as_secs_f64();
@@ -523,15 +536,12 @@ impl ViewState {
         !self.initialised && self.status == SessionStatus::Halted
     }
 
-    /// The time to go back to for `typed`, as the jump field takes it: earlier than or at shown
-    /// time, in the form shown time is written.
+    /// The time to go to for `typed`, as the Go to field takes it, in the form shown time is
+    /// written: earlier goes back, later goes on. Before Init there is nothing to go back in.
     pub fn jump_target(&self, typed: &str) -> Result<SimTime, JumpProblem> {
-        if !self.initialised {
-            return Err(JumpProblem::NotInitialised);
-        }
         let to = parse_time(typed).ok_or(JumpProblem::NotATime)?;
-        if to > self.picture.shown() {
-            return Err(JumpProblem::NotEarlier);
+        if !self.initialised && to <= self.picture.shown() {
+            return Err(JumpProblem::NotInitialised);
         }
         Ok(to)
     }
@@ -638,7 +648,7 @@ impl ViewState {
     /// enough to follow them. Otherwise objects show their state, and a count where readable.
     pub fn shows_mus(&self, camera: &Camera) -> bool {
         camera.pixels_per_metre >= MU_MIN_PIXELS_PER_METRE
-            && (self.status != SessionStatus::Advancing || self.speed <= MU_MAX_SPEED)
+            && (self.status != SessionStatus::Advancing || (self.animate && self.speed <= MU_MAX_SPEED))
     }
 
     /// Every MU to draw, each in the object that holds it, or none when MUs aren't shown. A move

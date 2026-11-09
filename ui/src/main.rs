@@ -893,7 +893,7 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
     // Going back past interventions drops them, so it asks first. Stepping back may first have to
     // ask the session where it goes, and decides once the answer is in.
     let request = match request {
-        Some(Request::GoBack(to)) if ui.view.lost_going_back(to) > 0 => {
+        Some(Request::GoTo(to)) if ui.view.lost_going_back(to) > 0 => {
             ui.pending = Some(GoingBack::To(to));
             None
         }
@@ -964,7 +964,11 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
                 ui.view.set_time_mode(mode);
                 session.set_time_mode(mode)
             }
-            Request::GoBack(to) => session.go_back(to),
+            Request::GoTo(to) => session.go_to(to),
+            Request::Animate(on) => {
+                ui.view.set_animate(on);
+                session.set_animation(on)
+            }
             // Shown time has to stand still for the answer to hold.
             Request::LocateStepBack => session.halt().and_then(|()| session.locate_step_back()),
             Request::EndTime(end) => {
@@ -1002,7 +1006,10 @@ enum Request {
     Control(Control),
     Speed(f64),
     TimeMode(TimeMode),
-    GoBack(SimTime),
+    /// Go to a time: back to an earlier one, or on to a later one.
+    GoTo(SimTime),
+    /// Animation on or off.
+    Animate(bool),
     /// Ask the session where stepping back goes, before deciding whether to ask the user.
     LocateStepBack,
     /// Set or clear the end time.
@@ -1033,7 +1040,8 @@ fn replace_session(ui: &mut Ui, session: &Session, new_model: bool, wall: Durati
     let settled = fresh
         .set_speed(view.speed())
         .and_then(|()| fresh.set_time_mode(view.time_mode()))
-        .and_then(|()| fresh.set_end_time(view.end_time()));
+        .and_then(|()| fresh.set_end_time(view.end_time()))
+        .and_then(|()| fresh.set_animation(view.animate()));
     *session.0.lock().expect("the session lock is never poisoned") = fresh;
     ui.view = view;
     ui.pending = None;
@@ -1258,6 +1266,7 @@ fn top_bar(
         ui.separator();
         ui.label(egui::RichText::new(view.shown_time()).monospace().size(16.0));
         ui.label(match view.status() {
+            SessionStatus::Advancing if !view.animate() => "Running as fast as it can",
             SessionStatus::Advancing => "Running",
             SessionStatus::Halted => "Halted",
             SessionStatus::ReachedEnd => "Reached the end time",
@@ -1285,30 +1294,38 @@ fn top_bar(
         }
         ui.separator();
 
-        const BACK_HINT: &str = "Goes back to an earlier time, as it was then. Interventions made after it are dropped, so it asks first.";
-        ui.label("Go back to").on_hover_text(BACK_HINT);
-        let field = ui.add(egui::TextEdit::singleline(jump_text).desired_width(90.0).hint_text(view.shown_time())).on_hover_text(BACK_HINT);
+        const GO_HINT: &str = "Goes to a time, such as 30d. An earlier one goes back to it as it was then, dropping interventions made after it, so it asks first. A later one runs there and halts: at the speed while animated, as fast as it can otherwise.";
+        ui.label("Go to").on_hover_text(GO_HINT);
+        let field = ui.add(egui::TextEdit::singleline(jump_text).desired_width(90.0).hint_text(view.shown_time())).on_hover_text(GO_HINT);
         let target = view.jump_target(jump_text);
         let go = ui.add_enabled(target.is_ok(), egui::Button::new("Go")).on_disabled_hover_text(match target {
-            Err(JumpProblem::NotInitialised) => "Init first",
+            Err(JumpProblem::NotInitialised) => "Init first to go back, or type a later time",
             Err(JumpProblem::NotATime) => "Type a time such as 1:30, 02:00:00 or 1d 06:00:00",
-            Err(JumpProblem::NotEarlier) => "Only an earlier time than the one shown",
             Ok(_) => "",
         });
         let entered = field.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
         if let (true, Ok(to)) = (go.clicked() || entered, target) {
-            request = Some(Request::GoBack(to));
+            request = Some(Request::GoTo(to));
             jump_text.clear();
         }
         ui.separator();
 
+        let mut animate = view.animate();
+        let animate_hint = "Draw what happens at the chosen speed. Off, a run goes as fast as the machine allows, and the objects' states update a few times a second. Results are the same either way.";
+        if ui.checkbox(&mut animate, "Animate").on_hover_text(animate_hint).changed() {
+            request = Some(Request::Animate(animate));
+        }
         let mut speed = view.speed();
         let slider = egui::Slider::new(&mut speed, MIN_SPEED..=MAX_SPEED)
             .logarithmic(true)
             .suffix("×")
             .max_decimals(1)
             .text("speed");
-        if ui.add(slider).on_hover_text("How much simulated time passes in a second of real time. Changing it never makes the time jump.").changed() {
+        let slider = ui
+            .add_enabled(view.animate(), slider)
+            .on_hover_text("How much simulated time passes in a second of real time. Changing it never makes the time jump.")
+            .on_disabled_hover_text("Animation is off, so a run goes as fast as it can");
+        if slider.changed() {
             request = Some(Request::Speed(speed));
         }
         if let Some(achieved) = view.achieved_speed() {
@@ -1398,7 +1415,7 @@ fn confirm_going_back(ctx: &egui::Context, ui: &mut Ui) -> Option<Request> {
     // Stepping back goes to the instant before the one on screen, which is `to`, so going back
     // there is the same step, to exactly the time the user was shown.
     answer.then_some(match pending {
-        GoingBack::To(to) | GoingBack::Step(to) => Request::GoBack(to),
+        GoingBack::To(to) | GoingBack::Step(to) => Request::GoTo(to),
     })
 }
 

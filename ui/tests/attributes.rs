@@ -5,6 +5,7 @@
 
 use crabsim::{Position, SimTime};
 use crabsim_catalogue::{Catalogue, Settings, Source};
+use crabsim_model::State;
 use crabsim_ui::attributes::{Form, RepairKind};
 use crabsim_ui::view::Change;
 use crabsim_ui::workspace::{ModelChange, Refusal, ValueFrom, Workspace};
@@ -62,7 +63,7 @@ fn every_attribute_comes_with_its_value_and_where_it_comes_from() {
     let folder = Folder::new("read");
     let workspace = open(&folder);
     let names: Vec<String> = workspace.attributes("P1").unwrap().into_iter().map(|view| view.attribute).collect();
-    assert_eq!(names, ["process_time", "failures", "starting_mus", "dimensions", "description"], "a Station's attributes, in a fixed order");
+    assert_eq!(names, ["process_time", "failures", "starting_mus", "dimensions", "description", "state_notes"], "a Station's attributes, in a fixed order");
     assert_eq!(of(&workspace, "P1", "process_time"), (Some(json!("00:00:05")), ValueFrom::Class("Press".into())));
     assert_eq!(of(&workspace, "P2", "process_time"), (Some(json!("00:00:07")), ValueFrom::Instance));
     assert_eq!(of(&workspace, "P1", "starting_mus"), (Some(json!(0)), ValueFrom::BuiltIn));
@@ -252,6 +253,18 @@ fn a_time_field_gives_the_time_typed_or_says_what_is_wrong() {
     assert!(!form.matches(Some(&json!("00:00:45"))), "something waits to be applied");
     typed(&mut form, &["soon"]);
     assert!(form.value().unwrap_err().contains("isn't a time"));
+}
+
+#[test]
+fn state_notes_get_a_field_per_state_the_object_can_be_in_and_leave_out_empty_ones() {
+    let mut form = Form::state_notes(&[State::Busy, State::Blocked], Some(&json!({ "blocked": "waits for the conveyor" })));
+    let fields: Vec<(&str, &str)> = form.parts.iter().map(|part| (part.label, part.text.as_str())).collect();
+    assert_eq!(fields, [("Busy", ""), ("Blocked", "waits for the conveyor")]);
+    assert!(form.matches(Some(&json!({ "blocked": "waits for the conveyor" }))));
+    typed(&mut form, &["welding", "  "]);
+    assert_eq!(form.value(), Ok(json!({ "busy": "welding" })), "an empty field says nothing");
+    assert!(!form.matches(Some(&json!({ "blocked": "waits for the conveyor" }))), "something waits to be applied");
+    assert!(Form::state_notes(&[State::Idle], None).matches(None));
 }
 
 #[test]

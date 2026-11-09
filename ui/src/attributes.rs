@@ -4,6 +4,7 @@
 //! with no egui types, so it is tested without a window. See spec issue 63.
 
 use crabsim::time::parse_time;
+use crabsim_model::State;
 use serde_json::{json, Map, Value};
 
 /// How a repair time is spread, as a model file names it.
@@ -104,6 +105,21 @@ impl Form {
         Form { attribute: attribute.to_string(), parts, repair }
     }
 
+    /// The fields for state notes: one per state the object can be in, labelled with the state and
+    /// filled from `value`, the notes as a model file writes them.
+    pub fn state_notes(states: &[State], value: Option<&Value>) -> Form {
+        let parts = states
+            .iter()
+            .map(|state| part(state.label(), value.and_then(|notes| notes.get(state.name())).and_then(Value::as_str).unwrap_or_default()))
+            .collect();
+        Form { attribute: "state_notes".into(), parts, repair: None }
+    }
+
+    /// The states a state notes form has a field for.
+    fn states(&self) -> Vec<State> {
+        self.parts.iter().filter_map(|part| State::ALL.into_iter().find(|state| state.label() == part.label)).collect()
+    }
+
     /// Chooses how the repair time is spread, keeping what was typed.
     pub fn set_repair(&mut self, kind: RepairKind) {
         self.repair = Some(kind);
@@ -142,6 +158,15 @@ impl Form {
                 repair.insert(self.repair.unwrap_or(RepairKind::Constant).name().into(), spread);
                 Ok(json!({ "availability": percent / 100.0, "repair_time": repair }))
             }
+            "state_notes" => {
+                let mut notes = Map::new();
+                for (state, part) in self.states().into_iter().zip(&self.parts) {
+                    if !part.text.trim().is_empty() {
+                        notes.insert(state.name().into(), json!(part.text.trim()));
+                    }
+                }
+                Ok(Value::Object(notes))
+            }
             "dimensions" => {
                 let mut size = Map::new();
                 for (index, key) in ["length", "width", "height"].into_iter().enumerate() {
@@ -159,6 +184,9 @@ impl Form {
 
     /// Whether the fields hold what `value` would give, so nothing waits to be applied.
     pub fn matches(&self, value: Option<&Value>) -> bool {
+        if self.attribute == "state_notes" {
+            return *self == Form::state_notes(&self.states(), value);
+        }
         *self == Form::new(&self.attribute, value)
     }
 }

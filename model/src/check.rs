@@ -243,6 +243,14 @@ impl<'m> Checker<'m> {
         if let Some(dimensions) = attributes.dimensions {
             self.dimensions(owner, dimensions);
         }
+        for (state, note) in attributes.state_notes.iter().flatten() {
+            let at = format!("/attributes/state_notes/{}", state.name());
+            if !crate::State::of(built_in).contains(state) {
+                self.problem(owner, &at, format!("a {built_in} is never {}", state.never()));
+            } else if note.trim().is_empty() {
+                self.problem(owner, &at, "a note can't be empty: leave the state out instead");
+            }
+        }
     }
 
     fn failures(&mut self, owner: Owner, failures: &Failures) {

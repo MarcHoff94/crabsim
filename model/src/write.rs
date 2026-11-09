@@ -94,6 +94,10 @@ pub(crate) fn attributes(attributes: &Attributes) -> Value {
     if let Some(description) = &attributes.description {
         fields.insert("description".into(), json!(description));
     }
+    if let Some(notes) = &attributes.state_notes {
+        let notes: Map<String, Value> = notes.iter().map(|(state, note)| (state.name().to_string(), json!(note))).collect();
+        fields.insert("state_notes".into(), Value::Object(notes));
+    }
     Value::Object(fields)
 }
 

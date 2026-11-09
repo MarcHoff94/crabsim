@@ -109,6 +109,34 @@ pub struct AttributesFile {
     pub dimensions: Option<DimensionsFile>,
     /// Any object: free text saying what it is. Visual only.
     pub description: Option<String>,
+    /// Any object: the model's own note on what a state means for it, by state, shown beside
+    /// crabsim's definition of the state. Only states its built-in class can be in, each note not
+    /// empty. Inherited as a whole. Visual only.
+    pub state_notes: Option<StateNotesFile>,
+}
+
+/// A note per state, each left out if there is nothing to say.
+#[derive(JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct StateNotesFile {
+    /// Source, Station, Buffer.
+    #[schemars(length(min = 1))]
+    pub busy: Option<String>,
+    /// Source, Station, Buffer.
+    #[schemars(length(min = 1))]
+    pub blocked: Option<String>,
+    /// Station, Buffer, Drain.
+    #[schemars(length(min = 1))]
+    pub idle: Option<String>,
+    /// Station.
+    #[schemars(length(min = 1))]
+    pub failed: Option<String>,
+    /// Station.
+    #[schemars(length(min = 1))]
+    pub forced_failure: Option<String>,
+    /// Station.
+    #[schemars(length(min = 1))]
+    pub paused: Option<String>,
 }
 
 /// Random failures. The time between failures follows from the availability and the repair time.

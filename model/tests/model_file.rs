@@ -644,3 +644,63 @@ fn a_stations_random_numbers_follow_its_stream_through_a_file() {
     assert!(alone > 10, "{alone}");
     assert_eq!(with_one_in_front, alone, "the Mill moved to another place but kept its stream");
 }
+
+// ---------- State notes ----------
+
+/// A robot class noting what Blocked means for it, an instance of it with its own note on Failed,
+/// and another that inherits the class's notes.
+fn robots() -> String {
+    with_classes(
+        json!([{ "name": "Robot", "parent": "Station", "attributes": {
+            "process_time": "30",
+            "state_notes": { "blocked": "waits for the conveyor to clear", "busy": "welding" } } }]),
+        json!([
+            { "name": "In", "class": "Source", "successors": ["R1", "R2"], "attributes": { "interval": "5", "state_notes": { "blocked": "the pallet store is full" } } },
+            { "name": "R1", "class": "Robot", "successors": ["Out"], "attributes": { "state_notes": { "failed": "the gripper needs changing" } } },
+            { "name": "R2", "class": "Robot", "successors": ["Out"] },
+            { "name": "Out", "class": "Drain" },
+        ]),
+    )
+}
+
+#[test]
+fn state_notes_are_inherited_as_a_whole_and_an_instance_can_set_its_own() {
+    let model = load(&robots()).unwrap();
+    let notes = |index: usize| {
+        let resolved = model.resolve(index).unwrap();
+        let notes: Vec<(&'static str, String)> =
+            resolved.attributes.state_notes.clone().unwrap_or_default().into_iter().map(|(state, note)| (state.name(), note)).collect();
+        (notes, resolved.origin(Attribute::StateNotes).clone())
+    };
+    assert_eq!(notes(2), (vec![("busy", "welding".to_string()), ("blocked", "waits for the conveyor to clear".to_string())], Origin::Class("Robot".into())));
+    assert_eq!(notes(1), (vec![("failed", "the gripper needs changing".to_string())], Origin::Instance), "set here, so the class's notes are cut");
+    assert_eq!(notes(3), (vec![], Origin::BuiltIn), "a Drain with none");
+}
+
+#[test]
+fn state_notes_survive_saving_and_change_no_result() {
+    let model = load(&robots()).unwrap();
+    let saved = model.save();
+    assert!(saved.contains("the gripper needs changing"), "{saved}");
+    assert_eq!(load(&saved).unwrap(), model);
+    let plain = robots().replace(r#","state_notes":{"blocked":"the pallet store is full"}"#, "");
+    assert_ne!(plain, robots(), "the note was taken out");
+    assert_eq!(run_for(&built(&robots()), 3, secs(3_600)), run_for(&built(&plain), 3, secs(3_600)));
+}
+
+#[test]
+fn a_state_note_must_name_a_state_its_object_can_be_in_and_say_something() {
+    let text = file(json!([
+        { "name": "In", "class": "Source", "successors": ["Out"], "attributes": { "interval": "5", "state_notes": { "failed": "never", "blokked": "typo" } } },
+        { "name": "Out", "class": "Drain", "attributes": { "state_notes": { "idle": "", "busy": 3 } } },
+    ]));
+    assert_eq!(
+        found(&text),
+        vec![
+            "/instances/0/attributes/state_notes/blokked: unknown state `blokked`: did you mean `blocked`?",
+            "/instances/0/attributes/state_notes/failed: a Source is never failed",
+            "/instances/1/attributes/state_notes/busy: this should be text",
+            "/instances/1/attributes/state_notes/idle: a note can't be empty: leave the state out instead",
+        ]
+    );
+}

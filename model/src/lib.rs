@@ -102,6 +102,9 @@ pub struct Attributes {
     pub dimensions: Option<Dimensions>,
     /// Free text saying what the object is. Visual only.
     pub description: Option<String>,
+    /// The model's own note on what each state means for this object, such as Blocked meaning
+    /// "waits for the conveyor". Inherited as a whole. Visual only.
+    pub state_notes: Option<StateNotes>,
 }
 
 impl Attributes {
@@ -124,6 +127,7 @@ impl Attributes {
             Attribute::Capacity => self.capacity.is_some(),
             Attribute::Dimensions => self.dimensions.is_some(),
             Attribute::Description => self.description.is_some(),
+            Attribute::StateNotes => self.state_notes.is_some(),
         }
     }
 
@@ -137,6 +141,7 @@ impl Attributes {
             Attribute::Capacity => self.capacity = from.capacity,
             Attribute::Dimensions => self.dimensions = from.dimensions,
             Attribute::Description => self.description = from.description.clone(),
+            Attribute::StateNotes => self.state_notes = from.state_notes.clone(),
         }
     }
 }
@@ -151,10 +156,11 @@ pub enum Attribute {
     Capacity,
     Dimensions,
     Description,
+    StateNotes,
 }
 
 impl Attribute {
-    pub const ALL: [Attribute; 7] = [
+    pub const ALL: [Attribute; 8] = [
         Attribute::Interval,
         Attribute::ProcessTime,
         Attribute::Failures,
@@ -162,6 +168,7 @@ impl Attribute {
         Attribute::Capacity,
         Attribute::Dimensions,
         Attribute::Description,
+        Attribute::StateNotes,
     ];
 
     /// Its name in a file.
@@ -174,6 +181,7 @@ impl Attribute {
             Attribute::Capacity => "capacity",
             Attribute::Dimensions => "dimensions",
             Attribute::Description => "description",
+            Attribute::StateNotes => "state_notes",
         }
     }
 
@@ -181,11 +189,83 @@ impl Attribute {
     pub fn applies_to(self, built_in: &str) -> bool {
         matches!(
             (built_in, self),
-            (_, Attribute::Dimensions | Attribute::Description)
+            (_, Attribute::Dimensions | Attribute::Description | Attribute::StateNotes)
                 | ("Source", Attribute::Interval)
                 | ("Station", Attribute::ProcessTime | Attribute::Failures | Attribute::StartingMus)
                 | ("Buffer", Attribute::Capacity)
         )
+    }
+}
+
+/// A state a material-flow object can be in, as a model file names it in state notes. Each has
+/// one colour wherever crabsim shows it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum State {
+    Busy,
+    Blocked,
+    Idle,
+    Failed,
+    ForcedFailure,
+    Paused,
+}
+
+/// A model's own notes on what states mean for a class or instance, by state.
+pub type StateNotes = std::collections::BTreeMap<State, String>;
+
+impl State {
+    pub const ALL: [State; 6] = [State::Busy, State::Blocked, State::Idle, State::Failed, State::ForcedFailure, State::Paused];
+
+    /// Its name in a file.
+    pub fn name(self) -> &'static str {
+        match self {
+            State::Busy => "busy",
+            State::Blocked => "blocked",
+            State::Idle => "idle",
+            State::Failed => "failed",
+            State::ForcedFailure => "forced_failure",
+            State::Paused => "paused",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<State> {
+        State::ALL.into_iter().find(|state| state.name() == name)
+    }
+
+    /// Its name as people read it, such as "Forced failure".
+    pub fn label(self) -> &'static str {
+        match self {
+            State::Busy => "Busy",
+            State::Blocked => "Blocked",
+            State::Idle => "Idle",
+            State::Failed => "Failed",
+            State::ForcedFailure => "Forced failure",
+            State::Paused => "Paused",
+        }
+    }
+
+    /// The states an object of this built-in class can be in. A Source is always making its next
+    /// MU or waiting to pass one on, and a Drain takes MUs at once, so it is only ever idle. Only
+    /// Stations stop, so far.
+    pub fn of(built_in: &str) -> &'static [State] {
+        match built_in {
+            "Source" => &[State::Busy, State::Blocked],
+            "Station" => &State::ALL,
+            "Buffer" => &[State::Busy, State::Blocked, State::Idle],
+            "Drain" => &[State::Idle],
+            _ => &[],
+        }
+    }
+
+    /// Completes "a Station is never ...".
+    pub(crate) fn never(self) -> &'static str {
+        match self {
+            State::Busy => "busy",
+            State::Blocked => "blocked",
+            State::Idle => "idle",
+            State::Failed => "failed",
+            State::ForcedFailure => "under a forced failure",
+            State::Paused => "paused",
+        }
     }
 }
 

@@ -83,7 +83,16 @@ fn main() {
         .add_plugins(
             DefaultPlugins
                 .set(WindowPlugin {
-                    primary_window: Some(Window { title: "crabsim".into(), ..default() }),
+                    primary_window: Some(Window {
+                        title: "crabsim".into(),
+                        // Narrower than this, the top bar's rows no longer fit.
+                        resize_constraints: bevy::window::WindowResizeConstraints {
+                            min_width: 1000.0,
+                            min_height: 500.0,
+                            ..default()
+                        },
+                        ..default()
+                    }),
                     ..default()
                 })
                 // The engine logs every event at info level, which Bevy's logger would print, and
@@ -850,10 +859,10 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
 
     // A model clicked replaces the run, so a run in progress is replaced only once confirmed.
     if let Some(path) = chosen {
-        if ui.view.allows(Control::Init) {
-            open_model(ui, &session, &path, wall);
-        } else {
+        if ui.view.run_in_progress() {
             ui.replacing = Some(path);
+        } else {
+            open_model(ui, &session, &path, wall);
         }
     }
     if let Some(path) = confirm_replacing(&ctx, ui) {
@@ -1083,7 +1092,9 @@ fn top_bar(
     end_text: &mut String,
 ) -> Option<Request> {
     let mut request = None;
-    ui.horizontal_wrapped(|ui| {
+    // Two rows, each narrower than the window's minimum width, so neither wraps or loses a
+    // control off its end: running the model first, then where and how fast it goes.
+    ui.horizontal(|ui| {
         ui.label(egui::RichText::new(workspace.opened().unwrap_or("No model open")).strong());
         ui.label("seed");
         let seed_field = ui
@@ -1118,8 +1129,8 @@ fn top_bar(
             SessionStatus::ReachedEnd => "Reached the end time",
             SessionStatus::Failed => "Run error",
         });
-        ui.separator();
-
+    });
+    ui.horizontal(|ui| {
         ui.label("End at");
         let hint = view.end_time().map_or_else(|| "no end".to_string(), format_time);
         let field = ui.add(egui::TextEdit::singleline(end_text).desired_width(90.0).hint_text(hint));

@@ -515,6 +515,12 @@ impl ViewState {
         !self.objects.is_empty()
     }
 
+    /// Whether there is a run that opening another model would end: from Init, or a run error,
+    /// until Reset.
+    pub fn run_in_progress(&self) -> bool {
+        self.has_model() && (self.initialised || self.status == SessionStatus::Failed)
+    }
+
     /// Whether a control would do anything now. None does without a model.
     pub fn allows(&self, control: Control) -> bool {
         if !self.has_model() {

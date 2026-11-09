@@ -599,6 +599,19 @@ impl ViewState {
         self.objects.iter().rev().find(|object| object.holds(floor)).map(|object| object.id)
     }
 
+    /// Draws the object with its centre at `centre`, and its connections with it, such as while
+    /// the user drags it. The model file changes only when the window saves the move.
+    pub fn move_object(&mut self, id: u32, centre: Point) {
+        let Some(object) = self.objects.get_mut(id as usize) else { return };
+        object.centre = centre;
+        let objects = &self.objects;
+        for connection in self.connections.iter_mut().filter(|connection| connection.from == id || connection.to == id) {
+            let (from, to) = (&objects[connection.from as usize], &objects[connection.to as usize]);
+            connection.start = from.edge_towards(to.centre);
+            connection.end = to.edge_towards(from.centre);
+        }
+    }
+
     pub fn select(&mut self, id: Option<u32>) {
         self.selected = id.filter(|&id| (id as usize) < self.objects.len());
     }

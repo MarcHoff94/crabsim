@@ -312,12 +312,51 @@ impl Workspace {
         self.change(json!({ "change": "restore_inheritance", "target": { "instance": instance }, "attribute": attribute }), take_over)
     }
 
-    /// One change to the open model file, through `edit_model`.
-    fn change(&mut self, change: Value, take_over: bool) -> Result<(), Refusal> {
+    /// Moves the instance to `to`, saving the model file, with every position rounded to the
+    /// centimetre so the file stays readable. Instances the file leaves unplaced are saved where
+    /// the window draws them too, in the same change, so moving one doesn't send the rest
+    /// elsewhere. Refused as a conflict if the file changed since the window read it. `take_over`
+    /// makes the one move while an agent holds the editor right.
+    pub fn move_instance(&mut self, instance: &str, to: Position, take_over: bool) -> Result<(), Refusal> {
         let path = self.opened.clone().ok_or(Refusal::NoModel)?;
         let catalogue = self.catalogue.as_ref().ok_or(Refusal::NoModel)?;
+        let read = catalogue.call("read_model", json!({ "path": path })).map_err(|error| Refusal::Invalid(error.to_string()))?;
+        let in_file = crabsim_model::load(read["text"].as_str().unwrap_or_default()).map_err(|_| Refusal::Invalid(format!("{path} has problems now")))?.to_description();
+        let move_to = |name: &str, to: Position| {
+            let round = |metres: f64| (metres * 100.0).round() / 100.0;
+            let mut position = json!({ "x": round(to.x), "y": round(to.y) });
+            if to.z != 0.0 {
+                position["z"] = json!(round(to.z));
+            }
+            json!({ "change": "move_instance", "name": name, "position": position })
+        };
+        let mut changes: Vec<Value> = (0..in_file.object_count())
+            .filter(|&id| in_file.position(id).is_none())
+            .filter_map(|id| Some((self.description.name(id)?, self.description.position(id)?)))
+            .filter(|(name, _)| *name != instance)
+            .map(|(name, drawn)| move_to(name, drawn))
+            .collect();
+        changes.push(move_to(instance, to));
+        let expected = self.read.as_ref().map(|read| read.hash.clone());
+        self.edit(changes, expected, take_over)
+    }
+
+    /// One change to the open model file, through `edit_model`.
+    fn change(&mut self, change: Value, take_over: bool) -> Result<(), Refusal> {
+        self.edit(vec![change], None, take_over)
+    }
+
+    /// A batch of changes to the open model file, through `edit_model`, refused if the file's
+    /// hash is no longer `expected_hash`.
+    fn edit(&mut self, changes: Vec<Value>, expected_hash: Option<String>, take_over: bool) -> Result<(), Refusal> {
+        let path = self.opened.clone().ok_or(Refusal::NoModel)?;
+        let catalogue = self.catalogue.as_ref().ok_or(Refusal::NoModel)?;
+        let mut input = json!({ "path": path, "changes": changes });
+        if let Some(hash) = expected_hash {
+            input["expected_hash"] = json!(hash);
+        }
         catalogue.set_take_over(take_over);
-        let changed = catalogue.call("edit_model", json!({ "path": path, "changes": [change] }));
+        let changed = catalogue.call("edit_model", input);
         catalogue.set_take_over(false);
         changed.map(|_| ()).map_err(|error| match error.kind {
             ErrorKind::NotEditor => Refusal::NotEditor(error.message.clone()),
@@ -464,7 +503,7 @@ fn extent(size: Dimensions) -> (f64, f64) {
 /// Places every object the model leaves unplaced. If none is placed, in columns from left to right
 /// by the fewest connections from a Source, each stacked from the top in file order, with what
 /// nothing reaches in a column after the rest. If some are placed, the rest go in a row below
-/// them, in file order. Visual only, and never saved to the file.
+/// them, in file order. Visual only, and saved to the file only when the user moves an object.
 pub fn lay_out(model: &mut ModelDescription) {
     let count = model.object_count();
     let unplaced: Vec<u32> = (0..count).filter(|&id| model.position(id).is_none()).collect();

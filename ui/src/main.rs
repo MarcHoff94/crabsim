@@ -9,7 +9,8 @@
 //! The window lists the folder's model files and runs the one clicked. The repository's `models`
 //! folder holds the demo model, `demo.json`.
 //!
-//! Drag with any mouse button to pan, and use the wheel to zoom.
+//! Drag with any mouse button to pan, and use the wheel to zoom. Before Init or after Reset, a
+//! left drag on an object moves it, saved to the model file when let go.
 
 use bevy::{
     input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll, MouseScrollUnit},
@@ -113,6 +114,8 @@ fn main() {
             queue_stamp: None,
             queue_note: None,
             confirm_take: None,
+            moving: None,
+            confirm_move: None,
         })
         .insert_resource(Session(Mutex::new(session)))
         .insert_resource(WatchedFile(Arc::new(Mutex::new(Vec::new()))))
@@ -184,6 +187,23 @@ struct Ui {
     queue_note: Option<String>,
     /// Taking the right from this agent, waiting for the user to confirm it.
     confirm_take: Option<(Agent, Queue)>,
+    /// The object being dragged to a new place.
+    moving: Option<Moving>,
+    /// A move refused because an agent holds the file or it changed outside crabsim, waiting for
+    /// the user to make it anyway or put the object back, with why it was refused.
+    confirm_move: Option<(Moving, Refusal)>,
+}
+
+/// An object dragged on the canvas, before Init or after Reset.
+#[derive(Clone, Copy)]
+struct Moving {
+    id: u32,
+    /// Where the object's centre was when the drag began, to put it back if the move is refused.
+    from: Point,
+    /// The object's centre less the pointer, in metres, so the object keeps where it was gripped.
+    grip: Point,
+    /// Whether the pointer has gone far enough for a drag rather than a click.
+    dragged: bool,
 }
 
 /// The tabs of the right-hand column.
@@ -402,32 +422,65 @@ fn apply_shades(ui: Res<Ui>, mut scene: ResMut<Scene>, mut drawn: Query<&mut Mes
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn canvas_input(
     mut ui: ResMut<Ui>,
     motion: Res<AccumulatedMouseMotion>,
     scroll: Res<AccumulatedMouseScroll>,
     buttons: Res<ButtonInput<MouseButton>>,
     window: Single<&Window, With<PrimaryWindow>>,
+    scene: Res<Scene>,
+    mut transforms: Query<&mut Transform>,
+    time: Res<Time<Real>>,
 ) {
     let Some(canvas) = ui.canvas else { return };
     let size = Point { x: canvas.width() as f64, y: canvas.height() as f64 };
     let ui = &mut *ui;
-    let Some(camera) = ui.camera.as_mut() else { return };
-    if buttons.just_pressed(MouseButton::Left) {
+    let Some(camera) = ui.camera else { return };
+    let floor = |at: Vec2| camera.to_world(Point { x: (at.x - canvas.min.x) as f64, y: (at.y - canvas.min.y) as f64 }, size);
+    if buttons.just_pressed(MouseButton::Left) && ui.confirm_move.is_none() {
         ui.press = window.cursor_position().map(|at| (at, 0.0));
+        // Before Init or after Reset, pressing on an object grips it, to move it.
+        let movable = ui.view.reloads_now() && ui.workspace.opened().is_some();
+        ui.moving = ui.press.filter(|_| movable).and_then(|(at, _)| {
+            let pointer = floor(at);
+            let id = ui.view.object_at(pointer)?;
+            let from = ui.view.objects()[id as usize].centre;
+            Some(Moving { id, from, grip: Point { x: from.x - pointer.x, y: from.y - pointer.y }, dragged: false })
+        });
     }
     if let Some((_, travelled)) = ui.press.as_mut() {
         *travelled += motion.delta.length();
     }
+    if let (Some(moving), Some((_, travelled)), Some(cursor)) = (ui.moving.as_mut(), ui.press, window.cursor_position())
+        && travelled >= CLICK_SLOP
+        && motion.delta != Vec2::ZERO
+    {
+        moving.dragged = true;
+        let pointer = floor(cursor);
+        let centre = Point { x: pointer.x + moving.grip.x, y: pointer.y + moving.grip.y };
+        ui.view.move_object(moving.id, centre);
+        ui.view.select(Some(moving.id));
+        place_object(&scene, &mut transforms, moving.id, centre);
+    }
+    // A release over a panel never reaches the canvas, so a drag ends whenever the button is up.
+    if !buttons.pressed(MouseButton::Left)
+        && let Some(moving) = ui.moving.take().filter(|moving| moving.dragged)
+    {
+        ui.press = None;
+        ui.view.commanded(time.elapsed());
+        save_move(ui, &scene, &mut transforms, moving, false);
+    }
     if buttons.just_released(MouseButton::Left) {
         if let Some((at, travelled)) = ui.press.take() {
             if travelled < CLICK_SLOP {
-                let pointer = Point { x: (at.x - canvas.min.x) as f64, y: (at.y - canvas.min.y) as f64 };
-                ui.view.select(ui.view.object_at(camera.to_world(pointer, size)));
+                ui.view.select(ui.view.object_at(floor(at)));
             }
         }
     }
-    let dragging = [MouseButton::Left, MouseButton::Right, MouseButton::Middle].iter().any(|&b| buttons.pressed(b));
+    let Some(camera) = ui.camera.as_mut() else { return };
+    let panning = ui.moving.is_none() && buttons.pressed(MouseButton::Left);
+    let dragging = panning || [MouseButton::Right, MouseButton::Middle].iter().any(|&b| buttons.pressed(b));
     if dragging && motion.delta != Vec2::ZERO {
         camera.pan(Point { x: motion.delta.x as f64, y: motion.delta.y as f64 });
         ui.camera_moved = true;
@@ -443,6 +496,40 @@ fn canvas_input(
             ui.camera_moved = true;
         }
     }
+}
+
+/// Draws the object at `centre`, keeping its rotation.
+fn place_object(scene: &Scene, transforms: &mut Query<&mut Transform>, id: u32, centre: Point) {
+    if let Some(&entity) = scene.entities.get(id as usize)
+        && let Ok(mut transform) = transforms.get_mut(entity)
+    {
+        transform.translation = Vec3::new(centre.x as f32, centre.y as f32, transform.translation.z);
+    }
+}
+
+/// Saves where the user dragged the object to the model file, which the window then picks up
+/// and rebuilds the model from. While an agent holds the file, or when it changed outside
+/// crabsim, it asks whether to move it anyway, and any other refusal puts the object back and
+/// says why.
+fn save_move(ui: &mut Ui, scene: &Scene, transforms: &mut Query<&mut Transform>, moving: Moving, take_over: bool) {
+    match moved(ui, moving, take_over) {
+        Ok(()) => {}
+        Err(refusal @ (Refusal::NotEditor(_) | Refusal::ChangedOutside(_))) => ui.confirm_move = Some((moving, refusal)),
+        Err(refusal) => {
+            ui.view.move_object(moving.id, moving.from);
+            place_object(scene, transforms, moving.id, moving.from);
+            let name = &ui.view.objects()[moving.id as usize].name;
+            ui.view.show_error(format!("{name} wasn't moved: {refusal}"));
+        }
+    }
+}
+
+/// Saves the dragged object where the view now draws it.
+fn moved(ui: &mut Ui, moving: Moving, take_over: bool) -> Result<(), Refusal> {
+    let object = &ui.view.objects()[moving.id as usize];
+    let (name, centre) = (object.name.clone(), object.centre);
+    let z = ui.workspace.description().position(moving.id).map_or(0.0, |position| position.z);
+    ui.workspace.move_instance(&name, crabsim::Position { x: centre.x, y: centre.y, z }, take_over)
 }
 
 /// Points the Bevy camera so that the view camera's centre sits in the middle of the canvas. The
@@ -652,6 +739,26 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
             act_on_queue(ui, &shown, QueueAction::Take);
         }
         ui.view.commanded(wall);
+    }
+    if let Some((moving, refusal)) = ui.confirm_move.clone()
+        && let Some(anyway) = confirm_moving(&ctx, &ui.view.objects()[moving.id as usize].name, &refusal)
+    {
+        ui.confirm_move = None;
+        ui.view.commanded(wall);
+        let done = match (anyway, &refusal) {
+            (false, _) => Ok(()),
+            (true, Refusal::ChangedOutside(_)) => ui.workspace.adopt().map_err(Refusal::Invalid).and_then(|()| moved(ui, moving, false)),
+            (true, _) => moved(ui, moving, true),
+        };
+        if !anyway || done.is_err() {
+            // Back where it was: the window draws the objects afresh from the view.
+            ui.view.move_object(moving.id, moving.from);
+            ui.rebuild_scene = true;
+        }
+        if let Err(refusal) = done {
+            let name = &ui.view.objects()[moving.id as usize].name;
+            ui.view.show_error(format!("{name} wasn't moved: {refusal}"));
+        }
     }
     if let (Some((change, take_over)), Some(id)) = (attribute_change, selected) {
         let name = ui.view.objects()[id as usize].name.clone();
@@ -1255,6 +1362,37 @@ fn act_on_queue(ui: &mut Ui, shown: &Queue, action: QueueAction) {
         Err(ActRefusal::Refused(why)) => ui.queue_note = Some(why),
     }
     ui.queue_stamp = ui.workspace.editing_file().and_then(|file| stamp_of(&file));
+}
+
+/// Asks whether to move an object while an agent holds the model file, or the file changed
+/// outside crabsim, saying why it was refused. `Some(true)` to move it anyway, adopting the file
+/// first if it changed outside, `Some(false)` to put it back.
+fn confirm_moving(ctx: &egui::Context, name: &str, refused: &Refusal) -> Option<bool> {
+    let outside = matches!(refused, Refusal::ChangedOutside(_));
+    let mut answer = None;
+    let modal = egui::Modal::new(egui::Id::new("confirm moving")).show(ctx, |modal| {
+        modal.set_max_width(420.0);
+        modal.heading(format!("Move {name} anyway?"));
+        modal.label(refused.to_string());
+        modal.label(if outside {
+            "Adopting it accepts the file as it is now, then saves the move."
+        } else {
+            "Moving it anyway makes this one change, and the agent keeps its right."
+        });
+        modal.add_space(8.0);
+        modal.horizontal(|row| {
+            if row.button(if outside { "Adopt and move" } else { "Move anyway" }).clicked() {
+                answer = Some(true);
+            }
+            if row.button("Put it back").clicked() {
+                answer = Some(false);
+            }
+        });
+    });
+    if modal.should_close() && answer.is_none() {
+        answer = Some(false);
+    }
+    answer
 }
 
 /// Asks before taking the right to change the model from the agent that holds it. `Some(true)`

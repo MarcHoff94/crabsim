@@ -54,6 +54,24 @@ fn an_object_without_a_name_or_position_is_still_drawn_somewhere_of_its_own() {
 }
 
 #[test]
+fn a_moved_object_takes_the_ends_of_its_connections_with_it() {
+    let mut model = ModelDescription::new();
+    let source = model.add_source(SimTime::from_secs(5));
+    let drain = model.add_drain();
+    model.connect(source, drain);
+    model.set_position(source, Position { x: 0.0, y: 0.0, z: 0.0 });
+    model.set_position(drain, Position { x: 10.0, y: 0.0, z: 0.0 });
+    let mut view = ViewState::new(&model);
+    view.move_object(drain, point(0.0, 10.0));
+    assert_eq!(view.objects()[drain as usize].centre, point(0.0, 10.0));
+    assert_eq!(view.object_at(point(0.0, 10.0)), Some(drain), "it is found where it now is");
+    let connection = &view.connections()[0];
+    // Both are 1 m square, so the arrow now runs straight up between their edges.
+    assert!(close(connection.start, point(0.0, 0.5)), "{:?}", connection.start);
+    assert!(close(connection.end, point(0.0, 9.5)), "{:?}", connection.end);
+}
+
+#[test]
 fn bounds_hold_every_object_whole() {
     let view = ViewState::new(&demo::model());
     let bounds = view.bounds();

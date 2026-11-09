@@ -28,7 +28,7 @@ Slice 1's operations, with `model_file_format`, `edit_model` and `get_attributes
 | Operation | Does |
 |---|---|
 | `validate_model { path? , text? }` | Every problem in a model, by path or by text |
-| `list_models { folder? }` | The `.json` files in the folder or a subfolder, and below |
+| `list_models { folder? }` | The model files in the folder or a subfolder, and below: `.json` files with `format_version` at their top level, or, when they aren't JSON any more, naming it at all, so a file with problems is still listed and other JSON, such as a schema, isn't |
 | `read_model { path }` | A file's text, exactly |
 | `write_model { path, text, overwrite?, expected_hash? }` | Saves a valid model in canonical form, an invalid one exactly as given, returning its problems either way. An existing file only with `overwrite: true` |
 | `adopt_model { path }` | Accepts a file changed outside crabsim as it is, so crabsim may change it again |

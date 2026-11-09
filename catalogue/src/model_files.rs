@@ -122,14 +122,14 @@ pub struct ListModelsInput {
 
 #[derive(Serialize, JsonSchema)]
 pub struct ListModelsOutput {
-    /// The paths of the `.json` files, relative to the models folder, sorted, including those in
+    /// The paths of the model files, relative to the models folder, sorted, including those in
     /// subfolders.
     pub models: Vec<String>,
 }
 
 impl Operation for ListModels {
     const NAME: &'static str = "list_models";
-    const DESCRIPTION: &'static str = "Lists the model files (.json) in the models folder, or in one of its subfolders, including those further down. Paths are relative to the models folder, with / between folders, and are what the other operations take.";
+    const DESCRIPTION: &'static str = "Lists the model files in the models folder, or in one of its subfolders, including those further down: the .json files with `format_version` at their top level, also those with problems, but not other JSON such as a schema. Paths are relative to the models folder, with / between folders, and are what the other operations take.";
     const EFFECT: Effect = Effect::ReadOnly;
     type Input = ListModelsInput;
     type Output = ListModelsOutput;
@@ -154,13 +154,25 @@ impl Operation for ListModels {
                 // through the same check as every other operation, so `.crabsim` never shows.
                 if kind.is_dir() {
                     folders.push(path);
-                } else if catalogue.folder().model_file(&name).is_ok() && path.is_file() {
+                } else if catalogue.folder().model_file(&name).is_ok() && path.is_file() && is_model_file(&path) {
                     models.push(name);
                 }
             }
         }
         models.sort();
         Ok(ListModelsOutput { models })
+    }
+}
+
+/// Whether a `.json` file is meant as a model file: its top level has `format_version`. A file
+/// that isn't JSON any more, such as one part way through being written by hand, counts when it
+/// names `format_version` at all, so it is listed with its problems rather than vanishing. Other
+/// JSON, such as a JSON Schema or settings, isn't listed.
+fn is_model_file(path: &std::path::Path) -> bool {
+    let Ok(text) = std::fs::read_to_string(path) else { return false };
+    match serde_json::from_str::<serde_json::Value>(&text) {
+        Ok(json) => json.get("format_version").is_some(),
+        Err(_) => text.contains("\"format_version\""),
     }
 }
 

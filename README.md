@@ -20,7 +20,13 @@ Run the tests:
 cargo test
 ```
 
-Open the UI on the repo's `models` folder, then click `demo.json` in the list on the left and press Start. The first build takes several minutes:
+Open the UI, then click `demo.json` in the list on the left and press Start. The first build takes several minutes. It works on a models folder, `crabsim-models` in your Documents, made the first time with the demo model in it:
+
+```powershell
+cargo run -p crabsim-ui --profile ui
+```
+
+To work on another models folder, such as the repo's own `models`, name it:
 
 ```powershell
 cargo run -p crabsim-ui --profile ui -- --models models

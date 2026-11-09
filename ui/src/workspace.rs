@@ -15,6 +15,10 @@ use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+/// The demo model, saved in a models folder made on a first start. Built in, so a downloaded
+/// program has it without the repository.
+const DEMO: &str = include_str!("../../models/demo.json");
+
 /// Space left between objects the window places itself, in metres.
 const GAP: f64 = 2.0;
 
@@ -148,6 +152,29 @@ impl Workspace {
                 workspace.banner = Some("Another crabsim window has this models folder open. Open a copy of the folder to work on a variant.".into());
             }
             Err(error) => workspace.banner = Some(format!("The models folder {} can't be opened: {error}", models.display())),
+        }
+        workspace
+    }
+
+    /// The workspace on `models`, as `open`, but a folder that doesn't exist yet is made first
+    /// with the demo model saved in it through the catalogue, so a first start has a model to run
+    /// and crabsim counts it as its own. A folder that exists is opened as it is, so a demo the
+    /// user deleted doesn't come back.
+    pub fn open_or_create(models: &Path) -> Workspace {
+        if models.exists() {
+            return Workspace::open(models);
+        }
+        if let Err(error) = std::fs::create_dir_all(models) {
+            let mut workspace = Workspace::open(models);
+            workspace.banner = Some(format!("The models folder {} can't be made: {error}", models.display()));
+            return workspace;
+        }
+        let mut workspace = Workspace::open(models);
+        if let Some(catalogue) = &workspace.catalogue {
+            if let Err(error) = catalogue.call("write_model", json!({ "path": "demo.json", "text": DEMO })) {
+                workspace.banner = Some(format!("The demo model can't be saved in the new models folder: {error}"));
+            }
+            workspace.refresh();
         }
         workspace
     }

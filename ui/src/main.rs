@@ -7,7 +7,8 @@
 //! cargo run -p crabsim-ui --profile ui -- --models <folder>
 //!
 //! The window lists the folder's model files and runs the one clicked. The repository's `models`
-//! folder holds the demo model, `demo.json`.
+//! folder holds the demo model, `demo.json`. Without `--models` it opens `crabsim-models` in the
+//! user's Documents, made on the first start with the demo in it.
 //!
 //! Drag with any mouse button to pan, and use the wheel to zoom. Before Init or after Reset, a
 //! left drag on an object moves it, saved to the model file when let go.
@@ -43,10 +44,14 @@ use std::time::Duration;
 )]
 struct Opts {
     /// The models folder whose model files to list and run, such as the repository's `models`.
-    /// It must not hold source code.
+    /// It must not hold source code. Left out, `crabsim-models` in your Documents, made with the
+    /// demo model in it the first time.
     #[arg(long)]
-    models: PathBuf,
+    models: Option<PathBuf>,
 }
+
+/// The models folder used when none is given.
+const DEFAULT_MODELS_FOLDER: &str = "crabsim-models";
 
 const BACKGROUND: Color = Color::srgb(0.10, 0.11, 0.13);
 const CONNECTION: Color = Color::srgba(0.65, 0.67, 0.75, 0.6);
@@ -72,7 +77,16 @@ const SHADES: [Shade; 7] =
 
 fn main() {
     let opts = Opts::parse();
-    let workspace = Workspace::open(&opts.models);
+    let workspace = match opts.models {
+        Some(models) => Workspace::open(&models),
+        None => match dirs::document_dir() {
+            Some(documents) => Workspace::open_or_create(&documents.join(DEFAULT_MODELS_FOLDER)),
+            None => {
+                eprintln!("Your Documents folder can't be found, so give a models folder with --models.");
+                std::process::exit(2);
+            }
+        },
+    };
     let view = ViewState::new(workspace.description());
     let session = workspace.session(WallClock::new());
     session.set_speed(DEFAULT_SPEED).expect("a positive speed");

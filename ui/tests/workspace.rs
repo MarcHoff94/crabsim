@@ -131,6 +131,29 @@ fn until_a_model_is_chosen_none_is_open_and_the_view_offers_no_control() {
 }
 
 #[test]
+fn a_models_folder_that_doesnt_exist_yet_is_made_with_the_demo_saved_in_it() {
+    let parent = Folder::new("first-start");
+    let models = parent.0.join("crabsim-models");
+    let mut workspace = Workspace::open_or_create(&models);
+    assert_eq!(workspace.banner(), None);
+    assert!(models.is_dir());
+    let listed: Vec<(&str, usize)> = workspace.models().iter().map(|entry| (entry.path.as_str(), entry.problems)).collect();
+    assert_eq!(listed, [("demo.json", 0)]);
+    assert!(workspace.open_model("demo.json"));
+    assert_eq!(workspace.description().object_count(), 14);
+    assert!(!workspace.changed_outside(), "crabsim saved it, so it can be changed without adopting it first");
+}
+
+#[test]
+fn an_existing_models_folder_is_opened_as_it_is_without_the_demo() {
+    let folder = Folder::new("existing");
+    folder.write("placed.json", PLACED);
+    let workspace = Workspace::open_or_create(&folder.0);
+    let listed: Vec<&str> = workspace.models().iter().map(|entry| entry.path.as_str()).collect();
+    assert_eq!(listed, ["placed.json"], "a demo the user deleted doesn't come back");
+}
+
+#[test]
 fn a_folder_lists_its_models_marking_those_with_problems() {
     let folder = folder("list");
     let workspace = Workspace::open(&folder.0);

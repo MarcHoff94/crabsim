@@ -21,7 +21,7 @@ Done on 2026-11-09 by an agent driving the window, at `master` after PR 77 (`f32
 
 6. **The colours have no legend.** Orange, green, red and grey make sense only after clicking objects and reading their state. A small legend, or the state named on hover, would do.
 7. **Getting to a useful length is hard to find.** At the starting 60 times real time a simulated day takes 24 minutes. Dragging the slider to the right end gives 200,000 times, about 7 days in 3 seconds, and with the slider cut off the speed can't be read. What works is End at, then Start, which stops at "Reached the end time", but nothing points there.
-8. **An end time typed while running didn't take,** and the run went past it to 19 days. The cause wasn't confirmed: the top bar shifts while the clock's text grows, so the Set click may have missed. Typing it again while halted worked. Worth reproducing by hand.
+8. **An end time typed while running didn't take,** and the run went past it to 19 days. **Not a defect, found later:** the walkthrough's input tool sends typed text that never reaches the window, so the field stayed empty and Set disabled. With real key presses it works.
 
 ## Reading the result
 

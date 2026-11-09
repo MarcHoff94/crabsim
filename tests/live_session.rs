@@ -2420,3 +2420,121 @@ fn an_end_time_before_what_was_computed_ahead_still_stops_the_run_there() {
     assert_eq!(watched.time(), secs(4_000));
     assert_eq!(watched.state_now(), headless_at(line_with_random_failures, secs(4_000)));
 }
+
+// ---------- Without animation, and going to a later time ----------
+
+/// A session on `build` with animation off.
+fn without_animation(build: fn() -> SimulationRun) -> Watched {
+    let watched = Watched::new(build);
+    watched.session.set_animation(false).unwrap();
+    watched
+}
+
+#[test]
+fn without_animation_a_run_reaches_its_end_time_with_no_wall_time_and_the_same_result() {
+    let end = secs(50_000);
+    let mut watched = without_animation(line_with_random_failures);
+    watched.session.set_end_time(Some(end)).unwrap();
+    watched.session.start().unwrap();
+    // The clock never moves: animated, at speed 1, nothing would happen.
+    let seen = watched.look();
+    assert_eq!(seen.errors, vec![]);
+    assert!(seen.occurrences.iter().all(|o| o.time == SimTime::ZERO), "nothing after Init is recorded or sent");
+    assert_eq!(seen.statuses, vec![SessionStatus::Advancing, SessionStatus::ReachedEnd]);
+    assert_eq!(watched.shown, end);
+    let expected = headless_at(line_with_random_failures, end);
+    assert_eq!(watched.state.clone(), Some(expected.clone()), "the last state sent is the one at the end");
+    assert_eq!(watched.state_now(), expected);
+}
+
+#[test]
+fn halting_a_run_without_animation_leaves_it_at_a_whole_instant() {
+    let mut watched = without_animation(line_with_random_failures);
+    watched.session.start().unwrap();
+    wait_for_output(&watched.session, |output| matches!(output, SessionOutput::State(state) if state.time > secs(1_000)).then_some(()));
+    watched.session.halt().unwrap();
+    let seen = watched.look();
+    assert_eq!(seen.errors, vec![]);
+    assert_eq!(seen.statuses.last(), Some(&SessionStatus::Halted));
+    let shown = watched.shown;
+    assert!(shown > secs(1_000));
+    assert_eq!(watched.state_now(), headless_at(line_with_random_failures, shown), "everything at shown time is done, and nothing after");
+}
+
+#[test]
+fn going_back_and_stepping_after_a_run_without_animation_work_as_after_one_with_it() {
+    let mut watched = without_animation(line_with_random_failures);
+    watched.session.set_end_time(Some(secs(50_000))).unwrap();
+    watched.session.start().unwrap();
+    watched.look();
+    watched.session.go_back(secs(20_000)).unwrap();
+    assert_eq!(watched.time(), secs(20_000));
+    assert_eq!(watched.state_now(), headless_at(line_with_random_failures, secs(20_000)));
+    watched.session.step_forward().unwrap();
+    let seen = watched.look();
+    assert!(!seen.occurrences.is_empty(), "a step records again");
+    let ahead = watched.shown;
+    assert!(ahead > secs(20_000));
+    watched.session.step_back().unwrap();
+    assert!(watched.time() < ahead);
+}
+
+#[test]
+fn going_to_a_later_time_halts_there_animated_at_the_speed_or_at_once_without_animation() {
+    let mut watched = Watched::new(line_with_random_failures);
+    watched.session.set_speed(10.0).unwrap();
+    watched.session.go_to(secs(300)).unwrap();
+    watched.at(10);
+    assert_eq!(watched.time(), secs(100), "animated, it takes as long as the speed says");
+    watched.at(60);
+    let seen = watched.look();
+    assert_eq!(seen.errors, vec![]);
+    assert_eq!(watched.shown, secs(300), "and halts at the time gone to");
+    assert_eq!(seen.statuses, vec![SessionStatus::Halted], "halted, not at an end time");
+    assert!(!seen.occurrences.is_empty());
+    assert_eq!(watched.state_now(), headless_at(line_with_random_failures, secs(300)));
+
+    watched.session.set_animation(false).unwrap();
+    watched.session.go_to(secs(40_000)).unwrap();
+    let seen = watched.look();
+    assert_eq!(seen.errors, vec![]);
+    assert_eq!(watched.shown, secs(40_000), "without animation, at once");
+    assert_eq!(seen.statuses, vec![SessionStatus::Advancing, SessionStatus::Halted]);
+    assert_eq!(watched.state_now(), headless_at(line_with_random_failures, secs(40_000)));
+
+    watched.session.go_to(secs(1_000)).unwrap();
+    assert_eq!(watched.time(), secs(1_000), "an earlier time goes back");
+    assert_eq!(watched.state_now(), headless_at(line_with_random_failures, secs(1_000)));
+}
+
+#[test]
+fn going_to_a_time_past_the_end_time_stops_at_the_end_time() {
+    let mut watched = without_animation(source_into_drain);
+    watched.session.set_end_time(Some(secs(35))).unwrap();
+    watched.session.go_to(secs(100)).unwrap();
+    let seen = watched.look();
+    assert_eq!(watched.shown, secs(35));
+    assert_eq!(seen.statuses.last(), Some(&SessionStatus::ReachedEnd));
+}
+
+#[test]
+fn turning_animation_off_while_running_races_on_and_on_again_animates_from_there() {
+    let mut watched = Watched::new(busy_source);
+    watched.session.set_end_time(Some(secs(10_000))).unwrap();
+    watched.session.start().unwrap();
+    watched.at(5);
+    assert_eq!(watched.time(), secs(5));
+    watched.session.set_animation(false).unwrap();
+    let seen = watched.look();
+    assert_eq!(watched.shown, secs(10_000));
+    assert_eq!(seen.statuses.last(), Some(&SessionStatus::ReachedEnd));
+    assert_eq!(watched.state_now(), headless_at(busy_source, secs(10_000)));
+
+    watched.session.set_end_time(None).unwrap();
+    watched.session.set_animation(true).unwrap();
+    watched.session.start().unwrap();
+    watched.at(8);
+    let seen = watched.look();
+    assert_eq!(watched.shown, secs(10_003), "animated again at speed 1");
+    assert!(!seen.occurrences.is_empty() && seen.occurrences.iter().all(|o| o.time > secs(10_000)));
+}

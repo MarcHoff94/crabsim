@@ -29,6 +29,19 @@ fn halted_at(secs: u64) -> Watched {
 }
 
 #[test]
+fn without_animation_mus_arent_drawn_while_running_but_are_once_halted() {
+    let mut watched = Watched::demo();
+    watched.session.start().unwrap();
+    watched.at(12);
+    assert!(watched.view.shows_mus(&close()), "animated at speed 1");
+    watched.view.set_animate(false);
+    assert!(!watched.view.shows_mus(&close()), "racing, there is nothing to follow");
+    watched.session.halt().unwrap();
+    watched.frame();
+    assert!(watched.view.shows_mus(&close()), "halted, they are where they are");
+}
+
+#[test]
 fn each_mu_is_drawn_inside_the_object_that_holds_it() {
     // At 12 s Station 1 works on the first MU and the Source holds the second, waiting.
     let watched = halted_at(12);

@@ -52,8 +52,8 @@ struct Server {
 
 impl Server {
     fn new(catalogue: Catalogue) -> Server {
-        // The user's own operations, such as controlling the edit queue, are never offered to an
-        // agent (ADR 0011).
+        // The user's own operations, such as revoking an agent's claim, are never offered to an
+        // agent (ADR 0011, ADR 0013).
         let tools = catalogue
             .operations()
             .filter(|operation| !operation.user_only)

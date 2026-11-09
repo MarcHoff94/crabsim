@@ -207,28 +207,27 @@ pub fn adopted(adopted: &Value) -> String {
     text
 }
 
-/// The edit queue: each file's editor and waiting agents, and the blocked agents.
-pub fn queue(queue: &Value) -> String {
-    let files: Vec<Value> = match queue["files"].as_array() {
-        Some(files) => files.clone(),
-        None => vec![serde_json::json!({ "path": "", "editor": queue["editor"], "queue": queue["queue"] })],
-    };
+/// Who holds each model file: the user, or an agent's claim with its goal and what it's doing,
+/// and the blocked agents.
+pub fn editors(editors: &Value) -> String {
     let mut rows = Vec::new();
-    for file in &files {
+    for file in editors["files"].as_array().into_iter().flatten() {
         let path = cell(&file["path"]);
-        match &file["editor"] {
-            Value::Null => rows.push(vec![path.clone(), "nobody edits".to_string(), String::new(), String::new(), String::new(), String::new()]),
-            editor if editor["user"] == true => rows.push(vec![path.clone(), "editor".to_string(), "the user".to_string(), String::new(), String::new(), cell(&editor["since"])]),
-            editor => rows.push(vec![path.clone(), "editor".to_string(), cell(&editor["agent"]), cell(&editor["client"]), cell(&editor["purpose"]), cell(&editor["since"])]),
+        if file["user_since"].is_string() {
+            rows.push(vec![path.clone(), "the user".to_string(), String::new(), String::new(), String::new(), cell(&file["user_since"])]);
         }
-        for (place, waiting) in file["queue"].as_array().into_iter().flatten().enumerate() {
-            rows.push(vec![path.clone(), format!("waiting {place}"), cell(&waiting["agent"]), cell(&waiting["client"]), cell(&waiting["purpose"]), cell(&waiting["since"])]);
+        let claim = &file["claim"];
+        if claim.is_object() {
+            let who = if claim["paused"] == true { format!("{} (paused)", cell(&claim["agent"])) } else { cell(&claim["agent"]) };
+            rows.push(vec![path.clone(), who, cell(&claim["client"]), cell(&claim["goal"]), cell(&claim["doing"]), cell(&claim["since"])]);
         }
     }
-    let mut text = if rows.is_empty() { "Nobody edits or waits for any model file.\n".to_string() } else { table(&["File", "Role", "Who", "Harness", "Purpose", "Since"], &rows) };
-    let blocked: Vec<String> = queue["blocked"].as_array().into_iter().flatten().map(|agent| format!("{} ({})", cell(&agent["agent"]), cell(&agent["client"]))).collect();
+    let mut text = if rows.is_empty() { "Nobody holds any model file.
+".to_string() } else { table(&["File", "Who", "Harness", "Goal", "Doing", "Since"], &rows) };
+    let blocked: Vec<String> = editors["blocked"].as_array().into_iter().flatten().map(|agent| format!("{} ({})", cell(&agent["agent"]), cell(&agent["client"]))).collect();
     if !blocked.is_empty() {
-        text += &format!("Blocked: {}\n", blocked.join(", "));
+        text += &format!("Blocked: {}
+", blocked.join(", "));
     }
     text
 }

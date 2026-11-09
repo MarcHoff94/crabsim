@@ -1,6 +1,6 @@
 //! The UI as the user: a catalogue opened as `Source::Ui` counts as the user, only one UI may have
 //! a models folder open, and while one does, the CLI may read and run but not change models or the
-//! edit queue (spec issue 63, ADR 0011). Agents keep working through the UI's folder.
+//! who edits them (spec issue 63, ADR 0011, ADR 0013). Agents keep working through the UI's folder.
 
 mod common;
 
@@ -37,8 +37,8 @@ fn the_ui_counts_as_the_user() {
     let folder = folder("ui-is-user");
     let ui = open(&folder, Source::Ui);
     ok(&ui, "take_model", json!({ "path": "line.json" }));
-    let queue = ok(&ui, "get_edit_queue", json!({ "path": "line.json" }));
-    assert_eq!(queue["editor"]["user"], true, "{queue}");
+    let editors = ok(&ui, "get_editors", json!({ "path": "line.json" }));
+    assert_eq!(editors["files"][0]["editor"], "user", "{editors}");
     ok(&ui, "release_model", json!({ "path": "line.json" }));
     ok(&ui, "edit_model", json!({ "path": "line.json", "changes": [{ "change": "set_stream", "name": "Work", "stream": 40 }] }));
 
@@ -78,9 +78,7 @@ fn while_a_ui_has_the_folder_the_cli_reads_and_runs_but_changes_nothing() {
         ("release_model", json!({ "path": "line.json" })),
         ("block_agent", json!({ "agent": "agent-1" })),
         ("unblock_agent", json!({ "agent": "agent-1" })),
-        ("give_model", json!({ "path": "line.json", "agent": "agent-1" })),
-        ("move_in_queue", json!({ "path": "line.json", "agent": "agent-1", "place": 0 })),
-        ("remove_from_queue", json!({ "path": "line.json", "agent": "agent-1" })),
+        ("revoke_claim", json!({ "path": "line.json" })),
     ] {
         let refused = err(&cli, name, input);
         assert_eq!(refused["kind"], "folder_in_use", "{name}: {refused}");
@@ -94,7 +92,7 @@ fn while_a_ui_has_the_folder_the_cli_reads_and_runs_but_changes_nothing() {
         ("list_models", json!({})),
         ("get_attributes", json!({ "path": "line.json", "target": { "instance": "Work" } })),
         ("describe_model", json!({ "path": "line.json" })),
-        ("get_edit_queue", json!({})),
+        ("get_editors", json!({})),
         ("start_run", json!({ "model": "line.json", "length": "1:00", "observations": 1, "wait": 30 })),
         ("export_model", json!({ "path": "line.json", "format": "graphml" })),
     ] {
@@ -110,8 +108,8 @@ fn agents_keep_changing_models_while_a_ui_has_the_folder() {
     let folder = folder("agents-with-ui");
     let _ui = open(&folder, Source::Ui);
     let agent = open(&folder, Source::Mcp);
+    ok(&agent, "claim_model", json!({ "path": "line.json", "goal": "a tidier layout", "doing": "moving Work" }));
     ok(&agent, "edit_model", json!({ "path": "line.json", "changes": [{ "change": "move_instance", "name": "Work", "position": { "x": 2, "y": 0 } }] }));
-    ok(&agent, "claim_model", json!({ "path": "line.json", "purpose": "trying something" }));
 }
 
 #[test]
@@ -119,11 +117,11 @@ fn the_ui_may_change_a_model_past_an_agent_that_holds_it_and_the_agent_keeps_its
     let folder = folder("ui-takes-over");
     let ui = open(&folder, Source::Ui);
     let agent = open(&folder, Source::Mcp);
-    ok(&agent, "claim_model", json!({ "path": "line.json", "purpose": "trying something" }));
+    ok(&agent, "claim_model", json!({ "path": "line.json", "goal": "a tidier layout", "doing": "moving Work" }));
     let change = json!({ "path": "line.json", "changes": [{ "change": "move_instance", "name": "Work", "position": { "x": 3, "y": 0 } }] });
     assert_eq!(err(&ui, "edit_model", change.clone())["kind"], "not_editor");
     ui.set_take_over(true);
     ok(&ui, "edit_model", change);
-    let queue = ok(&ui, "get_edit_queue", json!({ "path": "line.json" }));
-    assert_eq!(queue["editor"]["agent"], "agent-1", "{queue}");
+    let editors = ok(&ui, "get_editors", json!({ "path": "line.json" }));
+    assert_eq!(editors["files"][0]["editor"], "agent-1", "{editors}");
 }

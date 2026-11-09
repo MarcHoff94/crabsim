@@ -106,13 +106,13 @@ fn while_an_agent_holds_the_file_a_change_is_refused_unless_taken_over_and_the_a
     let folder = Folder::new("agent");
     let mut workspace = open(&folder);
     let agent = Catalogue::open(Settings::new(&folder.0, Source::Mcp)).unwrap();
-    agent.call("claim_model", json!({ "path": "presses.json", "purpose": "tuning the presses" })).unwrap();
+    agent.call("claim_model", json!({ "path": "presses.json", "goal": "faster presses", "doing": "tuning the presses" })).unwrap();
 
     let refused = workspace.set_attribute("P1", "process_time", json!("0:30"), false).unwrap_err();
-    assert!(matches!(&refused, Refusal::NotEditor(message) if message.contains("tuning the presses")), "names the agent's purpose: {refused:?}");
+    assert!(matches!(&refused, Refusal::NotEditor(message) if message.contains("tuning the presses")), "names what the agent is doing: {refused:?}");
     workspace.set_attribute("P1", "process_time", json!("0:30"), true).unwrap();
-    let queue = agent.call("get_edit_queue", json!({ "path": "presses.json" })).unwrap();
-    assert_eq!(queue["editor"]["agent"], "agent-1", "{queue}");
+    let editors = agent.call("get_editors", json!({ "path": "presses.json" })).unwrap();
+    assert_eq!(editors["files"][0]["editor"], "agent-1", "{editors}");
 
     let refused = workspace.restore("P2", "description", false).unwrap_err();
     assert!(matches!(refused, Refusal::NotEditor(_)), "a take-over lasts one change");
@@ -165,7 +165,7 @@ fn while_an_agent_holds_the_file_a_move_is_refused_unless_taken_over() {
     let folder = Folder::new("move-agent");
     let mut workspace = open(&folder);
     let agent = Catalogue::open(Settings::new(&folder.0, Source::Mcp)).unwrap();
-    agent.call("claim_model", json!({ "path": "presses.json", "purpose": "rearranging the hall" })).unwrap();
+    agent.call("claim_model", json!({ "path": "presses.json", "goal": "a tidier hall", "doing": "rearranging the hall" })).unwrap();
     let to = Position { x: 6.0, y: 3.0, z: 0.0 };
     let refused = workspace.move_instance("P1", to, false).unwrap_err();
     assert!(matches!(&refused, Refusal::NotEditor(message) if message.contains("rearranging the hall")), "{refused:?}");
@@ -174,8 +174,8 @@ fn while_an_agent_holds_the_file_a_move_is_refused_unless_taken_over() {
     workspace.check();
     workspace.apply_pending();
     assert_eq!(position_of(&workspace, "P1"), to);
-    let queue = agent.call("get_edit_queue", json!({ "path": "presses.json" })).unwrap();
-    assert_eq!(queue["editor"]["agent"], "agent-1", "the agent keeps its right: {queue}");
+    let editors = agent.call("get_editors", json!({ "path": "presses.json" })).unwrap();
+    assert_eq!(editors["files"][0]["editor"], "agent-1", "the agent keeps its claim: {editors}");
 }
 
 #[test]

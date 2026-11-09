@@ -1,10 +1,15 @@
-//! Who may change a model file: one editor at a time, and an edit queue of agents waiting for it,
-//! which the user controls (ADR 0011). The state is shared by every crabsim process on the models
-//! folder, in `.crabsim/editing.json`, read and written only while holding an OS lock on
-//! `.crabsim/editing.lock`. See `docs/design/operation-catalogue.md`.
+//! Who may change a model file: one editor at a time (ADR 0013, replacing ADR 0011's edit queue).
+//! An agent claims a file, saying its goal and what it is doing, and gets it at once or is refused:
+//! there is no queue. Every change an agent makes needs a claim. The user may take the right at any
+//! time, which pauses the agent's claim until the user releases it, and after anyone else changes a
+//! file an agent holds, the agent's next change is refused once, so it reads the model again. The
+//! state is shared by every crabsim process on the models folder, in `.crabsim/editing.json`, read
+//! and written only while holding an OS lock on `.crabsim/editing.lock`. See
+//! `docs/design/operation-catalogue.md`.
 //!
-//! One agent is one crabsim process opened as an MCP server, known by its process lock (see
-//! `process.rs`), so an agent whose process ended is noticed the next time anyone looks.
+//! One agent is one crabsim process opened as an MCP server, and the user's hold belongs to the
+//! window or command that took it, each known by its process lock (see `process.rs`), so a holder
+//! whose process ended is noticed the next time anyone looks.
 
 use crate::error::{ErrorKind, OperationError};
 use crate::{entry, process, Catalogue, Effect, Entry, Operation, Source};
@@ -20,11 +25,9 @@ pub(crate) fn entries() -> Vec<Entry> {
         entry::<AdoptModel>(),
         entry::<ClaimModel>(),
         entry::<ReleaseModel>(),
-        entry::<GetEditQueue>(),
+        entry::<GetEditors>(),
         entry::<TakeModel>(),
-        entry::<GiveModel>(),
-        entry::<MoveInQueue>(),
-        entry::<RemoveFromQueue>(),
+        entry::<RevokeClaim>(),
         entry::<BlockAgent>(),
         entry::<UnblockAgent>(),
     ]
@@ -34,9 +37,12 @@ pub(crate) fn entries() -> Vec<Entry> {
 pub const EDITING_FILE: &str = "editing.json";
 const LOCK_FILE: &str = "editing.lock";
 
-/// How long an agent's right, or its place in the queue, lasts without it changing the file or
-/// asking again, unless set when the server or the CLI starts.
+/// How long an agent's claim lasts without it changing the file or claiming again, unless set
+/// when the server or the CLI starts. A paused claim doesn't run out.
 pub const EDIT_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// How many of an agent's activities a claim keeps, newest first.
+pub const TRAIL_LENGTH: usize = 10;
 
 fn now_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| since.as_millis() as u64)
@@ -68,7 +74,7 @@ struct State {
     next_agent: u64,
     /// Every agent seen and still alive, by its process lock id.
     agents: BTreeMap<String, Agent>,
-    /// Every model file someone edits or waits for, by its path in the models folder.
+    /// Every model file someone holds, by its path in the models folder.
     files: BTreeMap<String, FileState>,
     /// The hash of each model file as crabsim last saved or adopted it, by its path. A file whose
     /// hash differs, or that has none here, was changed outside crabsim.
@@ -88,25 +94,73 @@ struct Agent {
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct FileState {
-    editor: Option<Editor>,
-    queue: Vec<Waiting>,
+    /// The user's hold, while the user has taken the file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    user: Option<UserHold>,
+    /// An agent's claim, paused while the user holds the file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    claim: Option<Claim>,
+    /// The editor of a state written before claims (ADR 0011), turned into a claim when read.
+    #[serde(default, skip_serializing)]
+    editor: Option<OldEditor>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct Editor {
-    /// The agent's process lock id, or none for the user.
+struct UserHold {
+    /// The process lock id of the window or command that took the file.
+    process: String,
+    since: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Claim {
+    /// The agent's process lock id.
+    process: String,
+    goal: String,
+    doing: String,
+    /// What it has been doing, newest first, the first being `doing`.
+    trail: Vec<Activity>,
+    since: u64,
+    last_active: u64,
+    /// The file's hash after the agent's last change to it, or when it claimed it if it has made
+    /// none. A file whose hash differs was changed by someone else since.
+    hash: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Activity {
+    doing: String,
+    since: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct OldEditor {
     process: Option<String>,
+    #[serde(default)]
     purpose: Option<String>,
     since: u64,
     last_active: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct Waiting {
-    process: String,
-    purpose: String,
-    asked: u64,
-    last_asked: u64,
+impl State {
+    /// Turns a state written before claims into one with claims: an agent that held a file keeps
+    /// it, its purpose as its goal, and queues and the user's holds are dropped. Gives whether
+    /// anything changed.
+    fn upgrade(&mut self) -> bool {
+        let mut changed = false;
+        for (path, file) in &mut self.files {
+            if let Some(old) = file.editor.take() {
+                changed = true;
+                if let Some(process) = old.process {
+                    let goal = old.purpose.unwrap_or_default();
+                    let hash = self.records.get(path).cloned();
+                    file.claim = Some(Claim { process, goal, doing: String::new(), trail: Vec::new(), since: old.since, last_active: old.last_active, hash });
+                }
+            }
+        }
+        self.files.retain(|_, file| file.user.is_some() || file.claim.is_some());
+        changed
+    }
 }
 
 /// The edit state, held under its lock until dropped, which writes it if it changed.
@@ -124,18 +178,19 @@ impl Held {
         let lock = File::options().create(true).truncate(false).read(true).write(true).open(crabsim_folder.join(LOCK_FILE)).map_err(|error| fail("locked", error))?;
         lock.lock().map_err(|error| fail("locked", error))?;
         let path = crabsim_folder.join(EDITING_FILE);
-        let state = match std::fs::read_to_string(&path) {
+        let mut state: State = match std::fs::read_to_string(&path) {
             Ok(text) => serde_json::from_str(&text).unwrap_or_default(),
             Err(_) => State::default(),
         };
-        Ok(Held { _lock: lock, path, state, changed: false })
+        let changed = state.upgrade();
+        Ok(Held { _lock: lock, path, state, changed })
     }
 
     fn write(&mut self) -> Result<(), OperationError> {
         if !self.changed {
             return Ok(());
         }
-        self.state.version = 1;
+        self.state.version = 2;
         let text = serde_json::to_string_pretty(&self.state).expect("the edit state serialises");
         let temporary = self.path.with_extension("json.new");
         std::fs::write(&temporary, text)
@@ -152,22 +207,30 @@ impl Drop for Held {
     }
 }
 
-/// Who is asking: an agent, by its process lock id, or the user.
+/// Who is asking, by the process lock id of its catalogue: an agent, or the user.
 #[derive(Debug, Clone, PartialEq)]
 enum Asker {
     Agent(String),
-    User,
+    User(String),
 }
 
-/// The edit state for one call: swept of ended agents, lost rights and forgotten places, with
-/// rights passed on, and the caller known.
+impl Asker {
+    fn process(&self) -> &str {
+        match self {
+            Asker::Agent(process) | Asker::User(process) => process,
+        }
+    }
+}
+
+/// The edit state for one call: swept of ended agents, lost claims and the holds of windows and
+/// commands that ended, and the caller known.
 pub(crate) struct Editing {
     held: Held,
     asker: Asker,
     now: u64,
     /// The model file a change is about, once checked.
     key: Option<String>,
-    /// The user changes past an agent's right, for one command.
+    /// The user changes past an agent's claim, for one command.
     take_over: bool,
 }
 
@@ -193,7 +256,7 @@ impl Catalogue {
                 }
                 Asker::Agent(process)
             }
-            Source::Cli | Source::Ui => Asker::User,
+            Source::Cli | Source::Ui => Asker::User(process),
         };
         let mut editing = Editing { held, asker, now, key: None, take_over: self.take_over() };
         editing.sweep(&crabsim_folder, self.edit_timeout());
@@ -207,14 +270,13 @@ impl Editing {
         &mut self.held.state
     }
 
-    /// Drops agents whose process ended, rights unused for longer than `timeout` and places not
-    /// asked for in as long, then passes each free right to the first waiting agent.
+    /// Drops agents whose process ended, the user's holds whose window or command ended, giving
+    /// the paused claim back, and claims of ended or blocked agents and claims unused for longer
+    /// than `timeout`, unless paused.
     fn sweep(&mut self, crabsim_folder: &Path, timeout: Duration) {
-        let own = match &self.asker {
-            Asker::Agent(process) => Some(process.clone()),
-            Asker::User => None,
-        };
-        let ended: Vec<String> = self.held.state.agents.keys().filter(|process| Some(*process) != own.as_ref() && !process::is_alive(crabsim_folder, process)).cloned().collect();
+        let own = self.asker.process().to_string();
+        let alive = |process: &str| process == own || process::is_alive(crabsim_folder, process);
+        let ended: Vec<String> = self.held.state.agents.keys().filter(|process| !alive(process)).cloned().collect();
         let now = self.now;
         let timeout = timeout.as_millis() as u64;
         let before = serde_json::to_string(&self.held.state.files).unwrap_or_default();
@@ -222,22 +284,22 @@ impl Editing {
         for process in &ended {
             state.agents.remove(process);
         }
-        let gone = |process: &str, state_agents: &BTreeMap<String, Agent>| state_agents.get(process).is_none_or(|agent| agent.blocked);
         let agents = &state.agents;
+        let gone = |process: &str| agents.get(process).is_none_or(|agent| agent.blocked);
         for file in state.files.values_mut() {
-            if let Some(editor) = &file.editor
-                && let Some(process) = &editor.process
-                && (gone(process, agents) || now.saturating_sub(editor.last_active) > timeout)
-            {
-                file.editor = None;
+            if file.user.as_ref().is_some_and(|hold| !alive(&hold.process)) {
+                file.user = None;
+                if let Some(claim) = &mut file.claim {
+                    claim.last_active = now;
+                }
             }
-            file.queue.retain(|waiting| !gone(&waiting.process, agents) && now.saturating_sub(waiting.last_asked) <= timeout);
-            if file.editor.is_none() && !file.queue.is_empty() {
-                let next = file.queue.remove(0);
-                file.editor = Some(Editor { process: Some(next.process), purpose: Some(next.purpose), since: now, last_active: now });
+            if let Some(claim) = &file.claim
+                && (gone(&claim.process) || (file.user.is_none() && now.saturating_sub(claim.last_active) > timeout))
+            {
+                file.claim = None;
             }
         }
-        state.files.retain(|_, file| file.editor.is_some() || !file.queue.is_empty());
+        state.files.retain(|_, file| file.user.is_some() || file.claim.is_some());
         if !ended.is_empty() || serde_json::to_string(&state.files).unwrap_or_default() != before {
             self.held.changed = true;
         }
@@ -258,20 +320,17 @@ impl Editing {
             .ok_or_else(|| OperationError::not_found(format!("there is no agent `{id}` on this models folder now")))
     }
 
-    /// How an editor is named in messages.
-    fn describe(&self, editor: &Editor) -> String {
-        match &editor.process {
-            None => "the user".to_string(),
-            Some(process) => match self.agent(process) {
-                Some(agent) => format!(
-                    "{} ({}, since {}, \"{}\")",
-                    agent.id,
-                    agent.client,
-                    iso(editor.since),
-                    editor.purpose.as_deref().unwrap_or("")
-                ),
-                None => "an agent that has ended".to_string(),
-            },
+    /// Who holds `file`, as messages name it.
+    fn describe(&self, file: &FileState) -> String {
+        if let Some(hold) = &file.user {
+            return format!("the user, since {}", iso(hold.since));
+        }
+        match &file.claim {
+            None => "nobody".to_string(),
+            Some(claim) => {
+                let agent = self.agent(&claim.process).map_or_else(|| "an agent that has ended".to_string(), |agent| format!("{} ({})", agent.id, agent.client));
+                format!("{agent}, since {}, with the goal \"{}\", now \"{}\"", iso(claim.since), claim.goal, claim.doing)
+            }
         }
     }
 
@@ -287,83 +346,89 @@ impl Editing {
         Ok(())
     }
 
-    /// Whether the asker may change `path` now. An editor's change renews its right.
+    /// Whether the asker may change `path` now. An agent's change renews its claim.
     pub(crate) fn may_change(&mut self, path: &str) -> Result<(), OperationError> {
         self.refuse_if_blocked()?;
-        let asker = self.asker.clone();
         let now = self.now;
-        let Some(file) = self.held.state.files.get(path) else { return Ok(()) };
-        let Some(editor) = file.editor.clone() else { return Ok(()) };
-        let waiting = file.queue.len();
-        let mine = match (&asker, &editor.process) {
-            (Asker::User, None) => true,
-            (Asker::Agent(me), Some(process)) => me == process,
-            _ => false,
-        };
-        if self.take_over && asker == Asker::User {
-            // The agent keeps its right: the user borrows it for this change only.
-            return Ok(());
-        }
-        if mine {
-            if let Some(editor) = self.state().files.get_mut(path).and_then(|file| file.editor.as_mut()) {
-                editor.last_active = now;
-            }
-            return Ok(());
-        }
-        let who = self.describe(&editor);
-        let message = match asker {
-            Asker::User => format!("`{path}` is being changed by {who}: take the editor right first with take_model"),
-            Asker::Agent(_) => {
-                let took = if editor.process.is_none() { ", who took the editor right" } else { "" };
-                format!("`{path}` is being changed by {who}{took}, with {waiting} waiting: call claim_model to wait your turn")
-            }
-        };
-        Err(OperationError::new(ErrorKind::NotEditor, message))
-    }
-
-    fn file(&mut self, path: &str) -> &mut FileState {
-        self.state().files.entry(path.to_string()).or_default()
-    }
-
-    /// Hands a free right to the first waiting, and forgets a file nobody holds or waits for.
-    fn settle(&mut self, path: &str) {
-        let now = self.now;
-        let state = self.state();
-        if let Some(file) = state.files.get_mut(path) {
-            if file.editor.is_none() && !file.queue.is_empty() {
-                let next = file.queue.remove(0);
-                file.editor = Some(Editor { process: Some(next.process), purpose: Some(next.purpose), since: now, last_active: now });
-            }
-            if file.editor.is_none() && file.queue.is_empty() {
-                state.files.remove(path);
-            }
-        }
-    }
-
-    fn view(&self, path: &str) -> FileView {
         let empty = FileState::default();
         let file = self.held.state.files.get(path).unwrap_or(&empty);
-        let agent_view = |process: &str, purpose: &str, since: u64| {
-            let agent = self.agent(process);
-            AgentView {
+        match self.asker.clone() {
+            Asker::User(_) => {
+                if self.take_over || file.claim.is_none() || file.user.is_some() {
+                    return Ok(());
+                }
+                let who = self.describe(file);
+                Err(OperationError::new(ErrorKind::NotEditor, format!("`{path}` is being changed by {who}: take it first with take_model, which pauses the agent's claim")))
+            }
+            Asker::Agent(me) => {
+                let mine = file.claim.as_ref().is_some_and(|claim| claim.process == me);
+                if mine && file.user.is_some() {
+                    return Err(OperationError::new(
+                        ErrorKind::NotEditor,
+                        format!("the user has taken `{path}`, so your claim is paused: wait and try again later. Your claim comes back to you when the user releases it"),
+                    ));
+                }
+                if mine {
+                    if let Some(claim) = self.state().files.get_mut(path).and_then(|file| file.claim.as_mut()) {
+                        claim.last_active = now;
+                    }
+                    return Ok(());
+                }
+                let message = if file.user.is_some() || file.claim.is_some() {
+                    format!("`{path}` is being changed by {}: you may not change it now. Claims aren't queued, so tell your user, or try again later", self.describe(file))
+                } else {
+                    format!("claim `{path}` with claim_model before changing it: every change an agent makes needs a claim")
+                };
+                Err(OperationError::new(ErrorKind::NotEditor, message))
+            }
+        }
+    }
+
+    /// For an agent holding `path`: refused once if someone else changed the file since the
+    /// agent's last change, whose hash is now `current`, so it reads it again.
+    fn read_again(&mut self, path: &str, current: Option<String>) -> Result<(), OperationError> {
+        let Asker::Agent(me) = self.asker.clone() else { return Ok(()) };
+        let stale = self.held.state.files.get(path).and_then(|file| file.claim.as_ref()).is_some_and(|claim| claim.process == me && claim.hash != current);
+        if !stale {
+            return Ok(());
+        }
+        if let Some(claim) = self.state().files.get_mut(path).and_then(|file| file.claim.as_mut()) {
+            claim.hash = current;
+        }
+        Err(OperationError::new(
+            ErrorKind::ModelChanged,
+            format!("`{path}` changed since your last change, by the user: read it again with read_model, then make your change from what it is now"),
+        ))
+    }
+
+    /// The asker's agent process, if it holds the claim on `path`.
+    fn claim_mut(&mut self, path: &str) -> Option<&mut Claim> {
+        let Asker::Agent(me) = self.asker.clone() else { return None };
+        self.state().files.get_mut(path).and_then(|file| file.claim.as_mut()).filter(|claim| claim.process == me)
+    }
+
+    fn view(&self, path: &str) -> Option<FileView> {
+        let file = self.held.state.files.get(path)?;
+        let claim = file.claim.as_ref().map(|claim| {
+            let agent = self.agent(&claim.process);
+            ClaimView {
                 agent: agent.map_or_else(|| "ended".to_string(), |agent| agent.id.clone()),
                 client: agent.map_or_else(String::new, |agent| agent.client.clone()),
                 started: agent.map_or_else(String::new, |agent| iso(agent.started)),
-                purpose: purpose.to_string(),
-                since: iso(since),
+                goal: claim.goal.clone(),
+                doing: claim.doing.clone(),
+                trail: claim.trail.iter().map(|activity| ActivityView { doing: activity.doing.clone(), since: iso(activity.since) }).collect(),
+                since: iso(claim.since),
+                last_active: iso(claim.last_active),
+                paused: file.user.is_some(),
             }
+        });
+        let editor = match (&file.user, &claim) {
+            (Some(_), _) => "user".to_string(),
+            (None, Some(claim)) => claim.agent.clone(),
+            (None, None) => "nobody".to_string(),
         };
-        FileView {
-            path: path.to_string(),
-            editor: file.editor.as_ref().map(|editor| match &editor.process {
-                None => EditorView { user: true, agent: None, purpose: editor.purpose.clone(), since: iso(editor.since) },
-                Some(process) => {
-                    let view = agent_view(process, editor.purpose.as_deref().unwrap_or(""), editor.since);
-                    EditorView { user: false, agent: Some(view), purpose: editor.purpose.clone(), since: iso(editor.since) }
-                }
-            }),
-            queue: file.queue.iter().map(|waiting| agent_view(&waiting.process, &waiting.purpose, waiting.asked)).collect(),
-        }
+        Some(FileView { path: path.to_string(), editor, user_since: file.user.as_ref().map(|hold| iso(hold.since)), claim })
     }
 }
 
@@ -372,7 +437,7 @@ impl Catalogue {
     pub(crate) fn who(&self) -> Result<String, OperationError> {
         let editing = self.editing()?;
         Ok(match &editing.asker {
-            Asker::User => "the user".to_string(),
+            Asker::User(_) => "the user".to_string(),
             Asker::Agent(process) => editing.agent(process).map_or_else(|| "an agent".to_string(), |agent| format!("{} ({})", agent.id, agent.client)),
         })
     }
@@ -384,12 +449,18 @@ fn key(catalogue: &Catalogue, path: &str) -> Result<String, OperationError> {
     Ok(catalogue.folder().name_of(&file))
 }
 
+/// The hash of the model file at `path` now, if it exists.
+fn current_hash(catalogue: &Catalogue, path: &str) -> Result<Option<String>, OperationError> {
+    Ok(std::fs::read_to_string(catalogue.folder().model_file(path)?).ok().as_deref().map(crate::edit::hash))
+}
+
 /// Before an operation changes the model file at `path`: refused unless the caller may change it
-/// now. The returned state is held until the change is written, so two changes nobody claimed
-/// can't both go through.
+/// now. The returned state is held until the change is written, so two changes can't both go
+/// through.
 pub(crate) fn before_change(catalogue: &Catalogue, path: &str, expected_hash: Option<&str>) -> Result<Editing, OperationError> {
-    let editing = before_adopt(catalogue, path)?;
-    let key = editing.key.clone().expect("set before adopting");
+    let key = key(catalogue, path)?;
+    let mut editing = catalogue.editing()?;
+    editing.may_change(&key)?;
     let current = std::fs::read_to_string(catalogue.folder().model_file(path)?).ok();
     if let Some(text) = &current
         && !editing.recorded(&key, text)
@@ -401,16 +472,18 @@ pub(crate) fn before_change(catalogue: &Catalogue, path: &str, expected_hash: Op
             ),
         ));
     }
-    if let Some(expected) = expected_hash {
-        let now = current.as_deref().map(crate::edit::hash);
-        if now.as_deref() != Some(expected) {
-            let what = now.map_or_else(|| "doesn't exist".to_string(), |hash| format!("has the hash {hash} now"));
-            return Err(OperationError::new(
-                ErrorKind::Conflict,
-                format!("`{path}` isn't the version with the hash {expected} any more: it {what}. Read it again and decide on your change from that"),
-            ));
-        }
+    let current = current.as_deref().map(crate::edit::hash);
+    if let Some(expected) = expected_hash
+        && current.as_deref() != Some(expected)
+    {
+        let what = current.map_or_else(|| "doesn't exist".to_string(), |hash| format!("has the hash {hash} now"));
+        return Err(OperationError::new(
+            ErrorKind::Conflict,
+            format!("`{path}` isn't the version with the hash {expected} any more: it {what}. Read it again and decide on your change from that"),
+        ));
     }
+    editing.read_again(&key, current)?;
+    editing.key = Some(key);
     Ok(editing)
 }
 
@@ -437,10 +510,15 @@ impl Editing {
         self.held.state.records.get(key).is_some_and(|hash| *hash == crate::edit::hash(text))
     }
 
-    /// Records the file the change was about as saved with `text`.
+    /// Records the file the change was about as saved with `text`, and, for an agent holding it,
+    /// as its own last change.
     pub(crate) fn record(&mut self, text: &str) {
         let key = self.key.clone().expect("a change names its file");
-        self.state().records.insert(key, crate::edit::hash(text));
+        let hash = crate::edit::hash(text);
+        if let Some(claim) = self.claim_mut(&key) {
+            claim.hash = Some(hash.clone());
+        }
+        self.state().records.insert(key, hash);
     }
 
     /// Records `text` as crabsim's own at `key`, such as a copy of a file crabsim saved.
@@ -451,6 +529,9 @@ impl Editing {
     /// Forgets the file the change was about, which was deleted.
     pub(crate) fn forget(&mut self) {
         let key = self.key.clone().expect("a change names its file");
+        if let Some(claim) = self.claim_mut(&key) {
+            claim.hash = None;
+        }
         self.state().records.remove(&key);
     }
 }
@@ -467,39 +548,48 @@ fn user_only(catalogue: &Catalogue, operation: &str) -> Result<(), OperationErro
     Ok(())
 }
 
-// ---------- What the queue looks like ----------
+// ---------- What a claim looks like ----------
 
 #[derive(Debug, Serialize, JsonSchema)]
-pub struct AgentView {
+pub struct ActivityView {
+    pub doing: String,
+    /// When the agent began it, UTC.
+    pub since: String,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct ClaimView {
     /// Such as `agent-3`.
     pub agent: String,
     /// The name its harness gave, such as `claude-code`.
     pub client: String,
     /// When the agent's server started, UTC.
     pub started: String,
-    pub purpose: String,
-    /// Since when it edits or waits, UTC.
+    /// What the agent means to achieve overall.
+    pub goal: String,
+    /// What it is working on now.
+    pub doing: String,
+    /// What it has been doing, newest first, at most 10.
+    pub trail: Vec<ActivityView>,
+    /// Since when it holds the file, UTC.
     pub since: String,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct EditorView {
-    /// The user edits.
-    pub user: bool,
-    /// The agent that edits, if one does.
-    #[serde(flatten)]
-    pub agent: Option<AgentView>,
-    pub purpose: Option<String>,
-    pub since: String,
+    /// When it last changed the file or claimed it, UTC.
+    pub last_active: String,
+    /// The user has taken the file: the agent may not change it until the user releases it.
+    pub paused: bool,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct FileView {
     pub path: String,
-    /// Who may change the file now, if anyone.
-    pub editor: Option<EditorView>,
-    /// The agents waiting for it, in the order they'll get it.
-    pub queue: Vec<AgentView>,
+    /// Who may change it now: `user`, or an agent's id, such as `agent-3`.
+    pub editor: String,
+    /// Since when the user holds it, UTC, while the user does.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_since: Option<String>,
+    /// The agent's claim on it, if any, paused while the user holds it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub claim: Option<ClaimView>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -528,7 +618,7 @@ pub struct AdoptModelOutput {
 
 impl Operation for AdoptModel {
     const NAME: &'static str = "adopt_model";
-    const DESCRIPTION: &'static str = "Accepts a model file as it is now, after it was changed outside crabsim, such as by a text editor, a harness's own file tools or git, or when crabsim never saved it. Until then crabsim reads and runs it but won't change it, refusing with changed_outside, so that an outside change is never overwritten or taken in by accident. Look at the file with read_model first, or, for a copy, compare its file_hash with one you trust, such as its source's. It changes nothing in the file, follows the same editor rules as a change, and gives the file's problems, if any: an invalid file is adopted too, so write_model can fix it.";
+    const DESCRIPTION: &'static str = "Accepts a model file as it is now, after it was changed outside crabsim, such as by a text editor, a harness's own file tools or git, or when crabsim never saved it. Until then crabsim reads and runs it but won't change it, refusing with changed_outside, so that an outside change is never overwritten or taken in by accident. Look at the file with read_model first, or, for a copy, compare its file_hash with one you trust, such as its source's. It changes nothing in the file, needs a claim like a change (claim_model), and gives the file's problems, if any: an invalid file is adopted too, so write_model can fix it.";
     const EFFECT: Effect = Effect::Additive;
     const CHANGES_MODELS: bool = true;
     type Input = PathInput;
@@ -552,31 +642,21 @@ pub struct ClaimModel;
 pub struct ClaimModelInput {
     /// A model file in the models folder, such as `line.json`. It needn't exist yet.
     pub path: String,
-    /// What you mean to do, in a few words, such as "adding a second mill". The user sees it.
-    pub purpose: String,
-}
-
-#[derive(Serialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum ClaimState {
-    /// You may change the file now.
-    Granted,
-    /// Someone else edits it: ask again to keep your place.
-    Queued,
+    /// What you mean to achieve overall, in a sentence, such as "find out whether a second mill
+    /// removes the bottleneck". The user sees it.
+    pub goal: String,
+    /// What you are working on now, such as "adding Mill 2 after Station 3". The user sees it.
+    pub doing: String,
 }
 
 #[derive(Serialize, JsonSchema)]
 pub struct ClaimModelOutput {
-    pub state: ClaimState,
-    /// Your place in the queue, from 1, when queued.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub place: Option<usize>,
     pub file: FileView,
 }
 
 impl Operation for ClaimModel {
     const NAME: &'static str = "claim_model";
-    const DESCRIPTION: &'static str = "Asks for the right to change a model file, for several changes in a row: only its editor may change it, through edit_model, write_model or delete_model. Say in `purpose` what you mean to do: the user sees it. Gives `granted`, or `queued` with your place: then ask again from time to time, which keeps your place, until it's granted. The right lasts while you use it, renewed by every change and every claim, and passes on when you call release_model, after 10 minutes without use, or when your session ends. A queued place you don't ask for in as long is dropped too. The user can take the right from you, give it to someone else, reorder the queue or block you, at any time. A single change to a file nobody holds or waits for needs no claim.";
+    const DESCRIPTION: &'static str = "Claims a model file, which you need before every change to it: edit_model, write_model (also for a new file), delete_model and adopt_model. Say your overall `goal` and what you are `doing` now: the user sees both. Granted at once if nobody holds the file, and refused with model_in_use otherwise, naming who holds it: claims aren't queued, so tell your user or try again later. Claim again as you go to update `goal` and `doing`, which also renews the claim. It lasts while you use it and ends when you call release_model, after 10 minutes without a change or a claim, or when your session ends. The user can take the file at any time, which pauses your claim until they release it, can revoke it, and can block you. After anyone else changes the file, your next change is refused once with model_changed: read the model again, then carry on. Reading, copying and running need no claim.";
     const EFFECT: Effect = Effect::Additive;
     const CHANGES_MODELS: bool = true;
     type Input = ClaimModelInput;
@@ -584,41 +664,46 @@ impl Operation for ClaimModel {
 
     fn run(catalogue: &Catalogue, input: ClaimModelInput) -> Result<ClaimModelOutput, OperationError> {
         if catalogue.source() != Source::Mcp {
-            return Err(OperationError::invalid_input("the user doesn't claim: take the editor right with take_model"));
+            return Err(OperationError::invalid_input("the user doesn't claim: take the file with take_model"));
         }
-        let purpose = input.purpose.trim().to_string();
-        if purpose.is_empty() {
-            return Err(OperationError::invalid_input("say what you mean to do in `purpose`, such as \"adding a second mill\""));
+        let (goal, doing) = (input.goal.trim().to_string(), input.doing.trim().to_string());
+        if goal.is_empty() || doing.is_empty() {
+            return Err(OperationError::invalid_input(
+                "say your overall `goal`, such as \"find out whether a second mill removes the bottleneck\", and what you are `doing` now, such as \"adding Mill 2 after Station 3\"",
+            ));
         }
         let path = key(catalogue, &input.path)?;
+        let hash = current_hash(catalogue, &input.path)?;
         let mut editing = catalogue.editing()?;
         editing.refuse_if_blocked()?;
         let Asker::Agent(me) = editing.asker.clone() else { unreachable!("an MCP catalogue is an agent") };
         let now = editing.now;
-        let file = editing.file(&path);
-        let (state, place) = match &mut file.editor {
-            Some(editor) if editor.process.as_deref() == Some(me.as_str()) => {
-                editor.last_active = now;
-                editor.purpose = Some(purpose);
-                (ClaimState::Granted, None)
+        if let Some(file) = editing.held.state.files.get(&path)
+            && (file.claim.as_ref().is_some_and(|claim| claim.process != me) || (file.user.is_some() && file.claim.is_none()))
+        {
+            let who = editing.describe(file);
+            return Err(OperationError::new(
+                ErrorKind::ModelInUse,
+                format!("`{path}` is being changed by {who}. Claims aren't queued: tell your user, or try again later"),
+            ));
+        }
+        let file = editing.state().files.entry(path.clone()).or_default();
+        match &mut file.claim {
+            Some(claim) => {
+                claim.goal = goal;
+                if claim.doing != doing {
+                    claim.trail.insert(0, Activity { doing: doing.clone(), since: now });
+                    claim.trail.truncate(TRAIL_LENGTH);
+                    claim.doing = doing;
+                }
+                claim.last_active = now;
             }
-            Some(_) => match file.queue.iter_mut().position(|waiting| waiting.process == me) {
-                Some(at) => {
-                    file.queue[at].last_asked = now;
-                    file.queue[at].purpose = purpose;
-                    (ClaimState::Queued, Some(at + 1))
-                }
-                None => {
-                    file.queue.push(Waiting { process: me.clone(), purpose, asked: now, last_asked: now });
-                    (ClaimState::Queued, Some(file.queue.len()))
-                }
-            },
             None => {
-                file.editor = Some(Editor { process: Some(me.clone()), purpose: Some(purpose), since: now, last_active: now });
-                (ClaimState::Granted, None)
+                let trail = vec![Activity { doing: doing.clone(), since: now }];
+                file.claim = Some(Claim { process: me, goal, doing, trail, since: now, last_active: now, hash });
             }
-        };
-        Ok(ClaimModelOutput { state, place, file: editing.view(&path) })
+        }
+        Ok(ClaimModelOutput { file: editing.view(&path).expect("just claimed") })
     }
 }
 
@@ -628,14 +713,17 @@ pub struct ReleaseModel;
 
 #[derive(Serialize, JsonSchema)]
 pub struct ReleaseModelOutput {
-    /// Whether you held the right or a place, which you now don't.
+    /// Whether you held the file, which you now don't.
     pub released: bool,
-    pub file: FileView,
+    /// The file as it stands now, if anyone still holds it, such as an agent whose claim the
+    /// user's release gave back.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file: Option<FileView>,
 }
 
 impl Operation for ReleaseModel {
     const NAME: &'static str = "release_model";
-    const DESCRIPTION: &'static str = "Gives back the right to change a model file, or your place in its queue, so the next waiting gets it. Call it when you're done changing a file you claimed.";
+    const DESCRIPTION: &'static str = "Ends your claim on a model file, so others may claim it. Call it when you're done changing a file you claimed. For the user, it gives the file back to the agent whose claim it paused, if any.";
     const EFFECT: Effect = Effect::Additive;
     const CHANGES_MODELS: bool = true;
     type Input = PathInput;
@@ -645,36 +733,41 @@ impl Operation for ReleaseModel {
         let path = key(catalogue, &input.path)?;
         let mut editing = catalogue.editing()?;
         let asker = editing.asker.clone();
+        let now = editing.now;
         let mut released = false;
         if let Some(file) = editing.state().files.get_mut(&path) {
-            let holds = match (&asker, file.editor.as_ref().map(|editor| &editor.process)) {
-                (Asker::User, Some(None)) => true,
-                (Asker::Agent(me), Some(Some(process))) => me == process,
-                _ => false,
-            };
-            if holds {
-                file.editor = None;
-                released = true;
+            match &asker {
+                Asker::User(_) => {
+                    if file.user.take().is_some() {
+                        released = true;
+                        if let Some(claim) = &mut file.claim {
+                            claim.last_active = now;
+                        }
+                    }
+                }
+                Asker::Agent(me) => {
+                    if file.claim.as_ref().is_some_and(|claim| &claim.process == me) {
+                        file.claim = None;
+                        released = true;
+                    }
+                }
             }
-            if let Asker::Agent(me) = &asker {
-                let before = file.queue.len();
-                file.queue.retain(|waiting| &waiting.process != me);
-                released |= file.queue.len() != before;
+            if file.user.is_none() && file.claim.is_none() {
+                editing.state().files.remove(&path);
             }
         }
-        editing.settle(&path);
         Ok(ReleaseModelOutput { released, file: editing.view(&path) })
     }
 }
 
-// --- get_edit_queue ---
+// --- get_editors ---
 
-pub struct GetEditQueue;
+pub struct GetEditors;
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct GetEditQueueInput {
-    /// A model file, such as `line.json`. Left out, every file someone edits or waits for.
+pub struct GetEditorsInput {
+    /// A model file, such as `line.json`. Left out, every file someone holds.
     pub path: Option<String>,
 }
 
@@ -685,16 +778,9 @@ pub struct BlockedView {
 }
 
 #[derive(Serialize, JsonSchema)]
-pub struct GetEditQueueOutput {
-    /// With a path: who edits it, if anyone.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub editor: Option<Option<EditorView>>,
-    /// With a path: who waits for it, in order.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub queue: Option<Vec<AgentView>>,
-    /// Without a path: every file someone edits or waits for.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub files: Option<Vec<FileView>>,
+pub struct GetEditorsOutput {
+    /// Every file someone holds, or with a path, that file if someone holds it.
+    pub files: Vec<FileView>,
     /// The agents the user has blocked.
     pub blocked: Vec<BlockedView>,
     /// Your own id, if you're an agent.
@@ -702,193 +788,94 @@ pub struct GetEditQueueOutput {
     pub you: Option<String>,
 }
 
-impl Operation for GetEditQueue {
-    const NAME: &'static str = "get_edit_queue";
-    const DESCRIPTION: &'static str = "Shows who may change a model file now, its editor, and the agents waiting for it in order, each with its id, harness, purpose and since when, or the same for every file someone edits or waits for. Also the agents the user has blocked, and `you`, your own id.";
+impl Operation for GetEditors {
+    const NAME: &'static str = "get_editors";
+    const DESCRIPTION: &'static str = "Shows who holds a model file now, or every file someone holds: the user, or an agent's claim with its id, harness, goal, what it is doing, its last activities, since when, and whether it is paused because the user has taken the file. Also the agents the user has blocked, and `you`, your own id.";
     const EFFECT: Effect = Effect::ReadOnly;
-    type Input = GetEditQueueInput;
-    type Output = GetEditQueueOutput;
+    type Input = GetEditorsInput;
+    type Output = GetEditorsOutput;
 
-    fn run(catalogue: &Catalogue, input: GetEditQueueInput) -> Result<GetEditQueueOutput, OperationError> {
+    fn run(catalogue: &Catalogue, input: GetEditorsInput) -> Result<GetEditorsOutput, OperationError> {
         let path = input.path.as_deref().map(|path| key(catalogue, path)).transpose()?;
         let editing = catalogue.editing()?;
         let blocked = editing.held.state.agents.values().filter(|agent| agent.blocked).map(|agent| BlockedView { agent: agent.id.clone(), client: agent.client.clone() }).collect();
         let you = match &editing.asker {
             Asker::Agent(process) => editing.agent(process).map(|agent| agent.id.clone()),
-            Asker::User => None,
+            Asker::User(_) => None,
         };
-        Ok(match path {
-            Some(path) => {
-                let view = editing.view(&path);
-                GetEditQueueOutput { editor: Some(view.editor), queue: Some(view.queue), files: None, blocked, you }
-            }
-            None => {
-                let files = editing.held.state.files.keys().map(|path| editing.view(path)).collect();
-                GetEditQueueOutput { editor: None, queue: None, files: Some(files), blocked, you }
-            }
-        })
+        let files = match path {
+            Some(path) => editing.view(&path).into_iter().collect(),
+            None => editing.held.state.files.keys().filter_map(|path| editing.view(path)).collect(),
+        };
+        Ok(GetEditorsOutput { files, blocked, you })
     }
 }
 
 // ---------- The user's controls ----------
 
+#[derive(Serialize, JsonSchema)]
+pub struct HeldOutput {
+    pub file: FileView,
+}
+
 // --- take_model ---
 
 pub struct TakeModel;
 
-#[derive(Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct TakeModelInput {
-    /// A model file in the models folder, such as `line.json`.
-    pub path: String,
-}
-
-#[derive(Serialize, JsonSchema)]
-pub struct QueueOutput {
-    pub file: FileView,
-}
-
 impl Operation for TakeModel {
     const NAME: &'static str = "take_model";
-    const DESCRIPTION: &'static str = "For the user: takes the right to change a model file now, from any agent that holds it, which then waits first in line, keeping its purpose. The user's right never runs out: release_model gives it back to the first waiting agent, so an agent interrupted carries on where it was.";
+    const DESCRIPTION: &'static str = "For the user: takes a model file now. An agent's claim on it is paused: its changes are refused until the user releases the file with release_model, which gives the claim back. The user's hold ends when the window or command that took it ends.";
     const EFFECT: Effect = Effect::Additive;
     const CHANGES_MODELS: bool = true;
     const USER_ONLY: bool = true;
-    type Input = TakeModelInput;
-    type Output = QueueOutput;
+    type Input = PathInput;
+    type Output = HeldOutput;
 
-    fn run(catalogue: &Catalogue, input: TakeModelInput) -> Result<QueueOutput, OperationError> {
+    fn run(catalogue: &Catalogue, input: PathInput) -> Result<HeldOutput, OperationError> {
         user_only(catalogue, Self::NAME)?;
         let path = key(catalogue, &input.path)?;
         let mut editing = catalogue.editing()?;
-        let now = editing.now;
-        let file = editing.file(&path);
-        // An agent interrupted waits first in line, so releasing gives it back its right.
-        if let Some(Editor { process: Some(process), purpose, .. }) = file.editor.take() {
-            let purpose = purpose.unwrap_or_default();
-            file.queue.insert(0, Waiting { process, purpose, asked: now, last_asked: now });
+        let (now, process) = (editing.now, editing.asker.process().to_string());
+        let file = editing.state().files.entry(path.clone()).or_default();
+        if file.user.is_none() {
+            file.user = Some(UserHold { process, since: now });
         }
-        file.editor = Some(Editor { process: None, purpose: None, since: now, last_active: now });
-        Ok(QueueOutput { file: editing.view(&path) })
+        Ok(HeldOutput { file: editing.view(&path).expect("just taken") })
     }
 }
 
-// --- give_model ---
+// --- revoke_claim ---
 
-pub struct GiveModel;
+pub struct RevokeClaim;
 
-#[derive(Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct AgentInFileInput {
-    /// A model file in the models folder, such as `line.json`.
-    pub path: String,
-    /// The agent's id, such as `agent-3`.
-    pub agent: String,
+#[derive(Serialize, JsonSchema)]
+pub struct RevokeClaimOutput {
+    /// The agent whose claim ended, such as `agent-3`.
+    pub revoked: String,
+    /// The file as it stands now, if the user still holds it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file: Option<FileView>,
 }
 
-impl Operation for GiveModel {
-    const NAME: &'static str = "give_model";
-    const DESCRIPTION: &'static str = "For the user: gives the right to change a model file to an agent waiting for it, now, whoever held it. The one who held it isn't queued again.";
+impl Operation for RevokeClaim {
+    const NAME: &'static str = "revoke_claim";
+    const DESCRIPTION: &'static str = "For the user: ends an agent's claim on a model file at once, paused or not. The agent may claim it again.";
     const EFFECT: Effect = Effect::Additive;
     const CHANGES_MODELS: bool = true;
     const USER_ONLY: bool = true;
-    type Input = AgentInFileInput;
-    type Output = QueueOutput;
+    type Input = PathInput;
+    type Output = RevokeClaimOutput;
 
-    fn run(catalogue: &Catalogue, input: AgentInFileInput) -> Result<QueueOutput, OperationError> {
+    fn run(catalogue: &Catalogue, input: PathInput) -> Result<RevokeClaimOutput, OperationError> {
         user_only(catalogue, Self::NAME)?;
         let path = key(catalogue, &input.path)?;
         let mut editing = catalogue.editing()?;
-        let process = editing.process_of(&input.agent)?;
-        let now = editing.now;
-        let file = editing.file(&path);
-        let at = file
-            .queue
-            .iter()
-            .position(|waiting| waiting.process == process)
-            .ok_or_else(|| OperationError::not_found(format!("`{}` isn't waiting for `{path}`", input.agent)))?;
-        let waiting = file.queue.remove(at);
-        file.editor = Some(Editor { process: Some(process), purpose: Some(waiting.purpose), since: now, last_active: now });
-        Ok(QueueOutput { file: editing.view(&path) })
-    }
-}
-
-// --- move_in_queue ---
-
-pub struct MoveInQueue;
-
-#[derive(Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct MoveInQueueInput {
-    /// A model file in the models folder, such as `line.json`.
-    pub path: String,
-    /// The waiting agent's id, such as `agent-3`.
-    pub agent: String,
-    /// Its new place, 0 first.
-    pub place: usize,
-}
-
-impl Operation for MoveInQueue {
-    const NAME: &'static str = "move_in_queue";
-    const DESCRIPTION: &'static str = "For the user: moves an agent waiting for a model file to another place in its queue, 0 first, as dragging it in a list does. The others keep their order.";
-    const EFFECT: Effect = Effect::Additive;
-    const CHANGES_MODELS: bool = true;
-    const USER_ONLY: bool = true;
-    type Input = MoveInQueueInput;
-    type Output = QueueOutput;
-
-    fn run(catalogue: &Catalogue, input: MoveInQueueInput) -> Result<QueueOutput, OperationError> {
-        user_only(catalogue, Self::NAME)?;
-        let path = key(catalogue, &input.path)?;
-        let mut editing = catalogue.editing()?;
-        let process = editing.process_of(&input.agent)?;
-        let file = editing.file(&path);
-        let at = file
-            .queue
-            .iter()
-            .position(|waiting| waiting.process == process)
-            .ok_or_else(|| OperationError::not_found(format!("`{}` isn't waiting for `{path}`", input.agent)))?;
-        if input.place >= file.queue.len() {
-            let last = file.queue.len() - 1;
-            return Err(OperationError::invalid_input(format!("{} wait for `{path}`, so the place can be 0 to {last}", file.queue.len())));
+        let claim = editing.state().files.get_mut(&path).and_then(|file| file.claim.take()).ok_or_else(|| OperationError::not_found(format!("no agent has claimed `{path}`")))?;
+        let revoked = editing.agent(&claim.process).map_or_else(|| "ended".to_string(), |agent| agent.id.clone());
+        if editing.held.state.files.get(&path).is_some_and(|file| file.user.is_none()) {
+            editing.state().files.remove(&path);
         }
-        let waiting = file.queue.remove(at);
-        file.queue.insert(input.place, waiting);
-        Ok(QueueOutput { file: editing.view(&path) })
-    }
-}
-
-// --- remove_from_queue ---
-
-pub struct RemoveFromQueue;
-
-impl Operation for RemoveFromQueue {
-    const NAME: &'static str = "remove_from_queue";
-    const DESCRIPTION: &'static str = "For the user: takes an agent out of a model file's queue, or, if it's the editor, takes its right away, which passes to the first waiting. It may claim again.";
-    const EFFECT: Effect = Effect::Additive;
-    const CHANGES_MODELS: bool = true;
-    const USER_ONLY: bool = true;
-    type Input = AgentInFileInput;
-    type Output = QueueOutput;
-
-    fn run(catalogue: &Catalogue, input: AgentInFileInput) -> Result<QueueOutput, OperationError> {
-        user_only(catalogue, Self::NAME)?;
-        let path = key(catalogue, &input.path)?;
-        let mut editing = catalogue.editing()?;
-        let process = editing.process_of(&input.agent)?;
-        let file = editing.file(&path);
-        let before = file.queue.len();
-        file.queue.retain(|waiting| waiting.process != process);
-        let mut found = file.queue.len() != before;
-        if file.editor.as_ref().is_some_and(|editor| editor.process.as_deref() == Some(process.as_str())) {
-            file.editor = None;
-            found = true;
-        }
-        if !found {
-            return Err(OperationError::not_found(format!("`{}` neither edits nor waits for `{path}`", input.agent)));
-        }
-        editing.settle(&path);
-        Ok(QueueOutput { file: editing.view(&path) })
+        Ok(RevokeClaimOutput { revoked, file: editing.view(&path) })
     }
 }
 
@@ -923,7 +910,7 @@ fn set_blocked(catalogue: &Catalogue, agent: &str, blocked: bool) -> Result<Bloc
 
 impl Operation for BlockAgent {
     const NAME: &'static str = "block_agent";
-    const DESCRIPTION: &'static str = "For the user: blocks an agent session from changing models in this folder. It loses any right it holds and its places in queues, and every claim or change it makes is refused as blocked, until unblock_agent or the end of its session.";
+    const DESCRIPTION: &'static str = "For the user: blocks an agent session from changing models in this folder. Its claims end, and every claim or change it makes is refused as blocked, until unblock_agent or the end of its session.";
     const EFFECT: Effect = Effect::Additive;
     const CHANGES_MODELS: bool = true;
     const USER_ONLY: bool = true;
@@ -938,7 +925,7 @@ impl Operation for BlockAgent {
 
 impl Operation for UnblockAgent {
     const NAME: &'static str = "unblock_agent";
-    const DESCRIPTION: &'static str = "For the user: lets a blocked agent claim and change models again. It gets back no right or place it lost.";
+    const DESCRIPTION: &'static str = "For the user: lets a blocked agent claim and change models again. It gets back no claim it lost.";
     const EFFECT: Effect = Effect::Additive;
     const CHANGES_MODELS: bool = true;
     const USER_ONLY: bool = true;

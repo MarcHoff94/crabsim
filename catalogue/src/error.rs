@@ -21,8 +21,13 @@ pub enum ErrorKind {
     AlreadyExists,
     /// Something went wrong while running or storing, such as a file that can't be written.
     RunError,
-    /// Someone else may change this model file now: claim_model to wait your turn.
+    /// You may not change this model file now: claim it first with claim_model, or the user has
+    /// taken it and your claim is paused.
     NotEditor,
+    /// Someone else holds this model file, so your claim is refused. Claims aren't queued.
+    ModelInUse,
+    /// The model file changed since your last change, by someone else: read it again.
+    ModelChanged,
     /// The user has blocked this agent from changing models in this folder.
     Blocked,
     /// The file was written outside crabsim since crabsim last saved it, or crabsim never saved
@@ -30,7 +35,7 @@ pub enum ErrorKind {
     ChangedOutside,
     /// The file isn't the version `expected_hash` names any more: read it again.
     Conflict,
-    /// A crabsim window has the models folder open, so it alone changes models and the edit queue
+    /// A crabsim window has the models folder open, so it alone changes models and who edits them
     /// there, and no second window may open it.
     FolderInUse,
 }

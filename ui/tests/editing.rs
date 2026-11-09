@@ -1,9 +1,10 @@
-//! The Editing tab's logic: the edit queue as the user sees it, every control of the user's, each
-//! checked against the latest queue before it acts and read again after. Agents are played by
-//! catalogues opened as `Source::Mcp` in this process, each an agent of its own. No window.
+//! The Editing tab's logic: the agents' claims as the user sees them, and every control of the
+//! user's, each checked against the latest state before it acts and read again after (ADR 0013).
+//! Agents are played by catalogues opened as `Source::Mcp` in this process, each an agent of its
+//! own. No window.
 
 use crabsim_catalogue::{Catalogue, Settings, Source};
-use crabsim_ui::editing::{ActRefusal, Holder, Queue, QueueAction};
+use crabsim_ui::editing::{ActRefusal, EditAction, Editors};
 use crabsim_ui::workspace::Workspace;
 use serde_json::json;
 use std::path::PathBuf;
@@ -40,8 +41,8 @@ impl Drop for Folder {
     }
 }
 
-fn claim(agent: &Catalogue, path: &str, purpose: &str) {
-    agent.call("claim_model", json!({ "path": path, "purpose": purpose })).unwrap();
+fn claim(agent: &Catalogue, path: &str, goal: &str, doing: &str) {
+    agent.call("claim_model", json!({ "path": path, "goal": goal, "doing": doing })).unwrap();
 }
 
 fn open(folder: &Folder) -> Workspace {
@@ -50,99 +51,79 @@ fn open(folder: &Folder) -> Workspace {
     workspace
 }
 
-fn queue(workspace: &Workspace) -> Queue {
-    workspace.edit_queue().unwrap()
+fn editors(workspace: &Workspace) -> Editors {
+    workspace.editors().unwrap()
 }
 
-/// Who holds the right on the open model, as the tab names them.
-fn holder(workspace: &Workspace) -> Option<String> {
-    queue(workspace).file("line.json").editor.map(|holder| match holder {
-        Holder::User { .. } => "you".to_string(),
-        Holder::Agent(agent) => agent.agent,
-    })
+/// Who may change the open model, as the tab names them, and whether an agent's claim is paused.
+fn holder(workspace: &Workspace) -> (Option<String>, bool) {
+    let file = editors(workspace).file("line.json");
+    let paused = file.claim.as_ref().is_some_and(|claim| claim.paused);
+    let who = if file.user_since.is_some() { Some("you".to_string()) } else { file.claim.map(|claim| claim.agent) };
+    (who, paused)
 }
 
-fn waiting(workspace: &Workspace) -> Vec<String> {
-    queue(workspace).file("line.json").queue.into_iter().map(|agent| agent.agent).collect()
-}
-
-fn act(workspace: &mut Workspace, action: QueueAction) -> Queue {
-    let shown = queue(workspace);
+fn act(workspace: &mut Workspace, action: EditAction) -> Editors {
+    let shown = editors(workspace);
     workspace.act(&shown, action).unwrap_or_else(|refusal| panic!("{refusal:?}"))
 }
 
-// ---------- Seeing the queue ----------
+// ---------- Seeing the claims ----------
 
 #[test]
-fn the_queue_shows_who_edits_and_who_waits_with_harness_and_purpose() {
+fn a_claim_shows_its_agent_harness_goal_and_what_it_is_doing() {
     let folder = Folder::new("see");
     let workspace = open(&folder);
-    assert_eq!(holder(&workspace), None, "nobody edits yet");
-    let (first, second) = (folder.agent(), folder.agent());
-    claim(&first, "line.json", "adding a mill");
-    claim(&second, "line.json", "tuning times");
-    let shown = queue(&workspace);
-    let file = shown.file("line.json");
-    match file.editor {
-        Some(Holder::Agent(agent)) => {
-            assert_eq!((agent.agent.as_str(), agent.purpose.as_str()), ("agent-1", "adding a mill"));
-            assert!(!agent.client.is_empty() && !agent.since.is_empty());
-        }
-        other => panic!("{other:?}"),
-    }
-    assert_eq!(waiting(&workspace), ["agent-2"]);
-    assert_eq!(shown.agent_holding("line.json").map(|agent| agent.purpose.as_str()), Some("adding a mill"), "for asking before taking the right");
+    assert_eq!(holder(&workspace), (None, false), "nobody holds it yet");
+    let agent = folder.agent();
+    claim(&agent, "line.json", "find the bottleneck", "adding a mill");
+    claim(&agent, "line.json", "find the bottleneck", "tuning times");
+    let shown = editors(&workspace);
+    let claim = shown.file("line.json").claim.expect("claimed");
+    assert_eq!((claim.agent.as_str(), claim.goal.as_str(), claim.doing.as_str()), ("agent-1", "find the bottleneck", "tuning times"));
+    assert!(!claim.client.is_empty() && !claim.since.is_empty() && !claim.paused);
+    let trail: Vec<&str> = claim.trail.iter().map(|(doing, _)| doing.as_str()).collect();
+    assert_eq!(trail, ["tuning times", "adding a mill"], "newest first");
+    assert_eq!(shown.agent_holding("line.json").map(|claim| claim.goal.as_str()), Some("find the bottleneck"), "for asking before taking it");
 }
 
 #[test]
-fn other_files_with_an_editor_or_a_queue_are_listed_apart() {
+fn other_files_held_are_listed_apart() {
     let folder = Folder::new("others");
     let workspace = open(&folder);
     // An agent whose catalogue is gone counts as ended, so it has to stay alive here.
     let agent = folder.agent();
-    claim(&agent, "other.json", "renaming things");
-    let shown = queue(&workspace);
+    claim(&agent, "other.json", "tidy names", "renaming things");
+    let shown = editors(&workspace);
     let others: Vec<&str> = shown.others("line.json").iter().map(|file| file.path.as_str()).collect();
     assert_eq!(others, ["other.json"]);
-    assert_eq!(shown.file("line.json").editor, None);
+    assert_eq!(shown.file("line.json").claim, None);
 }
 
 // ---------- The user's controls ----------
 
 #[test]
-fn taking_the_right_puts_the_agent_first_in_line_and_releasing_gives_it_back() {
+fn taking_pauses_the_agents_claim_and_releasing_gives_it_back() {
     let folder = Folder::new("take");
     let mut workspace = open(&folder);
     let agent = folder.agent();
-    claim(&agent, "line.json", "adding a mill");
-    act(&mut workspace, QueueAction::Take);
-    assert_eq!(holder(&workspace).as_deref(), Some("you"));
-    assert_eq!(waiting(&workspace), ["agent-1"], "the agent interrupted waits first in line");
-    act(&mut workspace, QueueAction::Release);
-    assert_eq!(holder(&workspace).as_deref(), Some("agent-1"), "and gets its right back");
+    claim(&agent, "line.json", "find the bottleneck", "adding a mill");
+    act(&mut workspace, EditAction::Take);
+    assert_eq!(holder(&workspace), (Some("you".to_string()), true), "the agent's claim is paused");
+    act(&mut workspace, EditAction::Release);
+    assert_eq!(holder(&workspace), (Some("agent-1".to_string()), false), "and comes back");
 }
 
 #[test]
-fn giving_moving_and_removing_waiting_agents() {
-    let folder = Folder::new("queue");
+fn revoking_ends_the_agents_claim() {
+    let folder = Folder::new("revoke");
     let mut workspace = open(&folder);
-    let agents = [folder.agent(), folder.agent(), folder.agent(), folder.agent()];
-    for (agent, purpose) in agents.iter().zip(["a", "b", "c", "d"]) {
-        claim(agent, "line.json", purpose);
-    }
-    assert_eq!(waiting(&workspace), ["agent-2", "agent-3", "agent-4"]);
-    act(&mut workspace, QueueAction::Down("agent-2".into()));
-    assert_eq!(waiting(&workspace), ["agent-3", "agent-2", "agent-4"]);
-    act(&mut workspace, QueueAction::Up("agent-4".into()));
-    assert_eq!(waiting(&workspace), ["agent-3", "agent-4", "agent-2"]);
-    act(&mut workspace, QueueAction::Remove("agent-4".into()));
-    assert_eq!(waiting(&workspace), ["agent-3", "agent-2"]);
-    act(&mut workspace, QueueAction::Give("agent-2".into()));
-    assert_eq!(holder(&workspace).as_deref(), Some("agent-2"));
-
-    let shown = queue(&workspace);
-    let refused = workspace.act(&shown, QueueAction::Up("agent-3".into())).unwrap_err();
-    assert!(matches!(&refused, ActRefusal::Refused(why) if why.contains("first in line")), "the first can't move up: {refused:?}");
+    let agent = folder.agent();
+    claim(&agent, "line.json", "find the bottleneck", "adding a mill");
+    act(&mut workspace, EditAction::Revoke);
+    assert_eq!(holder(&workspace), (None, false));
+    let shown = editors(&workspace);
+    assert!(matches!(workspace.act(&shown, EditAction::Revoke), Err(ActRefusal::Refused(_))), "nothing left to revoke");
 }
 
 #[test]
@@ -150,68 +131,65 @@ fn blocking_and_unblocking_an_agent() {
     let folder = Folder::new("block");
     let mut workspace = open(&folder);
     let agent = folder.agent();
-    claim(&agent, "line.json", "adding a mill");
-    let after = act(&mut workspace, QueueAction::Block("agent-1".into()));
+    claim(&agent, "line.json", "find the bottleneck", "adding a mill");
+    let after = act(&mut workspace, EditAction::Block("agent-1".into()));
     assert_eq!(after.blocked, [("agent-1".to_string(), after.blocked[0].1.clone())]);
-    assert_eq!(holder(&workspace), None, "a blocked agent loses its right");
-    let after = act(&mut workspace, QueueAction::Unblock("agent-1".into()));
+    assert_eq!(holder(&workspace), (None, false), "a blocked agent's claim ends");
+    let after = act(&mut workspace, EditAction::Unblock("agent-1".into()));
     assert!(after.blocked.is_empty());
 }
 
 // ---------- Checked before acting ----------
 
 #[test]
-fn an_action_on_a_queue_that_changed_since_it_was_shown_is_refused_saying_what_changed() {
+fn an_action_on_a_state_that_changed_since_it_was_shown_is_refused_saying_what_changed() {
     let folder = Folder::new("changed");
     let mut workspace = open(&folder);
-    let shown = queue(&workspace);
+    let shown = editors(&workspace);
     let agent = folder.agent();
-    claim(&agent, "line.json", "adding a mill");
+    claim(&agent, "line.json", "find the bottleneck", "adding a mill");
 
-    let refused = workspace.act(&shown, QueueAction::Take).unwrap_err();
+    let refused = workspace.act(&shown, EditAction::Take).unwrap_err();
     match &refused {
         ActRefusal::Changed { now, what } => {
-            assert!(what.contains("agent-1") && what.contains("adding a mill"), "{what}");
-            assert!(matches!(now.file("line.json").editor, Some(Holder::Agent(_))), "the new state comes with it");
+            assert!(what.contains("agent-1") && what.contains("find the bottleneck"), "{what}");
+            assert!(now.file("line.json").claim.is_some(), "the new state comes with it");
         }
         other => panic!("{other:?}"),
     }
-    assert_eq!(holder(&workspace).as_deref(), Some("agent-1"), "nothing was done");
+    assert_eq!(holder(&workspace), (Some("agent-1".to_string()), false), "nothing was done");
 
     let ActRefusal::Changed { now, .. } = refused else { unreachable!() };
-    workspace.act(&now, QueueAction::Take).unwrap();
-    assert_eq!(holder(&workspace).as_deref(), Some("you"), "acting on the new state goes through");
+    workspace.act(&now, EditAction::Take).unwrap();
+    assert_eq!(holder(&workspace).0.as_deref(), Some("you"), "acting on the new state goes through");
 }
 
 #[test]
-fn a_change_to_who_waits_is_a_change_too() {
-    let folder = Folder::new("waiting-changed");
+fn an_agent_saying_what_it_does_now_is_no_change_to_act_on() {
+    let folder = Folder::new("doing-changed");
     let mut workspace = open(&folder);
-    let (first, second) = (folder.agent(), folder.agent());
-    claim(&first, "line.json", "adding a mill");
-    let shown = queue(&workspace);
-    claim(&second, "line.json", "tuning times");
-    match workspace.act(&shown, QueueAction::Give("agent-1".into())).unwrap_err() {
-        ActRefusal::Changed { what, .. } => assert!(what.contains("agent-2"), "{what}"),
-        other => panic!("{other:?}"),
-    }
+    let agent = folder.agent();
+    claim(&agent, "line.json", "find the bottleneck", "adding a mill");
+    let shown = editors(&workspace);
+    claim(&agent, "line.json", "find the bottleneck", "tuning times");
+    workspace.act(&shown, EditAction::Take).unwrap();
 }
 
 #[test]
 fn a_change_to_another_file_doesnt_stop_an_action_on_the_open_one() {
     let folder = Folder::new("unrelated");
     let mut workspace = open(&folder);
-    let shown = queue(&workspace);
+    let shown = editors(&workspace);
     let agent = folder.agent();
-    claim(&agent, "other.json", "renaming things");
-    workspace.act(&shown, QueueAction::Take).unwrap();
-    assert_eq!(holder(&workspace).as_deref(), Some("you"));
+    claim(&agent, "other.json", "tidy names", "renaming things");
+    workspace.act(&shown, EditAction::Take).unwrap();
+    assert_eq!(holder(&workspace).0.as_deref(), Some("you"));
 }
 
 #[test]
-fn with_no_model_open_there_is_no_queue_to_act_on() {
+fn with_no_model_open_there_is_nothing_to_act_on() {
     let folder = Folder::new("none");
     let mut workspace = Workspace::open(&folder.0);
-    let shown = workspace.edit_queue().unwrap();
-    assert!(matches!(workspace.act(&shown, QueueAction::Take), Err(ActRefusal::Refused(_))));
+    let shown = workspace.editors().unwrap();
+    assert!(matches!(workspace.act(&shown, EditAction::Take), Err(ActRefusal::Refused(_))));
 }

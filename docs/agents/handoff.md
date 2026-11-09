@@ -1,6 +1,6 @@
 # crabsim handoff
 
-Written 2026-11-07 at the end of a working session, and updated after each step since, last on 2026-11-09 after the design round on claims. Read this first, then check it against the code and git, because it describes a moment in time.
+Written 2026-11-07 at the end of a working session, and updated after each step since, last on 2026-11-09 while building claims (spec issue 73). Read this first, then check it against the code and git, because it describes a moment in time.
 
 **The UI's order of work is done.** UI stage 1 was built in four slices, PRs 24 to 27: the demo drawn live with state colours and MUs, pan and zoom, the run controls, speed, time mode, stepping, going back to a time, the error banner, the inspector, interventions on Stations and their marks. Step 7 trimmed the CLI to a headless run of the demo, in PR 30.
 
@@ -13,7 +13,7 @@ Written 2026-11-07 at the end of a working session, and updated after each step 
 
 **UI stage 2 is done** ([spec issue 63](https://github.com/MarcHoff94/crabsim/issues/63), PRs 65 to 70): the window works on a models folder through the catalogue as the user, lists and runs its model files, picks up an agent's changes, shows and changes every attribute of an instance in the inspector, and has an Editing tab with the user's control of the edit queue. Both front-ends now always work on a model file: the built-in demo is gone from them. See "UI stage 2 (built)".
 
-**Next: the owner reviews [spec issue 73](https://github.com/MarcHoff94/crabsim/issues/73), claims instead of the edit queue (ADR 0013), designed on 2026-11-09.** Whether it is built before the domain model (build step 7) is the owner's call. See "Possible next steps".
+**Now: claims instead of the edit queue, [spec issue 73](https://github.com/MarcHoff94/crabsim/issues/73) (ADR 0013), designed on 2026-11-09.** Its PR 1, on `feat/claims`, holds the catalogue, the MCP server and the CLI's `crabsim editors` (spec PR 2, folded in because removing the queue operations broke the CLI anyway), and the UI's Editing tab on claims. PR 3 is left: the trail in the tab and the marker on the open model. Then the domain model (build step 7). See "Possible next steps".
 
 ## Start here
 
@@ -31,7 +31,7 @@ Checked on 2026-11-08, on Rust 1.99.1, at `master` after PR 70 (`424aac6`): 603 
 | Where | State |
 |---|---|
 | `master` on GitHub | Steps 1 to 6 of the build order, UI stages 1 and 2, and steps 1 to 4 of the AI-native order of work through slice 3 of the catalogue, through PR 70 |
-| Open issues | Specs #3 (only build step 7 left), #28 (steps 5 to 8 left) and #63 (UI stage 2, built: tried with a real agent on 2026-11-09, which led to #73, so it can be closed), #73 (claims instead of the edit queue, waiting for the owner's review), and #58, the MCP tool list's size, to monitor |
+| Open issues | Specs #3 (only build step 7 left), #28 (steps 5 to 8 left) and #63 (UI stage 2, built: tried with a real agent on 2026-11-09, which led to #73, so it can be closed), #73 (claims instead of the edit queue: PR 1 built, PR 3 left), and #58, the MCP tool list's size, to monitor |
 | `prototype/restore-replay` | The throwaway prototype from build step 5. Keep it, and never merge it |
 | `prototype/ui-bevy` | The throwaway UI prototype from UI step 2, with temporary counters in the session. Keep it, and never merge it |
 | Merged branches still on GitHub | 8, the docs branches and UI stage 2's, all merged into `master`: safe to delete (`git branch -r --merged origin/master`). Deleting remote branches needs the owner's own hand: the permission check refuses it to an agent |
@@ -348,7 +348,7 @@ Decided with the owner on 2026-11-07 in a design round, and written up as [spec 
 Decided with the owner on 2026-11-08 in a design round of six rounds, and written up as [spec issue 45](https://github.com/MarcHoff94/crabsim/issues/45) with user stories, every decision and the test seams. ADR 0011 holds the decisions that are hard to reverse. The short version:
 
 - **`edit_model { path, changes, expected_hash? }`:** a batch of typed changes to a model file, all or nothing, checked once at the end, refused with every problem if the result is invalid. Instances, connections, classes, attributes and the model's description. `remove_class` is refused while anything depends on it unless `delete_dependents: true`. **`get_attributes`** gives every attribute with its value and origin. Files by path, no interventions yet.
-- **Superseded by ADR 0013 (spec issue 73, not built yet):** no edit queue, a claim with a goal and what the agent is doing, granted or refused at once, needed for every change, paused when the user takes the right. The two points below describe what is built today.
+- **Superseded by ADR 0013 (spec issue 73, built in its PR 1):** no edit queue, a claim with a goal and what the agent is doing, granted or refused at once, needed for every change, paused when the user takes the right. The two points below describe slice 2 as it was. `docs/design/operation-catalogue.md` describes claims as built.
 - **The editor:** one per model file. Agents `claim_model` with a required purpose and wait in the edit queue, polling for now. A one-off change goes through when nobody holds or waits. An agent's right ends on release, when its process ends, or after 10 idle minutes.
 - **The user controls the queue,** in the UI and the CLI, never over MCP: take the right at once, give it, choose who is next, remove, block and unblock an agent session. The user never waits and never times out. This is the AI-native pillar's first deliberate exception.
 - **One person's front-end per models folder:** one UI window, holding `.crabsim/user.lock`. A second window means an independent copy of the folder. While the UI has it, the CLI can only read and run.
@@ -444,7 +444,7 @@ Done on 2026-11-07: the wiki was rewritten against today's code, with four pages
 In the owner's order of 2026-11-08, with spec 73 added on 2026-11-09:
 
 1. **Step 7 of the build order, the domain model, starting with a design round,** as UI stage 2 had. What it covers, from "Build order" and "Agreed design": stops on Source, Buffer and Drain with failure profiles, and what becomes of `StopCtrl`, which is still `todo!()`; fixing Buffer (see "Known problems") and adding dwelling time; the failure time bases; Station capacity with start modes and the exit-strategy seam. Decisions waiting for it: whether a stopped predecessor keeps its place among the blocked ("Known problems"), and how blocked predecessors give up their place once objects hold more than one MU. Each new attribute arrives with its operation, its place in the model file and its schema, its mid-run behaviour (ADR 0008), and its fields in the inspector (`ui/src/attributes.rs`), with the benchmark before and after for anything on the per-event path. Drag and drop, class editing and the layout image wait for it.
-2. **Claims instead of the edit queue, [spec issue 73](https://github.com/MarcHoff94/crabsim/issues/73):** waiting for the owner's review, then three PRs (catalogue, CLI, UI). The owner may put it before step 7. Trying the Editing tab with a real agent, the old step 2, was done on 2026-11-09 and led to it, so #63 can be closed.
+2. **Claims instead of the edit queue, [spec issue 73](https://github.com/MarcHoff94/crabsim/issues/73):** the owner chose it before step 7. PR 1 holds the catalogue, MCP, the CLI and the Editing tab on claims. PR 3 is left: the trail and the marker on the open model. Then the owner tries it with a real agent from an IDE. Trying the Editing tab with a real agent, the old step 2, was done on 2026-11-09 and led to it, so #63 can be closed.
 3. **The rest of issue 28:** crabsim's first skills, as the test that the operations are enough (step 5), experiments and studies (6), live-session operations and class changes as interventions (7), then in-app agents (8).
 4. **The MCP tool list's size, [issue 58](https://github.com/MarcHoff94/crabsim/issues/58):** a design round on shrinking it, when the owner chooses. Stage 2 added no tool. Measure it again after each slice.
 

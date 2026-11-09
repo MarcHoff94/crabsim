@@ -47,7 +47,7 @@ fn all_figures(setup: &Setup, run: &str) -> Value {
 
 #[test]
 fn a_run_starts_at_once_and_is_polled_until_done() {
-    let setup = Setup::new("start");
+    let setup = Setup::agent("start");
     write_models(&setup.folder);
     let started = Instant::now();
     let output = setup.ok("start_run", json!({ "model": "small.json", "seed": 1, "length": "8:00:00", "observations": 3, "label": "first" }));

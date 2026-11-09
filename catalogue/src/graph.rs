@@ -323,7 +323,7 @@ pub struct DescribeModelOutput {
     /// built-in classes that have any, then the model's own in file order, up to 50.
     pub classes: Vec<ClassCount>,
     /// How many classes there are beyond those listed.
-    #[serde(skip_serializing_if = "is_zero")]
+    #[serde(default, skip_serializing_if = "is_zero")]
     pub more_classes: usize,
     pub sources: Listed,
     pub drains: Listed,
@@ -388,7 +388,7 @@ pub struct Flow {
     /// The Drains it reaches, in file order, up to 10.
     pub drains: Vec<Reach>,
     /// How many Drains it reaches beyond those listed.
-    #[serde(skip_serializing_if = "is_zero")]
+    #[serde(default, skip_serializing_if = "is_zero")]
     pub more_drains: usize,
 }
 

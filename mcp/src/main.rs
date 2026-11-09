@@ -90,8 +90,10 @@ impl ServerHandler for Server {
     /// Runs the operation on a thread where blocking is fine. A failed operation is a tool
     /// result marked as an error, holding the error as JSON, so the agent reads it.
     async fn call_tool(&self, request: CallToolRequestParams, context: RequestContext<RoleServer>) -> Result<CallToolResponse, ErrorData> {
-        if let Some(peer) = context.peer.peer_info() {
-            self.catalogue.set_client_name(&peer.client_info.name);
+        // The harness's name, from this request's `_meta` where a client sends it there and never
+        // sends `initialize` (MCP 2026-07-28, as Claude Code does), or else from `initialize`.
+        if let Some(client) = context.client_info() {
+            self.catalogue.set_client_name(&client.name);
         }
         let catalogue = Arc::clone(&self.catalogue);
         let name = request.name.to_string();

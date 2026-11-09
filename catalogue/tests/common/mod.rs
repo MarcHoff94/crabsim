@@ -65,9 +65,12 @@ impl Setup {
         Setup { folder, catalogue }
     }
 
-    /// Calls an operation that must succeed.
+    /// Calls an operation that must succeed, and checks its output against the operation's own
+    /// output schema, which an MCP client checks too and throws away a result that breaks it.
     pub fn ok(&self, name: &str, input: Value) -> Value {
-        self.catalogue.call(name, input.clone()).unwrap_or_else(|error| panic!("{name} {input} failed: {error}"))
+        let output = self.catalogue.call(name, input.clone()).unwrap_or_else(|error| panic!("{name} {input} failed: {error}"));
+        assert_fits_its_schema(&self.catalogue, name, &output);
+        output
     }
 
     /// Calls an operation that must fail, giving its error as JSON, as an agent sees it.
@@ -81,6 +84,15 @@ impl Setup {
     pub fn error(&self, name: &str, input: Value) -> OperationError {
         self.catalogue.call(name, input).expect_err("should fail")
     }
+}
+
+/// Panics unless `output` fits the output schema `name` publishes.
+pub fn assert_fits_its_schema(catalogue: &Catalogue, name: &str, output: &Value) {
+    let operation = catalogue.operations().find(|operation| operation.name == name).unwrap_or_else(|| panic!("no operation {name}"));
+    let validator = jsonschema::validator_for(&operation.output_schema).expect("an output schema is a valid JSON Schema");
+    let problems: Vec<String> = validator.iter_errors(output).map(|error| format!("{} at {}", error, error.instance_path())).collect();
+    assert!(problems.is_empty(), "{name}'s output breaks its own schema: {problems:?}
+{output}");
 }
 
 /// The demo model's file text.

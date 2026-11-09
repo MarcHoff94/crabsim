@@ -58,6 +58,7 @@ fn open(folder: &Folder, path: &str) -> Workspace {
 }
 
 fn add_spare(agent: &Catalogue) {
+    agent.call("claim_model", json!({ "path": "line.json", "goal": "a spare drain", "doing": "adding it" })).unwrap();
     agent.call("edit_model", json!({ "path": "line.json", "changes": [{ "change": "add_instance", "name": "Spare", "class": "Drain" }] })).unwrap();
 }
 

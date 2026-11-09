@@ -116,10 +116,10 @@ fn an_agent_lists_the_tools_validates_runs_and_reads_results_over_stdio() {
     let tools = listed["tools"].as_array().unwrap();
     let tool = |name: &str| tools.iter().find(|tool| tool["name"] == name).unwrap_or_else(|| panic!("no tool {name}: {listed}")).clone();
     assert_eq!(tools.len(), 24, "{listed}");
-    for users_own in ["take_model", "give_model", "move_in_queue", "remove_from_queue", "block_agent", "unblock_agent"] {
+    for users_own in ["take_model", "revoke_claim", "block_agent", "unblock_agent"] {
         assert!(!tools.iter().any(|tool| tool["name"] == users_own), "{users_own} is the user's own");
     }
-    for read_only in ["validate_model", "list_models", "read_model", "model_file_format", "get_attributes", "describe_model", "query_model", "get_edit_queue", "compare_runs", "run_status", "run_results", "query_results"] {
+    for read_only in ["validate_model", "list_models", "read_model", "model_file_format", "get_attributes", "describe_model", "query_model", "get_editors", "compare_runs", "run_status", "run_results", "query_results"] {
         assert_eq!(tool(read_only)["annotations"]["readOnlyHint"], true, "{read_only}");
     }
     for destructive in ["write_model", "edit_model", "delete_model", "export_model", "forget_run"] {
@@ -160,10 +160,20 @@ fn an_agent_lists_the_tools_validates_runs_and_reads_results_over_stdio() {
     let text: Value = serde_json::from_str(results["content"][0]["text"].as_str().unwrap()).unwrap();
     assert_eq!(&text, content);
 
-    // The edit queue shows the agent by the name its harness gave when it connected.
-    let claimed = server.call("claim_model", json!({ "path": "small.json", "purpose": "checking the name" }));
-    assert_eq!(claimed["structuredContent"]["state"], "granted", "{claimed}");
-    assert_eq!(claimed["structuredContent"]["file"]["editor"]["client"], "crabsim-test", "{claimed}");
+    // A claim on a file another agent holds is refused, naming it. Claims aren't queued.
+    let other = crabsim_catalogue::Catalogue::open(crabsim_catalogue::Settings::new(&models.0, crabsim_catalogue::Source::Mcp)).unwrap();
+    other.call("claim_model", json!({ "path": "small.json", "goal": "a tidier model", "doing": "renaming" })).unwrap();
+    let in_use = server.call("claim_model", json!({ "path": "small.json", "goal": "check the name", "doing": "claiming" }));
+    assert_eq!(in_use["isError"], true, "{in_use}");
+    let error: Value = serde_json::from_str(in_use["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(error["kind"], "model_in_use");
+    assert!(error["message"].as_str().unwrap().contains("a tidier model"), "{error}");
+    drop(other);
+
+    // A claim shows the agent by the name its harness gave when it connected.
+    let claimed = server.call("claim_model", json!({ "path": "small.json", "goal": "check the name", "doing": "claiming" }));
+    assert_eq!(claimed["structuredContent"]["file"]["claim"]["client"], "crabsim-test", "{claimed}");
+    assert_eq!(claimed["structuredContent"]["file"]["claim"]["goal"], "check the name", "{claimed}");
 
     // A failure comes back as a tool result marked as an error, for the agent to read.
     let failed = server.call("read_model", json!({ "path": "../outside.json" }));

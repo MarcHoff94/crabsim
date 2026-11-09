@@ -1,60 +1,53 @@
-//! The edit queue as the Editing tab shows it: who may change each model file, who waits, and the
-//! blocked agents, read with `get_edit_queue`, and the user's controls over it (ADR 0011). Every
-//! control is checked against the latest queue before it acts: see `Workspace::act`. Plain Rust
-//! with no egui types, so it is tested without a window. See spec issue 63.
+//! Who may change each model file as the Editing tab shows it: the user's hold, the agents' claims
+//! with their goals and what they're doing, and the blocked agents, read with `get_editors`, and
+//! the user's controls (ADR 0013). Every control is checked against the latest state before it
+//! acts: see `Workspace::act`. Plain Rust with no egui types, so it is tested without a window.
 
 use serde_json::Value;
 
-/// An agent, as the queue shows it.
+/// An agent's claim on a model file.
 #[derive(Debug, Clone, PartialEq)]
-pub struct Agent {
+pub struct Claim {
     /// Such as `agent-3`.
     pub agent: String,
     /// The name its harness gave, such as `claude-code`.
     pub client: String,
-    pub purpose: String,
-    /// Since when it edits or waits, UTC.
+    pub goal: String,
+    pub doing: String,
+    /// What it has been doing and since when, UTC, newest first.
+    pub trail: Vec<(String, String)>,
+    /// Since when it holds the file, UTC.
     pub since: String,
+    /// The user has taken the file, so the agent waits until the user releases it.
+    pub paused: bool,
 }
 
-/// Who may change a model file now.
-#[derive(Debug, Clone, PartialEq)]
-pub enum Holder {
-    User { since: String },
-    Agent(Agent),
-}
-
-/// One model file's editor and the agents waiting for it, in the order they'll get it.
+/// Who holds one model file.
 #[derive(Debug, Clone, PartialEq, Default)]
-pub struct FileQueue {
+pub struct FileEditors {
     pub path: String,
-    pub editor: Option<Holder>,
-    pub queue: Vec<Agent>,
+    /// Since when the user holds it, UTC, while the user does.
+    pub user_since: Option<String>,
+    pub claim: Option<Claim>,
 }
 
-/// The whole folder's edit queue: every file someone edits or waits for, and the blocked agents.
+/// Every model file someone holds, and the blocked agents.
 #[derive(Debug, Clone, PartialEq, Default)]
-pub struct Queue {
-    pub files: Vec<FileQueue>,
+pub struct Editors {
+    pub files: Vec<FileEditors>,
     /// Each blocked agent and its harness.
     pub blocked: Vec<(String, String)>,
 }
 
 /// One of the user's controls, on the open model file or an agent session.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum QueueAction {
-    /// Takes the right to change the open model, from any agent, which keeps its place first.
+pub enum EditAction {
+    /// Takes the open model, pausing an agent's claim on it.
     Take,
-    /// Gives the right back, to the first waiting.
+    /// Releases it, giving a paused claim back.
     Release,
-    /// Gives the right to a waiting agent now.
-    Give(String),
-    /// Moves a waiting agent one place nearer the front.
-    Up(String),
-    /// Moves a waiting agent one place further back.
-    Down(String),
-    /// Takes an agent out of the queue, or its right away if it edits.
-    Remove(String),
+    /// Ends the agent's claim on the open model.
+    Revoke,
     /// Blocks an agent session from changing models in the folder.
     Block(String),
     Unblock(String),
@@ -63,9 +56,9 @@ pub enum QueueAction {
 /// Why a control did nothing.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ActRefusal {
-    /// The queue changed since it was shown, so nothing was done. Here is the queue now, and
-    /// what changed, to decide again.
-    Changed { now: Queue, what: String },
+    /// Who holds the open model changed since it was shown, so nothing was done. Here is the
+    /// state now, and what changed, to decide again.
+    Changed { now: Editors, what: String },
     /// The operation refused it, or it can't apply, with why.
     Refused(String),
 }
@@ -74,65 +67,62 @@ fn text(value: &Value) -> String {
     value.as_str().unwrap_or_default().to_string()
 }
 
-fn agent(value: &Value) -> Agent {
-    Agent { agent: text(&value["agent"]), client: text(&value["client"]), purpose: text(&value["purpose"]), since: text(&value["since"]) }
+fn claim(value: &Value) -> Claim {
+    Claim {
+        agent: text(&value["agent"]),
+        client: text(&value["client"]),
+        goal: text(&value["goal"]),
+        doing: text(&value["doing"]),
+        trail: value["trail"].as_array().into_iter().flatten().map(|entry| (text(&entry["doing"]), text(&entry["since"]))).collect(),
+        since: text(&value["since"]),
+        paused: value["paused"] == true,
+    }
 }
 
-impl Queue {
-    /// The queue as `get_edit_queue` gives it without a path.
-    pub fn from_json(value: &Value) -> Queue {
+impl Editors {
+    /// The state as `get_editors` gives it.
+    pub fn from_json(value: &Value) -> Editors {
         let files = value["files"]
             .as_array()
             .into_iter()
             .flatten()
-            .map(|file| FileQueue {
+            .map(|file| FileEditors {
                 path: text(&file["path"]),
-                editor: match &file["editor"] {
-                    Value::Null => None,
-                    editor if editor["user"] == true => Some(Holder::User { since: text(&editor["since"]) }),
-                    editor => Some(Holder::Agent(agent(editor))),
-                },
-                queue: file["queue"].as_array().into_iter().flatten().map(agent).collect(),
+                user_since: file["user_since"].as_str().map(str::to_string),
+                claim: file["claim"].is_object().then(|| claim(&file["claim"])),
             })
             .collect();
         let blocked = value["blocked"].as_array().into_iter().flatten().map(|blocked| (text(&blocked["agent"]), text(&blocked["client"]))).collect();
-        Queue { files, blocked }
+        Editors { files, blocked }
     }
 
-    /// The editor and queue of `path`, empty if nobody edits or waits for it.
-    pub fn file(&self, path: &str) -> FileQueue {
-        self.files.iter().find(|file| file.path == path).cloned().unwrap_or_else(|| FileQueue { path: path.to_string(), ..FileQueue::default() })
+    /// Who holds `path`, nobody if nobody does.
+    pub fn file(&self, path: &str) -> FileEditors {
+        self.files.iter().find(|file| file.path == path).cloned().unwrap_or_else(|| FileEditors { path: path.to_string(), ..FileEditors::default() })
     }
 
-    /// The other files someone edits or waits for.
-    pub fn others(&self, path: &str) -> Vec<&FileQueue> {
+    /// The other files someone holds.
+    pub fn others(&self, path: &str) -> Vec<&FileEditors> {
         self.files.iter().filter(|file| file.path != path).collect()
     }
 
-    /// The agent holding the right on `path`, if an agent does, for asking before taking it.
-    pub fn agent_holding(&self, path: &str) -> Option<&Agent> {
-        match self.files.iter().find(|file| file.path == path)?.editor.as_ref()? {
-            Holder::Agent(agent) => Some(agent),
-            Holder::User { .. } => None,
-        }
+    /// The claim of the agent changing `path` now, unpaused, for asking before taking it.
+    pub fn agent_holding(&self, path: &str) -> Option<&Claim> {
+        self.files.iter().find(|file| file.path == path)?.claim.as_ref().filter(|claim| !claim.paused)
     }
 
-    /// What changed on `path`, and in the blocked agents, between `self` and `now`, as one
-    /// sentence, or none if nothing did.
-    pub fn changes_on(&self, path: &str, now: &Queue) -> Option<String> {
+    /// What changed in who holds `path`, and in the blocked agents, between `self` and `now`, as
+    /// one sentence, or none if nothing did. An agent saying what it does now isn't a change.
+    pub fn changes_on(&self, path: &str, now: &Editors) -> Option<String> {
         let (before, after) = (self.file(path), now.file(path));
-        if before.editor != after.editor {
-            let who = match &after.editor {
-                None => "Nobody holds the right to change it now".to_string(),
-                Some(Holder::User { .. }) => "You hold the right to change it now".to_string(),
-                Some(Holder::Agent(agent)) => format!("{} ({}) holds the right to change it now, {}", agent.agent, agent.client, agent.purpose),
+        let holder = |file: &FileEditors| (file.user_since.is_some(), file.claim.as_ref().map(|claim| (claim.agent.clone(), claim.paused)));
+        if holder(&before) != holder(&after) {
+            let who = match (&after.user_since, &after.claim) {
+                (Some(_), _) => "You hold it now".to_string(),
+                (None, Some(claim)) => format!("{} ({}) holds it now, with the goal \"{}\"", claim.agent, claim.client, claim.goal),
+                (None, None) => "Nobody holds it now".to_string(),
             };
-            return Some(format!("The queue changed a moment ago: {who}."));
-        }
-        if before.queue != after.queue {
-            let waiting: Vec<String> = after.queue.iter().map(|agent| agent.agent.clone()).collect();
-            let waiting = if waiting.is_empty() { "nobody".to_string() } else { waiting.join(", ") };
-            return Some(format!("The queue changed a moment ago: waiting now are {waiting}."));
+            return Some(format!("Who holds this model changed a moment ago: {who}."));
         }
         if self.blocked != now.blocked {
             return Some("The blocked agents changed a moment ago.".to_string());

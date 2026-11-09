@@ -7,7 +7,7 @@
 //! compares the file's size and modified time, and only when they differ reads it again through
 //! the catalogue and compares its hash. A file watcher could take its place later.
 
-use crate::editing::{ActRefusal, Queue, QueueAction};
+use crate::editing::{ActRefusal, EditAction, Editors};
 use crabsim::{Clock, Dimensions, LiveSession, ModelDescription, ObjectKind, Position};
 use crabsim_catalogue::{Catalogue, ErrorKind, Settings, Source};
 use serde_json::{json, Value};
@@ -71,7 +71,7 @@ pub struct AttributeView {
 /// Why a change to the model file was refused.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Refusal {
-    /// An agent holds the editor right: the message names it and its purpose. A take-over for the
+    /// An agent holds the file: the message names it, its goal and what it's doing. A take-over for the
     /// one change goes through, and the agent keeps its right.
     NotEditor(String),
     /// The file was written outside crabsim, so it must be adopted first.
@@ -365,46 +365,35 @@ impl Workspace {
         })
     }
 
-    /// The folder's edit queue: every file someone edits or waits for, and the blocked agents.
-    pub fn edit_queue(&self) -> Result<Queue, String> {
+    /// Who holds each model file in the folder, and the blocked agents.
+    pub fn editors(&self) -> Result<Editors, String> {
         let catalogue = self.catalogue.as_ref().ok_or("no models folder is open")?;
-        let read = catalogue.call("get_edit_queue", json!({})).map_err(|error| error.to_string())?;
-        Ok(Queue::from_json(&read))
+        let read = catalogue.call("get_editors", json!({})).map_err(|error| error.to_string())?;
+        Ok(Editors::from_json(&read))
     }
 
-    /// Does one of the user's controls, if the queue of the open model and the blocked agents are
+    /// Does one of the user's controls, if who holds the open model and the blocked agents are
     /// still as `shown`, which is what the user decided on. Otherwise nothing is done, and the
-    /// refusal holds the queue now and what changed. Gives the queue after.
-    pub fn act(&mut self, shown: &Queue, action: QueueAction) -> Result<Queue, ActRefusal> {
+    /// refusal holds the state now and what changed. Gives the state after.
+    pub fn act(&mut self, shown: &Editors, action: EditAction) -> Result<Editors, ActRefusal> {
         let path = self.opened.clone().ok_or_else(|| ActRefusal::Refused("no model file is open".into()))?;
-        let now = self.edit_queue().map_err(ActRefusal::Refused)?;
+        let now = self.editors().map_err(ActRefusal::Refused)?;
         if let Some(what) = shown.changes_on(&path, &now) {
             return Err(ActRefusal::Changed { now, what });
         }
-        let waiting: Vec<String> = now.file(&path).queue.into_iter().map(|agent| agent.agent).collect();
-        let place = |agent: &str| waiting.iter().position(|waiting| waiting == agent).ok_or_else(|| ActRefusal::Refused(format!("{agent} isn't waiting for {path}")));
         let (operation, input) = match &action {
-            QueueAction::Take => ("take_model", json!({ "path": path })),
-            QueueAction::Release => ("release_model", json!({ "path": path })),
-            QueueAction::Give(agent) => ("give_model", json!({ "path": path, "agent": agent })),
-            QueueAction::Up(agent) => match place(agent)? {
-                0 => return Err(ActRefusal::Refused(format!("{agent} is first in line already"))),
-                at => ("move_in_queue", json!({ "path": path, "agent": agent, "place": at - 1 })),
-            },
-            QueueAction::Down(agent) => match place(agent)? {
-                at if at + 1 >= waiting.len() => return Err(ActRefusal::Refused(format!("{agent} is last in line already"))),
-                at => ("move_in_queue", json!({ "path": path, "agent": agent, "place": at + 1 })),
-            },
-            QueueAction::Remove(agent) => ("remove_from_queue", json!({ "path": path, "agent": agent })),
-            QueueAction::Block(agent) => ("block_agent", json!({ "agent": agent })),
-            QueueAction::Unblock(agent) => ("unblock_agent", json!({ "agent": agent })),
+            EditAction::Take => ("take_model", json!({ "path": path })),
+            EditAction::Release => ("release_model", json!({ "path": path })),
+            EditAction::Revoke => ("revoke_claim", json!({ "path": path })),
+            EditAction::Block(agent) => ("block_agent", json!({ "agent": agent })),
+            EditAction::Unblock(agent) => ("unblock_agent", json!({ "agent": agent })),
         };
         let catalogue = self.catalogue.as_ref().ok_or_else(|| ActRefusal::Refused("no models folder is open".into()))?;
         catalogue.call(operation, input).map_err(|error| ActRefusal::Refused(error.to_string()))?;
-        self.edit_queue().map_err(ActRefusal::Refused)
+        self.editors().map_err(ActRefusal::Refused)
     }
 
-    /// The folder's edit state on disk, which the window may watch for changes to the queue.
+    /// The folder's edit state on disk, which the window may watch for changes to who holds what.
     pub fn editing_file(&self) -> Option<PathBuf> {
         Some(self.catalogue.as_ref()?.folder().crabsim_folder().join(crabsim_catalogue::EDITING_FILE))
     }

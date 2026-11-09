@@ -55,10 +55,10 @@ pub trait Operation {
     /// Whether it only reads, or may change or delete what's there, for a harness deciding
     /// whether to ask the user first.
     const EFFECT: Effect;
-    /// Only for the user, through the UI or the CLI, such as controlling the edit queue: the MCP
+    /// Only for the user, through the UI or the CLI, such as revoking an agent's claim: the MCP
     /// server doesn't offer it, and the catalogue refuses it to an agent (ADR 0011).
     const USER_ONLY: bool = false;
-    /// Changes a model file or the edit queue, which the CLI is refused while a UI has the folder.
+    /// Changes a model file or who may change it, which the CLI is refused while a UI has the folder.
     const CHANGES_MODELS: bool = false;
     /// Always a JSON object.
     type Input: DeserializeOwned + JsonSchema;
@@ -215,7 +215,7 @@ pub struct Settings {
     pub source: Source,
     /// How many threads run observations. One per CPU core if left out.
     pub threads: Option<usize>,
-    /// How long an agent's editor right, or its place in an edit queue, lasts unused.
+    /// How long an agent's claim lasts unused.
     pub edit_timeout: std::time::Duration,
 }
 
@@ -234,7 +234,7 @@ pub struct Catalogue {
     entries: Vec<Entry>,
     jobs: jobs::Jobs,
     edit_timeout: std::time::Duration,
-    /// The name an agent's harness gave, for the edit queue.
+    /// The name an agent's harness gave, shown with its claims.
     client_name: Mutex<String>,
     /// For the user: changes go through even while an agent holds the right, which keeps it.
     take_over: std::sync::atomic::AtomicBool,
@@ -286,7 +286,7 @@ impl Catalogue {
         if entry.changes_models && self.source == Source::Cli && ui_holds(&self.folder) {
             return Err(OperationError::new(
                 ErrorKind::FolderInUse,
-                format!("a crabsim window has this models folder open, so `{name}` is refused here: change models and the edit queue in the window. Reading and running work here"),
+                format!("a crabsim window has this models folder open, so `{name}` is refused here: change models and who edits them in the window. Reading and running work here"),
             ));
         }
         (entry.handler)(self, input)

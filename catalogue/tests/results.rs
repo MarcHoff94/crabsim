@@ -259,7 +259,7 @@ fn the_filters_give_exactly_the_objects_and_classes_they_name() {
 
 #[test]
 fn results_carry_what_reproduces_them() {
-    let setup = Setup::new("settings");
+    let setup = Setup::agent("settings");
     write_models(&setup.folder);
     let run = setup.start(json!({ "model": "small.json", "seed": 9, "length": "1:30:00", "warm_up": "0:30:00", "observations": 2, "label": "check" }));
     setup.finished(&run);
@@ -364,7 +364,7 @@ fn a_running_run_cant_be_forgotten() {
 
 #[test]
 fn a_cli_and_another_catalogue_share_one_store() {
-    let setup = Setup::new("shared");
+    let setup = Setup::agent("shared");
     write_models(&setup.folder);
     let other = Catalogue::open(Settings::new(&setup.folder.path, Source::Cli)).unwrap();
     let mine = setup.start(json!({ "model": "small.json", "seed": 1, "length": "1:00:00", "observations": 2 }));

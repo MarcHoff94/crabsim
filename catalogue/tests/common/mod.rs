@@ -44,16 +44,24 @@ impl Drop for TempFolder {
     }
 }
 
-/// A models folder and a catalogue on it.
+/// A models folder and a catalogue on it, opened as the user, who changes models without a claim.
+/// `Setup::agent` opens it as an agent instead, which must claim a model before changing it.
 pub struct Setup {
     pub folder: TempFolder,
     pub catalogue: Catalogue,
 }
 
 impl Setup {
-    pub fn new(name: &str) -> Setup {
+    /// The catalogue as an agent, as `crabsim-mcp` opens it.
+    pub fn agent(name: &str) -> Setup {
         let folder = TempFolder::new(name);
         let catalogue = Catalogue::open(Settings::new(&folder.path, Source::Mcp)).expect("an empty folder opens");
+        Setup { folder, catalogue }
+    }
+
+    pub fn new(name: &str) -> Setup {
+        let folder = TempFolder::new(name);
+        let catalogue = Catalogue::open(Settings::new(&folder.path, Source::Cli)).expect("an empty folder opens");
         Setup { folder, catalogue }
     }
 
@@ -95,7 +103,7 @@ impl Setup {
     /// A catalogue whose pool has `threads` threads.
     pub fn with_threads(name: &str, threads: usize) -> Setup {
         let folder = TempFolder::new(name);
-        let mut settings = Settings::new(&folder.path, Source::Mcp);
+        let mut settings = Settings::new(&folder.path, Source::Cli);
         settings.threads = Some(threads);
         let catalogue = Catalogue::open(settings).expect("an empty folder opens");
         Setup { folder, catalogue }

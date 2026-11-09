@@ -28,7 +28,7 @@ use crabsim_ui::view::{
     Point, MU_METRES, Shade, StepBack, ViewState, format_time, format_time_exact, label_size, parse_time,
 };
 use crabsim_ui::attributes::{Form, RepairKind};
-use crabsim_ui::editing::{ActRefusal, Agent, Holder, Queue, QueueAction};
+use crabsim_ui::editing::{ActRefusal, Claim, EditAction, Editors};
 use crabsim_ui::workspace::{AttributeView, ModelChange, Refusal, ValueFrom, Workspace};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -110,9 +110,9 @@ fn main() {
             forms: HashMap::new(),
             refused: None,
             tab: Tab::Inspector,
-            queue: None,
-            queue_stamp: None,
-            queue_note: None,
+            editors: None,
+            editors_stamp: None,
+            editors_note: None,
             confirm_take: None,
             moving: None,
             confirm_move: None,
@@ -179,14 +179,14 @@ struct Ui {
     refused: Option<(String, Refusal, Option<AttributeChange>)>,
     /// Which tab the right-hand column shows.
     tab: Tab,
-    /// The edit queue as last read, while the Editing tab shows it.
-    queue: Option<Result<Queue, String>>,
-    /// The edit state file's size and modified time when the queue was read.
-    queue_stamp: Option<(u64, Option<std::time::SystemTime>)>,
-    /// Why the last control did nothing, such as the queue having changed.
-    queue_note: Option<String>,
+    /// Who holds each model file, as last read, while the Editing tab shows it.
+    editors: Option<Result<Editors, String>>,
+    /// The edit state file's size and modified time when it was read.
+    editors_stamp: Option<(u64, Option<std::time::SystemTime>)>,
+    /// Why the last control did nothing, such as who holds the model having changed.
+    editors_note: Option<String>,
     /// Taking the right from this agent, waiting for the user to confirm it.
-    confirm_take: Option<(Agent, Queue)>,
+    confirm_take: Option<(Claim, Editors)>,
     /// The object being dragged to a new place.
     moving: Option<Moving>,
     /// A move refused because an agent holds the file or it changed outside crabsim, waiting for
@@ -689,24 +689,24 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
         ui.refused = None;
     }
     let editable = ui.view.reloads_now();
-    // The edit queue, read when the Editing tab opens and whenever the edit state changes.
+    // Who holds each model, read when the Editing tab opens and whenever the edit state changes.
     if ui.tab == Tab::Editing && ui.workspace.has_folder() {
         let stamp = ui.workspace.editing_file().and_then(|file| stamp_of(&file));
-        if ui.queue.is_none() || stamp != ui.queue_stamp {
-            ui.queue = Some(ui.workspace.edit_queue());
-            ui.queue_stamp = stamp;
+        if ui.editors.is_none() || stamp != ui.editors_stamp {
+            ui.editors = Some(ui.workspace.editors());
+            ui.editors_stamp = stamp;
         }
     }
     let mut intervention = None;
     let mut attribute_change = None;
-    let mut queue_action = None;
+    let mut editors_action = None;
     let right = egui::Panel::right("inspector").exact_size(INSPECTOR_WIDTH).show(&mut root, |panel| {
         panel.horizontal(|row| {
             for (tab, label) in [(Tab::Inspector, "Inspector"), (Tab::Editing, "Editing")] {
                 if row.selectable_label(ui.tab == tab, label).clicked() && ui.tab != tab {
                     ui.tab = tab;
-                    ui.queue = None;
-                    ui.queue_note = None;
+                    ui.editors = None;
+                    ui.editors_note = None;
                 }
             }
         });
@@ -718,16 +718,16 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
                     attribute_change = attributes_section(panel, attributes, &mut ui.forms, editable, ui.refused.as_ref());
                 }
             }
-            Tab::Editing => queue_action = editing_tab(panel, ui.workspace.opened(), ui.queue.as_ref(), ui.queue_note.as_deref()),
+            Tab::Editing => editors_action = editing_tab(panel, ui.workspace.opened(), ui.editors.as_ref(), ui.editors_note.as_deref()),
         });
     });
-    // Taking the right from an agent asks first, naming it and its purpose.
-    if let Some(action) = queue_action {
-        let shown = ui.queue.as_ref().and_then(|queue| queue.as_ref().ok()).cloned().unwrap_or_default();
+    // Taking a model from an agent asks first, naming it, its goal and what it's doing.
+    if let Some(action) = editors_action {
+        let shown = ui.editors.as_ref().and_then(|editors| editors.as_ref().ok()).cloned().unwrap_or_default();
         let holder = ui.workspace.opened().and_then(|path| shown.agent_holding(path)).cloned();
         match (action, holder) {
-            (QueueAction::Take, Some(agent)) => ui.confirm_take = Some((agent, shown)),
-            (action, _) => act_on_queue(ui, &shown, action),
+            (EditAction::Take, Some(agent)) => ui.confirm_take = Some((agent, shown)),
+            (action, _) => act_on_editors(ui, &shown, action),
         }
         ui.view.commanded(wall);
     }
@@ -736,7 +736,7 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
     {
         ui.confirm_take = None;
         if confirmed {
-            act_on_queue(ui, &shown, QueueAction::Take);
+            act_on_editors(ui, &shown, EditAction::Take);
         }
         ui.view.commanded(wall);
     }
@@ -1347,21 +1347,21 @@ fn inspector(ui: &mut egui::Ui, inspection: Option<&Inspection>, process_time_te
     asked
 }
 
-/// Does one of the user's controls of the edit queue, if the queue is still as shown. Either way
-/// the tab shows the queue as it is now, and why nothing was done, if it wasn't.
-fn act_on_queue(ui: &mut Ui, shown: &Queue, action: QueueAction) {
+/// Does one of the user's controls, if who holds the open model is still as shown. Either way the
+/// tab shows the state as it is now, and why nothing was done, if it wasn't.
+fn act_on_editors(ui: &mut Ui, shown: &Editors, action: EditAction) {
     match ui.workspace.act(shown, action) {
         Ok(now) => {
-            ui.queue = Some(Ok(now));
-            ui.queue_note = None;
+            ui.editors = Some(Ok(now));
+            ui.editors_note = None;
         }
         Err(ActRefusal::Changed { now, what }) => {
-            ui.queue = Some(Ok(now));
-            ui.queue_note = Some(format!("{what} Nothing was done: look again and decide."));
+            ui.editors = Some(Ok(now));
+            ui.editors_note = Some(format!("{what} Nothing was done: look again and decide."));
         }
-        Err(ActRefusal::Refused(why)) => ui.queue_note = Some(why),
+        Err(ActRefusal::Refused(why)) => ui.editors_note = Some(why),
     }
-    ui.queue_stamp = ui.workspace.editing_file().and_then(|file| stamp_of(&file));
+    ui.editors_stamp = ui.workspace.editing_file().and_then(|file| stamp_of(&file));
 }
 
 /// Asks whether to move an object while an agent holds the model file, or the file changed
@@ -1397,13 +1397,13 @@ fn confirm_moving(ctx: &egui::Context, name: &str, refused: &Refusal) -> Option<
 
 /// Asks before taking the right to change the model from the agent that holds it. `Some(true)`
 /// once confirmed, `Some(false)` once cancelled.
-fn confirm_taking(ctx: &egui::Context, agent: &Agent) -> Option<bool> {
+fn confirm_taking(ctx: &egui::Context, claim: &Claim) -> Option<bool> {
     let mut answer = None;
     let modal = egui::Modal::new(egui::Id::new("confirm taking")).show(ctx, |modal| {
         modal.set_max_width(420.0);
-        modal.heading(format!("Take the right from {}?", agent.agent));
-        modal.label(format!("{} ({}) is changing this model: {}.", agent.agent, agent.client, agent.purpose));
-        modal.label("It waits first in line, and gets the right back when you release it.");
+        modal.heading(format!("Take this model from {}?", claim.agent));
+        modal.label(format!("{} ({}) is working on it, with the goal \"{}\": {}.", claim.agent, claim.client, claim.goal, claim.doing));
+        modal.label("Its claim is paused while you hold the model, and comes back to it when you release it. If you change the model, it reads it again before its next change.");
         modal.add_space(8.0);
         modal.horizontal(|row| {
             if row.button("Take it").clicked() {
@@ -1420,13 +1420,13 @@ fn confirm_taking(ctx: &egui::Context, agent: &Agent) -> Option<bool> {
     answer
 }
 
-/// Who may change the open model and who waits, the other files someone edits or waits for, and
-/// the blocked agents, with the user's controls. Returns the control used, if any.
-fn editing_tab(ui: &mut egui::Ui, opened: Option<&str>, queue: Option<&Result<Queue, String>>, note: Option<&str>) -> Option<QueueAction> {
+/// Who holds the open model, with an agent's goal and what it's doing, the other files someone
+/// holds, and the blocked agents, with the user's controls. Returns the control used, if any.
+fn editing_tab(ui: &mut egui::Ui, opened: Option<&str>, editors: Option<&Result<Editors, String>>, note: Option<&str>) -> Option<EditAction> {
     ui.heading("Editing");
     let mut asked = None;
-    let queue = match queue {
-        Some(Ok(queue)) => queue,
+    let editors = match editors {
+        Some(Ok(editors)) => editors,
         Some(Err(error)) => {
             ui.label(egui::RichText::new(error).weak());
             return None;
@@ -1440,94 +1440,76 @@ fn editing_tab(ui: &mut egui::Ui, opened: Option<&str>, queue: Option<&Result<Qu
         ui.colored_label(egui::Color32::from_rgb(240, 200, 80), note);
         ui.add_space(4.0);
     }
-    let agent_line = |agent: &Agent| format!("{} ({}): {}", agent.agent, agent.client, agent.purpose);
+    let claim_lines = |ui: &mut egui::Ui, claim: &Claim| {
+        let paused = if claim.paused { ", paused while you hold it" } else { "" };
+        ui.label(format!("{} ({}), since {}{paused}", claim.agent, claim.client, claim.since));
+        ui.label(format!("Goal: {}", claim.goal));
+        ui.label(format!("Doing: {}", claim.doing));
+    };
     match opened {
         None => {
             ui.label(egui::RichText::new("Open a model to see who may change it.").weak());
         }
         Some(path) => {
-            let file = queue.file(path);
+            let file = editors.file(path);
             ui.label(egui::RichText::new(path).strong());
-            match &file.editor {
-                None => {
-                    ui.label("Nobody holds the right to change it.");
-                    if ui.button("Take").on_hover_text("Hold the right to change this model until you release it").clicked() {
-                        asked = Some(QueueAction::Take);
+            if let Some(since) = &file.user_since {
+                ui.label(format!("You hold it, since {since}."));
+                if ui.button("Release").on_hover_text("Let go of it, giving a paused claim back to its agent").clicked() {
+                    asked = Some(EditAction::Release);
+                }
+            }
+            match &file.claim {
+                None if file.user_since.is_none() => {
+                    ui.label("Nobody holds it.");
+                    if ui.button("Take").on_hover_text("Hold this model until you release it or close the window").clicked() {
+                        asked = Some(EditAction::Take);
                     }
                 }
-                Some(Holder::User { since }) => {
-                    ui.label(format!("You hold the right, since {since}."));
-                    if ui.button("Release").on_hover_text("Give it to the first waiting agent").clicked() {
-                        asked = Some(QueueAction::Release);
-                    }
-                }
-                Some(Holder::Agent(agent)) => {
-                    ui.label(format!("{} holds the right, since {}.", agent_line(agent), agent.since));
+                None => {}
+                Some(claim) => {
+                    ui.add_space(4.0);
+                    claim_lines(ui, claim);
                     ui.horizontal(|row| {
-                        if row.button("Take").on_hover_text("Take the right now. The agent waits first in line").clicked() {
-                            asked = Some(QueueAction::Take);
+                        if !claim.paused && row.button("Take").on_hover_text("Take it now. The agent's claim is paused until you release it").clicked() {
+                            asked = Some(EditAction::Take);
                         }
-                        if row.button("Remove").on_hover_text("Take the right away from it").clicked() {
-                            asked = Some(QueueAction::Remove(agent.agent.clone()));
+                        if row.button("Revoke").on_hover_text("End the agent's claim").clicked() {
+                            asked = Some(EditAction::Revoke);
                         }
                         if row.button("Block").on_hover_text("Block this agent session from changing models in the folder").clicked() {
-                            asked = Some(QueueAction::Block(agent.agent.clone()));
+                            asked = Some(EditAction::Block(claim.agent.clone()));
                         }
                     });
                 }
             }
-            ui.add_space(6.0);
-            if file.queue.is_empty() {
-                ui.label(egui::RichText::new("Nobody waits for it.").weak());
-            } else {
-                ui.label(egui::RichText::new("Waiting, in the order they'll get it").strong());
-            }
-            let last = file.queue.len().saturating_sub(1);
-            for (place, agent) in file.queue.iter().enumerate() {
-                ui.label(format!("{}. {}", place + 1, agent_line(agent)));
-                ui.horizontal(|row| {
-                    if row.small_button("Give").on_hover_text("Give it the right now").clicked() {
-                        asked = Some(QueueAction::Give(agent.agent.clone()));
-                    }
-                    if row.add_enabled(place > 0, egui::Button::new("▲").small()).on_hover_text("Move up").clicked() {
-                        asked = Some(QueueAction::Up(agent.agent.clone()));
-                    }
-                    if row.add_enabled(place < last, egui::Button::new("▼").small()).on_hover_text("Move down").clicked() {
-                        asked = Some(QueueAction::Down(agent.agent.clone()));
-                    }
-                    if row.small_button("Remove").clicked() {
-                        asked = Some(QueueAction::Remove(agent.agent.clone()));
-                    }
-                    if row.small_button("Block").clicked() {
-                        asked = Some(QueueAction::Block(agent.agent.clone()));
-                    }
-                });
-            }
         }
     }
-    let others = queue.others(opened.unwrap_or_default());
+    let others = editors.others(opened.unwrap_or_default());
     if !others.is_empty() {
         ui.add_space(8.0);
         ui.separator();
         ui.label(egui::RichText::new("Other files").strong());
         for file in others {
-            let who = match &file.editor {
-                None => "nobody".to_string(),
-                Some(Holder::User { .. }) => "you".to_string(),
-                Some(Holder::Agent(agent)) => agent.agent.clone(),
-            };
-            ui.label(format!("{}: {who} edits, {} waiting", file.path, file.queue.len()));
+            ui.add_space(4.0);
+            ui.label(egui::RichText::new(&file.path).strong());
+            if file.user_since.is_some() {
+                ui.label("You hold it.");
+            }
+            if let Some(claim) = &file.claim {
+                claim_lines(ui, claim);
+            }
         }
     }
-    if !queue.blocked.is_empty() {
+    if !editors.blocked.is_empty() {
         ui.add_space(8.0);
         ui.separator();
         ui.label(egui::RichText::new("Blocked").strong());
-        for (agent, client) in &queue.blocked {
+        for (agent, client) in &editors.blocked {
             ui.horizontal(|row| {
                 row.label(format!("{agent} ({client})"));
                 if row.small_button("Unblock").clicked() {
-                    asked = Some(QueueAction::Unblock(agent.clone()));
+                    asked = Some(EditAction::Unblock(agent.clone()));
                 }
             });
         }

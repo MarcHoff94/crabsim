@@ -120,7 +120,7 @@ fn write_model_overwrites_only_when_asked() {
 
 #[test]
 fn an_agent_can_read_but_not_forget_or_relabel_the_users_runs() {
-    let setup = Setup::new("users-runs");
+    let setup = Setup::agent("users-runs");
     write_models(&setup.folder);
     let user = Catalogue::open(Settings::new(&setup.folder.path, Source::Cli)).unwrap();
     let theirs = user.call("start_run", json!({ "model": "small.json", "length": "1:00", "observations": 1 })).unwrap()["run"].as_str().unwrap().to_string();
@@ -148,7 +148,7 @@ fn adopting_follows_the_editor_rules() {
     let setup = Setup::new("adopt-editor");
     setup.folder.write("line.json", &canonical(SMALL));
     let other = Catalogue::open(Settings::new(&setup.folder.path, Source::Mcp)).unwrap();
-    other.call("claim_model", json!({ "path": "line.json", "purpose": "working" })).unwrap();
+    other.call("claim_model", json!({ "path": "line.json", "goal": "a faster line", "doing": "working" })).unwrap();
     assert_eq!(setup.err("adopt_model", json!({ "path": "line.json" }))["kind"], "not_editor");
     other.call("adopt_model", json!({ "path": "line.json" })).unwrap();
 }

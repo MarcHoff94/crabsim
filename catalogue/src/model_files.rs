@@ -248,7 +248,7 @@ pub struct WriteModelOutput {
 
 impl Operation for WriteModel {
     const NAME: &'static str = "write_model";
-    const DESCRIPTION: &'static str = "Saves a whole model file in the models folder, such as a new model. A file already at the path is refused unless `overwrite` is true: to change a model, edit_model is usually better. A valid model is saved in crabsim's canonical form. A model with problems is saved exactly as given, so work in progress isn't lost, and its problems come back to fix. Only the file's editor may replace it (claim_model), not a file changed outside crabsim until adopt_model, and with `expected_hash` only the version you read.";
+    const DESCRIPTION: &'static str = "Saves a whole model file in the models folder, such as a new model. A file already at the path is refused unless `overwrite` is true: to change a model, edit_model is usually better. A valid model is saved in crabsim's canonical form. A model with problems is saved exactly as given, so work in progress isn't lost, and its problems come back to fix. An agent needs its claim on the path first (claim_model), also for a new file. A file changed outside crabsim isn't replaced until adopt_model, and with `expected_hash` only the version you read is.";
     const EFFECT: Effect = Effect::Destructive;
     const CHANGES_MODELS: bool = true;
     type Input = WriteModelInput;
@@ -353,7 +353,7 @@ pub struct DeleteModelOutput {
 
 impl Operation for DeleteModel {
     const NAME: &'static str = "delete_model";
-    const DESCRIPTION: &'static str = "Deletes a model file in the models folder. Files only, never folders. Results of runs of it stay in the results store. Only the file's editor may delete it (claim_model), and not a file changed outside crabsim until adopt_model.";
+    const DESCRIPTION: &'static str = "Deletes a model file in the models folder. Files only, never folders. Results of runs of it stay in the results store. An agent needs its claim on the file first (claim_model), and no file changed outside crabsim is deleted until adopt_model.";
     const EFFECT: Effect = Effect::Destructive;
     const CHANGES_MODELS: bool = true;
     type Input = PathInput;

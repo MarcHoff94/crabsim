@@ -51,7 +51,7 @@ fn a_copy_says_whether_it_needs_adopting() {
 
 #[test]
 fn a_run_records_the_build_and_the_agent_or_user_that_started_it() {
-    let setup = Setup::new("who");
+    let setup = Setup::agent("who");
     write_models(&setup.folder);
     setup.catalogue.set_client_name("test-harness");
     let agents = setup.start(json!({ "model": "small.json", "length": "1:00", "observations": 1 }));
@@ -123,7 +123,7 @@ fn start_run_can_wait_for_a_short_run() {
 
 #[test]
 fn an_agent_forgets_only_the_runs_its_own_session_started() {
-    let setup = Setup::new("forget-own");
+    let setup = Setup::agent("forget-own");
     write_models(&setup.folder);
     let other = Catalogue::open(Settings::new(&setup.folder.path, Source::Mcp)).unwrap();
     let theirs = other.call("start_run", json!({ "model": "small.json", "length": "1:00", "observations": 1, "wait": 30 })).unwrap()["run"].as_str().unwrap().to_string();

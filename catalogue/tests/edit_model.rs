@@ -396,11 +396,14 @@ fn a_new_or_duplicated_instance_gets_a_new_stream_and_a_removed_ones_leaves_a_ga
 #[test]
 fn only_the_user_sets_a_stream_and_it_must_be_unique() {
     let setup = setup("set-stream");
-    let refused = edit_err(&setup, json!([{ "change": "set_stream", "name": "Mill 1", "stream": 40 }]));
+    let agent = crabsim_catalogue::Catalogue::open(crabsim_catalogue::Settings::new(&setup.folder.path, crabsim_catalogue::Source::Mcp)).unwrap();
+    agent.call("claim_model", json!({ "path": "line.json", "goal": "check the streams", "doing": "renumbering streams" })).unwrap();
+    let refused = agent.call("edit_model", json!({ "path": "line.json", "changes": [{ "change": "set_stream", "name": "Mill 1", "stream": 40 }] })).unwrap_err().to_json();
     assert_eq!(refused["kind"], "invalid_input");
     assert!(refused["message"].as_str().unwrap().contains("only for the user"), "{refused}");
 
-    let user = crabsim_catalogue::Catalogue::open(crabsim_catalogue::Settings::new(&setup.folder.path, crabsim_catalogue::Source::Cli)).unwrap();
+    agent.call("release_model", json!({ "path": "line.json" })).unwrap();
+    let user = &setup.catalogue;
     user.call("edit_model", json!({ "path": "line.json", "changes": [{ "change": "set_stream", "name": "Mill 1", "stream": 40 }] })).unwrap();
     assert!(streams_in(&setup).contains(&("Mill 1".to_string(), 40)));
     let taken = user.call("edit_model", json!({ "path": "line.json", "changes": [{ "change": "set_stream", "name": "Mill 2", "stream": 40 }] })).unwrap_err().to_json();

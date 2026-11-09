@@ -3,9 +3,10 @@
 //! file unless taken over for the one change, instances moved, and the fields that turn text into a model file's
 //! values. No window, as in the other UI tests.
 
-use crabsim::Position;
+use crabsim::{Position, SimTime};
 use crabsim_catalogue::{Catalogue, Settings, Source};
 use crabsim_ui::attributes::{Form, RepairKind};
+use crabsim_ui::view::Change;
 use crabsim_ui::workspace::{ModelChange, Refusal, ValueFrom, Workspace};
 use serde_json::{json, Value};
 use std::path::PathBuf;
@@ -136,6 +137,44 @@ fn with_no_model_open_there_are_no_attributes() {
     let mut workspace = Workspace::open(&folder.0);
     assert!(workspace.attributes("P1").is_err());
     assert_eq!(workspace.set_attribute("P1", "process_time", json!("0:30"), false), Err(Refusal::NoModel));
+}
+
+// ---------- Keeping changes on Reset ----------
+
+fn change(name: &str, secs: u64) -> Change {
+    Change { object: 0, name: name.into(), attribute: "process_time", value: SimTime::from_secs(secs) }
+}
+
+#[test]
+fn changes_kept_on_reset_are_saved_to_the_file_together() {
+    let folder = Folder::new("keep");
+    let mut workspace = open(&folder);
+    workspace.keep_changes(&[change("P1", 30), change("P2", 90)], false).unwrap();
+    assert_eq!(workspace.check(), Some(ModelChange::Changed), "Reset then uses the saved file");
+    workspace.apply_pending();
+    assert_eq!(of(&workspace, "P1", "process_time"), (Some(json!("00:00:30")), ValueFrom::Instance));
+    assert_eq!(of(&workspace, "P2", "process_time"), (Some(json!("00:01:30")), ValueFrom::Instance));
+}
+
+#[test]
+fn changes_kept_on_reset_are_all_refused_while_an_agent_holds_the_file_unless_taken_over() {
+    let folder = Folder::new("keep-agent");
+    let mut workspace = open(&folder);
+    let agent = Catalogue::open(Settings::new(&folder.0, Source::Mcp)).unwrap();
+    agent.call("claim_model", json!({ "path": "presses.json", "goal": "faster presses", "doing": "tuning the presses" })).unwrap();
+    let refused = workspace.keep_changes(&[change("P1", 30), change("P2", 90)], false).unwrap_err();
+    assert!(matches!(refused, Refusal::NotEditor(_)), "{refused:?}");
+    assert_eq!(workspace.check(), None, "nothing was saved, not even the first");
+    workspace.keep_changes(&[change("P1", 30), change("P2", 90)], true).unwrap();
+    assert_eq!(workspace.check(), Some(ModelChange::Changed));
+}
+
+#[test]
+fn keeping_no_changes_saves_nothing() {
+    let folder = Folder::new("keep-none");
+    let mut workspace = open(&folder);
+    workspace.keep_changes(&[], false).unwrap();
+    assert_eq!(workspace.check(), None);
 }
 
 // ---------- Moving ----------

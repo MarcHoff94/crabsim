@@ -145,7 +145,7 @@ fn init_shows_the_default_state_and_is_offered_no_more() {
     watched.frame();
     let view = &watched.view;
     // From Init on, the Source is working on its first MU, and everything else waits for one.
-    assert_eq!(view.shade(0), Shade::Working);
+    assert_eq!(view.shade(0), Shade::Busy);
     assert!(view.objects()[1..].iter().all(|object| view.shade(object.id) == Shade::Idle));
     assert!(!view.allows(Control::Init));
     assert!(view.allows(Control::Start));
@@ -161,7 +161,7 @@ fn while_advancing_shown_time_and_state_colours_follow_the_run() {
     assert_eq!(view.status(), SessionStatus::Advancing);
     assert_eq!(view.shown_time(), "00:00:12");
     // The first MU leaves the Source at 5 s and takes 10 s at Station 1.
-    assert_eq!(view.shade(STATION_1), Shade::Working);
+    assert_eq!(view.shade(STATION_1), Shade::Busy);
     assert_eq!(view.shade(STATION_2), Shade::Idle);
     assert!(view.allows(Control::Halt));
     assert!(!view.allows(Control::Start));
@@ -184,7 +184,7 @@ fn a_stop_shows_its_most_serious_interruption() {
     assert_eq!(watched.view.shade(STATION_1), Shade::ForcedFailure);
     watched.session.end_forced_failure(STATION_1).unwrap();
     watched.frame();
-    assert_eq!(watched.view.shade(STATION_1), Shade::Working);
+    assert_eq!(watched.view.shade(STATION_1), Shade::Busy);
 }
 
 #[test]

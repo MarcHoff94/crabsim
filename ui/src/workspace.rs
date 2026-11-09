@@ -8,6 +8,7 @@
 //! the catalogue and compares its hash. A file watcher could take its place later.
 
 use crate::editing::{ActRefusal, EditAction, Editors};
+use crate::view::Change;
 use crabsim::{Clock, Dimensions, LiveSession, ModelDescription, ObjectKind, Position};
 use crabsim_catalogue::{Catalogue, ErrorKind, Settings, Source};
 use serde_json::{json, Value};
@@ -331,6 +332,28 @@ impl Workspace {
     /// The window picks up the saved file through `check`.
     pub fn set_attribute(&mut self, instance: &str, attribute: &str, value: Value, take_over: bool) -> Result<(), Refusal> {
         self.change(json!({ "change": "set_attribute", "target": { "instance": instance }, "attribute": attribute, "value": value }), take_over)
+    }
+
+    /// Saves values changed during the run to the model file, as Reset keeping changes does: each
+    /// set on its instance, all in one change, so either all are saved or none is. `take_over`
+    /// makes the change while an agent holds the editor right, which it keeps. Nothing to keep
+    /// saves nothing.
+    pub fn keep_changes(&mut self, changes: &[Change], take_over: bool) -> Result<(), Refusal> {
+        if changes.is_empty() {
+            return Ok(());
+        }
+        let batch = changes
+            .iter()
+            .map(|change| {
+                json!({
+                    "change": "set_attribute",
+                    "target": { "instance": change.name },
+                    "attribute": change.attribute,
+                    "value": crabsim::time::format_time_exact(change.value),
+                })
+            })
+            .collect();
+        self.edit(batch, None, take_over)
     }
 
     /// Takes one attribute set on the instance back to what its class gives, saving the model

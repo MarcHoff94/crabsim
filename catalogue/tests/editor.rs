@@ -114,6 +114,7 @@ fn a_claim_is_granted_at_once_and_a_second_is_refused_naming_who_holds_the_file(
     assert_eq!(granted["file"]["claim"]["doing"], "adding Mill 2 after Station 3");
     assert_eq!(granted["file"]["claim"]["client"], "test-harness");
     assert_eq!(granted["file"]["claim"]["paused"], false);
+    assert_eq!(granted.get("paused"), None, "nothing to say while it isn't paused");
 
     let refused = b.claim_err("tidy the names", "renaming");
     assert_eq!(refused["kind"], "model_in_use");
@@ -252,6 +253,10 @@ fn taking_the_right_pauses_the_agents_claim_and_releasing_gives_it_back() {
     assert_eq!(paused["kind"], "not_editor");
     assert!(message(&paused).contains("paused"), "{paused}");
     assert_eq!(b.claim_err("two", "x")["kind"], "model_in_use", "nobody slips in while it's paused");
+    let claimed = a.claim("find the bottleneck", "waiting for the user");
+    let note = claimed["paused"].as_str().expect("claiming while paused says so at the top");
+    assert!(note.contains("the user") && note.contains("release"), "{note}");
+    assert_eq!(claimed["file"]["claim"]["doing"], "waiting for the user", "and still updates what it's doing");
 
     user.ok("release_model", json!({ "path": "line.json" }));
     let back = a.file();
@@ -314,6 +319,27 @@ fn after_a_take_over_the_agents_next_change_is_refused_once_to_read_again() {
     assert!(message(&stale).contains("read it again") && message(&stale).contains("the user"), "{stale}");
     a.change_to("the agent's again").unwrap();
     a.change_to("and again").unwrap();
+}
+
+#[test]
+fn a_conflict_over_the_expected_hash_is_the_one_refusal_to_read_again() {
+    let folder = Folder::new("conflict-read-again");
+    let (a, user) = (folder.agent(), folder.user());
+    a.claim("one", "working");
+    let read = a.ok("read_model", json!({ "path": "line.json" }))["file_hash"].as_str().unwrap().to_string();
+    user.ok("take_model", json!({ "path": "line.json" }));
+    user.change_to("the user's").unwrap();
+    user.ok("release_model", json!({ "path": "line.json" }));
+    let change = |expected: &str| {
+        a.catalogue
+            .call("edit_model", json!({ "path": "line.json", "expected_hash": expected, "changes": [{ "change": "set_model_description", "description": "the agent's" }] }))
+            .map_err(|error| error.to_json())
+    };
+    let conflict = change(&read).unwrap_err();
+    assert_eq!(conflict["kind"], "conflict");
+    assert!(message(&conflict).contains("the user"), "says who changed it: {conflict}");
+    let now = a.ok("read_model", json!({ "path": "line.json" }))["file_hash"].as_str().unwrap().to_string();
+    change(&now).expect("reading again after the conflict is enough");
 }
 
 #[test]

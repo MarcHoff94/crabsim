@@ -32,10 +32,39 @@ struct Server {
     input: ChildStdin,
     replies: Receiver<Value>,
     next_id: u64,
+    /// For a client that never sends `initialize`, as Claude Code since 2.1.317 (MCP 2026-07-28):
+    /// the `_meta` it sends with every request, naming itself there.
+    meta: Option<Value>,
 }
 
 impl Server {
+    /// A client that connects with `initialize`, named `crabsim-test`.
     fn start(models: &Models) -> Server {
+        let mut server = Server::spawn(models);
+        let initialised = server.request(
+            "initialize",
+            json!({ "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "crabsim-test", "version": "1" } }),
+        );
+        assert_eq!(initialised["serverInfo"]["name"], "crabsim", "{initialised}");
+        assert!(initialised["capabilities"]["tools"].is_object(), "{initialised}");
+        server.send(json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }));
+        server
+    }
+
+    /// A client that never sends `initialize` but names itself in every request's `_meta`, as
+    /// Claude Code 2.1.317 does.
+    fn start_without_initialize(models: &Models, client: &str) -> Server {
+        let mut server = Server::spawn(models);
+        server.meta = Some(json!({
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientInfo": { "name": client, "version": "1" },
+            "io.modelcontextprotocol/clientCapabilities": {},
+        }));
+        server.request("server/discover", json!({}));
+        server
+    }
+
+    fn spawn(models: &Models) -> Server {
         let mut child = Command::new(env!("CARGO_BIN_EXE_crabsim-mcp"))
             .arg("--models")
             .arg(&models.0)
@@ -56,15 +85,7 @@ impl Server {
                 }
             }
         });
-        let mut server = Server { child, input, replies, next_id: 1 };
-        let initialised = server.request(
-            "initialize",
-            json!({ "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "crabsim-test", "version": "1" } }),
-        );
-        assert_eq!(initialised["serverInfo"]["name"], "crabsim", "{initialised}");
-        assert!(initialised["capabilities"]["tools"].is_object(), "{initialised}");
-        server.send(json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }));
-        server
+        Server { child, input, replies, next_id: 1, meta: None }
     }
 
     fn send(&mut self, message: Value) {
@@ -73,7 +94,10 @@ impl Server {
     }
 
     /// Sends a request and gives its result, failing on a protocol error.
-    fn request(&mut self, method: &str, params: Value) -> Value {
+    fn request(&mut self, method: &str, mut params: Value) -> Value {
+        if let Some(meta) = &self.meta {
+            params["_meta"] = meta.clone();
+        }
         let id = self.next_id;
         self.next_id += 1;
         self.send(json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }));
@@ -184,6 +208,15 @@ fn an_agent_lists_the_tools_validates_runs_and_reads_results_over_stdio() {
     assert_eq!(invalid["isError"], true);
     let unknown = server.call("no_such_tool", json!({}));
     assert_eq!(unknown["isError"], true);
+}
+
+#[test]
+fn a_client_that_names_itself_in_each_request_is_shown_by_that_name() {
+    let models = Models::new("discover");
+    std::fs::write(models.0.join("small.json"), SMALL).unwrap();
+    let mut server = Server::start_without_initialize(&models, "claude-code");
+    let claimed = server.call("claim_model", json!({ "path": "small.json", "goal": "check the name", "doing": "claiming" }));
+    assert_eq!(claimed["structuredContent"]["file"]["claim"]["client"], "claude-code", "{claimed}");
 }
 
 #[test]

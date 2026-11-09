@@ -70,7 +70,7 @@ fn model_file_format_gives_the_model_files_own_schema_and_a_valid_canonical_exam
 fn model_file_format_explains_how_each_built_in_class_behaves() {
     let setup = Setup::new("semantics");
     let semantics = setup.ok("model_file_format", json!({}))["semantics"].as_str().unwrap().to_string();
-    for part in ["MU", "Source", "Station", "Buffer", "Drain", "round-robin", "blocked", "availability", "position"] {
+    for part in ["MU", "Source", "Station", "Buffer", "Drain", "round-robin", "blocked", "availability", "stream"] {
         assert!(semantics.contains(part), "the semantics don't mention {part}: {semantics}");
     }
 }

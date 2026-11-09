@@ -476,10 +476,12 @@ pub(crate) fn before_change(catalogue: &Catalogue, path: &str, expected_hash: Op
     if let Some(expected) = expected_hash
         && current.as_deref() != Some(expected)
     {
-        let what = current.map_or_else(|| "doesn't exist".to_string(), |hash| format!("has the hash {hash} now"));
+        let what = current.as_ref().map_or_else(|| "doesn't exist".to_string(), |hash| format!("has the hash {hash} now"));
+        // This tells an agent all that read_again would, so it counts as that one refusal.
+        let by = if editing.read_again(&key, current).is_err() { ", changed by the user since your last change" } else { "" };
         return Err(OperationError::new(
             ErrorKind::Conflict,
-            format!("`{path}` isn't the version with the hash {expected} any more: it {what}. Read it again and decide on your change from that"),
+            format!("`{path}` isn't the version with the hash {expected} any more: it {what}{by}. Read it again and decide on your change from that"),
         ));
     }
     editing.read_again(&key, current)?;
@@ -563,7 +565,8 @@ pub struct ClaimView {
     pub agent: String,
     /// The name its harness gave, such as `claude-code`.
     pub client: String,
-    /// When the agent's server started, UTC.
+    /// When the agent's session with crabsim began, UTC, which may be before this claim: see
+    /// `since` for the claim's own start.
     pub started: String,
     /// What the agent means to achieve overall.
     pub goal: String,
@@ -652,11 +655,15 @@ pub struct ClaimModelInput {
 #[derive(Serialize, JsonSchema)]
 pub struct ClaimModelOutput {
     pub file: FileView,
+    /// Only while the user has taken the file: your claim is paused, so your changes are refused
+    /// until the user releases it, and then it is yours again.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub paused: Option<String>,
 }
 
 impl Operation for ClaimModel {
     const NAME: &'static str = "claim_model";
-    const DESCRIPTION: &'static str = "Claims a model file, which you need before every change to it: edit_model, write_model (also for a new file), delete_model and adopt_model. Say your overall `goal` and what you are `doing` now: the user sees both. Granted at once if nobody holds the file, and refused with model_in_use otherwise, naming who holds it: claims aren't queued, so tell your user or try again later. Claim again as you go to update `goal` and `doing`, which also renews the claim. It lasts while you use it and ends when you call release_model, after 10 minutes without a change or a claim, or when your session ends. The user can take the file at any time, which pauses your claim until they release it, can revoke it, and can block you. After anyone else changes the file, your next change is refused once with model_changed: read the model again, then carry on. Reading, copying and running need no claim.";
+    const DESCRIPTION: &'static str = "Claims a model file, which you need before every change to it: edit_model, write_model (also for a new file), delete_model and adopt_model. Say your overall `goal` and what you are `doing` now: the user sees both. Granted at once if nobody holds the file, and refused with model_in_use otherwise, naming who holds it: claims aren't queued, so tell your user or try again later. Claim again as you go to update `goal` and `doing`, which also renews the claim. It lasts while you use it and ends when you call release_model, after 10 minutes without a change or a claim, or when your session ends. The user can take the file at any time, which pauses your claim until they release it (claiming then says so in `paused`), can revoke it, and can block you. After anyone else changes the file, your next change is refused once with model_changed: read the model again, then carry on. Reading, copying and running need no claim.";
     const EFFECT: Effect = Effect::Additive;
     const CHANGES_MODELS: bool = true;
     type Input = ClaimModelInput;
@@ -703,7 +710,12 @@ impl Operation for ClaimModel {
                 file.claim = Some(Claim { process: me, goal, doing, trail, since: now, last_active: now, hash });
             }
         }
-        Ok(ClaimModelOutput { file: editing.view(&path).expect("just claimed") })
+        let file = editing.view(&path).expect("just claimed");
+        let paused = file.claim.as_ref().filter(|claim| claim.paused).map(|_| {
+            let since = file.user_since.as_deref().map_or_else(String::new, |since| format!(" since {since}"));
+            format!("The user has taken `{path}`{since}, so your claim is paused: your changes are refused until the user releases it. Then it is yours again, and if the user changed it, your next change is refused once so you read it again")
+        });
+        Ok(ClaimModelOutput { file, paused })
     }
 }
 

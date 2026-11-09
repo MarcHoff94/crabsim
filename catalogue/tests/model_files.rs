@@ -206,6 +206,24 @@ fn validate_model_reports_every_problem_by_path_or_by_text() {
 }
 
 #[test]
+fn list_models_lists_only_json_files_that_are_model_files_even_broken_ones() {
+    let setup = Setup::new("list-only-models");
+    setup.folder.write("line.json", SMALL);
+    // A model file with problems is still a model file, so it is listed to show them.
+    setup.folder.write("broken.json", r#"{ "format_version": 1, "instances": [{ "name": "x", "class": "Nothing" }] }"#);
+    // So is one that isn't JSON any more, part way through being written by hand.
+    setup.folder.write("half.json", r#"{ "format_version": 1, "instances": [ "#);
+    // A JSON Schema names `format_version` among its properties, but not at its top level.
+    setup.folder.write("model-file.schema.json", r#"{ "$schema": "https://json-schema.org/draft/2020-12/schema", "properties": { "format_version": { "const": 1 } } }"#);
+    setup.folder.write("settings.json", r#"{ "theme": "dark" }"#);
+    setup.folder.write("list.json", "[1, 2, 3]");
+    setup.folder.write("empty.json", "");
+
+    let listed = setup.ok("list_models", json!({}));
+    assert_eq!(listed["models"], json!(["broken.json", "half.json", "line.json"]));
+}
+
+#[test]
 fn list_models_lists_json_files_in_the_folder_and_below_but_never_crabsims_own() {
     let setup = Setup::new("list");
     setup.folder.write("b.json", SMALL);

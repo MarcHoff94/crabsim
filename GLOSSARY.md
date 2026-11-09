@@ -297,14 +297,15 @@ One thing crabsim can do for a person or an agent, such as validating a model or
 _Avoid_: Tool (the word one agent protocol uses for an operation), command (what a live session takes)
 
 **Editor**:
-The user or the one agent currently allowed to change a model file through crabsim's operations. The user can take the editor right at any time. An agent must say what it means to do, and a change asked for by any other agent waits in the edit queue, unless nobody holds or waits for that file.
+The user or the one agent currently allowed to change a model file through crabsim's operations. An agent becomes one by a claim, and the user can take the editor right at any time, which pauses the agent's claim.
 _Avoid_: Lock, owner, text editor (a program such as a code editor)
 
-**Edit queue**:
-The agents waiting to become a model file's editor. They come first come, first served unless the user chooses who is next, and the user can remove or block any of them. The editor right passes on when the editor finishes, ends or stays inactive for too long.
+**Claim**:
+An agent's hold on one model file, which it needs for every change: granted at once if nobody holds the file, refused otherwise. It says the agent's **goal** and what it is **doing** now, which the agent updates as it goes. It ends when the agent releases it, its process ends, it stays unused for too long or the user revokes it. While the user has taken the right, it is **paused**.
+_Avoid_: Edit queue (there is none), lock
 
 **User**:
-The one person working with a models folder, through either the UI or the CLI, who controls its edit queue. Only one UI can have a models folder open at a time: working in a second window means working on an independent copy of the folder.
+The one person working with a models folder, through either the UI or the CLI, who controls who edits its model files. Only one UI can have a models folder open at a time: working in a second window means working on an independent copy of the folder.
 _Avoid_: Agent (never a user)
 
 **Models folder**:

@@ -1,5 +1,7 @@
 # Models change only through crabsim's operations, and the user controls who edits
 
+**Partly superseded by ADR 0013** (2026-11-09): there is no edit queue, a claim is granted or refused at once, and every change an agent makes needs a claim. The rest stands: models change only through crabsim's operations, the user controls who edits, and one person's front-end works on a models folder.
+
 Model files stay readable JSON that people, agents and git can read and diff, but they change only through crabsim's operations: in the UI, which is the user's main way, in the CLI, or through an agent's harness over MCP. This replaces one point of ADR 0007, which chose files that agents write with their own file tools. We changed it because several agents and a person working on one models folder need to know who is changing a model, and a file written past crabsim can't take part in that. Its old objections no longer hold: `edit_model` applies a batch of changes in one call, so building through operations isn't chatty, and the files are still in git.
 
 Only one editor can change a model file at a time. The user can take the editor right at any time, and decides who comes next. Agents claim the right, stating their purpose, and wait in an edit queue, first come, first served unless the user chooses otherwise. Only one person's front-end works on a models folder: one UI window, or the CLI when no UI is open. A second window means an independent copy of the folder.

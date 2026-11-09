@@ -123,6 +123,22 @@ fn before_init_nothing_has_a_state_and_init_and_start_are_offered() {
 }
 
 #[test]
+fn a_run_is_in_progress_only_from_init_until_reset() {
+    let empty = ViewState::new(&ModelDescription::new());
+    assert!(!empty.run_in_progress(), "with no model open there is no run to lose");
+
+    let mut watched = Watched::demo();
+    watched.frame();
+    assert!(!watched.view.run_in_progress(), "before Init");
+    watched.session.step_forward().unwrap();
+    watched.frame();
+    assert!(watched.view.run_in_progress(), "after Init");
+    watched.session.reset().unwrap();
+    watched.frame();
+    assert!(!watched.view.run_in_progress(), "after Reset");
+}
+
+#[test]
 fn init_shows_the_default_state_and_is_offered_no_more() {
     let mut watched = Watched::demo();
     watched.session.step_forward().unwrap();

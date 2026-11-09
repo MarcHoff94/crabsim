@@ -4,7 +4,7 @@ A discrete-event simulator for any material flow, such as a factory line, writte
 
 crabsim exists to simulate long periods as fast as possible: a year of the demo model takes about 1.2 seconds, at about 13 million events per second, and a run's memory stays flat however long it is. A live session can also play a run at a chosen speed, step forward and back through it, and take interventions while it plays, for a UI to show.
 
-**Status:** the engine and live session work. The UI's first stage works: a Bevy application with egui panels (ADR 0006) that plays the demo model live in 2D, with the run controls, stepping back and forward, interventions on Stations and an inspector. Building models in it comes later. Buffer's movement is known to be broken, so models don't use it yet. The plan is in `docs/agents/handoff.md` and in [spec issue 3](https://github.com/MarcHoff94/crabsim/issues/3).
+**Status:** the engine and live session work. Models are model files, readable JSON, kept in a models folder. The UI, a Bevy application with egui panels (ADR 0006), lists a models folder's model files and plays the one you choose live in 2D, with the run controls, stepping back and forward, interventions on Stations, an inspector that changes an object's attributes in its file, and moving objects by dragging. Adding and connecting objects in it comes later. The CLI runs model files headless and runs experiments, and an MCP server lets AI agents do the same through the same operations. Buffer's movement is known to be broken, so models don't use it yet. The plan is in `docs/agents/handoff.md`.
 
 ## Requirements
 
@@ -20,34 +20,28 @@ Run the tests:
 cargo test
 ```
 
-Run the demo model headless for a simulated day, then print each object's statistics and how long the run took:
+Open the UI on the repo's `models` folder, then click `demo.json` in the list on the left and press Start. The first build takes several minutes:
 
 ```powershell
-cargo run --release --bin crabsim
+cargo run -p crabsim-ui --profile ui -- --models models
+```
+
+Run the demo model headless for a simulated day, then print each object's statistics and how long the run took. `models/demo.json` is the demo model as a file, `models/model-file.schema.json` is the format's JSON Schema, which editors such as VS Code use to check a file as you type, and `docs/design/model-file.md` describes the format:
+
+```powershell
+cargo run --release --bin crabsim -- --model models/demo.json
 ```
 
 The same with a seed and a simulated length, written as the UI shows time, such as `1:30`, `8:00:00` or `30d 12:00:00`:
 
 ```powershell
-cargo run --release --bin crabsim -- --seed 7 --length 365d
-```
-
-Run a model file. `models/demo.json` is the demo model as a file, `models/model-file.schema.json` is the format's JSON Schema, which editors such as VS Code use to check a file as you type, and `docs/design/model-file.md` describes the format:
-
-```powershell
-cargo run --release --bin crabsim -- --model models/demo.json --length 30d
+cargo run --release --bin crabsim -- --model models/demo.json --seed 7 --length 365d
 ```
 
 Run the benchmark, which takes about a minute and reports events per second, simulated time per wall second and peak memory:
 
 ```powershell
 cargo bench --bench reference
-```
-
-Open the UI, which plays the demo model live. The first build takes several minutes:
-
-```powershell
-cargo run -p crabsim-ui --profile ui
 ```
 
 The engine logs every event at `info` level. To see that while running the demo or the tests, set `RUST_LOG` first:

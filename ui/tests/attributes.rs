@@ -1,8 +1,9 @@
 //! The inspector's attributes: every attribute of an instance with where its value comes from,
 //! changed and saved to the model file, each restored on its own, refused while an agent holds the
-//! file unless taken over for the one change, and the fields that turn text into a model file's
+//! file unless taken over for the one change, instances moved, and the fields that turn text into a model file's
 //! values. No window, as in the other UI tests.
 
+use crabsim::Position;
 use crabsim_catalogue::{Catalogue, Settings, Source};
 use crabsim_ui::attributes::{Form, RepairKind};
 use crabsim_ui::workspace::{ModelChange, Refusal, ValueFrom, Workspace};
@@ -135,6 +136,63 @@ fn with_no_model_open_there_are_no_attributes() {
     let mut workspace = Workspace::open(&folder.0);
     assert!(workspace.attributes("P1").is_err());
     assert_eq!(workspace.set_attribute("P1", "process_time", json!("0:30"), false), Err(Refusal::NoModel));
+}
+
+// ---------- Moving ----------
+
+/// Where the open model places an instance.
+fn position_of(workspace: &Workspace, instance: &str) -> Position {
+    let model = workspace.description();
+    let id = (0..model.object_count()).find(|&id| model.name(id) == Some(instance)).unwrap_or_else(|| panic!("no {instance}"));
+    model.position(id).expect("placed")
+}
+
+#[test]
+fn a_moved_instance_is_saved_to_the_file_to_the_centimetre() {
+    let folder = Folder::new("move");
+    let mut workspace = open(&folder);
+    workspace.move_instance("P1", Position { x: 7.123456, y: -0.996, z: 0.0 }, false).unwrap();
+    assert_eq!(workspace.check(), Some(ModelChange::Changed), "the window picks up the saved file");
+    workspace.apply_pending();
+    assert_eq!(position_of(&workspace, "P1"), Position { x: 7.12, y: -1.0, z: 0.0 });
+    assert_eq!(position_of(&workspace, "P2"), Position { x: 5.0, y: -2.0, z: 0.0 }, "nothing else moves");
+    let saved = std::fs::read_to_string(folder.0.join("presses.json")).unwrap();
+    assert!(saved.contains("7.12") && !saved.contains("7.123"), "{saved}");
+}
+
+#[test]
+fn while_an_agent_holds_the_file_a_move_is_refused_unless_taken_over() {
+    let folder = Folder::new("move-agent");
+    let mut workspace = open(&folder);
+    let agent = Catalogue::open(Settings::new(&folder.0, Source::Mcp)).unwrap();
+    agent.call("claim_model", json!({ "path": "presses.json", "purpose": "rearranging the hall" })).unwrap();
+    let to = Position { x: 6.0, y: 3.0, z: 0.0 };
+    let refused = workspace.move_instance("P1", to, false).unwrap_err();
+    assert!(matches!(&refused, Refusal::NotEditor(message) if message.contains("rearranging the hall")), "{refused:?}");
+    assert_eq!(workspace.check(), None, "nothing was saved");
+    workspace.move_instance("P1", to, true).unwrap();
+    workspace.check();
+    workspace.apply_pending();
+    assert_eq!(position_of(&workspace, "P1"), to);
+    let queue = agent.call("get_edit_queue", json!({ "path": "presses.json" })).unwrap();
+    assert_eq!(queue["editor"]["agent"], "agent-1", "the agent keeps its right: {queue}");
+}
+
+#[test]
+fn a_move_in_a_file_changed_outside_crabsim_is_refused_until_adopted() {
+    let folder = Folder::new("move-outside");
+    let text = std::fs::read_to_string(folder.0.join("presses.json")).unwrap();
+    std::fs::write(folder.0.join("presses.json"), text.replace("Hydraulic press", "Hydraulic press, rebuilt")).unwrap();
+    let mut workspace = open(&folder);
+    let to = Position { x: 6.0, y: 3.0, z: 0.0 };
+    let refused = workspace.move_instance("P1", to, false).unwrap_err();
+    assert!(matches!(refused, Refusal::ChangedOutside(_)), "{refused:?}");
+    assert_eq!(workspace.check(), None, "nothing was saved");
+    workspace.adopt().unwrap();
+    workspace.move_instance("P1", to, false).unwrap();
+    workspace.check();
+    workspace.apply_pending();
+    assert_eq!(position_of(&workspace, "P1"), to);
 }
 
 // ---------- The fields ----------

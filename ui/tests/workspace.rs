@@ -5,7 +5,7 @@
 mod common;
 
 use common::{FakeClock, Watched};
-use crabsim::{ModelDescription, ObjectKind, RunState, SessionOutput, SessionStatus, SimTime};
+use crabsim::{ModelDescription, ObjectKind, Position, RunState, SessionOutput, SessionStatus, SimTime};
 use crabsim_ui::view::{Control, EndTimeProblem, ViewState};
 use crabsim_ui::workspace::Workspace;
 use std::path::{Path, PathBuf};
@@ -187,6 +187,29 @@ fn the_few_unplaced_instances_go_in_a_row_below_the_placed_ones() {
     assert_eq!(at(model, "Work").1, at(model, "Check").1, "in one row");
     assert!(at(model, "Work").0 < at(model, "Check").0, "in file order");
     assert_no_overlap(model);
+}
+
+#[test]
+fn moving_one_instance_of_a_model_laid_out_by_the_window_keeps_the_others_where_they_were_drawn() {
+    let folder = folder("move-unplaced");
+    let mut workspace = Workspace::open(&folder.0);
+    assert!(workspace.open_model("unplaced.json"));
+    workspace.adopt().unwrap();
+    let drawn = workspace.description().clone();
+    let out = drawn.position(id_of(&drawn, "Out")).unwrap();
+    workspace.move_instance("Out", Position { x: out.x + 4.0, y: out.y - 3.0, z: 0.0 }, false).unwrap();
+    assert!(workspace.check().is_some());
+    workspace.apply_pending();
+    let moved = workspace.description();
+    let round = |metres: f64| (metres * 100.0).round() / 100.0;
+    for id in 0..moved.object_count() {
+        let name = moved.name(id).unwrap();
+        let expected = if name == "Out" { (round(out.x + 4.0), round(out.y - 3.0)) } else { at(&drawn, name) };
+        let expected = (round(expected.0), round(expected.1));
+        assert_eq!(at(moved, name), expected, "{name}");
+    }
+    let saved = std::fs::read_to_string(folder.0.join("unplaced.json")).unwrap();
+    assert_eq!(saved.matches("\"position\"").count(), 7, "every instance is placed in the file now: {saved}");
 }
 
 // ---------- A model with problems ----------

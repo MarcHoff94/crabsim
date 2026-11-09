@@ -2,7 +2,7 @@
 //! stopping at the first. What can't be read is left at its default, and noted in `Broken`, so the
 //! checks that follow don't report it a second time.
 
-use crate::{Attributes, Class, Failures, Instance, Model, Problem, RepairTime, FORMAT_VERSION, escape};
+use crate::{Attributes, Class, Failures, Instance, Model, Problem, RepairTime, State, StateNotes, FORMAT_VERSION, escape};
 use crabsim::time::parse_time;
 use crabsim::{Dimensions, Position, SimTime};
 use serde_json::{Map, Value};
@@ -32,7 +32,7 @@ pub(crate) struct Broken {
 const TOP_LEVEL: [&str; 5] = ["$schema", "format_version", "description", "classes", "instances"];
 const INSTANCE: [&str; 6] = ["name", "class", "stream", "position", "successors", "attributes"];
 const CLASS: [&str; 3] = ["name", "parent", "attributes"];
-const ATTRIBUTES: [&str; 7] = ["interval", "process_time", "failures", "starting_mus", "capacity", "dimensions", "description"];
+const ATTRIBUTES: [&str; 8] = ["interval", "process_time", "failures", "starting_mus", "capacity", "dimensions", "description", "state_notes"];
 
 pub(crate) fn read(text: &str) -> (Model, Vec<Problem>, Broken) {
     let mut reader = Reader::default();
@@ -230,6 +230,7 @@ impl Reader {
                 "capacity" => self.count(value, &at, name).map(|count| attributes.capacity = Some(count)),
                 "dimensions" => self.dimensions(value, &at, name).map(|dimensions| attributes.dimensions = Some(dimensions)),
                 "description" => self.text(value, &at, name).map(|text| attributes.description = Some(text)),
+                "state_notes" => self.state_notes(value, &at, name).map(|notes| attributes.state_notes = Some(notes)),
                 _ => unreachable!("every attribute is read"),
             };
             if read.is_none() {
@@ -292,6 +293,32 @@ impl Reader {
         let y = self.number(fields, "y", pointer, name);
         let z = if fields.contains_key("z") { self.number(fields, "z", pointer, name) } else { Some(0.0) };
         Some(Position { x: x?, y: y?, z: z? })
+    }
+
+    /// Notes by state. A key that isn't a state, or a note that isn't text, is a problem, and the
+    /// notes that can be read are kept.
+    fn state_notes(&mut self, value: &Value, pointer: &str, name: Option<&str>) -> Option<StateNotes> {
+        let known: Vec<&str> = State::ALL.iter().map(|state| state.name()).collect();
+        let Some(fields) = value.as_object() else {
+            self.problem(pointer.to_owned(), name, r#"state notes should be an object, such as {"blocked": "waits for the conveyor"}"#);
+            return None;
+        };
+        let mut notes = StateNotes::new();
+        for (key, note) in fields {
+            let at = format!("{pointer}/{}", escape(key));
+            match State::from_name(key) {
+                None => {
+                    let guess = crate::suggest::did_you_mean(key, known.iter().copied());
+                    self.problem(at, name, format!("unknown state `{key}`{guess}"));
+                }
+                Some(state) => {
+                    if let Some(note) = self.text(note, &at, name) {
+                        notes.insert(state, note);
+                    }
+                }
+            }
+        }
+        Some(notes)
     }
 
     fn dimensions(&mut self, value: &Value, pointer: &str, name: Option<&str>) -> Option<Dimensions> {

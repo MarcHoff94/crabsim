@@ -104,6 +104,10 @@
         "description": {
           "description": "Any object: free text saying what it is. Visual only.",
           "type": "string"
+        },
+        "state_notes": {
+          "description": "Any object: the model's own note on what a state means for it, by state, shown beside crabsim's definition of the state. Only states its built-in class can be in, each note not empty. Inherited as a whole. Visual only.",
+          "$ref": "#/$defs/StateNotesFile"
         }
       },
       "additionalProperties": false
@@ -263,6 +267,43 @@
         "width",
         "height"
       ]
+    },
+    "StateNotesFile": {
+      "description": "A note per state, each left out if there is nothing to say.",
+      "type": "object",
+      "properties": {
+        "busy": {
+          "description": "Source, Station, Buffer.",
+          "type": "string",
+          "minLength": 1
+        },
+        "blocked": {
+          "description": "Source, Station, Buffer.",
+          "type": "string",
+          "minLength": 1
+        },
+        "idle": {
+          "description": "Station, Buffer, Drain.",
+          "type": "string",
+          "minLength": 1
+        },
+        "failed": {
+          "description": "Station.",
+          "type": "string",
+          "minLength": 1
+        },
+        "forced_failure": {
+          "description": "Station.",
+          "type": "string",
+          "minLength": 1
+        },
+        "paused": {
+          "description": "Station.",
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false
     },
     "InstanceFile": {
       "description": "One material-flow object.",

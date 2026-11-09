@@ -5,6 +5,7 @@ use crate::camera::Camera;
 pub use crabsim::time::{format_time, format_time_exact, parse_time};
 use crate::marks::Marks;
 pub use crate::marks::{Intervention, Mark};
+use crabsim_model::State;
 use crabsim::{
     ModelDescription, ObjectKind, ObjectStatistics, SessionOutput, Picture, ProcessState, RunState, SessionStatus,
     SimTime, StopCause, TimeMode,
@@ -701,6 +702,13 @@ impl ViewState {
         self.selected
     }
 
+    /// What hovering over an object on the canvas says: its name and the state it shows, such as
+    /// "Station 5a: Failed".
+    pub fn hover_text(&self, id: u32) -> String {
+        let name = self.objects.get(id as usize).map_or("An unknown object", |object| object.name.as_str());
+        format!("{name}: {}", self.shade(id).label())
+    }
+
     /// What the inspector says about the selected object.
     pub fn inspection(&self) -> Option<Inspection> {
         let id = self.selected?;
@@ -882,6 +890,48 @@ impl ViewState {
 }
 
 /// What an object is doing, as said after its name.
+impl Shade {
+    /// The colour a state is drawn in.
+    pub fn of(state: State) -> Shade {
+        match state {
+            State::Busy => Shade::Busy,
+            State::Blocked => Shade::Blocked,
+            State::Idle => Shade::Idle,
+            State::Failed => Shade::Failed,
+            State::ForcedFailure => Shade::ForcedFailure,
+            State::Paused => Shade::Paused,
+        }
+    }
+
+    /// The state it shows, such as "Forced failure", or that there is none before Init.
+    pub fn label(self) -> &'static str {
+        match self {
+            Shade::Unknown => "no state yet, before Init",
+            Shade::Idle => State::Idle.label(),
+            Shade::Busy => State::Busy.label(),
+            Shade::Blocked => State::Blocked.label(),
+            Shade::Paused => State::Paused.label(),
+            Shade::Failed => State::Failed.label(),
+            Shade::ForcedFailure => State::ForcedFailure.label(),
+        }
+    }
+}
+
+/// The one colour of each state, wherever crabsim shows it: on the canvas, in the help and in any
+/// chart later, as red, green and blue from 0 to 1. Fixed for the whole app, so a colour always
+/// means the same state.
+pub fn rgb(shade: Shade) -> [f32; 3] {
+    match shade {
+        Shade::Unknown => [0.28, 0.29, 0.32],
+        Shade::Idle => [0.50, 0.52, 0.56],
+        Shade::Busy => [0.20, 0.70, 0.30],
+        Shade::Blocked => [0.95, 0.60, 0.10],
+        Shade::Paused => [0.25, 0.45, 0.95],
+        Shade::Failed => [0.90, 0.15, 0.15],
+        Shade::ForcedFailure => [0.55, 0.08, 0.08],
+    }
+}
+
 fn doing(shade: Shade) -> &'static str {
     match shade {
         Shade::Unknown => "has no state yet",

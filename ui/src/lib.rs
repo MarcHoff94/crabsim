@@ -4,6 +4,7 @@
 pub mod attributes;
 pub mod camera;
 pub mod editing;
+pub mod help;
 pub mod marks;
 pub mod view;
 pub mod workspace;

@@ -78,6 +78,7 @@ Which attributes an instance has depends on its built-in class at the root of it
 | `capacity` | Buffer | none: must be set somewhere in the chain | 1 or more. Buffer is known to be broken until step 7 of issue 3 |
 | `dimensions` | all | by type: Station 2 × 1.5 × 1.5 m, Buffer 2 × 1 × 1 m, Source and Drain 1 m each way | `length`, `width`, `height` above 0, `rotation_degrees` optional, 0 by default |
 | `description` | all | none | Free text |
+| `state_notes` | all | none | A note per state, see below |
 
 - **Times** are strings in the UI's syntax, read by the same `parse_time` as the UI and the CLI: `"10"`, `"1:30"`, `"2:00:00"`, `"2d 06:00:00"`, `"0:00:12.5"`. Exact to the millisecond.
 - **A dummy Station** has a process time of 0. It takes no time, and exists so that something can happen as an MU passes, such as user code at a hook later. It can still fail, like any Station.
@@ -87,8 +88,13 @@ Which attributes an instance has depends on its built-in class at the root of it
   "failures": { "availability": 0.9, "repair_time": { "erlang": { "mean": "1:00", "k": 2 } } }
   ```
   Availability is strictly between 0 and 1. The repair time is one of `{"constant": t}`, `{"uniform": {"min": t, "max": t}}`, `{"normal": {"mean": t, "std": t}}` or `{"erlang": {"mean": t, "k": n}}`, with its mean above 0. The time between failures is derived from the availability, as today.
+- **State notes** say what a state means for this class or instance, beside crabsim's own meaning of it, which the window shows in its help on an object:
+  ```json
+  "state_notes": { "blocked": "waits for the conveyor to clear", "failed": "the gripper needs changing" }
+  ```
+  The states are `busy`, `blocked`, `idle`, `failed`, `forced_failure` and `paused`, and a note may name only states its built-in class can be in: a Source is busy or blocked, a Station any of them, a Buffer busy, blocked or idle, and a Drain only idle. A note can't be empty. Like every attribute, the notes are inherited as a whole, so an instance that sets its own replaces its class's. A note never changes what is measured or a state's colour.
 - **Starting MUs** are a count. MU ids belong to a run, and are handed out when a run is built, in file order.
-- **Visual only:** `position`, `dimensions` and `description` never reach a run, so they can't change a result. The 3D model path will be one more inheritable attribute when there is a 3D view, a path and never embedded.
+- **Visual only:** `position`, `dimensions`, `description` and `state_notes` never reach a run, so they can't change a result. The 3D model path will be one more inheritable attribute when there is a 3D view, a path and never embedded.
 
 ## Names
 

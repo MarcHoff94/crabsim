@@ -288,13 +288,29 @@ fn get_attributes_gives_every_attribute_with_its_value_and_origin() {
     assert_eq!(got["file_hash"], hash(&setup.folder.read("line.json")));
     let attributes: Vec<(String, Value)> = got["attributes"].as_array().unwrap().iter().map(|a| (a["attribute"].as_str().unwrap().to_string(), a.clone())).collect();
     let names: Vec<&str> = attributes.iter().map(|(name, _)| name.as_str()).collect();
-    assert_eq!(names, ["process_time", "failures", "starting_mus", "dimensions", "description"], "every attribute a Station has");
+    assert_eq!(names, ["process_time", "failures", "starting_mus", "dimensions", "description", "state_notes"], "every attribute a Station has");
     let of = |name: &str| attributes.iter().find(|(n, _)| n == name).unwrap().1.clone();
     assert_eq!(of("process_time"), json!({ "attribute": "process_time", "value": "00:00:50", "from": "instance" }));
     assert_eq!(of("failures"), json!({ "attribute": "failures", "value": { "availability": 0.9, "repair_time": { "constant": "00:01:00" } }, "from": "class", "class": "Mill" }));
     assert_eq!(of("starting_mus"), json!({ "attribute": "starting_mus", "value": 0, "from": "built_in" }));
     assert_eq!(of("dimensions")["from"], "built_in");
     assert_eq!(of("description"), json!({ "attribute": "description", "from": "not_set" }));
+    assert_eq!(of("state_notes"), json!({ "attribute": "state_notes", "from": "not_set" }));
+}
+
+#[test]
+fn state_notes_are_set_on_a_class_and_checked_against_its_built_in_class() {
+    let setup = setup("state-notes");
+    let notes = json!({ "blocked": "waits for the crane", "failed": "the spindle broke" });
+    setup.ok("edit_model", json!({ "path": "line.json", "changes": [
+        { "change": "set_attribute", "target": { "class": "Mill" }, "attribute": "state_notes", "value": notes } ] }));
+    let got = setup.ok("get_attributes", json!({ "path": "line.json", "target": { "instance": "Mill 2" } }));
+    let state_notes = got["attributes"].as_array().unwrap().iter().find(|a| a["attribute"] == "state_notes").unwrap().clone();
+    assert_eq!(state_notes, json!({ "attribute": "state_notes", "value": notes, "from": "class", "class": "Mill" }));
+
+    let error = edit_err(&setup, json!([
+        { "change": "set_attribute", "target": { "instance": "Out" }, "attribute": "state_notes", "value": { "failed": "never" } } ]));
+    assert_eq!(error["problems"][0]["message"], "a Drain is never failed");
 }
 
 #[test]

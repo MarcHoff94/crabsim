@@ -91,6 +91,10 @@ A change made from outside to a simulation run in progress, such as switching a 
 **Speed**:
 How much shown time passes per unit of wall time in a live session. Changing it never makes shown time jump.
 
+**Animation**:
+A live session releasing what happens at the chosen speed, so a view can draw every move and change of state. With animation off, the session computes as fast as the machine allows with no speed limit, and a view shows only the time and the objects' states a few times a second. Going back and stepping still work, and results are the same either way.
+_Avoid_: Headless run (that has no live session at all)
+
 **Zero-time loop**:
 Events that keep happening without simulation time advancing. A simulation run reports it as an error rather than looping forever.
 
@@ -247,6 +251,9 @@ The fixed-size numbers every material-flow object keeps about a simulation run. 
 **Busy**:
 The state of an object doing what it is there for: a Station working on at least one MU, a Source waiting out its interval, a Buffer holding at least one MU.
 _Avoid_: Processing (a Buffer does no work, and Processing time is a time basis)
+
+**State note**:
+A model's own explanation of what one state means for a class or instance, such as Blocked meaning "the robot waits for the conveyor". It is inherited like any attribute and shown beside crabsim's fixed definition of the state, never instead of it. It cannot change what is measured or the state's colour.
 
 **Blocked**:
 The state of an object holding an MU that is ready to leave but that no successor can accept.

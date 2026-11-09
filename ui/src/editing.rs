@@ -18,6 +18,8 @@ pub struct Claim {
     pub trail: Vec<(String, String)>,
     /// Since when it holds the file, UTC.
     pub since: String,
+    /// When it last changed the file or claimed it, UTC.
+    pub last_active: String,
     /// The user has taken the file, so the agent waits until the user releases it.
     pub paused: bool,
 }
@@ -46,8 +48,8 @@ pub enum EditAction {
     Take,
     /// Releases it, giving a paused claim back.
     Release,
-    /// Ends the agent's claim on the open model.
-    Revoke,
+    /// Ends the agent's claim on this model file, the open one or another.
+    Revoke(String),
     /// Blocks an agent session from changing models in the folder.
     Block(String),
     Unblock(String),
@@ -56,7 +58,7 @@ pub enum EditAction {
 /// Why a control did nothing.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ActRefusal {
-    /// Who holds the open model changed since it was shown, so nothing was done. Here is the
+    /// Who holds the model acted on changed since it was shown, so nothing was done. Here is the
     /// state now, and what changed, to decide again.
     Changed { now: Editors, what: String },
     /// The operation refused it, or it can't apply, with why.
@@ -75,6 +77,7 @@ fn claim(value: &Value) -> Claim {
         doing: text(&value["doing"]),
         trail: value["trail"].as_array().into_iter().flatten().map(|entry| (text(&entry["doing"]), text(&entry["since"]))).collect(),
         since: text(&value["since"]),
+        last_active: text(&value["last_active"]),
         paused: value["paused"] == true,
     }
 }
@@ -111,9 +114,23 @@ impl Editors {
         self.files.iter().find(|file| file.path == path)?.claim.as_ref().filter(|claim| !claim.paused)
     }
 
+    /// The line under the top bar while an agent has a claim on the open model `path`: who it is
+    /// and what it's doing, or that it's paused while the user holds the model. None otherwise.
+    pub fn marker(&self, path: &str) -> Option<String> {
+        let claim = self.files.iter().find(|file| file.path == path)?.claim.as_ref()?;
+        let who = format!("{} ({})", claim.agent, claim.client);
+        Some(match (claim.paused, claim.doing.is_empty()) {
+            (false, false) => format!("{who} is editing this model: {}", claim.doing),
+            (false, true) => format!("{who} is editing this model"),
+            (true, false) => format!("{who} is paused while you hold this model. It was: {}", claim.doing),
+            (true, true) => format!("{who} is paused while you hold this model"),
+        })
+    }
+
     /// What changed in who holds `path`, and in the blocked agents, between `self` and `now`, as
     /// one sentence, or none if nothing did. An agent saying what it does now isn't a change.
-    pub fn changes_on(&self, path: &str, now: &Editors) -> Option<String> {
+    /// `opened` is the open model, which the sentence calls "this model".
+    pub fn changes_on(&self, path: &str, opened: Option<&str>, now: &Editors) -> Option<String> {
         let (before, after) = (self.file(path), now.file(path));
         let holder = |file: &FileEditors| (file.user_since.is_some(), file.claim.as_ref().map(|claim| (claim.agent.clone(), claim.paused)));
         if holder(&before) != holder(&after) {
@@ -122,7 +139,8 @@ impl Editors {
                 (None, Some(claim)) => format!("{} ({}) holds it now, with the goal \"{}\"", claim.agent, claim.client, claim.goal),
                 (None, None) => "Nobody holds it now".to_string(),
             };
-            return Some(format!("Who holds this model changed a moment ago: {who}."));
+            let model = if opened == Some(path) { "this model" } else { path };
+            return Some(format!("Who holds {model} changed a moment ago: {who}."));
         }
         if self.blocked != now.blocked {
             return Some("The blocked agents changed a moment ago.".to_string());

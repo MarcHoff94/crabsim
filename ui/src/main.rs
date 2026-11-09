@@ -112,6 +112,7 @@ fn main() {
             tab: Tab::Inspector,
             editors: None,
             editors_stamp: None,
+            editors_read: Duration::ZERO,
             editors_note: None,
             confirm_take: None,
             moving: None,
@@ -183,6 +184,8 @@ struct Ui {
     editors: Option<Result<Editors, String>>,
     /// The edit state file's size and modified time when it was read.
     editors_stamp: Option<(u64, Option<std::time::SystemTime>)>,
+    /// When the edit state was last read, in wall time since the window opened.
+    editors_read: Duration,
     /// Why the last control did nothing, such as who holds the model having changed.
     editors_note: Option<String>,
     /// Taking the right from this agent, waiting for the user to confirm it.
@@ -271,6 +274,9 @@ fn watch_the_open_file(watched: Res<WatchedFile>, proxy: Res<EventLoopProxyWrapp
         }
     });
 }
+
+/// How long a shown claim may go unread, since it can end without the edit state file changing.
+const CLAIMS_READ_AGAIN: Duration = Duration::from_secs(3);
 
 /// A file's size and modified time, which change whenever it is written.
 fn stamp_of(path: &std::path::Path) -> Option<(u64, Option<std::time::SystemTime>)> {
@@ -642,11 +648,35 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
     );
     let ui = &mut *ui;
     let wall = time.elapsed();
+    // Who holds each model, for the marker and the Editing tab, read whenever the edit state
+    // changes and when a tab opens. A claim also ends without the file changing, when its agent's
+    // process ends or it times out, which only reading finds out. So while a claim is shown it's
+    // read again every few seconds, on frames drawn anyway: an idle window isn't woken for it.
+    if ui.workspace.has_folder() {
+        let stamp = ui.workspace.editing_file().and_then(|file| stamp_of(&file));
+        let claims_shown = matches!(&ui.editors, Some(Ok(editors)) if editors.files.iter().any(|file| file.claim.is_some()));
+        let stale = claims_shown && wall.saturating_sub(ui.editors_read) >= CLAIMS_READ_AGAIN;
+        if ui.editors.is_none() || stamp != ui.editors_stamp || stale {
+            ui.editors = Some(ui.workspace.editors());
+            ui.editors_stamp = ui.workspace.editing_file().and_then(|file| stamp_of(&file));
+            ui.editors_read = wall;
+        }
+    }
     let mut request = None;
     let top = egui::Panel::top("top bar").show(&mut root, |panel| {
         request = top_bar(panel, &ui.view, &ui.workspace, &mut ui.jump_text, &mut ui.seed_text, &mut ui.end_text)
     });
     let mut bottom_of_bars = top.response.rect.bottom();
+    // An agent's claim on the open model, whichever tab is open.
+    let marker = ui.workspace.opened().and_then(|path| ui.editors.as_ref()?.as_ref().ok()?.marker(path));
+    if let Some(marker) = marker {
+        let shown = egui::Panel::top("claim marker")
+            .frame(egui::Frame::new().fill(egui::Color32::from_rgb(70, 50, 110)).inner_margin(6.0))
+            .show(&mut root, |panel| {
+                panel.colored_label(egui::Color32::WHITE, marker);
+            });
+        bottom_of_bars = shown.response.rect.bottom();
+    }
     if let Some(banner) = ui.workspace.banner() {
         let shown = egui::Panel::top("folder banner")
             .frame(egui::Frame::new().fill(egui::Color32::from_rgb(110, 80, 20)).inner_margin(6.0))
@@ -689,14 +719,6 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
         ui.refused = None;
     }
     let editable = ui.view.reloads_now();
-    // Who holds each model, read when the Editing tab opens and whenever the edit state changes.
-    if ui.tab == Tab::Editing && ui.workspace.has_folder() {
-        let stamp = ui.workspace.editing_file().and_then(|file| stamp_of(&file));
-        if ui.editors.is_none() || stamp != ui.editors_stamp {
-            ui.editors = Some(ui.workspace.editors());
-            ui.editors_stamp = stamp;
-        }
-    }
     let mut intervention = None;
     let mut attribute_change = None;
     let mut editors_action = None;
@@ -1440,11 +1462,20 @@ fn editing_tab(ui: &mut egui::Ui, opened: Option<&str>, editors: Option<&Result<
         ui.colored_label(egui::Color32::from_rgb(240, 200, 80), note);
         ui.add_space(4.0);
     }
-    let claim_lines = |ui: &mut egui::Ui, claim: &Claim| {
+    let claim_lines = |ui: &mut egui::Ui, path: &str, claim: &Claim| {
         let paused = if claim.paused { ", paused while you hold it" } else { "" };
         ui.label(format!("{} ({}), since {}{paused}", claim.agent, claim.client, claim.since));
         ui.label(format!("Goal: {}", claim.goal));
         ui.label(format!("Doing: {}", claim.doing));
+        ui.label(egui::RichText::new(format!("Last active {}", claim.last_active)).weak().small());
+        // What it has done so far, newest first, closed until asked for.
+        if claim.trail.len() > 1 {
+            egui::CollapsingHeader::new(format!("Activities ({})", claim.trail.len())).id_salt(("trail", path)).show(ui, |trail| {
+                for (doing, since) in &claim.trail {
+                    trail.label(format!("{since}  {doing}"));
+                }
+            });
+        }
     };
     match opened {
         None => {
@@ -1469,13 +1500,13 @@ fn editing_tab(ui: &mut egui::Ui, opened: Option<&str>, editors: Option<&Result<
                 None => {}
                 Some(claim) => {
                     ui.add_space(4.0);
-                    claim_lines(ui, claim);
+                    claim_lines(ui, path, claim);
                     ui.horizontal(|row| {
                         if !claim.paused && row.button("Take").on_hover_text("Take it now. The agent's claim is paused until you release it").clicked() {
                             asked = Some(EditAction::Take);
                         }
                         if row.button("Revoke").on_hover_text("End the agent's claim").clicked() {
-                            asked = Some(EditAction::Revoke);
+                            asked = Some(EditAction::Revoke(path.to_string()));
                         }
                         if row.button("Block").on_hover_text("Block this agent session from changing models in the folder").clicked() {
                             asked = Some(EditAction::Block(claim.agent.clone()));
@@ -1497,7 +1528,15 @@ fn editing_tab(ui: &mut egui::Ui, opened: Option<&str>, editors: Option<&Result<
                 ui.label("You hold it.");
             }
             if let Some(claim) = &file.claim {
-                claim_lines(ui, claim);
+                claim_lines(ui, &file.path, claim);
+                ui.horizontal(|row| {
+                    if row.button("Revoke").on_hover_text("End the agent's claim").clicked() {
+                        asked = Some(EditAction::Revoke(file.path.clone()));
+                    }
+                    if row.button("Block").on_hover_text("Block this agent session from changing models in the folder").clicked() {
+                        asked = Some(EditAction::Block(claim.agent.clone()));
+                    }
+                });
             }
         }
     }

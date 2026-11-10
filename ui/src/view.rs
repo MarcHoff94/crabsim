@@ -5,6 +5,7 @@ use crate::camera::Camera;
 pub use crabsim::time::{format_time, format_time_exact, parse_time};
 use crate::marks::Marks;
 pub use crate::marks::{Intervention, Mark};
+use crabsim_catalogue::bottleneck::{likely_bottleneck, LikelyBottleneck, Shares};
 use crabsim_model::State;
 use crabsim::{
     ModelDescription, ObjectKind, ObjectStatistics, SessionOutput, Picture, ProcessState, RunState, SessionStatus,
@@ -171,6 +172,8 @@ pub struct ViewState {
     /// Wall time and shown time while advancing, oldest first, over the last `ACHIEVED_WINDOW`.
     pace: VecDeque<(Duration, SimTime)>,
     selected: Option<u32>,
+    /// Whether the Results tab is open, which wants full states as a selection does.
+    results_open: bool,
     /// The last full state, for what only a full state says, such as statistics.
     details: Option<RunState>,
     /// Whether something since the last full state may have changed it at the same shown time.
@@ -295,6 +298,41 @@ impl Change {
     }
 }
 
+/// A Drain's line in the Results tab.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DrainResult {
+    pub id: u32,
+    pub name: String,
+    pub mus_in: u64,
+    pub throughput_per_hour: Option<f64>,
+    pub mean_lead_time: Option<SimTime>,
+}
+
+/// A Station's line in the Results tab: its shares of the time measured, from 0 to 1.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StationResult {
+    pub id: u32,
+    pub name: String,
+    pub busy: f64,
+    pub blocked: f64,
+    pub idle: f64,
+    pub failed: f64,
+    pub paused: f64,
+}
+
+/// What the Results tab shows, from the run's full state at `as_of`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Results {
+    pub as_of: SimTime,
+    /// When the statistics began: at Init, or when they were last cleared.
+    pub since: SimTime,
+    pub drains: Vec<DrainResult>,
+    /// In model order.
+    pub stations: Vec<StationResult>,
+    /// By the catalogue's rule, the same `find_bottleneck` gives agents.
+    pub bottleneck: Option<LikelyBottleneck>,
+}
+
 /// The interventions a Station offers, and which are on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Offered {
@@ -361,6 +399,7 @@ impl ViewState {
             end_time: None,
             model_changed: false,
             animate: true,
+            results_open: false,
         }
     }
 
@@ -788,10 +827,72 @@ impl ViewState {
     pub fn wants_state(&self, wall: Duration) -> bool {
         let out_of_date = self.details_stale
             || self.details.as_ref().is_none_or(|state| state.time != self.picture.shown() || !state.initialised);
-        self.selected.is_some()
+        (self.selected.is_some() || self.results_open)
             && self.initialised
             && out_of_date
             && self.last_request.is_none_or(|last| wall >= last + DETAILS_INTERVAL)
+    }
+
+    /// Notes whether the Results tab is open, so full states are asked for while it is.
+    pub fn set_results_open(&mut self, open: bool) {
+        self.results_open = open;
+    }
+
+    /// What the Results tab shows: each Drain's throughput and lead time, every Station's shares
+    /// of time, and the likely bottleneck, from the last full state of the run. `None` until one
+    /// has arrived after Init.
+    pub fn results(&self) -> Option<Results> {
+        let state = self.details.as_ref().filter(|state| state.initialised)?;
+        let mut shares = Vec::new();
+        let mut drains = Vec::new();
+        let mut stations = Vec::new();
+        for object in &state.objects {
+            let Some(view) = self.objects.get(object.id as usize) else { continue };
+            let statistics = &object.statistics;
+            let measured = statistics.measured_time().as_millis() as f64;
+            let share = |time: SimTime| if measured > 0.0 { time.as_millis() as f64 / measured } else { 0.0 };
+            let built_in = crate::help::built_in(view.kind);
+            shares.push(Shares {
+                name: view.name.clone(),
+                built_in: built_in.to_string(),
+                working: share(statistics.time_busy),
+                blocked: share(statistics.time_blocked),
+                idle: share(statistics.time_idle),
+                failed: share(statistics.time_failed),
+                paused: share(statistics.time_paused),
+            });
+            match view.kind {
+                ObjectKind::Drain => drains.push(DrainResult {
+                    id: object.id,
+                    name: view.name.clone(),
+                    mus_in: statistics.mus_in,
+                    throughput_per_hour: statistics.mus_per_hour(state.time),
+                    mean_lead_time: statistics.lead_time_mean(),
+                }),
+                ObjectKind::Station => stations.push(StationResult {
+                    id: object.id,
+                    name: view.name.clone(),
+                    busy: share(statistics.time_busy),
+                    blocked: share(statistics.time_blocked),
+                    idle: share(statistics.time_idle),
+                    failed: share(statistics.time_failed),
+                    paused: share(statistics.time_paused),
+                }),
+                _ => {}
+            }
+        }
+        let connections: Vec<(String, String)> = self
+            .connections
+            .iter()
+            .map(|connection| (self.objects[connection.from as usize].name.clone(), self.objects[connection.to as usize].name.clone()))
+            .collect();
+        Some(Results {
+            as_of: state.time,
+            since: state.statistics_since,
+            drains,
+            stations,
+            bottleneck: likely_bottleneck(&shares, &connections),
+        })
     }
 
     /// Notes that the window asked the session for a full state at wall time `wall`, so the

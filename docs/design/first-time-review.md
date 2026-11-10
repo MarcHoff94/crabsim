@@ -52,3 +52,20 @@ The owner went through findings 1 to 11 in a grilling session on 2026-11-09, and
 - A larger window or other scale factors.
 - Errors from a model, interventions, stepping and going back.
 - The agent's side: a first-time user who starts from an agent rather than the window.
+
+## Second walkthrough, after spec 78
+
+On 2026-11-10, at `master` after PR 85 (`736134e`), the same way: the window started as the README says, with no arguments, on the owner's PC at the default window size. `Documents\crabsim-models` already existed from trying PR 81, holding only the demo, so the window opened it rather than making it, which shows the same.
+
+**Result:** the goal is met in time. About a minute and a half after the window opened, the Results tab gave the demo's throughput, 185.0 an hour, and a likely bottleneck, Station 2, busy or stopped 89.3% of the time. Nothing on the way needed the docs: the canvas says to choose a model, the README says to press Start, hover text explains every control, and the tab names were enough to find the result.
+
+**But the answer is the wrong one.** It came from 18 simulated minutes. Raced to 30 days with Animate off the day before (PR 85), the same tab named Station 7, busy or stopped 86.7%. A newcomer reading the tab early gets a confident answer that a longer run reverses, and nothing in the window says the run is too short to trust, that the start of a run is unlike the rest (warm-up), or that one run of a model that fails at random is one sample.
+
+Findings:
+
+13. **Early results look as final as late ones.** The Results tab shows a likely bottleneck after any length of run, with no sign of how sure it is. Options for the next round: say how much simulated time the figures cover beside them, a note when it is short against the model's failure and repair times, a warm-up, or offering an experiment of several observations, which the catalogue already has, with `find_bottleneck` on it.
+14. **Going to a far time while animated is a trap.** Go to 30d with Animate on runs at the chosen speed, 12 hours at the starting 60 times, though the hover text says so. A newcomer who doesn't know to untick Animate first waits. The window could offer to race when the time gone to would take more than a minute or so.
+15. **The run controls jump sideways when a model opens.** "No model open" is replaced by the model's name, and the controls after it move by the difference, so a pointer aimed at Start before can land on Halt. Giving the name a fixed width, or putting it last, would keep them still.
+16. **Results show shown time to the millisecond,** such as "At 00:18:24.151", where seconds are enough while a run is going.
+
+Not covered this time: changing anything, the Agents tab, a model of the newcomer's own, and a true first start that makes the folder (PR 81's test covers that).

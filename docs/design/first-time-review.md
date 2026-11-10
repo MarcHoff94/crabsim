@@ -69,3 +69,5 @@ Findings:
 16. **Results show shown time to the millisecond,** such as "At 00:18:24.151", where seconds are enough while a run is going.
 
 Not covered this time: changing anything, the Agents tab, a model of the newcomer's own, and a true first start that makes the folder (PR 81's test covers that).
+
+The owner decided findings 13 to 16 on 2026-11-10, in the design round for building models: [spec issue 87](https://github.com/MarcHoff94/crabsim/issues/87). Findings 14 to 16 are its PR 1, and finding 13 its PR 2: confidence intervals in the Results tab from measuring periods within the run, shown once 5 periods are complete, "too close to call" while the bottleneck's interval overlaps the runner-up's, and a note while periods are short against the model's repair times. A warm-up and checking with an experiment go to the comparing round.

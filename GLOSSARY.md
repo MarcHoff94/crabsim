@@ -144,6 +144,13 @@ A material-flow object that takes MUs out of the model.
 **Capacity**:
 How many MUs a Station or Buffer can hold at the same time.
 
+**Connection**:
+The way from one material-flow object to another along which MUs pass. It is a thing of its own in a model, with its own properties: its exit, its place in the order its object offers MUs to its successors, its entrance, its place among the connections into the object it leads to, and a description. Moving along it takes no time: travel time belongs to objects such as a conveyor.
+_Avoid_: Edge (the graph view's word), link
+
+**Successor**:
+An object a connection leads to from a given object. The object it comes from is the successor's predecessor.
+
 ### Classes
 
 **Attribute**:
@@ -290,6 +297,10 @@ How many MUs per hour a Drain takes, measured from its first exit up to now, so 
 **Warm-up**:
 The start of a simulation run, left out of the statistics by clearing them when it ends. Clearing statistics changes nothing else in the run.
 _Avoid_: Reset (that returns every object to its default state)
+
+**Measuring period**:
+A stretch of simulated time whose figures count as one sample, so that one simulation run gives a confidence interval from the spread between its periods. Its length is a setting of the run, not part of the model, and an hour by default.
+_Avoid_: Batch (a batch start is a Station starting work on several MUs at once)
 
 **Recording**:
 Keeping the occurrences of chosen kinds from a simulation run. It is opt-in, and it is the only way to get data per MU.

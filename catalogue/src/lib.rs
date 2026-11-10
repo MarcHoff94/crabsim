@@ -18,6 +18,7 @@
 //! UI's catalogue holds an OS lock on `.crabsim/user.lock` while it lives, a second UI is refused,
 //! and the CLI may only read and run meanwhile (ADR 0011).
 
+pub mod bottleneck;
 mod compare;
 mod edit;
 mod editing;

@@ -155,6 +155,7 @@ fn the_shortest_inputs_an_operation_accepts_pass_its_input_schema() {
         ("run_status", json!({ "run": "run-1" })),
         ("cancel_run", json!({ "run": "run-1" })),
         ("run_results", json!({ "run": "run-1" })),
+        ("find_bottleneck", json!({ "run": "run-1" })),
         ("label_run", json!({ "run": "run-1" })),
         ("forget_run", json!({ "run": "run-1" })),
         ("query_results", json!({ "sql": "SELECT 1" })),

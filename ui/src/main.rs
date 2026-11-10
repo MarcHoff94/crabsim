@@ -142,6 +142,7 @@ fn main() {
             keep_changes: false,
             confirm_reset: None,
             help_open: false,
+            results_sort: SortBy::Model,
         })
         .insert_resource(Session(Mutex::new(session)))
         .insert_resource(WatchedFile(Arc::new(Mutex::new(Vec::new()))))
@@ -228,6 +229,8 @@ struct Ui {
     confirm_reset: Option<ResetAsk>,
     /// Whether the help on the selected object's states is open.
     help_open: bool,
+    /// How the Results tab sorts its Stations.
+    results_sort: SortBy,
 }
 
 /// What a Reset with changes asks before it goes ahead.
@@ -255,7 +258,18 @@ struct Moving {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tab {
     Inspector,
+    Results,
     Agents,
+}
+
+/// What the Results tab's Stations are sorted by, most first, or model order.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SortBy {
+    Model,
+    Busy,
+    Blocked,
+    Idle,
+    Failed,
 }
 
 /// A change to one attribute of the selected instance, asked for in the inspector.
@@ -775,10 +789,12 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
     let mut intervention = None;
     let mut attribute_change = None;
     let mut editors_action = None;
+    let mut results_chosen = None;
     let right = egui::Panel::right("inspector").exact_size(INSPECTOR_WIDTH).show(&mut root, |panel| {
         panel.horizontal(|row| {
             for (tab, label, hint) in [
                 (Tab::Inspector, "Inspector", "The object clicked on the canvas: its state, statistics and attributes"),
+                (Tab::Results, "Results", "The run so far: each Drain's throughput, every Station's shares of time, and the likely bottleneck"),
                 (Tab::Agents, "Agents", "The AI agents changing this folder's models, what they're doing, and your control of them"),
             ] {
                 if row.selectable_label(ui.tab == tab, label).on_hover_text(hint).clicked() && ui.tab != tab {
@@ -796,9 +812,15 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
                     attribute_change = attributes_section(panel, attributes, &mut ui.forms, editable, ui.refused.as_ref());
                 }
             }
+            Tab::Results => results_chosen = results_tab(panel, ui.view.results().as_ref(), &mut ui.results_sort),
             Tab::Agents => editors_action = agents_tab(panel, ui.workspace.opened(), ui.editors.as_ref(), ui.editors_note.as_deref()),
         });
     });
+    ui.view.set_results_open(ui.tab == Tab::Results);
+    if let Some(id) = results_chosen {
+        ui.view.select(Some(id));
+        ui.view.commanded(wall);
+    }
     // Taking a model from an agent asks first, naming it, its goal and what it's doing.
     if let Some(action) = editors_action {
         let shown = ui.editors.as_ref().and_then(|editors| editors.as_ref().ok()).cloned().unwrap_or_default();
@@ -1705,6 +1727,109 @@ fn confirm_taking(ctx: &egui::Context, claim: &Claim) -> Option<bool> {
         answer = Some(false);
     }
     answer
+}
+
+/// A share from 0 to 1 as the Results tab writes it.
+fn percent(share: f64) -> String {
+    format!("{:.1} %", share * 100.0)
+}
+
+/// The run so far: each Drain's throughput and lead time, the likely bottleneck with its
+/// neighbours as evidence, and every Station's shares of time, sorted by a column clicked.
+/// Returns an object whose name was clicked, to select it.
+fn results_tab(ui: &mut egui::Ui, results: Option<&crabsim_ui::view::Results>, sort: &mut SortBy) -> Option<u32> {
+    ui.heading("Results");
+    let Some(results) = results else {
+        ui.label(egui::RichText::new("Start the model, or go to a time such as 8:00:00, and its results show here.").weak());
+        return None;
+    };
+    let mut chosen = None;
+    let pick = |ui: &mut egui::Ui, id: u32, name: &str, chosen: &mut Option<u32>| {
+        if ui.link(name).on_hover_text("Select it on the canvas").clicked() {
+            *chosen = Some(id);
+        }
+    };
+    ui.label(egui::RichText::new(format!("At {}, measured since {}", format_time_exact(results.as_of), format_time(results.since))).weak());
+    ui.add_space(6.0);
+
+    ui.label(egui::RichText::new("Drains").strong());
+    egui::Grid::new("drains").num_columns(3).spacing([10.0, 2.0]).striped(true).show(ui, |grid| {
+        grid.label("");
+        grid.label("Throughput").on_hover_text("MUs an hour, from the first one in up to now");
+        grid.label("Lead time").on_hover_text("How long an MU spends in the model on average, from leaving its Source to entering the Drain");
+        grid.end_row();
+        for drain in &results.drains {
+            pick(grid, drain.id, &drain.name, &mut chosen);
+            grid.label(drain.throughput_per_hour.map_or_else(|| "–".to_string(), |per_hour| format!("{per_hour:.1} an hour")));
+            grid.label(drain.mean_lead_time.map_or_else(|| "–".to_string(), format_time_exact));
+            grid.end_row();
+        }
+    });
+    ui.add_space(8.0);
+
+    ui.label(egui::RichText::new("Likely bottleneck").strong()).on_hover_text(crabsim_catalogue::bottleneck::RULE);
+    match &results.bottleneck {
+        None => {
+            ui.label(egui::RichText::new("The model has no Station.").weak());
+        }
+        Some(likely) => {
+            let id = results.stations.iter().find(|station| station.name == likely.instance).map(|station| station.id);
+            ui.horizontal(|row| {
+                match id {
+                    Some(id) => pick(row, id, &likely.instance, &mut chosen),
+                    None => {
+                        row.label(&likely.instance);
+                    }
+                }
+                row.label(format!("busy or stopped {}", percent(likely.not_idle_share)));
+            });
+            for (name, blocked) in &likely.upstream {
+                ui.label(format!("Upstream {name}: blocked {}", percent(*blocked)));
+            }
+            for (name, idle) in &likely.downstream {
+                ui.label(format!("Downstream {name}: idle {}", percent(*idle)));
+            }
+            ui.label(egui::RichText::new("A bottleneck's upstream is mostly blocked and its downstream mostly idle. Make sure by running it faster and comparing.").weak());
+        }
+    }
+    ui.add_space(8.0);
+
+    ui.label(egui::RichText::new("Stations").strong());
+    let mut stations: Vec<&crabsim_ui::view::StationResult> = results.stations.iter().collect();
+    let key = |station: &crabsim_ui::view::StationResult| match *sort {
+        SortBy::Model => 0.0,
+        SortBy::Busy => station.busy,
+        SortBy::Blocked => station.blocked,
+        SortBy::Idle => station.idle,
+        SortBy::Failed => station.failed + station.paused,
+    };
+    stations.sort_by(|a, b| key(b).total_cmp(&key(a)));
+    egui::Grid::new("stations").num_columns(5).spacing([4.0, 2.0]).striped(true).show(ui, |grid| {
+        if grid.selectable_label(*sort == SortBy::Model, "Station").on_hover_text("In model order").clicked() {
+            *sort = SortBy::Model;
+        }
+        for (by, label, shade, hint) in [
+            (SortBy::Busy, "Busy", Shade::Busy, "Working on an MU. Click to sort"),
+            (SortBy::Blocked, "Blocked", Shade::Blocked, "Holding a finished MU no successor can take. Click to sort"),
+            (SortBy::Idle, "Idle", Shade::Idle, "Waiting for an MU. Click to sort"),
+            (SortBy::Failed, "Stop", Shade::Failed, "Stopped: failed, under a forced failure or paused. Click to sort"),
+        ] {
+            let text = egui::RichText::new(label).color(shade_colour32(shade));
+            if grid.selectable_label(*sort == by, text).on_hover_text(hint).clicked() {
+                *sort = by;
+            }
+        }
+        grid.end_row();
+        for station in stations {
+            pick(grid, station.id, &station.name, &mut chosen);
+            grid.label(percent(station.busy));
+            grid.label(percent(station.blocked));
+            grid.label(percent(station.idle));
+            grid.label(percent(station.failed + station.paused));
+            grid.end_row();
+        }
+    });
+    chosen
 }
 
 /// Who holds the open model, with an agent's goal and what it's doing, the other files someone

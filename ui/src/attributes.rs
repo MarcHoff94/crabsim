@@ -7,6 +7,39 @@ use crabsim::time::parse_time;
 use crabsim_model::State;
 use serde_json::{json, Map, Value};
 
+/// A model file's value as one short line, such as "2 × 1.5 × 1.5 m" or "95 % available, repair
+/// 00:01:00", for showing a class's values without fields.
+pub fn summary(value: &Value) -> String {
+    let number = |value: &Value| value.as_f64().map_or_else(|| value.to_string(), |n| format!("{n}"));
+    let text = |value: &Value| value.as_str().map_or_else(|| value.to_string(), str::to_string);
+    let Value::Object(fields) = value else {
+        return text(value);
+    };
+    if let (Some(length), Some(width), Some(height)) = (fields.get("length"), fields.get("width"), fields.get("height")) {
+        let mut line = format!("{} × {} × {} m", number(length), number(width), number(height));
+        if let Some(turned) = fields.get("rotation_degrees").and_then(Value::as_f64).filter(|&turned| turned != 0.0) {
+            line += &format!(", turned {turned}°");
+        }
+        return line;
+    }
+    if let (Some(availability), Some(repair)) = (fields.get("availability").and_then(Value::as_f64), fields.get("repair_time")) {
+        let repair = if let Some(time) = repair.get("constant") {
+            format!("repair {}", text(time))
+        } else if let Some(spread) = repair.get("uniform") {
+            format!("repair {} to {}", text(&spread["min"]), text(&spread["max"]))
+        } else if let Some(spread) = repair.get("normal") {
+            format!("repair mean {} (normal, sd {})", text(&spread["mean"]), text(&spread["std"]))
+        } else if let Some(spread) = repair.get("erlang") {
+            format!("repair mean {} (Erlang, k {})", text(&spread["mean"]), number(&spread["k"]))
+        } else {
+            repair.to_string()
+        };
+        return format!("{} % available, {repair}", (availability * 1000.0).round() / 10.0);
+    }
+    // State notes, by state.
+    format!("notes on {}", fields.keys().cloned().collect::<Vec<_>>().join(", "))
+}
+
 /// How a repair time is spread, as a model file names it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RepairKind {

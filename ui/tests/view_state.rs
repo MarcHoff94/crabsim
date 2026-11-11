@@ -245,6 +245,19 @@ fn the_camera_starts_with_the_whole_model_in_view() {
 }
 
 #[test]
+fn a_small_or_empty_model_is_fitted_into_at_least_20_metres_to_build_on() {
+    let canvas = point(1000.0, 500.0);
+    for bounds in [Rect { min: point(0.0, 0.0), max: point(0.0, 0.0) }, Rect { min: point(3.0, 1.0), max: point(5.0, 2.0) }] {
+        let camera = Camera::fitting(bounds, canvas);
+        let left = camera.to_world(point(0.0, 250.0), canvas);
+        let right = camera.to_world(point(1000.0, 250.0), canvas);
+        let top = camera.to_world(point(500.0, 0.0), canvas);
+        let bottom = camera.to_world(point(500.0, 500.0), canvas);
+        assert!(right.x - left.x >= 20.0 && top.y - bottom.y >= 20.0, "{bounds:?} shows {left:?} to {right:?}, {bottom:?} to {top:?}");
+    }
+}
+
+#[test]
 fn the_screen_is_upside_down_from_the_floor() {
     let camera = Camera { centre: point(0.0, 0.0), pixels_per_metre: 10.0 };
     let canvas = point(200.0, 100.0);

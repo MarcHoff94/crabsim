@@ -32,7 +32,7 @@ use crabsim_ui::view::{
 use crabsim_ui::attributes::{Form, RepairKind};
 use crabsim_ui::editing::{ActRefusal, Claim, EditAction, Editors};
 use crabsim_ui::help;
-use crabsim_ui::workspace::{AttributeView, ModelChange, Refusal, ValueFrom, Workspace};
+use crabsim_ui::workspace::{AttributeView, ClassEntry, ModelChange, Refusal, ValueFrom, Workspace};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -149,6 +149,13 @@ fn main() {
             confirm_reset: None,
             help_open: false,
             results_sort: SortBy::Model,
+            confirm_building: None,
+            new_model: None,
+            duplicating: None,
+            class_selected: None,
+            placing: None,
+            name_text: (None, String::new()),
+            select_name: None,
         })
         .insert_resource(Session(Mutex::new(session)))
         .insert_resource(WatchedFile(Arc::new(Mutex::new(Vec::new()))))
@@ -242,6 +249,48 @@ struct Ui {
     help_open: bool,
     /// How the Results tab sorts its Stations.
     results_sort: SortBy,
+    /// A building action refused because an agent holds the file or it changed outside crabsim,
+    /// waiting for the user to make it anyway or leave it, with why it was refused.
+    confirm_building: Option<(Building, Refusal)>,
+    /// The name typed for a new model file, while the New model dialog is open.
+    new_model: Option<String>,
+    /// The model file being duplicated and the name typed for the copy, while asking for it.
+    duplicating: Option<(String, String)>,
+    /// The class selected in the Classes panel, whose values the inspector shows instead of an
+    /// object's, and those values as read.
+    class_selected: Option<(String, Result<Vec<AttributeView>, String>)>,
+    /// The class being dragged from the Classes panel to place an instance of it.
+    placing: Option<String>,
+    /// What has been typed into the inspector's name field, and for which object.
+    name_text: (Option<u32>, String),
+    /// An instance to select once the model it was just saved into is drawn, by name.
+    select_name: Option<String>,
+}
+
+/// A change to the model's structure, made with no run in progress, each one `edit_model` batch.
+#[derive(Clone, Debug)]
+enum Building {
+    /// An instance of the class at this point on the floor.
+    AddInstance { class: String, at: crabsim::Position },
+    RenameInstance { name: String, to: String },
+}
+
+impl Building {
+    /// What it does, for a question or an error, such as "Placing a Station".
+    fn what(&self) -> String {
+        match self {
+            Building::AddInstance { class, .. } => format!("Placing a {class}"),
+            Building::RenameInstance { name, to } => format!("Renaming {name} to {to}"),
+        }
+    }
+
+    /// Makes the change, giving the instance to select once the model is drawn again, if any.
+    fn apply(&self, workspace: &mut Workspace, take_over: bool) -> Result<Option<String>, Refusal> {
+        match self {
+            Building::AddInstance { class, at } => workspace.add_instance(class, *at, take_over).map(Some),
+            Building::RenameInstance { name, to } => workspace.rename_instance(name, to, take_over).map(|()| Some(to.clone())),
+        }
+    }
 }
 
 /// What a Reset with changes asks before it goes ahead.
@@ -512,7 +561,9 @@ fn canvas_input(
     let Some(camera) = ui.camera else { return };
     let floor = |at: Vec2| camera.to_world(Point { x: (at.x - canvas.min.x) as f64, y: (at.y - canvas.min.y) as f64 }, size);
     if buttons.just_pressed(MouseButton::Left) && ui.confirm_move.is_none() {
-        ui.press = window.cursor_position().map(|at| (at, 0.0));
+        // Only a press on the canvas is the canvas's: one on a panel, which egui may not have
+        // claimed yet when the pointer arrived and pressed within one frame, leaves it alone.
+        ui.press = window.cursor_position().filter(|at| canvas.contains(egui::pos2(at.x, at.y))).map(|at| (at, 0.0));
         // Before Init or after Reset, pressing on an object grips it, to move it.
         let movable = ui.view.reloads_now() && ui.workspace.opened().is_some();
         ui.moving = ui.press.filter(|_| movable).and_then(|(at, _)| {
@@ -552,7 +603,7 @@ fn canvas_input(
         }
     }
     let Some(camera) = ui.camera.as_mut() else { return };
-    let panning = ui.moving.is_none() && buttons.pressed(MouseButton::Left);
+    let panning = ui.moving.is_none() && ui.press.is_some() && buttons.pressed(MouseButton::Left);
     let dragging = panning || [MouseButton::Right, MouseButton::Middle].iter().any(|&b| buttons.pressed(b));
     if dragging && motion.delta != Vec2::ZERO {
         camera.pan(Point { x: motion.delta.x as f64, y: motion.delta.y as f64 });
@@ -801,6 +852,15 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
     let mut attribute_change = None;
     let mut editors_action = None;
     let mut results_chosen = None;
+    let mut renamed = None;
+    // What has been typed for a name belongs to the object it was typed for.
+    if ui.name_text.0 != selected {
+        let name = selected.map_or_else(String::new, |id| ui.view.objects()[id as usize].name.clone());
+        ui.name_text = (selected, name);
+    }
+    if selected.is_some() {
+        ui.class_selected = None;
+    }
     let right = egui::Panel::right("inspector").exact_size(INSPECTOR_WIDTH).show(&mut root, |panel| {
         panel.horizontal(|row| {
             for (tab, label, hint) in [
@@ -817,12 +877,18 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
         });
         panel.separator();
         egui::ScrollArea::vertical().show(panel, |panel| match ui.tab {
-            Tab::Inspector => {
-                intervention = inspector(panel, inspection.as_ref(), &mut ui.process_time_text.1, &mut ui.help_open);
-                if let Some((_, attributes)) = &ui.attributes {
-                    attribute_change = attributes_section(panel, attributes, &mut ui.forms, editable, ui.refused.as_ref());
+            Tab::Inspector => match (&ui.class_selected, selected) {
+                (Some((class, values)), None) => class_view(panel, class, values, ui.workspace.classes().iter().find(|entry| &entry.name == class)),
+                _ => {
+                    intervention = inspector(panel, inspection.as_ref(), &mut ui.process_time_text.1, &mut ui.help_open);
+                    if let Some(id) = selected {
+                        renamed = name_field(panel, &ui.view.objects()[id as usize].name, &mut ui.name_text.1, editable);
+                    }
+                    if let Some((_, attributes)) = &ui.attributes {
+                        attribute_change = attributes_section(panel, attributes, &mut ui.forms, editable, ui.refused.as_ref());
+                    }
                 }
-            }
+            },
             Tab::Results => {
                 let results = ui.view.results().map(|results| (ui.view.results_time(&results), results));
                 results_chosen = results_tab(panel, results.as_ref().map(|(at, results)| (at.as_str(), results)), &mut ui.results_sort);
@@ -890,14 +956,47 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
         };
         ui.view.commanded(wall);
     }
+    if let (Some(to), Some(id)) = (renamed, selected) {
+        let name = ui.view.objects()[id as usize].name.clone();
+        build(ui, Building::RenameInstance { name, to }, false);
+        ui.view.commanded(wall);
+    }
     let mut chosen = None;
     let mut panel_error = None;
+    let mut models_asked = None;
+    let mut class_asked = None;
     let mut left_edge = ctx.viewport_rect().left();
+    let building = ui.view.allows_building();
     if ui.workspace.has_folder() {
         let left = egui::Panel::left("models").exact_size(MODELS_WIDTH).show(&mut root, |panel| {
-            egui::ScrollArea::vertical().show(panel, |panel| (chosen, panel_error) = models_panel(panel, &mut ui.workspace));
+            egui::ScrollArea::vertical().show(panel, |panel| {
+                (chosen, panel_error) = models_panel(panel, &mut ui.workspace, building, &mut models_asked);
+                if ui.workspace.opened().is_some() {
+                    let selected_class = ui.class_selected.as_ref().map(|(class, _)| class.as_str());
+                    class_asked = classes_panel(panel, &ui.workspace.classes(), selected_class, building);
+                }
+            });
         });
         left_edge = left.response.rect.right();
+    }
+    match models_asked {
+        Some(ModelsAsk::New) => ui.new_model = Some(String::new()),
+        Some(ModelsAsk::Duplicate(path)) => {
+            let stem = path.strip_suffix(".json").unwrap_or(&path);
+            ui.duplicating = Some((path.clone(), format!("{stem} copy")));
+        }
+        None => {}
+    }
+    match class_asked {
+        Some(ClassAsk::Select(class)) => {
+            let values = ui.workspace.class_attributes(&class);
+            ui.class_selected = Some((class, values));
+            ui.view.select(None);
+            ui.tab = Tab::Inspector;
+            ui.view.commanded(wall);
+        }
+        Some(ClassAsk::Place(class)) => ui.placing = Some(class),
+        None => {}
     }
     if let Some(error) = panel_error {
         ui.view.commanded(wall);
@@ -908,6 +1007,33 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
         egui::pos2(right.response.rect.left(), ctx.viewport_rect().bottom()),
     );
     ui.canvas = Some(canvas);
+    place_dragged_class(&ctx, ui, canvas);
+    if let Some(path) = ask_new_model(&ctx, ui) {
+        match ui.workspace.new_model(&path) {
+            Ok(path) => open_model(ui, &session, &path, wall),
+            Err(refusal) => ui.view.show_error(format!("The new model wasn't made: {refusal}")),
+        }
+        ui.view.commanded(wall);
+    }
+    if let Some((from, to)) = ask_duplicate(&ctx, ui) {
+        if let Err(refusal) = ui.workspace.duplicate_model(&from, &to) {
+            ui.view.show_error(format!("{from} wasn't duplicated: {refusal}"));
+        }
+        ui.view.commanded(wall);
+    }
+    if let Some((building, refusal)) = ui.confirm_building.clone()
+        && let Some(anyway) = confirm_building(&ctx, &building, &refusal)
+    {
+        ui.confirm_building = None;
+        if anyway {
+            let outside = matches!(refusal, Refusal::ChangedOutside(_));
+            match if outside { ui.workspace.adopt().map_err(Refusal::Invalid) } else { Ok(()) } {
+                Ok(()) => build(ui, building, !outside),
+                Err(refusal) => ui.view.show_error(format!("{} didn't happen: {refusal}", building.what())),
+            }
+        }
+        ui.view.commanded(wall);
+    }
     hover_tooltip(&ctx, ui, canvas);
     help_window(&ctx, ui, canvas);
 
@@ -1041,7 +1167,11 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
     }
 
     if !ui.view.has_model() {
-        let hint = if ui.workspace.has_folder() { "Choose a model from the list on the left" } else { "No models folder is open" };
+        let hint = match (ui.workspace.has_folder(), ui.workspace.opened().is_some()) {
+            (false, _) => "No models folder is open",
+            (true, false) => "Choose a model from the list on the left",
+            (true, true) => "Drag a class from the Classes panel onto the canvas to place one",
+        };
         ctx.layer_painter(egui::LayerId::new(egui::Order::Middle, egui::Id::new("no model"))).text(
             canvas.center(),
             egui::Align2::CENTER_CENTER,
@@ -1095,6 +1225,10 @@ fn replace_session(ui: &mut Ui, session: &Session, new_model: bool, wall: Durati
         let name = ui.view.selected().map(|id| ui.view.objects()[id as usize].name.clone());
         view.select(name.and_then(|name| view.objects().iter().find(|object| object.name == name).map(|object| object.id)));
     }
+    // An instance just placed or renamed is selected, found by its name.
+    if let Some(name) = ui.select_name.take() {
+        view.select(view.objects().iter().find(|object| object.name == name).map(|object| object.id));
+    }
     let fresh = ui.workspace.session(WallClock::new());
     let settled = fresh
         .set_speed(view.speed())
@@ -1112,6 +1246,11 @@ fn replace_session(ui: &mut Ui, session: &Session, new_model: bool, wall: Durati
     if new_model {
         ui.camera_moved = false;
         ui.camera = None;
+        ui.class_selected = None;
+    } else if let Some((class, _)) = ui.class_selected.take() {
+        // The same model, changed: the class's values are read again, if it's still there.
+        let values = ui.workspace.class_attributes(&class);
+        ui.class_selected = values.is_ok().then_some((class, values));
     }
     ui.rebuild_scene = true;
     ui.view.commanded(wall);
@@ -1211,13 +1350,20 @@ fn confirm_replacing(ctx: &egui::Context, ui: &mut Ui) -> Option<String> {
 /// The folder's model files, each marked with how many problems it has, whether the one open was
 /// changed outside crabsim, and why the one last chosen can't run. Returns the model clicked, if
 /// any, and an error to show.
-fn models_panel(ui: &mut egui::Ui, workspace: &mut Workspace) -> (Option<String>, Option<String>) {
+fn models_panel(ui: &mut egui::Ui, workspace: &mut Workspace, building: bool, asked: &mut Option<ModelsAsk>) -> (Option<String>, Option<String>) {
     let mut chosen = None;
     let mut error = None;
     ui.horizontal(|row| {
         row.heading("Models");
         if row.small_button("Refresh").on_hover_text("List the folder's model files again").clicked() {
             workspace.refresh();
+        }
+        let new = row
+            .add_enabled(building, egui::Button::new("New model").small())
+            .on_hover_text("Make an empty model file in this folder and open it, to build on")
+            .on_disabled_hover_text(RESET_FIRST);
+        if new.clicked() {
+            *asked = Some(ModelsAsk::New);
         }
     });
     if workspace.models().is_empty() {
@@ -1227,13 +1373,23 @@ fn models_panel(ui: &mut egui::Ui, workspace: &mut Workspace) -> (Option<String>
         let open = workspace.opened() == Some(entry.path.as_str());
         let label = if entry.problems > 0 { format!("⚠ {}  ({})", entry.path, entry.problems) } else { entry.path.clone() };
         let clicked = ui.selectable_label(open, label).on_hover_text(if entry.problems > 0 {
-            format!("{} problem{}: it can't run until they are fixed", entry.problems, plural(entry.problems))
+            format!("{} problem{}: it can't run until they are fixed. Right-click to duplicate it", entry.problems, plural(entry.problems))
         } else {
-            "Click to run it".to_string()
+            "Click to run it, right-click to duplicate it".to_string()
         });
         if clicked.clicked() && !open {
             chosen = Some(entry.path.clone());
         }
+        clicked.context_menu(|menu| {
+            let duplicate = menu
+                .add_enabled(building, egui::Button::new("Duplicate…"))
+                .on_hover_text("Copy this model file under a new name, to try a variant")
+                .on_disabled_hover_text(RESET_FIRST);
+            if duplicate.clicked() {
+                *asked = Some(ModelsAsk::Duplicate(entry.path.clone()));
+                menu.close();
+            }
+        });
     }
     if workspace.changed_outside() {
         ui.add_space(8.0);
@@ -1261,6 +1417,250 @@ fn models_panel(ui: &mut egui::Ui, workspace: &mut Workspace) -> (Option<String>
         }
     }
     (chosen, error)
+}
+
+/// What the Models panel asks for besides opening a model.
+enum ModelsAsk {
+    New,
+    /// Duplicating this model file.
+    Duplicate(String),
+}
+
+/// What the Classes panel asks for.
+enum ClassAsk {
+    /// Showing the class's values in the inspector.
+    Select(String),
+    /// Placing an instance of the class where it is dropped on the canvas.
+    Place(String),
+}
+
+/// Why a building control is greyed out during a run.
+const RESET_FIRST: &str = "Reset first to change the model";
+
+/// The classes an instance can be placed from, as a tree by inheritance. Clicking one shows its
+/// values in the inspector, and dragging one onto the canvas places an instance of it.
+fn classes_panel(ui: &mut egui::Ui, classes: &[ClassEntry], selected: Option<&str>, building: bool) -> Option<ClassAsk> {
+    let mut asked = None;
+    ui.add_space(8.0);
+    ui.separator();
+    ui.heading("Classes");
+    for entry in classes {
+        ui.horizontal(|row| {
+            row.add_space(14.0 * entry.depth as f32);
+            let text = egui::RichText::new(&entry.name);
+            let text = if entry.built_in { text.strong() } else { text };
+            let text = if selected == Some(entry.name.as_str()) { text.background_color(row.visuals().selection.bg_fill) } else { text };
+            let hint = if building {
+                "Drag it onto the canvas to place one, or click to see its values"
+            } else {
+                "Click to see its values. Reset first to place one"
+            };
+            let label = row.add(egui::Label::new(text).selectable(false).sense(egui::Sense::click_and_drag())).on_hover_text(hint);
+            if building && label.drag_started() {
+                asked = Some(ClassAsk::Place(entry.name.clone()));
+            } else if label.clicked() {
+                asked = Some(ClassAsk::Select(entry.name.clone()));
+            }
+            if label.hovered() && building {
+                row.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+            }
+        });
+    }
+    asked
+}
+
+/// A class's values in the inspector, each with where it comes from, read-only.
+fn class_view(ui: &mut egui::Ui, class: &str, values: &Result<Vec<AttributeView>, String>, entry: Option<&ClassEntry>) {
+    ui.heading("Class");
+    ui.label(egui::RichText::new(class).strong().size(16.0));
+    match entry.and_then(|entry| entry.parent.as_deref()) {
+        Some(parent) => ui.label(egui::RichText::new(format!("Derived from {parent}")).weak()),
+        None => ui.label(egui::RichText::new("Built in").weak()),
+    };
+    ui.label(egui::RichText::new("Drag it from the Classes panel onto the canvas to place one.").weak());
+    ui.add_space(8.0);
+    let values = match values {
+        Ok(values) => values,
+        Err(error) => {
+            ui.label(egui::RichText::new(error).weak());
+            return;
+        }
+    };
+    for view in values {
+        let from = match &view.from {
+            ValueFrom::Instance => "set here".to_string(),
+            ValueFrom::Class(owner) if owner == class => "set here".to_string(),
+            ValueFrom::Class(owner) => format!("from class {owner}"),
+            ValueFrom::BuiltIn => "built in".to_string(),
+            ValueFrom::NotSet => "not set".to_string(),
+        };
+        ui.add_space(4.0);
+        ui.horizontal(|row| {
+            row.label(egui::RichText::new(attribute_label(&view.attribute)).strong());
+            row.label(egui::RichText::new(from).weak().small());
+        });
+        if let Some(value) = &view.value {
+            ui.add(egui::Label::new(crabsim_ui::attributes::summary(value)).wrap());
+        }
+    }
+}
+
+/// The selected instance's name, which can be changed with no run in progress. Returns a new name
+/// once typed and confirmed with Enter or by leaving the field.
+fn name_field(ui: &mut egui::Ui, name: &str, text: &mut String, editable: bool) -> Option<String> {
+    if !editable {
+        return None;
+    }
+    let mut renamed = None;
+    ui.add_space(4.0);
+    ui.horizontal(|row| {
+        row.label("Name").on_hover_text("The instance's name in the model file. Its connections keep it.");
+        let field = row.add(egui::TextEdit::singleline(text).desired_width(170.0));
+        if field.lost_focus() {
+            let typed = text.trim().to_string();
+            if !typed.is_empty() && typed != name {
+                renamed = Some(typed);
+            } else {
+                *text = name.to_string();
+            }
+        }
+    });
+    renamed
+}
+
+/// Makes a building change. While an agent holds the file, or when it changed outside crabsim, it
+/// asks whether to make it anyway, and any other refusal says why in the banner.
+fn build(ui: &mut Ui, building: Building, take_over: bool) {
+    match building.apply(&mut ui.workspace, take_over) {
+        // The window picks up the saved file next frame and draws the model again.
+        Ok(select) => ui.select_name = select,
+        Err(refusal @ (Refusal::NotEditor(_) | Refusal::ChangedOutside(_))) => ui.confirm_building = Some((building, refusal)),
+        Err(refusal) => ui.view.show_error(format!("{} didn't happen: {refusal}", building.what())),
+    }
+}
+
+/// Asks whether to make a refused building change anyway. `Some(true)` to make it, `Some(false)`
+/// to leave it.
+fn confirm_building(ctx: &egui::Context, building: &Building, refused: &Refusal) -> Option<bool> {
+    let outside = matches!(refused, Refusal::ChangedOutside(_));
+    let mut answer = None;
+    let modal = egui::Modal::new(egui::Id::new("confirm building")).show(ctx, |modal| {
+        modal.set_max_width(420.0);
+        modal.heading(format!("{} anyway?", building.what()));
+        modal.label(refused.to_string());
+        modal.label(if outside {
+            "Adopting it accepts the file as it is now, then makes the change."
+        } else {
+            "Changing it anyway makes this one change, and the agent keeps its right."
+        });
+        modal.add_space(8.0);
+        modal.horizontal(|row| {
+            if row.button(if outside { "Adopt and change" } else { "Change anyway" }).clicked() {
+                answer = Some(true);
+            }
+            if row.button("Leave it").clicked() {
+                answer = Some(false);
+            }
+        });
+    });
+    if modal.should_close() && answer.is_none() {
+        answer = Some(false);
+    }
+    answer
+}
+
+/// While a class is dragged from the Classes panel, shows its name at the pointer, and places an
+/// instance of it where it is let go over the canvas. Let go anywhere else, nothing happens.
+fn place_dragged_class(ctx: &egui::Context, ui: &mut Ui, canvas: egui::Rect) {
+    let Some(class) = ui.placing.clone() else { return };
+    let pointer = ctx.input(|input| input.pointer.latest_pos());
+    if let Some(at) = pointer {
+        ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
+        ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("placing"))).text(
+            at + egui::vec2(14.0, 4.0),
+            egui::Align2::LEFT_CENTER,
+            format!("+ {class}"),
+            egui::FontId::proportional(14.0),
+            egui::Color32::WHITE,
+        );
+    }
+    if !ctx.input(|input| input.pointer.any_released()) {
+        return;
+    }
+    ui.placing = None;
+    let (Some(at), Some(camera)) = (pointer, ui.camera) else { return };
+    if !canvas.contains(at) {
+        return;
+    }
+    let size = Point { x: canvas.width() as f64, y: canvas.height() as f64 };
+    let floor = camera.to_world(Point { x: (at.x - canvas.min.x) as f64, y: (at.y - canvas.min.y) as f64 }, size);
+    // The view stays where it is, so the next drop lands where it's aimed.
+    ui.camera_moved = true;
+    build(ui, Building::AddInstance { class, at: crabsim::Position { x: floor.x, y: floor.y, z: 0.0 } }, false);
+}
+
+/// Asks for a new model file's name while the dialog is open. Returns the name once confirmed.
+fn ask_new_model(ctx: &egui::Context, ui: &mut Ui) -> Option<String> {
+    let typed = ui.new_model.as_mut()?;
+    let mut answer = None;
+    let modal = egui::Modal::new(egui::Id::new("new model")).show(ctx, |modal| {
+        modal.set_max_width(420.0);
+        modal.heading("New model");
+        modal.label("A file name in this models folder, such as press line or plant/press line.");
+        let field = modal.add(egui::TextEdit::singleline(typed).hint_text("press line").desired_width(300.0));
+        // Enter takes the focus away, so the field is given it only when nothing has it yet.
+        let entered = field.lost_focus() && modal.input(|input| input.key_pressed(egui::Key::Enter));
+        if !entered && modal.memory(|memory| memory.focused().is_none()) {
+            field.request_focus();
+        }
+        modal.add_space(8.0);
+        modal.horizontal(|row| {
+            if (row.add_enabled(!typed.trim().is_empty(), egui::Button::new("Make it")).clicked() || entered) && !typed.trim().is_empty() {
+                answer = Some(Some(typed.trim().to_string()));
+            }
+            if row.button("Cancel").clicked() {
+                answer = Some(None);
+            }
+        });
+    });
+    if modal.should_close() && answer.is_none() {
+        answer = Some(None);
+    }
+    let answer = answer?;
+    ui.new_model = None;
+    answer
+}
+
+/// Asks for the copy's name while duplicating a model file. Returns the file and the copy's name
+/// once confirmed.
+fn ask_duplicate(ctx: &egui::Context, ui: &mut Ui) -> Option<(String, String)> {
+    let (from, typed) = ui.duplicating.as_mut()?;
+    let mut answer = None;
+    let modal = egui::Modal::new(egui::Id::new("duplicate model")).show(ctx, |modal| {
+        modal.set_max_width(420.0);
+        modal.heading(format!("Duplicate {from}"));
+        modal.label("The copy's file name in this models folder.");
+        let field = modal.add(egui::TextEdit::singleline(typed).desired_width(300.0));
+        let entered = field.lost_focus() && modal.input(|input| input.key_pressed(egui::Key::Enter));
+        if !entered && modal.memory(|memory| memory.focused().is_none()) {
+            field.request_focus();
+        }
+        modal.add_space(8.0);
+        modal.horizontal(|row| {
+            if (row.add_enabled(!typed.trim().is_empty(), egui::Button::new("Duplicate")).clicked() || entered) && !typed.trim().is_empty() {
+                answer = Some(Some((from.clone(), typed.trim().to_string())));
+            }
+            if row.button("Cancel").clicked() {
+                answer = Some(None);
+            }
+        });
+    });
+    if modal.should_close() && answer.is_none() {
+        answer = Some(None);
+    }
+    let answer = answer?;
+    ui.duplicating = None;
+    answer
 }
 
 /// What to send for a step back the view has decided on: the step itself, a question to the

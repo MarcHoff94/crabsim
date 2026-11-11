@@ -316,3 +316,17 @@ fn dimensions_go_round_and_leave_out_no_rotation() {
     typed(&mut form, &["wide"]);
     assert!(form.value().is_err());
 }
+
+#[test]
+fn a_value_reads_as_one_short_line_for_a_class_shown_in_the_inspector() {
+    use crabsim_ui::attributes::summary;
+    assert_eq!(summary(&json!("00:00:45")), "00:00:45");
+    assert_eq!(summary(&json!(0)), "0");
+    assert_eq!(summary(&json!({ "length": 2.0, "width": 1.5, "height": 1.5 })), "2 × 1.5 × 1.5 m");
+    assert_eq!(summary(&json!({ "length": 2.0, "width": 1.0, "height": 1.0, "rotation_degrees": 90.0 })), "2 × 1 × 1 m, turned 90°");
+    assert_eq!(summary(&json!({ "availability": 0.95, "repair_time": { "constant": "00:01:00" } })), "95 % available, repair 00:01:00");
+    assert_eq!(summary(&json!({ "availability": 0.9, "repair_time": { "erlang": { "mean": "00:05:00", "k": 2 } } })), "90 % available, repair mean 00:05:00 (Erlang, k 2)");
+    assert_eq!(summary(&json!({ "availability": 0.9, "repair_time": { "uniform": { "min": "0:10", "max": "0:20" } } })), "90 % available, repair 0:10 to 0:20");
+    assert_eq!(summary(&json!({ "availability": 0.9, "repair_time": { "normal": { "mean": "1:00", "std": "0:10" } } })), "90 % available, repair mean 1:00 (normal, sd 0:10)");
+    assert_eq!(summary(&json!({ "blocked": "waits for the crane", "failed": "spindle" })), "notes on blocked, failed");
+}

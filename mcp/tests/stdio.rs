@@ -124,10 +124,12 @@ impl Drop for Server {
     }
 }
 
-const SMALL: &str = r#"{"format_version":1,"instances":[
-  {"name":"In","class":"Source","successors":["Work"],"attributes":{"interval":"10"}},
-  {"name":"Work","class":"Station","successors":["Out"],"attributes":{"process_time":"8"}},
-  {"name":"Out","class":"Drain"}]}"#;
+const SMALL: &str = r#"{"format_version":2,"instances":[
+  {"name":"In","class":"Source","attributes":{"interval":"10"}},
+  {"name":"Work","class":"Station","attributes":{"process_time":"8"}},
+  {"name":"Out","class":"Drain"}],"connections":[
+  {"from":"In","to":"Work","exit":1,"entrance":1},
+  {"from":"Work","to":"Out","exit":1,"entrance":1}]}"#;
 
 #[test]
 fn an_agent_lists_the_tools_validates_runs_and_reads_results_over_stdio() {

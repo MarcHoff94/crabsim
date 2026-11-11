@@ -85,7 +85,7 @@ fn an_invalid_model_is_refused_at_start_with_every_problem() {
     let error = setup.err("start_run", json!({ "model": "broken.json", "seed": 0, "length": "1:00", "observations": 1 }));
     assert_eq!(error["kind"], "invalid_model");
     assert_eq!(error["problems"].as_array().unwrap().len(), crabsim_model::load(BROKEN).unwrap_err().len());
-    assert_eq!(error["problems"][0]["pointer"], "/instances/0");
+    assert_eq!(error["problems"][0]["pointer"], "/instances/0/attributes/interval");
     let runs = setup.ok("query_results", json!({ "sql": "SELECT count(*) FROM runs" }));
     assert_eq!(runs["rows"], json!([[0]]), "nothing was stored or run");
 }

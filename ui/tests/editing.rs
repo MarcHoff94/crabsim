@@ -10,9 +10,10 @@ use serde_json::json;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-const LINE: &str = r#"{"format_version":1,"instances":[
-  {"name":"In","class":"Source","position":{"x":0,"y":0},"successors":["Out"],"attributes":{"interval":"10"}},
-  {"name":"Out","class":"Drain","position":{"x":5,"y":0}}]}"#;
+const LINE: &str = r#"{"format_version":2,"instances":[
+  {"name":"In","class":"Source","position":{"x":0,"y":0},"attributes":{"interval":"10"}},
+  {"name":"Out","class":"Drain","position":{"x":5,"y":0}}],"connections":[
+  {"from":"In","to":"Out","exit":1,"entrance":1}]}"#;
 
 struct Folder(PathBuf);
 

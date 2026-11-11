@@ -9,30 +9,42 @@ use serde_json::{json, Value};
 /// A Source, a Station that splits the flow three ways, two presses that merge again before one
 /// Drain, and a third press into another Drain, with a class derived from a derived class and a
 /// class nobody uses.
-const BRANCH: &str = r#"{"format_version":1,"description":"Split, press and join",
-  "classes":[
-    {"name":"Press","parent":"Station","attributes":{"process_time":"0:05","description":"Hydraulic press"}},
-    {"name":"Fast press","parent":"Press","attributes":{"process_time":"0:03"}},
-    {"name":"Unused","parent":"Station"}],
-  "instances":[
-    {"name":"In","class":"Source","successors":["Split"],"attributes":{"interval":"10"}},
-    {"name":"Split","class":"Station","successors":["P1","P2","P3"],"attributes":{"process_time":"1"}},
-    {"name":"P1","class":"Press","successors":["Join"]},
-    {"name":"P2","class":"Fast press","successors":["Join"]},
-    {"name":"P3","class":"Press","successors":["Scrap"],"attributes":{"process_time":"0:40"}},
-    {"name":"Join","class":"Station","successors":["Out"],"attributes":{"process_time":"2"}},
-    {"name":"Out","class":"Drain"},
-    {"name":"Scrap","class":"Drain"}]}"#;
+const BRANCH: &str = r#"{"format_version":2,"description":"Split, press and join","classes":[
+  {"name":"Press","parent":"Station","attributes":{"process_time":"0:05","description":"Hydraulic press"}},
+  {"name":"Fast press","parent":"Press","attributes":{"process_time":"0:03"}},
+  {"name":"Unused","parent":"Station"}],"instances":[
+  {"name":"In","class":"Source","attributes":{"interval":"10"}},
+  {"name":"Split","class":"Station","attributes":{"process_time":"1"}},
+  {"name":"P1","class":"Press"},
+  {"name":"P2","class":"Fast press"},
+  {"name":"P3","class":"Press","attributes":{"process_time":"0:40"}},
+  {"name":"Join","class":"Station","attributes":{"process_time":"2"}},
+  {"name":"Out","class":"Drain"},
+  {"name":"Scrap","class":"Drain"}],"connections":[
+  {"from":"In","to":"Split","exit":1,"entrance":1},
+  {"from":"Split","to":"P1","exit":1,"entrance":1},
+  {"from":"Split","to":"P2","exit":2,"entrance":1},
+  {"from":"Split","to":"P3","exit":3,"entrance":1},
+  {"from":"P1","to":"Join","exit":1,"entrance":1},
+  {"from":"P2","to":"Join","exit":1,"entrance":2},
+  {"from":"P3","to":"Scrap","exit":1,"entrance":1},
+  {"from":"Join","to":"Out","exit":1,"entrance":1}]}"#;
 
 /// A rework loop between Work and Check, a Station that nothing feeds, and one that passes
 /// nothing on.
-const REWORK: &str = r#"{"format_version":1,"instances":[
-    {"name":"In","class":"Source","successors":["Work"],"attributes":{"interval":"10"}},
-    {"name":"Work","class":"Station","successors":["Check"],"attributes":{"process_time":"5"}},
-    {"name":"Check","class":"Station","successors":["Out","Work","Stuck"],"attributes":{"process_time":"2"}},
-    {"name":"Stuck","class":"Station","attributes":{"process_time":"1"}},
-    {"name":"Orphan","class":"Station","successors":["Out"],"attributes":{"process_time":"1"}},
-    {"name":"Out","class":"Drain"}]}"#;
+const REWORK: &str = r#"{"format_version":2,"instances":[
+  {"name":"In","class":"Source","attributes":{"interval":"10"}},
+  {"name":"Work","class":"Station","attributes":{"process_time":"5"}},
+  {"name":"Check","class":"Station","attributes":{"process_time":"2"}},
+  {"name":"Stuck","class":"Station","attributes":{"process_time":"1"}},
+  {"name":"Orphan","class":"Station","attributes":{"process_time":"1"}},
+  {"name":"Out","class":"Drain"}],"connections":[
+  {"from":"In","to":"Work","exit":1,"entrance":1},
+  {"from":"Work","to":"Check","exit":1,"entrance":1},
+  {"from":"Check","to":"Out","exit":1,"entrance":1},
+  {"from":"Check","to":"Work","exit":2,"entrance":2},
+  {"from":"Check","to":"Stuck","exit":3,"entrance":1},
+  {"from":"Orphan","to":"Out","exit":1,"entrance":2}]}"#;
 
 /// A line: In, then `diamonds` diamonds in a row, each a Station splitting to two that join at
 /// the next, then Out. There are 2^diamonds paths from In to Out, all of one length.
@@ -46,7 +58,7 @@ fn diamonds(diamonds: usize) -> String {
     }
     instances.push(station(format!("D{diamonds}"), vec!["Out".to_string()]));
     instances.push(json!({ "name": "Out", "class": "Drain" }));
-    json!({ "format_version": 1, "instances": instances }).to_string()
+    common::connected(json!({ "format_version": 1, "instances": instances })).to_string()
 }
 
 fn setup(name: &str) -> Setup {
@@ -150,7 +162,7 @@ fn a_summary_finds_loops_unreachable_instances_and_dead_ends() {
 #[test]
 fn the_widest_branch_and_merge_points_come_first() {
     let setup = setup("describe-widest");
-    let model = json!({ "format_version": 1, "instances": [
+    let model = common::connected(json!({ "format_version": 1, "instances": [
         { "name": "In", "class": "Source", "successors": ["A", "Hub"], "attributes": { "interval": "10" } },
         { "name": "A", "class": "Station", "successors": ["Out 1"] },
         { "name": "Hub", "class": "Station", "successors": ["X", "Y", "Z", "W"] },
@@ -160,7 +172,7 @@ fn the_widest_branch_and_merge_points_come_first() {
         { "name": "W", "class": "Station", "successors": ["Out 2"] },
         { "name": "Out 1", "class": "Drain" },
         { "name": "Out 2", "class": "Drain" }
-    ]});
+    ]}));
     setup.folder.write("widest.json", &model.to_string());
     let summary = describe(&setup, "widest.json");
     assert_eq!(summary["branch_points"]["widest"], json!([{ "name": "Hub", "successors": 4 }, { "name": "In", "successors": 2 }]));
@@ -201,7 +213,7 @@ fn a_summary_stays_the_same_size_whatever_the_model() {
     for i in 0..60 {
         instances.push(json!({ "name": format!("Idle {i}"), "class": "Station" }));
     }
-    setup.folder.write("many.json", &json!({ "format_version": 1, "instances": instances }).to_string());
+    setup.folder.write("many.json", &common::connected(json!({ "format_version": 1, "instances": instances })).to_string());
     let summary = describe(&setup, "many.json");
     assert_eq!(summary["sources"]["count"], 40);
     assert_eq!(summary["sources"]["names"].as_array().unwrap().len(), 10);
@@ -277,14 +289,14 @@ fn a_path_never_passes_an_object_twice() {
     assert_eq!((answer["others"].clone(), answer["count"].clone()), (json!([]), json!(1)));
 
     // Two ways through a diamond whose end leads back to its start.
-    let model = json!({ "format_version": 1, "instances": [
+    let model = common::connected(json!({ "format_version": 1, "instances": [
         { "name": "In", "class": "Source", "successors": ["A"], "attributes": { "interval": "10" } },
         { "name": "A", "class": "Station", "successors": ["B", "C"], "attributes": { "process_time": "1" } },
         { "name": "B", "class": "Station", "successors": ["D"], "attributes": { "process_time": "1" } },
         { "name": "C", "class": "Station", "successors": ["D"], "attributes": { "process_time": "1" } },
         { "name": "D", "class": "Station", "successors": ["Out", "A"], "attributes": { "process_time": "1" } },
         { "name": "Out", "class": "Drain" }
-    ]});
+    ]}));
     setup.folder.write("diamond-loop.json", &model.to_string());
     let answer = query(&setup, "diamond-loop.json", json!({ "kind": "paths", "from": "In", "to": "Out" }));
     assert_eq!(answer["shortest"], json!(["In", "A", "B", "D", "Out"]));
@@ -316,13 +328,13 @@ fn paths_are_counted_up_to_ten_thousand() {
 fn the_other_paths_come_shortest_first() {
     let setup = setup("paths-order");
     // A long way round first in the successor order, then a short cut.
-    let model = json!({ "format_version": 1, "instances": [
+    let model = common::connected(json!({ "format_version": 1, "instances": [
         { "name": "In", "class": "Source", "successors": ["L1", "Mid", "Out"], "attributes": { "interval": "10" } },
         { "name": "L1", "class": "Station", "successors": ["L2"] },
         { "name": "L2", "class": "Station", "successors": ["Out"] },
         { "name": "Mid", "class": "Station", "successors": ["Out"] },
         { "name": "Out", "class": "Drain" }
-    ]});
+    ]}));
     setup.folder.write("order.json", &model.to_string());
     let answer = query(&setup, "order.json", json!({ "kind": "paths", "from": "In", "to": "Out" }));
     assert_eq!(answer["shortest"], json!(["In", "Out"]));
@@ -336,7 +348,11 @@ fn the_neighbourhood_follows_connections_either_way_and_gives_the_connections_be
     let setup = setup("subgraph");
     let one = query(&setup, "branch.json", json!({ "kind": "subgraph_around", "name": "P1", "steps": 1 }));
     assert_eq!(distances(&one["nodes"]), [("P1", 0), ("Split", 1), ("Join", 1)]);
-    assert_eq!(one["edges"], json!([{ "from": "Split", "to": "P1" }, { "from": "P1", "to": "Join" }]));
+    assert_eq!(
+        one["edges"],
+        json!([{ "from": "Split", "to": "P1", "exit": 1, "entrance": 1 }, { "from": "P1", "to": "Join", "exit": 1, "entrance": 1 }]),
+        "each connection as the file has it"
+    );
 
     let two = query(&setup, "branch.json", json!({ "kind": "subgraph_around", "name": "P1" }));
     assert_eq!(two["steps"], 2, "2 by default");
@@ -348,12 +364,15 @@ fn the_neighbourhood_follows_connections_either_way_and_gives_the_connections_be
     assert_eq!(
         two["edges"],
         json!([
-            { "from": "In", "to": "Split" },
-            { "from": "Split", "to": "P1" }, { "from": "Split", "to": "P2" }, { "from": "Split", "to": "P3" },
-            { "from": "P1", "to": "Join" }, { "from": "P2", "to": "Join" },
-            { "from": "Join", "to": "Out" }
+            { "from": "In", "to": "Split", "exit": 1, "entrance": 1 },
+            { "from": "Split", "to": "P1", "exit": 1, "entrance": 1 },
+            { "from": "Split", "to": "P2", "exit": 2, "entrance": 1 },
+            { "from": "Split", "to": "P3", "exit": 3, "entrance": 1 },
+            { "from": "P1", "to": "Join", "exit": 1, "entrance": 1 },
+            { "from": "P2", "to": "Join", "exit": 1, "entrance": 2 },
+            { "from": "Join", "to": "Out", "exit": 1, "entrance": 1 }
         ]),
-        "edges in file order of their `from`, then successor order, leaving out P3 to Scrap"
+        "edges in file order of their `from`, then by exit, leaving out P3 to Scrap"
     );
     assert_eq!(two["truncated"], false);
 }
@@ -484,8 +503,13 @@ fn describe_and_query_on_6006_objects() {
             let mut instance = instance.clone();
             instance.name = rename(&instance.name);
             instance.stream = instance.stream.map(|stream| stream + 100 * copy as u64);
-            instance.successors = instance.successors.iter().map(|name| rename(name)).collect();
             model.instances.push(instance);
+        }
+        for connection in &demo.connections {
+            let mut connection = connection.clone();
+            connection.from = rename(&connection.from);
+            connection.to = rename(&connection.to);
+            model.connections.push(connection);
         }
     }
     let setup = Setup::new("graph-large");

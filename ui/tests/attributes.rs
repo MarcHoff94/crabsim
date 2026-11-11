@@ -14,13 +14,16 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// A class of press, P1 of it as it is, and P2 setting its own process time and description.
-const PRESSES: &str = r#"{"format_version":1,
-  "classes":[{"name":"Press","parent":"Station","attributes":{"process_time":"0:05","description":"Hydraulic press"}}],
-  "instances":[
-    {"name":"In","class":"Source","position":{"x":0,"y":0},"successors":["P1","P2"],"attributes":{"interval":"10"}},
-    {"name":"P1","class":"Press","position":{"x":5,"y":2},"successors":["Out"]},
-    {"name":"P2","class":"Press","position":{"x":5,"y":-2},"successors":["Out"],"attributes":{"process_time":"0:07","description":"The old one"}},
-    {"name":"Out","class":"Drain","position":{"x":10,"y":0}}]}"#;
+const PRESSES: &str = r#"{"format_version":2,"classes":[
+  {"name":"Press","parent":"Station","attributes":{"process_time":"0:05","description":"Hydraulic press"}}],"instances":[
+  {"name":"In","class":"Source","position":{"x":0,"y":0},"attributes":{"interval":"10"}},
+  {"name":"P1","class":"Press","position":{"x":5,"y":2}},
+  {"name":"P2","class":"Press","position":{"x":5,"y":-2},"attributes":{"process_time":"0:07","description":"The old one"}},
+  {"name":"Out","class":"Drain","position":{"x":10,"y":0}}],"connections":[
+  {"from":"In","to":"P1","exit":1,"entrance":1},
+  {"from":"In","to":"P2","exit":2,"entrance":1},
+  {"from":"P1","to":"Out","exit":1,"entrance":1},
+  {"from":"P2","to":"Out","exit":1,"entrance":2}]}"#;
 
 struct Folder(PathBuf);
 

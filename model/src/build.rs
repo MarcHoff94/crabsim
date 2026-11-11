@@ -14,7 +14,7 @@ pub(crate) fn build(model: &Model) -> ModelDescription {
         let resolved = model.resolve(index).expect("checked: every instance's chain of classes is sound");
         let attributes = &resolved.attributes;
         let id = match resolved.built_in {
-            "Source" => description.add_source(attributes.interval.expect("checked: a Source has an interval")),
+            "Source" => description.add_source(attributes.interval.unwrap_or(SimTime::ZERO)),
             "Station" => {
                 let process_time = attributes.process_time.unwrap_or(SimTime::ZERO);
                 let failures = failure_profile(attributes.failures.as_ref());
@@ -43,9 +43,10 @@ pub(crate) fn build(model: &Model) -> ModelDescription {
         }
     }
     let ids: HashMap<&str, u32> = model.instances.iter().enumerate().map(|(id, instance)| (instance.name.as_str(), id as u32)).collect();
+    // Each object offers MUs to its successors in the order of its exits.
     for (from, instance) in model.instances.iter().enumerate() {
-        for successor in &instance.successors {
-            description.connect(from as u32, ids[successor.as_str()]);
+        for successor in model.successors(&instance.name) {
+            description.connect(from as u32, ids[successor]);
         }
     }
     description

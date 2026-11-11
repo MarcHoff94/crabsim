@@ -2,7 +2,7 @@
 //! need left out, times as `format_time_exact` writes them, two-space indentation and a final
 //! newline. Saving, loading and saving again gives the same bytes.
 
-use crate::{Attributes, Class, Failures, Instance, Model, RepairTime, FORMAT_VERSION};
+use crate::{Attributes, Class, Connection, Failures, Instance, Model, RepairTime, FORMAT_VERSION};
 use crabsim::time::format_time_exact;
 use crabsim::SimTime;
 use serde_json::{json, Map, Value};
@@ -20,6 +20,14 @@ pub(crate) fn write(model: &Model) -> String {
         file.insert("classes".into(), Value::Array(model.classes.iter().map(class).collect()));
     }
     file.insert("instances".into(), Value::Array(model.instances.iter().map(instance).collect()));
+    if !model.connections.is_empty() {
+        // The list's order means nothing, so it is saved in one: by the place of the instance each
+        // leaves, then by exit, which reads as each object's exits in turn.
+        let place = |name: &str| model.instances.iter().position(|instance| instance.name == name).unwrap_or(usize::MAX);
+        let mut connections: Vec<&Connection> = model.connections.iter().collect();
+        connections.sort_by_key(|c| (place(&c.from), c.from.clone(), c.exit, place(&c.to), c.to.clone(), c.entrance));
+        file.insert("connections".into(), Value::Array(connections.into_iter().map(connection).collect()));
+    }
     let mut text = serde_json::to_string_pretty(&Value::Object(file)).expect("a model always serialises");
     text.push('\n');
     text
@@ -55,11 +63,20 @@ fn instance(instance: &Instance) -> Value {
         }
         fields.insert("position".into(), Value::Object(at));
     }
-    if !instance.successors.is_empty() {
-        fields.insert("successors".into(), json!(instance.successors));
-    }
     if !instance.attributes.is_empty() {
         fields.insert("attributes".into(), attributes(&instance.attributes));
+    }
+    Value::Object(fields)
+}
+
+fn connection(connection: &Connection) -> Value {
+    let mut fields = Map::new();
+    fields.insert("from".into(), json!(connection.from));
+    fields.insert("to".into(), json!(connection.to));
+    fields.insert("exit".into(), json!(connection.exit));
+    fields.insert("entrance".into(), json!(connection.entrance));
+    if let Some(description) = &connection.description {
+        fields.insert("description".into(), json!(description));
     }
     Value::Object(fields)
 }

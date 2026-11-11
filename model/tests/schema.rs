@@ -25,7 +25,7 @@ fn valid_files() -> Vec<Value> {
     let demo: Value = serde_json::from_str(&std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../models/demo.json")).unwrap()).unwrap();
     let everything = json!({
         "$schema": "https://example.com/model-file.schema.json",
-        "format_version": 1,
+        "format_version": 2,
         "description": "every field there is",
         "classes": [
             { "name": "Mill", "parent": "Station", "attributes": {
@@ -43,14 +43,24 @@ fn valid_files() -> Vec<Value> {
             { "name": "Store", "parent": "Buffer", "attributes": { "capacity": 4 } },
         ],
         "instances": [
-            { "name": "In", "class": "Source", "position": { "x": -1.5, "y": 2, "z": 0.5 },
-              "successors": ["A", "B", "C", "D"], "attributes": { "interval": "0" } },
-            { "name": "A", "class": "Mill", "successors": ["S"] },
-            { "name": "B", "class": "Shaky mill", "successors": ["S"], "attributes": { "starting_mus": 0 } },
-            { "name": "C", "class": "Odd mill", "successors": ["S"] },
-            { "name": "D", "class": "Steady mill", "successors": ["S"] },
-            { "name": "S", "class": "Store", "successors": ["Out"] },
+            { "name": "In", "class": "Source", "position": { "x": -1.5, "y": 2, "z": 0.5 }, "attributes": { "interval": "0" } },
+            { "name": "A", "class": "Mill" },
+            { "name": "B", "class": "Shaky mill", "attributes": { "starting_mus": 0 } },
+            { "name": "C", "class": "Odd mill" },
+            { "name": "D", "class": "Steady mill" },
+            { "name": "S", "class": "Store" },
             { "name": "Out", "class": "Drain", "attributes": { "description": "the end" } },
+        ],
+        "connections": [
+            { "from": "In", "to": "A", "exit": 1, "entrance": 1 },
+            { "from": "In", "to": "B", "exit": 2, "entrance": 1, "description": "the long way" },
+            { "from": "In", "to": "C", "exit": 3, "entrance": 1 },
+            { "from": "In", "to": "D", "exit": 4, "entrance": 1 },
+            { "from": "A", "to": "S", "exit": 1, "entrance": 4 },
+            { "from": "B", "to": "S", "exit": 1, "entrance": 3 },
+            { "from": "C", "to": "S", "exit": 1, "entrance": 2 },
+            { "from": "D", "to": "S", "exit": 1, "entrance": 1 },
+            { "from": "S", "to": "Out", "exit": 1, "entrance": 1 },
         ],
     });
     vec![demo, everything]
@@ -108,7 +118,11 @@ fn shape_mistakes_fail_the_schema_as_well_as_the_reader() {
         ("an unknown field", Box::new(|file| file["seed"] = json!(3))),
         ("an unknown attribute", Box::new(|file| file["classes"][0]["attributes"]["proces_time"] = json!("10"))),
         ("a null instead of leaving a field out", Box::new(|file| file["description"] = Value::Null)),
-        ("another format version", Box::new(|file| file["format_version"] = json!(2))),
+        ("another format version", Box::new(|file| file["format_version"] = json!(1))),
+        ("successors on an instance", Box::new(|file| file["instances"][5]["successors"] = json!(["Out"]))),
+        ("an exit of 0", Box::new(|file| file["connections"][0]["exit"] = json!(0))),
+        ("a connection without an entrance", Box::new(|file| { file["connections"][0].as_object_mut().unwrap().remove("entrance"); })),
+        ("a connection with a field it doesn't have", Box::new(|file| file["connections"][0]["share"] = json!(0.5))),
         ("a missing name", Box::new(|file| { file["instances"][1].as_object_mut().unwrap().remove("name"); })),
         ("a name with a space at the end", Box::new(|file| file["instances"][6]["name"] = json!("Out "))),
         ("a time that isn't one", Box::new(|file| file["classes"][0]["attributes"]["process_time"] = json!("soon"))),
@@ -132,7 +146,7 @@ fn shape_mistakes_fail_the_schema_as_well_as_the_reader() {
 #[test]
 fn times_the_reader_takes_match_the_schemas_pattern() {
     let with_interval = |time: &str| {
-        json!({ "format_version": 1, "instances": [{ "name": "S", "class": "Station", "attributes": { "process_time": time } }] })
+        json!({ "format_version": 2, "instances": [{ "name": "S", "class": "Station", "attributes": { "process_time": time } }] })
     };
     let saved: Vec<String> = [0, 1, 999, 59_000, 90_000, 3_599_999, 86_400_000, 86_401_250, 400 * 86_400_000 + 59_000]
         .into_iter()

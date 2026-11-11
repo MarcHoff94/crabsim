@@ -71,7 +71,8 @@ pub enum Change {
         name: String,
         class: String,
         position: Option<Position>,
-        /// The instances it passes MUs to, in the order they are tried.
+        /// The instances it passes MUs to, connected in this order of exits, each as the last
+        /// entrance of its successor.
         successors: Option<Vec<String>>,
         /// Values set on this instance, as in a model file.
         attributes: Option<Map<String, Value>>,
@@ -88,10 +89,22 @@ pub enum Change {
     /// Adds a copy of an instance at the end, with its class and the values set on it, at
     /// `position` or the original's, with no connections.
     DuplicateInstance { name: String, to: String, position: Option<Position> },
-    /// Connects `from` to `to`, at `place` in `from`'s successor order (0 first) or at the end.
-    Connect { from: String, to: String, place: Option<usize> },
-    /// Removes the connection from `from` to `to`.
+    /// Connects `from` to `to`: as `from`'s exit `exit` (1 first, the order MUs are offered on) or
+    /// its last, and as `to`'s entrance `entrance` or its last. The other connections at both ends
+    /// move up to make room.
+    Connect {
+        from: String,
+        to: String,
+        exit: Option<u64>,
+        entrance: Option<u64>,
+        /// What the connection is, such as "via the lift".
+        description: Option<String>,
+    },
+    /// Removes the connection from `from` to `to`. The other connections at both ends close up.
     Disconnect { from: String, to: String },
+    /// Moves the connection from `from` to `to` to exit `exit` of `from` or entrance `entrance` of
+    /// `to`, the others moving to make room, or sets its description, which `""` removes.
+    SetConnection { from: String, to: String, exit: Option<u64>, entrance: Option<u64>, description: Option<String> },
     /// Adds a class derived from `parent`, a built-in or another class.
     AddClass {
         name: String,
@@ -135,6 +148,7 @@ impl Change {
             Change::DuplicateInstance { .. } => "duplicate_instance",
             Change::Connect { .. } => "connect",
             Change::Disconnect { .. } => "disconnect",
+            Change::SetConnection { .. } => "set_connection",
             Change::AddClass { .. } => "add_class",
             Change::RemoveClass { .. } => "remove_class",
             Change::RenameClass { .. } => "rename_class",
@@ -222,9 +236,92 @@ impl Draft {
         Ok(())
     }
 
-    fn successors(&mut self, index: usize) -> &mut Vec<Value> {
-        let instance = self.instances()[index].as_object_mut().expect("an instance is an object");
-        instance.entry("successors").or_insert_with(|| json!([])).as_array_mut().expect("successors are a list")
+    fn connections(&mut self) -> &mut Vec<Value> {
+        let fields = self.model.as_object_mut().expect("a model is an object");
+        fields.entry("connections").or_insert_with(|| json!([])).as_array_mut().expect("connections are a list")
+    }
+
+    /// The connection from `from` to `to`, by its place in the list.
+    fn connection(&mut self, from: &str, to: &str) -> Result<usize, Refusal> {
+        self.connections()
+            .iter()
+            .position(|connection| connection["from"] == from && connection["to"] == to)
+            .ok_or_else(|| format!("`{from}` isn't connected to `{to}`"))
+    }
+
+    /// The connections whose `end` (`from` or `to`) is `name`, by place in the list, in the order
+    /// of `field` (`exit` or `entrance`), leaving out `except`.
+    fn ordered(&mut self, end: &str, name: &str, field: &str, except: Option<usize>) -> Vec<usize> {
+        let connections = self.connections();
+        let mut order: Vec<usize> =
+            (0..connections.len()).filter(|&index| Some(index) != except && connections[index][end] == name).collect();
+        order.sort_by_key(|&index| connections[index][field].as_u64().unwrap_or(u64::MAX));
+        order
+    }
+
+    /// Numbers these connections' `field` 1 to n, in this order.
+    fn number(&mut self, order: &[usize], field: &str) {
+        for (place, &index) in order.iter().enumerate() {
+            self.connections()[index][field] = json!(place + 1);
+        }
+    }
+
+    /// Checks that `place` can be the `field` of a connection joining the others whose `end` is
+    /// `name`, `moving` being the connection itself if it is already there.
+    fn check_place(&mut self, end: &str, name: &str, field: &str, place: Option<u64>, moving: Option<usize>) -> Result<(), Refusal> {
+        let count = self.ordered(end, name, field, moving).len() as u64 + 1;
+        match place {
+            Some(place) if place < 1 || place > count => {
+                let way = if end == "from" { "out" } else { "in" };
+                let others = count - 1;
+                let plural = if others == 1 { "" } else { "s" };
+                let range = if count == 1 { "only be 1".to_string() } else { format!("be 1 to {count}") };
+                Err(format!("`{name}` has {others} other connection{plural} {way}, so its {field} can {range}, not {place}"))
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Puts the connection at `index` at `place` among those whose `end` is `name`, or last, and
+    /// numbers them all again. The place must have passed `check_place`.
+    fn place(&mut self, index: usize, end: &str, name: &str, field: &str, place: Option<u64>) {
+        let mut order = self.ordered(end, name, field, Some(index));
+        let at = place.map_or(order.len(), |place| place as usize - 1);
+        order.insert(at, index);
+        self.number(&order, field);
+    }
+
+    /// Connects `from` to `to`, checking both names and both places first, so a refusal changes
+    /// nothing.
+    fn connect(&mut self, from: &str, to: &str, exit: Option<u64>, entrance: Option<u64>, description: Option<String>) -> Result<(), Refusal> {
+        self.instance(from)?;
+        self.instance(to)?;
+        if self.connection(from, to).is_ok() {
+            return Err(format!("`{from}` is already connected to `{to}`"));
+        }
+        self.check_place("from", from, "exit", exit, None)?;
+        self.check_place("to", to, "entrance", entrance, None)?;
+        let mut connection = json!({ "from": from, "to": to, "exit": 0, "entrance": 0 });
+        if let Some(description) = description.filter(|description| !description.is_empty()) {
+            connection["description"] = json!(description);
+        }
+        self.connections().push(connection);
+        let index = self.connections().len() - 1;
+        self.place(index, "from", from, "exit", exit);
+        self.place(index, "to", to, "entrance", entrance);
+        Ok(())
+    }
+
+    /// Removes the connection at `index`, closing up the exits and entrances at both its ends.
+    fn disconnect(&mut self, index: usize) -> Connection {
+        let from = self.connections()[index]["from"].as_str().unwrap_or_default().to_string();
+        let to = self.connections()[index]["to"].as_str().unwrap_or_default().to_string();
+        let exits = self.ordered("from", &from, "exit", Some(index));
+        self.number(&exits, "exit");
+        let entrances = self.ordered("to", &to, "entrance", Some(index));
+        self.number(&entrances, "entrance");
+        self.connections().remove(index);
+        Connection { from, to }
     }
 
     /// The attributes of `target`, made if there are none yet.
@@ -244,21 +341,14 @@ impl Draft {
         Ok((attributes, what))
     }
 
-    /// Removes the instance at `index` and every connection to and from it.
+    /// Removes the instance at `index` and every connection to and from it, in the order of the
+    /// list, closing up the exits and entrances of the instances they joined it to.
     fn remove_instance(&mut self, index: usize) {
         let removed = self.instances().remove(index);
         let name = removed["name"].as_str().unwrap_or_default().to_string();
-        for instance in self.model["instances"].as_array_mut().expect("instances").iter_mut() {
-            if let Some(successors) = instance.get_mut("successors").and_then(Value::as_array_mut)
-                && successors.iter().any(|successor| *successor == name)
-            {
-                successors.retain(|successor| *successor != name);
-                let from = instance["name"].as_str().unwrap_or_default().to_string();
-                self.also.connections.push(Connection { from, to: name.clone() });
-            }
-        }
-        for successor in removed.get("successors").and_then(Value::as_array).into_iter().flatten() {
-            self.also.connections.push(Connection { from: name.clone(), to: successor.as_str().unwrap_or_default().to_string() });
+        while let Some(at) = self.connections().iter().position(|connection| connection["from"] == name || connection["to"] == name) {
+            let connection = self.disconnect(at);
+            self.also.connections.push(connection);
         }
     }
 
@@ -290,17 +380,27 @@ impl Draft {
             Change::AddInstance { name, class, position, successors, attributes } => {
                 self.new_instance_name(&name)?;
                 self.class_exists(&class)?;
+                let successors = successors.unwrap_or_default();
+                for successor in &successors {
+                    if *successor != name {
+                        self.instance(successor)?;
+                    }
+                }
                 let mut instance = json!({ "name": name, "class": class });
                 if let Some(position) = position {
                     instance["position"] = position.to_json();
-                }
-                if let Some(successors) = successors {
-                    instance["successors"] = json!(successors);
                 }
                 if let Some(attributes) = attributes {
                     instance["attributes"] = Value::Object(attributes);
                 }
                 self.instances().push(instance);
+                // Repeats and a connection to itself are left for the model's own check to report.
+                for successor in successors {
+                    let mut connection = json!({ "from": name, "to": successor, "exit": 0, "entrance": 0 });
+                    connection["exit"] = json!(self.ordered("from", &name, "exit", None).len() + 1);
+                    connection["entrance"] = json!(self.ordered("to", &successor, "entrance", None).len() + 1);
+                    self.connections().push(connection);
+                }
             }
             Change::RemoveInstance { name } => {
                 let index = self.instance(&name)?;
@@ -310,10 +410,10 @@ impl Draft {
                 let index = self.instance(&name)?;
                 self.new_instance_name(&to)?;
                 self.instances()[index]["name"] = json!(to);
-                for instance in self.instances().iter_mut() {
-                    for successor in instance.get_mut("successors").and_then(Value::as_array_mut).into_iter().flatten() {
-                        if *successor == name {
-                            *successor = json!(to);
+                for connection in self.connections().iter_mut() {
+                    for end in ["from", "to"] {
+                        if connection[end] == name.as_str() {
+                            connection[end] = json!(to);
                         }
                     }
                 }
@@ -333,7 +433,6 @@ impl Draft {
                 let mut copy = self.instances()[index].clone();
                 let fields = copy.as_object_mut().expect("an instance is an object");
                 fields.insert("name".into(), json!(to));
-                fields.remove("successors");
                 // A copy is a new instance, so it gets a stream of its own when the model is read.
                 fields.remove("stream");
                 if let Some(position) = position {
@@ -341,28 +440,34 @@ impl Draft {
                 }
                 self.instances().push(copy);
             }
-            Change::Connect { from, to, place } => {
-                let index = self.instance(&from)?;
-                self.instance(&to)?;
-                let successors = self.successors(index);
-                if successors.iter().any(|successor| *successor == to) {
-                    return Err(format!("`{from}` is already connected to `{to}`"));
-                }
-                let count = successors.len();
-                let place = place.unwrap_or(count);
-                if place > count {
-                    let plural = if count == 1 { "" } else { "s" };
-                    return Err(format!("`{from}` has {count} successor{plural}, so the place can be 0 to {count}"));
-                }
-                successors.insert(place, json!(to));
+            Change::Connect { from, to, exit, entrance, description } => {
+                self.connect(&from, &to, exit, entrance, description)?;
             }
             Change::Disconnect { from, to } => {
-                let index = self.instance(&from)?;
-                let successors = self.successors(index);
-                let before = successors.len();
-                successors.retain(|successor| *successor != to);
-                if successors.len() == before {
-                    return Err(format!("`{from}` isn't connected to `{to}`"));
+                self.instance(&from)?;
+                self.instance(&to)?;
+                let index = self.connection(&from, &to)?;
+                self.disconnect(index);
+            }
+            Change::SetConnection { from, to, exit, entrance, description } => {
+                let index = self.connection(&from, &to)?;
+                self.check_place("from", &from, "exit", exit, Some(index))?;
+                self.check_place("to", &to, "entrance", entrance, Some(index))?;
+                if exit.is_some() {
+                    self.place(index, "from", &from, "exit", exit);
+                }
+                if entrance.is_some() {
+                    self.place(index, "to", &to, "entrance", entrance);
+                }
+                let fields = self.connections()[index].as_object_mut().expect("a connection is an object");
+                match description {
+                    Some(text) if text.is_empty() => {
+                        fields.remove("description");
+                    }
+                    Some(text) => {
+                        fields.insert("description".into(), json!(text));
+                    }
+                    None => {}
                 }
             }
             Change::AddClass { name, parent, attributes } => {
@@ -497,7 +602,7 @@ pub struct EditModelOutput {
 
 impl Operation for EditModel {
     const NAME: &'static str = "edit_model";
-    const DESCRIPTION: &'static str = "Changes a valid model file in the models folder with a batch of changes, applied in order, all or nothing, then saves it in canonical form. Each change is an object naming its kind in `change`: add_instance, remove_instance, rename_instance, move_instance, set_class, duplicate_instance, connect, disconnect, add_class, remove_class, rename_class, set_parent, duplicate_class, set_attribute, restore_inheritance or set_model_description, and for the user set_stream. Values are written as in a model file, such as \"0:45\" for a time (model_file_format gives the format). Only the result is checked, so a batch may pass through invalid states, such as adding a Source and then setting its interval. A change that can't apply, such as one naming an unknown instance, refuses the batch with invalid_input naming its place, such as changes/2, along with every other that can't and the problems of the model the rest would make, so one round fixes them all. A result with problems refuses it with invalid_model and every problem, each pointing into the file the batch would have produced. Either way the file is unchanged. Give `expected_hash`, the file_hash read_model or get_attributes gave, to have the batch refused as a conflict if the file changed since you read it. An agent needs its claim on the file first (claim_model), and no file changed outside crabsim is changed until adopt_model. On success it gives the file's new file_hash, and what else was removed, such as the connections of a removed instance. Every instance keeps its stream, which gives its random numbers, whatever else changes, so runs of the model before and after an edit stay paired for every instance they share. New and duplicated instances get a stream of their own and go at the end.";
+    const DESCRIPTION: &'static str = "Changes a valid model file in the models folder with a batch of changes, applied in order, all or nothing, then saves it in canonical form. Each change is an object naming its kind in `change`: add_instance, remove_instance, rename_instance, move_instance, set_class, duplicate_instance, connect, disconnect, set_connection, add_class, remove_class, rename_class, set_parent, duplicate_class, set_attribute, restore_inheritance or set_model_description, and for the user set_stream. Values are written as in a model file, such as \"0:45\" for a time (model_file_format gives the format). Only the result is checked, so a batch may pass through invalid states, such as adding a Source and then setting its interval. A change that can't apply, such as one naming an unknown instance, refuses the batch with invalid_input naming its place, such as changes/2, along with every other that can't and the problems of the model the rest would make, so one round fixes them all. A result with problems refuses it with invalid_model and every problem, each pointing into the file the batch would have produced. Either way the file is unchanged. Connections have an exit, their place in the order their object offers MUs on, and an entrance, their place among those into the object they lead to: connect, disconnect, set_connection and removing an instance number them again at both ends, so give a place only to choose one. Give `expected_hash`, the file_hash read_model or get_attributes gave, to have the batch refused as a conflict if the file changed since you read it. An agent needs its claim on the file first (claim_model), and no file changed outside crabsim is changed until adopt_model. On success it gives the file's new file_hash, and what else was removed, such as the connections of a removed instance. Every instance keeps its stream, which gives its random numbers, whatever else changes, so runs of the model before and after an edit stay paired for every instance they share. New and duplicated instances get a stream of their own and go at the end.";
     const EFFECT: Effect = Effect::Destructive;
     const CHANGES_MODELS: bool = true;
     type Input = EditModelInput;
@@ -610,14 +715,17 @@ pub struct GetAttributesOutput {
     /// An instance's own position, if it has one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub position: Option<Value>,
-    /// An instance's successors, in the order they are tried.
+    /// An instance's successors, by exit: the order it offers MUs on.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub successors: Option<Vec<String>>,
+    /// An instance's predecessors, by entrance.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub predecessors: Option<Vec<String>>,
 }
 
 impl Operation for GetAttributes {
     const NAME: &'static str = "get_attributes";
-    const DESCRIPTION: &'static str = "Shows every attribute of an instance or class in a model file, with its value as a model file writes it and where it comes from: `from` is instance (set on it), class (inherited, with the class named), built_in (the built-in default) or not_set. It also gives the chain of classes, nearest first, an instance's stream, position and successors, the file's file_hash, and the model_hash runs of it record. Use it to see why an object behaves as it does before changing it with edit_model.";
+    const DESCRIPTION: &'static str = "Shows every attribute of an instance or class in a model file, with its value as a model file writes it and where it comes from: `from` is instance (set on it), class (inherited, with the class named), built_in (the built-in default) or not_set. It also gives the chain of classes, nearest first, an instance's stream, position, successors (by exit) and predecessors (by entrance), the file's file_hash, and the model_hash runs of it record. Use it to see why an object behaves as it does before changing it with edit_model.";
     const EFFECT: Effect = Effect::ReadOnly;
     type Input = GetAttributesInput;
     type Output = GetAttributesOutput;
@@ -670,7 +778,8 @@ impl Operation for GetAttributes {
             position: instance.and_then(|instance| instance.position).map(|position| {
                 if position.z == 0.0 { json!({ "x": position.x, "y": position.y }) } else { json!({ "x": position.x, "y": position.y, "z": position.z }) }
             }),
-            successors: instance.map(|instance| instance.successors.clone()),
+            successors: instance.map(|instance| model.successors(&instance.name).into_iter().map(str::to_owned).collect()),
+            predecessors: instance.map(|instance| model.predecessors(&instance.name).into_iter().map(str::to_owned).collect()),
             stream: instance.and_then(|instance| instance.stream),
         })
     }

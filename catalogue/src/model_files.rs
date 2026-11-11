@@ -36,7 +36,7 @@ pub(crate) fn entries() -> Vec<Entry> {
 pub(crate) fn model_text_schema(_: &mut SchemaGenerator) -> Schema {
     schemars::json_schema!({
         "type": "string",
-        "description": "A crabsim model file's text: JSON with `format_version` 1, optional `classes` and `instances`. model_file_format gives its schema and an example.",
+        "description": "A crabsim model file's text: JSON with `format_version` 2, `instances`, and optional `classes` and `connections`. model_file_format gives its schema and an example.",
         "contentMediaType": "application/json",
     })
 }
@@ -388,7 +388,7 @@ pub struct ModelFileFormat;
 /// A small model that uses every part of the format an agent starts with: a derived class with
 /// failures, instances that inherit from it or set their own values, positions and connections.
 const EXAMPLE: &str = r#"{
-  "format_version": 1,
+  "format_version": 2,
   "description": "A Source, two mills of one class in parallel, an inspection and a Drain",
   "classes": [
     {
@@ -402,11 +402,18 @@ const EXAMPLE: &str = r#"{
     }
   ],
   "instances": [
-    { "name": "Arrivals", "class": "Source", "position": { "x": 0, "y": 0 }, "successors": ["Mill 1", "Mill 2"], "attributes": { "interval": "00:00:30" } },
-    { "name": "Mill 1", "class": "CNC mill", "position": { "x": 4, "y": 2 }, "successors": ["Inspection"] },
-    { "name": "Mill 2", "class": "CNC mill", "position": { "x": 4, "y": -2 }, "successors": ["Inspection"], "attributes": { "process_time": "00:00:50" } },
-    { "name": "Inspection", "class": "Station", "position": { "x": 8, "y": 0 }, "successors": ["Shipping"], "attributes": { "process_time": "00:00:20" } },
+    { "name": "Arrivals", "class": "Source", "position": { "x": 0, "y": 0 }, "attributes": { "interval": "00:00:30" } },
+    { "name": "Mill 1", "class": "CNC mill", "position": { "x": 4, "y": 2 } },
+    { "name": "Mill 2", "class": "CNC mill", "position": { "x": 4, "y": -2 }, "attributes": { "process_time": "00:00:50" } },
+    { "name": "Inspection", "class": "Station", "position": { "x": 8, "y": 0 }, "attributes": { "process_time": "00:00:20" } },
     { "name": "Shipping", "class": "Drain", "position": { "x": 12, "y": 0 } }
+  ],
+  "connections": [
+    { "from": "Arrivals", "to": "Mill 1", "exit": 1, "entrance": 1 },
+    { "from": "Arrivals", "to": "Mill 2", "exit": 2, "entrance": 1 },
+    { "from": "Mill 1", "to": "Inspection", "exit": 1, "entrance": 1 },
+    { "from": "Mill 2", "to": "Inspection", "exit": 1, "entrance": 2, "description": "the long way round" },
+    { "from": "Inspection", "to": "Shipping", "exit": 1, "entrance": 1 }
   ]
 }"#;
 
@@ -415,9 +422,9 @@ const EXAMPLE: &str = r#"{
 pub struct ModelFileFormatInput {}
 
 /// How the built-in classes behave, which the schema can't say.
-const SEMANTICS: &str = "An MU (moveable unit) is one item flowing through the model. Objects pass MUs to their `successors` by push: an object holding a finished MU offers it on, and a move takes no simulated time. \
-The successors are tried round-robin, starting after the one that took the last MU, skipping any that can't take one now. When none can, the object is blocked: it keeps the MU and waits, and when a successor frees up, the predecessor that has waited longest gets it first. \
-A Source creates one MU, which takes its `interval`, then offers it on. It creates the next only once that one has left, so a blocked Source falls behind and loses arrivals rather than piling them up. An interval of 0 creates the next MU as soon as one leaves. \
+const SEMANTICS: &str = "An MU (moveable unit) is one item flowing through the model. Objects pass MUs along `connections` by push: an object holding a finished MU offers it on to its successors, the objects its connections lead to, and a move takes no simulated time. \
+Each connection has an `exit`, its place among the connections out of its object, and an `entrance`, its place among those into the object it leads to, each numbered 1 to n per object with no gaps or repeats, so the list's own order means nothing. The successors are tried round-robin in exit order, starting after the one that took the last MU, skipping any that can't take one now. Nothing reads the entrance order yet, so it doesn't change results. When none can, the object is blocked: it keeps the MU and waits, and when a successor frees up, the predecessor that has waited longest gets it first. \
+A Source creates one MU, which takes its `interval`, then offers it on. It creates the next only once that one has left, so a blocked Source falls behind and loses arrivals rather than piling them up. Its interval is 0 by default, which creates the next MU as soon as one leaves, so such a Source must reach every Drain through an object that takes time. \
 A Station holds one MU at a time and works on it for its `process_time`, then offers it on, blocked until a successor takes it. With `failures`, it fails at random: `availability` is the share of time it isn't failed, the time between failures follows from it and the mean repair time, and while it's failed its work is frozen and it takes and releases nothing. A Station with a process time of 0 is a dummy Station that passes MUs straight on. `starting_mus` puts an MU in it at the start. \
 A Buffer holds up to `capacity` MUs, but is known not to pass them on correctly yet: don't use it. \
 A Drain takes every MU it's offered at once, so it's never blocked, and measures throughput and lead time, from leaving the Source to entering the Drain. Only Stations can fail so far. \

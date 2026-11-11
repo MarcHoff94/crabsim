@@ -38,33 +38,46 @@ impl Drop for Folder {
 }
 
 /// Placed by hand, as the demo is.
-const PLACED: &str = r#"{"format_version":1,"instances":[
-  {"name":"In","class":"Source","position":{"x":0,"y":0},"successors":["Work"],"attributes":{"interval":"10"}},
-  {"name":"Work","class":"Station","position":{"x":5,"y":0},"successors":["Out"],"attributes":{"process_time":"8"}},
-  {"name":"Out","class":"Drain","position":{"x":10,"y":0}}]}"#;
+const PLACED: &str = r#"{"format_version":2,"instances":[
+  {"name":"In","class":"Source","position":{"x":0,"y":0},"attributes":{"interval":"10"}},
+  {"name":"Work","class":"Station","position":{"x":5,"y":0},"attributes":{"process_time":"8"}},
+  {"name":"Out","class":"Drain","position":{"x":10,"y":0}}],"connections":[
+  {"from":"In","to":"Work","exit":1,"entrance":1},
+  {"from":"Work","to":"Out","exit":1,"entrance":1}]}"#;
 
 /// Nothing placed: a Source, a split into two Stations that join again, a Drain, and a Station
 /// nothing reaches.
-const UNPLACED: &str = r#"{"format_version":1,"instances":[
-  {"name":"In","class":"Source","successors":["Split"],"attributes":{"interval":"10"}},
-  {"name":"Split","class":"Station","successors":["A","B"],"attributes":{"process_time":"1"}},
-  {"name":"A","class":"Station","successors":["Join"],"attributes":{"process_time":"5"}},
-  {"name":"B","class":"Station","successors":["Join"],"attributes":{"process_time":"5"}},
-  {"name":"Join","class":"Station","successors":["Out"],"attributes":{"process_time":"2"}},
+const UNPLACED: &str = r#"{"format_version":2,"instances":[
+  {"name":"In","class":"Source","attributes":{"interval":"10"}},
+  {"name":"Split","class":"Station","attributes":{"process_time":"1"}},
+  {"name":"A","class":"Station","attributes":{"process_time":"5"}},
+  {"name":"B","class":"Station","attributes":{"process_time":"5"}},
+  {"name":"Join","class":"Station","attributes":{"process_time":"2"}},
   {"name":"Out","class":"Drain"},
-  {"name":"Orphan","class":"Station","attributes":{"process_time":"2"}}]}"#;
+  {"name":"Orphan","class":"Station","attributes":{"process_time":"2"}}],"connections":[
+  {"from":"In","to":"Split","exit":1,"entrance":1},
+  {"from":"Split","to":"A","exit":1,"entrance":1},
+  {"from":"Split","to":"B","exit":2,"entrance":1},
+  {"from":"A","to":"Join","exit":1,"entrance":1},
+  {"from":"B","to":"Join","exit":1,"entrance":2},
+  {"from":"Join","to":"Out","exit":1,"entrance":1}]}"#;
 
 /// Two placed and two not.
-const PARTLY_PLACED: &str = r#"{"format_version":1,"instances":[
-  {"name":"In","class":"Source","position":{"x":0,"y":0},"successors":["Work"],"attributes":{"interval":"10"}},
-  {"name":"Work","class":"Station","successors":["Check"],"attributes":{"process_time":"8"}},
-  {"name":"Check","class":"Station","successors":["Out"],"attributes":{"process_time":"3"}},
-  {"name":"Out","class":"Drain","position":{"x":20,"y":4}}]}"#;
+const PARTLY_PLACED: &str = r#"{"format_version":2,"instances":[
+  {"name":"In","class":"Source","position":{"x":0,"y":0},"attributes":{"interval":"10"}},
+  {"name":"Work","class":"Station","attributes":{"process_time":"8"}},
+  {"name":"Check","class":"Station","attributes":{"process_time":"3"}},
+  {"name":"Out","class":"Drain","position":{"x":20,"y":4}}],"connections":[
+  {"from":"In","to":"Work","exit":1,"entrance":1},
+  {"from":"Work","to":"Check","exit":1,"entrance":1},
+  {"from":"Check","to":"Out","exit":1,"entrance":1}]}"#;
 
-/// Three problems: an unknown successor, a Source with no interval, a Drain with a process time.
-const BROKEN: &str = r#"{ "format_version": 1, "instances": [
-    { "name": "In", "class": "Source", "successors": ["Nowhere"] },
-    { "name": "Out", "class": "Drain", "attributes": { "process_time": "10" } } ] }"#;
+/// Three problems: a connection to an unknown instance, a Source's interval that isn't a time, a
+/// Drain with a process time.
+const BROKEN: &str = r#"{"format_version":2,"instances":[
+  {"name":"In","class":"Source","attributes":{"interval":"soon"}},
+  {"name":"Out","class":"Drain","attributes":{"process_time":"10"}}],"connections":[
+  {"from":"In","to":"Nowhere","exit":1,"entrance":1}]}"#;
 
 fn demo_text() -> String {
     std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../models/demo.json")).unwrap()

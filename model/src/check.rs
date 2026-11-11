@@ -17,6 +17,9 @@ pub(crate) fn check(model: &Model, broken: &Broken) -> Vec<Problem> {
     for index in 0..model.instances.len() {
         checker.instance(index);
     }
+    checker.connections();
+    checker.places(Place::Exit);
+    checker.places(Place::Entrance);
     checker.endless_sources();
     checker.problems
 }
@@ -34,6 +37,14 @@ struct Checker<'m> {
 enum Owner {
     Class(usize),
     Instance(usize),
+    Connection(usize),
+}
+
+/// One of a connection's two places.
+#[derive(Clone, Copy, PartialEq)]
+enum Place {
+    Exit,
+    Entrance,
 }
 
 impl<'m> Checker<'m> {
@@ -47,6 +58,13 @@ impl<'m> Checker<'m> {
                 format!("/instances/{index}{at}"),
                 (!self.broken.names.contains(&index)).then(|| self.model.instances[index].name.clone()),
             ),
+            Owner::Connection(index) => {
+                let connection = &self.model.connections[index];
+                (
+                    format!("/connections/{index}{at}"),
+                    (!self.broken.connections.contains(&index)).then(|| format!("{} → {}", connection.from, connection.to)),
+                )
+            }
         };
         self.problems.push(Problem { pointer, name, message: message.into() });
     }
@@ -56,6 +74,7 @@ impl<'m> Checker<'m> {
         match owner {
             Owner::Class(index) => self.broken.class_attributes.contains(&(index, attribute.name())),
             Owner::Instance(index) => self.broken.attributes.contains(&(index, attribute.name())),
+            Owner::Connection(_) => false,
         }
     }
 
@@ -188,15 +207,11 @@ impl<'m> Checker<'m> {
             self.attributes(owner, &instance.attributes, built_in);
             self.required(index, built_in);
         }
-        if !self.broken.successors.contains(&index) {
-            self.successors(index);
-        }
     }
 
     /// Values that must be set somewhere in the chain, and aren't.
     fn required(&mut self, index: usize, built_in: &str) {
         let attribute = match built_in {
-            "Source" => Attribute::Interval,
             "Buffer" => Attribute::Capacity,
             _ => return,
         };
@@ -206,20 +221,23 @@ impl<'m> Checker<'m> {
             return;
         }
         // One that was there but couldn't be read has been reported already.
-        let (chain, _) = model.chain(&model.instances[index].class).expect("resolved, so the chain is sound");
-        let unreadable_in_chain = self.unreadable(Owner::Instance(index), attribute)
+        if self.unreadable_in_chain(index, attribute) {
+            return;
+        }
+        let what = "a `capacity`: how many MUs it holds";
+        self.problem(Owner::Instance(index), "", format!("a {built_in} needs {what}. Set it on the instance or one of its classes"));
+    }
+
+    /// Whether the instance or a class in its chain has this attribute but it couldn't be read, so
+    /// its value is unknown and anything that depends on it goes unchecked.
+    fn unreadable_in_chain(&self, index: usize, attribute: Attribute) -> bool {
+        let model = self.model;
+        let Some((chain, _)) = model.chain(&model.instances[index].class) else { return false };
+        self.unreadable(Owner::Instance(index), attribute)
             || chain.iter().any(|class| {
                 let class_index = model.classes.iter().position(|c| std::ptr::eq(c, *class)).expect("in the model");
                 self.unreadable(Owner::Class(class_index), attribute)
-            });
-        if unreadable_in_chain {
-            return;
-        }
-        let what = match attribute {
-            Attribute::Interval => "an `interval`: the time between creating an MU and offering it on",
-            _ => "a `capacity`: how many MUs it holds",
-        };
-        self.problem(Owner::Instance(index), "", format!("a {built_in} needs {what}. Set it on the instance or one of its classes"));
+            })
     }
 
     // ---------- Values, on classes and instances alike ----------
@@ -296,31 +314,88 @@ impl<'m> Checker<'m> {
 
     // ---------- Connections ----------
 
-    fn successors(&mut self, index: usize) {
+    fn connections(&mut self) {
         let model = self.model;
-        let instance = &model.instances[index];
-        let owner = Owner::Instance(index);
-        if self.built_in(index) == Some("Drain") && !instance.successors.is_empty() {
-            self.problem(owner, "/successors", "a Drain takes MUs out of the model, so it can't have successors");
-            return;
-        }
-        for (place, successor) in instance.successors.iter().enumerate() {
-            let at = format!("/successors/{place}");
-            if instance.successors[..place].contains(successor) {
-                self.problem(owner, &at, format!("`{successor}` is listed twice"));
+        let mut seen: HashMap<(&str, &str), usize> = HashMap::new();
+        for (index, connection) in model.connections.iter().enumerate() {
+            if self.broken.connections.contains(&index) {
                 continue;
             }
-            match self.by_name.get(successor.as_str()) {
-                None => {
-                    let guess = crate::suggest::did_you_mean(successor, model.instances.iter().map(|instance| instance.name.as_str()));
-                    self.problem(owner, &at, format!("no instance is called `{successor}`{guess}"))
+            let owner = Owner::Connection(index);
+            let mut ends = [None, None];
+            for (end, field, name) in [(0, "from", &connection.from), (1, "to", &connection.to)] {
+                match self.by_name.get(name.as_str()) {
+                    Some(&found) => ends[end] = Some(found),
+                    None => {
+                        let guess = crate::suggest::did_you_mean(name, model.instances.iter().map(|instance| instance.name.as_str()));
+                        self.problem(owner, &format!("/{field}"), format!("no instance is called `{name}`{guess}"));
+                    }
                 }
-                Some(&target) if target == index => self.problem(owner, &at, "an object can't be its own successor"),
-                Some(&target) if self.built_in(target) == Some("Source") => {
-                    self.problem(owner, &at, format!("`{successor}` is a Source, which creates MUs and can't take any in"))
-                }
-                Some(_) => {}
             }
+            if let [Some(from), Some(to)] = ends {
+                if from == to {
+                    self.problem(owner, "/to", "an object can't be its own successor");
+                } else if self.built_in(to) == Some("Source") {
+                    self.problem(owner, "/to", format!("`{}` is a Source, which creates MUs and can't take any in", connection.to));
+                } else if self.built_in(from) == Some("Drain") {
+                    self.problem(owner, "/from", format!("`{}` is a Drain, which takes MUs out of the model, so no connection can leave it", connection.from));
+                }
+            }
+            match seen.get(&(connection.from.as_str(), connection.to.as_str())) {
+                Some(&first) => self.problem(owner, "", format!("connection {first} already connects `{}` to `{}`", connection.from, connection.to)),
+                None => {
+                    seen.insert((&connection.from, &connection.to), index);
+                }
+            }
+        }
+    }
+
+    /// Each object's exits, or entrances, run 1 to n with no gaps or repeats, n being how many
+    /// connections leave it, or lead into it.
+    fn places(&mut self, place: Place) {
+        let model = self.model;
+        let broken = match place {
+            Place::Exit => &self.broken.exits,
+            Place::Entrance => &self.broken.entrances,
+        };
+        let mut by_object: HashMap<&str, Vec<usize>> = HashMap::new();
+        for (index, connection) in model.connections.iter().enumerate() {
+            if self.broken.connections.contains(&index) {
+                continue;
+            }
+            let object = if place == Place::Exit { &connection.from } else { &connection.to };
+            by_object.entry(object).or_default().push(index);
+        }
+        let mut problems = Vec::new();
+        for (object, connections) in by_object {
+            let count = connections.len() as u64;
+            let mut taken: HashMap<u64, usize> = HashMap::new();
+            for index in connections {
+                if broken.contains(&index) {
+                    continue;
+                }
+                let connection = &model.connections[index];
+                let (number, field, way) = match place {
+                    Place::Exit => (connection.exit, "exit", "out of"),
+                    Place::Entrance => (connection.entrance, "entrance", "into"),
+                };
+                if number > count {
+                    let (plural, verb) = if count == 1 { ("", "leads") } else { ("s", "lead") };
+                    let range = if count == 1 { "1".to_string() } else { format!("1 to {count}") };
+                    problems.push((
+                        index,
+                        format!("/{field}"),
+                        format!("{count} connection{plural} {verb} {way} `{object}`, so its {field}s are numbered {range}, not {number}"),
+                    ));
+                } else if let Some(&first) = taken.get(&number) {
+                    problems.push((index, format!("/{field}"), format!("connection {first} {way} `{object}` already has {field} {number}")));
+                } else {
+                    taken.insert(number, index);
+                }
+            }
+        }
+        for (index, at, message) in problems {
+            self.problem(Owner::Connection(index), &at, message);
         }
     }
 
@@ -335,7 +410,7 @@ impl<'m> Checker<'m> {
                 continue;
             }
             let Some(resolved) = model.resolve(index) else { continue };
-            if resolved.attributes.interval != Some(SimTime::ZERO) {
+            if resolved.attributes.interval != Some(SimTime::ZERO) || self.unreadable_in_chain(index, Attribute::Interval) {
                 continue;
             }
             if let Some(path) = self.zero_time_path_to_a_drain(index) {
@@ -364,8 +439,8 @@ impl<'m> Checker<'m> {
         let mut came_from: HashMap<usize, usize> = HashMap::new();
         let mut queue = VecDeque::from([source]);
         while let Some(at) = queue.pop_front() {
-            for successor in &self.model.instances[at].successors {
-                let Some(&next) = self.by_name.get(successor.as_str()) else { continue };
+            for successor in self.model.successors(&self.model.instances[at].name) {
+                let Some(&next) = self.by_name.get(successor) else { continue };
                 if next == source || came_from.contains_key(&next) {
                     continue;
                 }

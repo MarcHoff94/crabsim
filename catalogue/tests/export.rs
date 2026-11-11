@@ -10,20 +10,25 @@ use std::collections::HashMap;
 
 /// A Source, a Station splitting three ways, three presses of a class and a class derived from it,
 /// a join, and two Drains, one with a name that needs escaping in every format.
-const LINE: &str = r#"{"format_version":1,"description":"Split, press and join",
-  "classes":[
-    {"name":"Press","parent":"Station","attributes":{"process_time":"0:05","description":"Hydraulic press",
-       "failures":{"availability":0.9,"repair_time":{"erlang":{"mean":"1:00","k":2}}}}},
-    {"name":"Fast press","parent":"Press","attributes":{"process_time":"0:03"}}],
-  "instances":[
-    {"name":"In","class":"Source","position":{"x":0,"y":1.5},"successors":["Split"],"attributes":{"interval":"10"}},
-    {"name":"Split","class":"Station","successors":["P1","P2","P3"],"attributes":{"process_time":"1"}},
-    {"name":"P1","class":"Press","successors":["Join"]},
-    {"name":"P2","class":"Fast press","successors":["Join"]},
-    {"name":"P3","class":"Press","successors":["Scrap 'A', \"bad\" & <worse>"],"attributes":{"process_time":"0:40"}},
-    {"name":"Join","class":"Station","successors":["Out"],"attributes":{"process_time":"2"}},
-    {"name":"Out","class":"Drain"},
-    {"name":"Scrap 'A', \"bad\" & <worse>","class":"Drain"}]}"#;
+const LINE: &str = r#"{"format_version":2,"description":"Split, press and join","classes":[
+  {"name":"Press","parent":"Station","attributes":{"process_time":"0:05","description":"Hydraulic press","failures":{"availability":0.9,"repair_time":{"erlang":{"mean":"1:00","k":2}}}}},
+  {"name":"Fast press","parent":"Press","attributes":{"process_time":"0:03"}}],"instances":[
+  {"name":"In","class":"Source","position":{"x":0,"y":1.5},"attributes":{"interval":"10"}},
+  {"name":"Split","class":"Station","attributes":{"process_time":"1"}},
+  {"name":"P1","class":"Press"},
+  {"name":"P2","class":"Fast press"},
+  {"name":"P3","class":"Press","attributes":{"process_time":"0:40"}},
+  {"name":"Join","class":"Station","attributes":{"process_time":"2"}},
+  {"name":"Out","class":"Drain"},
+  {"name":"Scrap 'A', \"bad\" & <worse>","class":"Drain"}],"connections":[
+  {"from":"In","to":"Split","exit":1,"entrance":1},
+  {"from":"Split","to":"P1","exit":1,"entrance":1},
+  {"from":"Split","to":"P2","exit":2,"entrance":1},
+  {"from":"Split","to":"P3","exit":3,"entrance":1},
+  {"from":"P1","to":"Join","exit":1,"entrance":1},
+  {"from":"P2","to":"Join","exit":1,"entrance":2,"description":"via the lift, 'quoted' & <marked>"},
+  {"from":"P3","to":"Scrap 'A', \"bad\" & <worse>","exit":1,"entrance":1},
+  {"from":"Join","to":"Out","exit":1,"entrance":1}]}"#;
 
 const INSTANCES: usize = 8;
 /// The model's own two, and the four built-in classes.
@@ -79,7 +84,8 @@ fn a_cypher_script_creates_every_instance_class_and_connection() {
     assert_eq!(feeds.len(), CONNECTIONS);
     assert_eq!(script.lines().filter(|line| line.contains("-[:IS_A]->")).count(), INSTANCES);
     assert_eq!(script.lines().filter(|line| line.contains("-[:DERIVES_FROM]->")).count(), DERIVATIONS);
-    assert!(feeds.iter().any(|line| line.contains("{name: 'Split'}") && line.contains("{name: 'P3'}") && line.contains("{order: 2}")), "{feeds:?}");
+    assert!(feeds.iter().any(|line| line.contains("{name: 'Split'}") && line.contains("{name: 'P3'}") && line.contains("FEEDS {exit: 3, entrance: 1}")), "{feeds:?}");
+    assert!(feeds.iter().any(|line| line.contains("{name: 'P2'}") && line.contains("FEEDS {exit: 1, entrance: 2, description: 'via the lift, \\'quoted\\' & <marked>'}")), "{feeds:?}");
     for line in script.lines().filter(|line| !line.trim().is_empty() && !line.starts_with("//")) {
         assert!(line.ends_with(';'), "every statement ends with a semicolon: {line}");
     }
@@ -134,9 +140,10 @@ fn neo4j_csv_gives_one_file_per_node_and_edge_type_with_neo4j_headers() {
     assert!(header.contains(&"built_in:boolean".to_string()));
 
     let (header, feeds) = csv(&setup, &format!("{folder}/feeds.csv"));
-    assert_eq!(header, [":START_ID(Instance)", ":END_ID(Instance)", "order:int", ":TYPE"]);
+    assert_eq!(header, [":START_ID(Instance)", ":END_ID(Instance)", "exit:long", "entrance:long", "description", ":TYPE"]);
     assert_eq!(feeds.len(), CONNECTIONS);
-    assert!(feeds.iter().any(|row| row[":START_ID(Instance)"] == "Split" && row[":END_ID(Instance)"] == "P3" && row["order:int"] == "2" && row[":TYPE"] == "FEEDS"));
+    assert!(feeds.iter().any(|row| row[":START_ID(Instance)"] == "Split" && row[":END_ID(Instance)"] == "P3" && row["exit:long"] == "3" && row["entrance:long"] == "1" && row["description"].is_empty() && row[":TYPE"] == "FEEDS"));
+    assert!(feeds.iter().any(|row| row[":START_ID(Instance)"] == "P2" && row["entrance:long"] == "2" && row["description"] == "via the lift, 'quoted' & <marked>"));
 
     let (header, is_a) = csv(&setup, &format!("{folder}/is_a.csv"));
     assert_eq!(header, [":START_ID(Instance)", ":END_ID(Class)", ":TYPE"]);
@@ -165,7 +172,9 @@ fn graphml_is_xml_with_typed_keys_and_every_node_and_edge() {
         .collect();
     assert!(keys.values().any(|key| *key == ("node", "process_time_s", "double")), "{keys:?}");
     assert!(keys.values().any(|key| *key == ("node", "stream", "long")), "{keys:?}");
-    assert!(keys.values().any(|key| *key == ("edge", "order", "int")), "{keys:?}");
+    for key in [("edge", "exit", "long"), ("edge", "entrance", "long"), ("edge", "description", "string")] {
+        assert!(keys.values().any(|known| *known == key), "{key:?} in {keys:?}");
+    }
     let graph = root.children().find(|node| node.has_tag_name("graph")).unwrap();
     assert_eq!(graph.attribute("edgedefault"), Some("directed"));
     let nodes: Vec<_> = graph.children().filter(|node| node.has_tag_name("node")).collect();
@@ -190,7 +199,13 @@ fn graphml_is_xml_with_typed_keys_and_every_node_and_edge() {
         .find(|edge| edge.attribute("source") == Some(id_of("Split", "Instance")) && edge.attribute("target") == Some(id_of("P3", "Instance")))
         .expect("Split feeds P3");
     let feeds = data(feeds);
-    assert_eq!((feeds["type"].as_str(), feeds["order"].as_str()), ("FEEDS", "2"));
+    assert_eq!((feeds["type"].as_str(), feeds["exit"].as_str(), feeds["entrance"].as_str()), ("FEEDS", "3", "1"));
+    assert!(!feeds.contains_key("description"), "a connection without one has none");
+    let lift = edges
+        .iter()
+        .find(|edge| edge.attribute("source") == Some(id_of("P2", "Instance")) && edge.attribute("target") == Some(id_of("Join", "Instance")))
+        .expect("P2 feeds Join");
+    assert_eq!(data(lift)["description"], "via the lift, 'quoted' & <marked>");
 }
 
 // ---------- A run's model, overwriting, refusals ----------
@@ -330,8 +345,13 @@ fn exports_of_6006_objects() {
             let mut instance = instance.clone();
             instance.name = rename(&instance.name);
             instance.stream = instance.stream.map(|stream| stream + 100 * copy as u64);
-            instance.successors = instance.successors.iter().map(|name| rename(name)).collect();
             model.instances.push(instance);
+        }
+        for connection in &demo.connections {
+            let mut connection = connection.clone();
+            connection.from = rename(&connection.from);
+            connection.to = rename(&connection.to);
+            model.connections.push(connection);
         }
     }
     let setup = Setup::new("export-large");

@@ -9,11 +9,11 @@
       "type": "string"
     },
     "format_version": {
-      "description": "The format's version. Only 1 exists.",
+      "description": "The format's version, 2. Version 1, with each instance's `successors` instead of a list of connections, isn't read any more.",
       "type": "integer",
       "format": "uint64",
       "minimum": 0,
-      "const": 1
+      "const": 2
     },
     "description": {
       "description": "What the model is, as a whole.",
@@ -31,6 +31,13 @@
       "type": "array",
       "items": {
         "$ref": "#/$defs/InstanceFile"
+      }
+    },
+    "connections": {
+      "description": "The ways MUs pass from one instance to another, in any order: each says its own place in both orders it belongs to, so sorting the list changes nothing.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ConnectionFile"
       }
     }
   },
@@ -73,7 +80,7 @@
       "type": "object",
       "properties": {
         "interval": {
-          "description": "Source: the time between creating an MU and offering it on. Must be set somewhere in the chain of classes. 0 offers each MU at once.",
+          "description": "Source: the time between creating an MU and offering it on. 0 by default, which creates the next MU as soon as one leaves.",
           "$ref": "#/$defs/Time"
         },
         "process_time": {
@@ -327,13 +334,6 @@
           "description": "The centre of its footprint, in metres. Visual only.",
           "$ref": "#/$defs/PositionFile"
         },
-        "successors": {
-          "description": "The instances it passes MUs to, by name, in the order they are tried.",
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
         "attributes": {
           "description": "Only the values set on this instance. Anything else comes from its class.",
           "$ref": "#/$defs/AttributesFile"
@@ -367,6 +367,43 @@
       "required": [
         "x",
         "y"
+      ]
+    },
+    "ConnectionFile": {
+      "description": "A connection from one instance to another. Moving along it takes no time.",
+      "type": "object",
+      "properties": {
+        "from": {
+          "description": "The instance MUs leave, which can't be a Drain.",
+          "type": "string"
+        },
+        "to": {
+          "description": "The instance MUs enter, which can't be a Source or `from` itself.",
+          "type": "string"
+        },
+        "exit": {
+          "description": "Its place among the connections out of `from`, the order MUs are offered round-robin: 1 to n with no gaps or repeats.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        },
+        "entrance": {
+          "description": "Its place among the connections into `to`, 1 to n with no gaps or repeats. Nothing reads it yet, so it doesn't change results until an entrance rule does.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        },
+        "description": {
+          "description": "What the connection is, such as \"via the lift\".",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "from",
+        "to",
+        "exit",
+        "entrance"
       ]
     }
   }

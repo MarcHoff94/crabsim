@@ -83,8 +83,9 @@ pub(crate) fn model_text(catalogue: &Catalogue, path: Option<String>, run: Optio
 
 // --- The graph ---
 
-/// A model's connections, by instance number. Unknown successors and repeats are left out, so a
-/// model with problems still gives a graph.
+/// A model's connections, by instance number, each instance's successors by exit and its
+/// predecessors by entrance. Connections to unknown instances, to themselves and repeats are left
+/// out, so a model with problems still gives a graph.
 struct Graph<'m> {
     model: &'m Model,
     successors: Vec<Vec<usize>>,
@@ -103,19 +104,24 @@ impl<'m> Graph<'m> {
         let count = model.instances.len();
         let mut successors = vec![Vec::new(); count];
         let mut predecessors = vec![Vec::new(); count];
-        for (from, instance) in model.instances.iter().enumerate() {
-            for name in &instance.successors {
-                if let Some(&to) = by_name.get(name.as_str())
-                    && to != from
+        let ends = |connection: &crabsim_model::Connection| {
+            let (&from, &to) = (by_name.get(connection.from.as_str())?, by_name.get(connection.to.as_str())?);
+            (from != to).then_some((from, to))
+        };
+        for instance in &model.instances {
+            for connection in model.connections_out(&instance.name) {
+                if let Some((from, to)) = ends(connection)
                     && !successors[from].contains(&to)
                 {
                     successors[from].push(to);
                 }
             }
-        }
-        for (from, list) in successors.iter().enumerate() {
-            for &to in list {
-                predecessors[to].push(from);
+            for connection in model.connections_in(&instance.name) {
+                if let Some((from, to)) = ends(connection)
+                    && !predecessors[to].contains(&from)
+                {
+                    predecessors[to].push(from);
+                }
             }
         }
         let built_in = model.instances.iter().map(|instance| model.chain(&instance.class).map(|(_, built_in)| built_in)).collect();
@@ -299,11 +305,17 @@ pub struct Reached {
     pub distance: usize,
 }
 
-/// A connection from an instance to one of its successors.
+/// A connection from an instance to one of its successors, as the model file has it.
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct Edge {
     pub from: String,
     pub to: String,
+    /// Its place in the order `from` offers MUs on, from 1.
+    pub exit: u64,
+    /// Its place among the connections into `to`, from 1.
+    pub entrance: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 // --- describe_model ---
@@ -808,7 +820,7 @@ pub struct ClassNode {
 
 impl Operation for QueryModel {
     const NAME: &'static str = "query_model";
-    const DESCRIPTION: &'static str = "Answers a question about a model's structure, from a file in the models folder (`path`) or the one a run ran (`run`), without reading the whole model. `query` names its kind in `kind`: neighbours {name} gives predecessors and successors; upstream or downstream {name, steps?} every instance that can reach it or that it reaches, with distances; paths {from, to} the shortest route, up to 20 others shortest first, and how many routes there are, counted up to 10,000, none passing an object twice; subgraph_around {name, steps?} the instances within steps (2 by default) following connections either way, and the connections between them; find_instances {name_contains?, class?, description_contains?, conditions?, set_on_instance?} the instances meeting every criterion, such as conditions [{\"attribute\": \"process_time\", \"op\": \">\", \"value\": \"0:30\"}] with op =, <, >, <= or >=, where class includes derived classes; class_tree {class?, instances?} the classes from the built-ins down with what each sets and how many instances follow it. Lists are capped (1,000 instances, 500 in a neighbourhood) and say so. A model with problems is refused with them: describe_model sums it up anyway. Pass the names it gives to run_results or compare_runs as `objects`.";
+    const DESCRIPTION: &'static str = "Answers a question about a model's structure, from a file in the models folder (`path`) or the one a run ran (`run`), without reading the whole model. `query` names its kind in `kind`: neighbours {name} gives predecessors and successors; upstream or downstream {name, steps?} every instance that can reach it or that it reaches, with distances; paths {from, to} the shortest route, up to 20 others shortest first, and how many routes there are, counted up to 10,000, none passing an object twice; subgraph_around {name, steps?} the instances within steps (2 by default) following connections either way, and the connections between them, each with its exit, entrance and description; find_instances {name_contains?, class?, description_contains?, conditions?, set_on_instance?} the instances meeting every criterion, such as conditions [{\"attribute\": \"process_time\", \"op\": \">\", \"value\": \"0:30\"}] with op =, <, >, <= or >=, where class includes derived classes; class_tree {class?, instances?} the classes from the built-ins down with what each sets and how many instances follow it. Lists are capped (1,000 instances, 500 in a neighbourhood) and say so. A model with problems is refused with them: describe_model sums it up anyway. Pass the names it gives to run_results or compare_runs as `objects`.";
     const EFFECT: Effect = Effect::ReadOnly;
     type Input = QueryModelInput;
     type Output = QueryModelOutput;
@@ -870,7 +882,16 @@ impl Operation for QueryModel {
                 let edges = froms
                     .iter()
                     .flat_map(|&from| graph.successors[from].iter().filter(|to| inside.contains(to)).map(move |&to| (from, to)))
-                    .map(|(from, to)| Edge { from: graph.name(from).to_string(), to: graph.name(to).to_string() })
+                    .filter_map(|(from, to)| {
+                        let connection = graph.model.connections.iter().find(|c| c.from == graph.name(from) && c.to == graph.name(to))?;
+                        Some(Edge {
+                            from: connection.from.clone(),
+                            to: connection.to.clone(),
+                            exit: connection.exit,
+                            entrance: connection.entrance,
+                            description: connection.description.clone(),
+                        })
+                    })
                     .collect();
                 let nodes = nodes.into_iter().map(|i| graph.reached(i, distance[i].expect("inside"))).collect();
                 Ok(QueryModelOutput::SubgraphAround { name, steps, nodes, edges, truncated })

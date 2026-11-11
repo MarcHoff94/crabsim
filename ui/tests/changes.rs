@@ -12,12 +12,16 @@ use serde_json::json;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-const LINE: &str = r#"{"format_version":1,"instances":[
-  {"name":"In","class":"Source","position":{"x":0,"y":0},"successors":["Work"],"attributes":{"interval":"10"}},
-  {"name":"Work","class":"Station","position":{"x":5,"y":0},"successors":["Out"],"attributes":{"process_time":"8"}},
-  {"name":"Out","class":"Drain","position":{"x":10,"y":0}}]}"#;
+const LINE: &str = r#"{"format_version":2,"instances":[
+  {"name":"In","class":"Source","position":{"x":0,"y":0},"attributes":{"interval":"10"}},
+  {"name":"Work","class":"Station","position":{"x":5,"y":0},"attributes":{"process_time":"8"}},
+  {"name":"Out","class":"Drain","position":{"x":10,"y":0}}],"connections":[
+  {"from":"In","to":"Work","exit":1,"entrance":1},
+  {"from":"Work","to":"Out","exit":1,"entrance":1}]}"#;
 
-const BROKEN: &str = r#"{ "format_version": 1, "instances": [ { "name": "In", "class": "Source", "successors": ["Nowhere"] } ] }"#;
+const BROKEN: &str = r#"{"format_version":2,"instances":[
+  {"name":"In","class":"Source"}],"connections":[
+  {"from":"In","to":"Nowhere","exit":1,"entrance":1}]}"#;
 
 /// A models folder holding `line.json` and `other.json`, both saved by crabsim, removed afterwards.
 struct Folder(PathBuf);

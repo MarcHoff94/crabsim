@@ -3,6 +3,7 @@ use crate::event::{EventContext, EventType, ScheduledEvent};
 use crate::flows::EventInterface;
 use crate::materialflow_objects::{ModelObject, OtherObjects};
 use crate::report::{Occurrence, OccurrenceKind, Recording, RunState};
+use crate::statistics::{ObjectStatistics, Periods};
 use crate::time::SimTime;
 use std::collections::BinaryHeap;
 use std::mem::size_of;
@@ -43,6 +44,12 @@ pub struct SimulationRun {
     initialised: bool,
     recording: Recording,
     statistics_since: SimTime,
+    /// The end of the measuring period in progress, or the end of time without periods, so
+    /// checking for one costs the per-event path a single comparison.
+    period_end: SimTime,
+    /// How long measuring periods are, a setting Reset keeps.
+    measuring_period: Option<SimTime>,
+    periods: Option<Periods>,
     context: EventContext,
 }
 
@@ -63,6 +70,9 @@ impl SimulationRun {
             initialised: false,
             recording: Recording::NOTHING,
             statistics_since: SimTime::ZERO,
+            period_end: SimTime::MAX,
+            measuring_period: None,
+            periods: None,
             context: EventContext::new(1, Recording::NOTHING),
         }
     }
@@ -81,6 +91,43 @@ impl SimulationRun {
             object.clear_statistics(self.time);
         }
         self.statistics_since = self.time;
+        self.start_periods();
+    }
+
+    /// Measures in periods of `length` from when statistics begin, each period's figures one
+    /// sample, so one run gives a confidence interval from the spread between its periods (see
+    /// `RunState::periods`). `None` or zero measures no periods. It is a setting, so Reset keeps
+    /// it. Set during a run, periods start afresh from the current time. A period ends after
+    /// every event at its end time, and costs reading every object's statistics once.
+    pub fn set_measuring_period(&mut self, length: Option<SimTime>) {
+        self.measuring_period = length.filter(|&length| length > SimTime::ZERO);
+        if self.initialised {
+            self.start_periods();
+        }
+    }
+
+    pub fn measuring_period(&self) -> Option<SimTime> {
+        self.measuring_period
+    }
+
+    fn start_periods(&mut self) {
+        self.periods = self.measuring_period.map(|length| Periods::new(length, self.time, self.statistics_at(self.time)));
+        self.period_end = self.periods.as_ref().map_or(SimTime::MAX, Periods::end);
+    }
+
+    /// Completes every period that ends before `time`, or by `time` if `inclusive`.
+    #[cold]
+    fn close_periods(&mut self, time: SimTime, inclusive: bool) {
+        while self.period_end < time || (inclusive && self.period_end == time) {
+            let statistics = self.statistics_at(self.period_end);
+            let Some(periods) = &mut self.periods else { return };
+            periods.close(statistics);
+            self.period_end = periods.end();
+        }
+    }
+
+    fn statistics_at(&self, time: SimTime) -> Vec<ObjectStatistics> {
+        self.objects.iter().map(|object| object.report(time).statistics).collect()
     }
 
     /// Changes how long a Station works on each MU from now on. The MU in work keeps its time,
@@ -130,6 +177,7 @@ impl SimulationRun {
             }
         }
         self.initialised = true;
+        self.start_periods();
         Ok(self.context.take_occurrences())
     }
 
@@ -177,7 +225,8 @@ impl SimulationRun {
     pub(crate) fn checkpoint_bytes(&self) -> u64 {
         const PER_OBJECT_ON_THE_HEAP: usize = 64;
         let objects = self.objects.len() * (size_of::<ModelObject>() + PER_OBJECT_ON_THE_HEAP);
-        (size_of::<SimulationRun>() + objects + self.queue.len() * size_of::<ScheduledEvent>()) as u64
+        let periods = self.periods.as_ref().map_or(0, Periods::bytes);
+        (size_of::<SimulationRun>() + objects + periods + self.queue.len() * size_of::<ScheduledEvent>()) as u64
     }
 
     /// Hands over everything an advance recorded, however it ended.
@@ -201,6 +250,8 @@ impl SimulationRun {
         self.events_at_this_time = 0;
         self.initialised = false;
         self.statistics_since = SimTime::ZERO;
+        self.periods = None;
+        self.period_end = SimTime::MAX;
         self.context = EventContext::new(1, self.recording);
     }
 
@@ -238,6 +289,7 @@ impl SimulationRun {
             initialised: self.initialised,
             statistics_since: self.statistics_since,
             objects: self.objects.iter().map(|object| object.report(self.time)).collect(),
+            periods: self.periods.as_ref().map(Periods::report),
         }
     }
 
@@ -277,6 +329,9 @@ impl SimulationRun {
         if until > self.time {
             self.time = until;
         }
+        if self.time >= self.period_end {
+            self.close_periods(self.time, true);
+        }
         Ok(true)
     }
 
@@ -290,6 +345,9 @@ impl SimulationRun {
         let Some(time) = self.next_event_time() else {
             return Ok(());
         };
+        if time > self.period_end {
+            self.close_periods(time, false);
+        }
         if time != self.counted_time {
             self.counted_time = time;
             self.events_at_this_time = 0;

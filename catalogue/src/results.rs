@@ -70,23 +70,7 @@ pub(crate) fn figures(statistics: &ObjectStatistics, now: SimTime) -> Vec<(&'sta
     figures
 }
 
-/// The 97.5% quantile of Student's t distribution with `df` degrees of freedom, for a two-sided
-/// 95% interval.
-pub(crate) fn t_quantile(df: usize) -> f64 {
-    const TABLE: [f64; 30] = [
-        12.706, 4.303, 3.182, 2.776, 2.571, 2.447, 2.365, 2.306, 2.262, 2.228, 2.201, 2.179, 2.160, 2.145, 2.131, 2.120, 2.110, 2.101,
-        2.093, 2.086, 2.080, 2.074, 2.069, 2.064, 2.060, 2.056, 2.052, 2.048, 2.045, 2.042,
-    ];
-    if (1..=30).contains(&df) {
-        return TABLE[df - 1];
-    }
-    // Beyond the table, the Cornish-Fisher expansion around the normal quantile, accurate to
-    // better than 0.001 from 30 degrees of freedom on.
-    let z: f64 = 1.959_964;
-    let n = df as f64;
-    z + (z.powi(3) + z) / (4.0 * n) + (5.0 * z.powi(5) + 16.0 * z.powi(3) + 3.0 * z) / (96.0 * n * n)
-        + (3.0 * z.powi(7) + 19.0 * z.powi(5) + 17.0 * z.powi(3) - 15.0 * z) / (384.0 * n.powi(3))
-}
+pub(crate) use crabsim::statistics::t_quantile;
 
 /// `value` as results show it: to 4 significant digits, but never fewer than its whole number, so
 /// 0.74604 is 0.746, 182.85 is 182.9 and 131650.75 is 131651. The store keeps every digit.

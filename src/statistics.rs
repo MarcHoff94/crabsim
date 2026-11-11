@@ -241,6 +241,154 @@ fn add_time(statistics: &mut ObjectStatistics, state: MachineState, contents: u6
     }
 }
 
+/// The 97.5% quantile of Student's t distribution with `df` degrees of freedom, for a two-sided
+/// 95% interval.
+pub fn t_quantile(df: usize) -> f64 {
+    const TABLE: [f64; 30] = [
+        12.706, 4.303, 3.182, 2.776, 2.571, 2.447, 2.365, 2.306, 2.262, 2.228, 2.201, 2.179, 2.160, 2.145, 2.131, 2.120, 2.110, 2.101,
+        2.093, 2.086, 2.080, 2.074, 2.069, 2.064, 2.060, 2.056, 2.052, 2.048, 2.045, 2.042,
+    ];
+    if (1..=30).contains(&df) {
+        return TABLE[df - 1];
+    }
+    // Beyond the table, the Cornish-Fisher expansion around the normal quantile, accurate to
+    // better than 0.001 from 30 degrees of freedom on.
+    let z: f64 = 1.959_964;
+    let n = df as f64;
+    z + (z.powi(3) + z) / (4.0 * n) + (5.0 * z.powi(5) + 16.0 * z.powi(3) + 3.0 * z) / (96.0 * n * n)
+        + (3.0 * z.powi(7) + 19.0 * z.powi(5) + 17.0 * z.powi(3) - 15.0 * z) / (384.0 * n.powi(3))
+}
+
+/// The mean and spread of one figure over complete measuring periods, kept as running sums by
+/// Welford's method, so memory doesn't grow with the number of periods.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Spread {
+    count: u64,
+    mean: f64,
+    /// The sum of squared differences from the mean.
+    squares: f64,
+}
+
+impl Spread {
+    pub fn add(&mut self, value: f64) {
+        self.count += 1;
+        let before = value - self.mean;
+        self.mean += before / self.count as f64;
+        self.squares += before * (value - self.mean);
+    }
+
+    /// How many periods it holds.
+    pub fn count(&self) -> u64 {
+        self.count
+    }
+
+    /// The mean over the periods. None before the first.
+    pub fn mean(&self) -> Option<f64> {
+        (self.count > 0).then_some(self.mean)
+    }
+
+    /// The sample variance between periods. None before the second.
+    pub fn variance(&self) -> Option<f64> {
+        (self.count > 1).then(|| self.squares / (self.count - 1) as f64)
+    }
+
+    /// Half the width of the 95% confidence interval for the mean (Student's t), taking the
+    /// periods as independent samples. None before the second period.
+    pub fn half_width(&self) -> Option<f64> {
+        let variance = self.variance()?;
+        Some(t_quantile(self.count as usize - 1) * (variance / self.count as f64).sqrt())
+    }
+}
+
+/// One object's figures over complete measuring periods, each period one sample. Shares are of
+/// the period's length, and `mus_in_per_hour` is the MUs that came in during it, per hour.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct PeriodFigures {
+    pub mus_in_per_hour: Spread,
+    pub busy: Spread,
+    pub blocked: Spread,
+    pub idle: Spread,
+    pub failed: Spread,
+    pub paused: Spread,
+    /// Failed or paused.
+    pub stopped: Spread,
+    /// Busy, failed or paused: what the likely-bottleneck rule ranks by.
+    pub not_idle: Spread,
+}
+
+impl PeriodFigures {
+    fn add(&mut self, before: &ObjectStatistics, after: &ObjectStatistics, length: SimTime) {
+        let length = length.as_millis() as f64;
+        let share = |of: fn(&ObjectStatistics) -> SimTime| (of(after).saturating_sub(of(before))).as_millis() as f64 / length;
+        let (busy, failed, paused) = (share(|s| s.time_busy), share(|s| s.time_failed), share(|s| s.time_paused));
+        self.mus_in_per_hour.add((after.mus_in - before.mus_in) as f64 * 3_600_000.0 / length);
+        self.busy.add(busy);
+        self.blocked.add(share(|s| s.time_blocked));
+        self.idle.add(share(|s| s.time_idle));
+        self.failed.add(failed);
+        self.paused.add(paused);
+        self.stopped.add(failed + paused);
+        self.not_idle.add(busy + failed + paused);
+    }
+}
+
+/// What a run measuring in periods reports: how long each is, how many are complete since
+/// statistics began, and every object's figures over them, indexed by id.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MeasuringPeriods {
+    pub length: SimTime,
+    pub complete: u64,
+    pub objects: Vec<PeriodFigures>,
+}
+
+/// A run's measuring periods in progress: the statistics at the end of the last complete one,
+/// and the figures so far. Its size doesn't grow with the number of periods.
+#[derive(Debug, Clone)]
+pub(crate) struct Periods {
+    length: SimTime,
+    /// The end of the period in progress.
+    end: SimTime,
+    complete: u64,
+    last: Vec<ObjectStatistics>,
+    figures: Vec<PeriodFigures>,
+}
+
+impl Periods {
+    /// Periods of `length` from `since`, when every object's statistics were `statistics`.
+    pub(crate) fn new(length: SimTime, since: SimTime, statistics: Vec<ObjectStatistics>) -> Periods {
+        Periods { length, end: later(since, length), complete: 0, figures: vec![PeriodFigures::default(); statistics.len()], last: statistics }
+    }
+
+    /// The end of the period in progress.
+    pub(crate) fn end(&self) -> SimTime {
+        self.end
+    }
+
+    /// Completes the period in progress with every object's statistics at its end.
+    pub(crate) fn close(&mut self, statistics: Vec<ObjectStatistics>) {
+        for ((figures, before), after) in self.figures.iter_mut().zip(&self.last).zip(&statistics) {
+            figures.add(before, after, self.length);
+        }
+        self.last = statistics;
+        self.complete += 1;
+        self.end = later(self.end, self.length);
+    }
+
+    /// About how much memory these take, for a checkpoint holding them.
+    pub(crate) fn bytes(&self) -> usize {
+        self.last.len() * (size_of::<ObjectStatistics>() + size_of::<PeriodFigures>())
+    }
+
+    pub(crate) fn report(&self) -> MeasuringPeriods {
+        MeasuringPeriods { length: self.length, complete: self.complete, objects: self.figures.clone() }
+    }
+}
+
+/// `length` after `time`, or the end of time.
+fn later(time: SimTime, length: SimTime) -> SimTime {
+    SimTime::from_millis(time.as_millis().saturating_add(length.as_millis()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -312,5 +460,19 @@ mod tests {
         let drain = keeper.read(SimTime::from_secs(500)).drain.unwrap();
         assert_eq!(drain.exit_interval_max, Some(SimTime::from_secs(370)));
         assert_eq!(drain.exit_interval_min, Some(SimTime::from_secs(60)));
+    }
+
+    #[test]
+    fn a_spread_gives_the_mean_variance_and_interval_of_its_values() {
+        let mut spread = Spread::default();
+        assert_eq!((spread.mean(), spread.variance(), spread.half_width()), (None, None, None));
+        for value in [2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0] {
+            spread.add(value);
+        }
+        assert_eq!(spread.count(), 8);
+        assert!((spread.mean().unwrap() - 5.0).abs() < 1e-12);
+        assert!((spread.variance().unwrap() - 32.0 / 7.0).abs() < 1e-12);
+        let half = 2.365 * (32.0 / 7.0 / 8.0f64).sqrt();
+        assert!((spread.half_width().unwrap() - half).abs() < 1e-12);
     }
 }

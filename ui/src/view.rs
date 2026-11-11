@@ -9,7 +9,7 @@ use crabsim_catalogue::bottleneck::{likely_bottleneck, LikelyBottleneck, Shares}
 use crabsim_model::State;
 use crabsim::{
     ModelDescription, ObjectKind, ObjectStatistics, SessionOutput, Picture, ProcessState, RunState, SessionStatus,
-    SimTime, StopCause, TimeMode,
+    SimTime, Spread, StopCause, TimeMode,
 };
 use std::collections::VecDeque;
 use std::time::Duration;
@@ -227,6 +227,9 @@ pub struct ViewState {
     trip: Option<Trip>,
     /// A raced trip ended, so the window turns animation on in the session too.
     trip_ended: bool,
+    /// The model's longest mean time between failures or repair time, which measuring periods
+    /// should be long against.
+    longest_failure_time: Option<SimTime>,
 }
 
 /// What the inspector says about the selected object.
@@ -346,6 +349,8 @@ pub struct DrainResult {
     pub mus_in: u64,
     pub throughput_per_hour: Option<f64>,
     pub mean_lead_time: Option<SimTime>,
+    /// MUs an hour, from the spread between measuring periods, once `MIN_PERIODS` are complete.
+    pub throughput_interval: Option<Interval>,
 }
 
 /// A Station's line in the Results tab: its shares of the time measured, from 0 to 1.
@@ -358,7 +363,67 @@ pub struct StationResult {
     pub idle: f64,
     pub failed: f64,
     pub paused: f64,
+    /// From the spread between measuring periods, once `MIN_PERIODS` are complete.
+    pub intervals: Option<StationIntervals>,
 }
+
+/// A figure's 95% confidence interval from the spread between measuring periods, each period one
+/// sample: `mean` plus or minus `half_width`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Interval {
+    pub mean: f64,
+    pub half_width: f64,
+}
+
+impl Interval {
+    fn of(spread: Spread) -> Option<Interval> {
+        Some(Interval { mean: spread.mean()?, half_width: spread.half_width()? })
+    }
+
+    pub fn low(&self) -> f64 {
+        self.mean - self.half_width
+    }
+
+    pub fn high(&self) -> f64 {
+        self.mean + self.half_width
+    }
+
+    /// Whether the two can't be told apart: their intervals share a value.
+    pub fn overlaps(&self, other: &Interval) -> bool {
+        self.low() <= other.high() && other.low() <= self.high()
+    }
+}
+
+/// A Station's shares of time as intervals, as the Results tab's columns have them.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StationIntervals {
+    pub busy: Interval,
+    pub blocked: Interval,
+    pub idle: Interval,
+    /// Failed or paused.
+    pub stopped: Interval,
+    /// Busy or stopped, which the likely-bottleneck rule ranks by.
+    pub not_idle: Interval,
+}
+
+/// How far measuring periods have got.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PeriodsSoFar {
+    pub length: SimTime,
+    pub complete: u64,
+}
+
+/// How many measuring periods have to be complete before the Results tab gives intervals. Fewer
+/// give intervals too wide to say much, and too few samples to trust their spread.
+pub const MIN_PERIODS: u64 = 5;
+
+/// A measuring period should be at least this many times the model's longest mean time between
+/// failures or mean repair time, or periods follow each other too closely to be independent
+/// samples, and intervals come out too narrow.
+pub const PERIOD_FAILURE_FACTOR: u64 = 5;
+
+/// The measuring period runs use until the user sets another: an hour of simulated time.
+pub const DEFAULT_MEASURING_PERIOD: SimTime = SimTime::from_secs(3_600);
 
 /// What the Results tab shows, from the run's full state at `as_of`.
 #[derive(Debug, Clone, PartialEq)]
@@ -371,6 +436,14 @@ pub struct Results {
     pub stations: Vec<StationResult>,
     /// By the catalogue's rule, the same `find_bottleneck` gives agents.
     pub bottleneck: Option<LikelyBottleneck>,
+    /// How far measuring periods have got, when the run measures in them.
+    pub periods: Option<PeriodsSoFar>,
+    /// The runner-up the likely bottleneck can't be told from: their busy-or-stopped intervals
+    /// overlap. Only once intervals are given.
+    pub too_close: Option<String>,
+    /// The model's longest mean time between failures or repair time, when the measuring period
+    /// is shorter than `PERIOD_FAILURE_FACTOR` times it.
+    pub short_against: Option<SimTime>,
 }
 
 /// The interventions a Station offers, and which are on.
@@ -440,6 +513,7 @@ impl ViewState {
             model_changed: false,
             trip: None,
             trip_ended: false,
+            longest_failure_time: model.longest_failure_time(),
             animate: true,
             results_open: false,
         }
@@ -933,6 +1007,9 @@ impl ViewState {
     /// has arrived after Init.
     pub fn results(&self) -> Option<Results> {
         let state = self.details.as_ref().filter(|state| state.initialised)?;
+        let periods = state.periods.as_ref();
+        // Each object's period figures, once enough periods are complete to give intervals.
+        let figures = |id: u32| periods.filter(|periods| periods.complete >= MIN_PERIODS)?.objects.get(id as usize).copied();
         let mut shares = Vec::new();
         let mut drains = Vec::new();
         let mut stations = Vec::new();
@@ -958,6 +1035,7 @@ impl ViewState {
                     mus_in: statistics.mus_in,
                     throughput_per_hour: statistics.mus_per_hour(state.time),
                     mean_lead_time: statistics.lead_time_mean(),
+                    throughput_interval: figures(object.id).and_then(|figures| Interval::of(figures.mus_in_per_hour)),
                 }),
                 ObjectKind::Station => stations.push(StationResult {
                     id: object.id,
@@ -967,6 +1045,15 @@ impl ViewState {
                     idle: share(statistics.time_idle),
                     failed: share(statistics.time_failed),
                     paused: share(statistics.time_paused),
+                    intervals: figures(object.id).and_then(|figures| {
+                        Some(StationIntervals {
+                            busy: Interval::of(figures.busy)?,
+                            blocked: Interval::of(figures.blocked)?,
+                            idle: Interval::of(figures.idle)?,
+                            stopped: Interval::of(figures.stopped)?,
+                            not_idle: Interval::of(figures.not_idle)?,
+                        })
+                    }),
                 }),
                 _ => {}
             }
@@ -976,12 +1063,25 @@ impl ViewState {
             .iter()
             .map(|connection| (self.objects[connection.from as usize].name.clone(), self.objects[connection.to as usize].name.clone()))
             .collect();
+        let bottleneck = likely_bottleneck(&shares, &connections);
+        let not_idle = |name: &str| stations.iter().find(|station| station.name == name)?.intervals.map(|intervals| intervals.not_idle);
+        let too_close = bottleneck.as_ref().and_then(|likely| {
+            let (runner_up, _) = likely.ranking.get(1)?;
+            not_idle(&likely.instance)?.overlaps(&not_idle(runner_up)?).then(|| runner_up.clone())
+        });
+        let short_against = periods
+            .and_then(|periods| Some((periods.length, self.longest_failure_time?)))
+            .filter(|&(length, longest)| length < longest.times(PERIOD_FAILURE_FACTOR))
+            .map(|(_, longest)| longest);
         Some(Results {
             as_of: state.time,
             since: state.statistics_since,
             drains,
             stations,
-            bottleneck: likely_bottleneck(&shares, &connections),
+            bottleneck,
+            periods: periods.map(|periods| PeriodsSoFar { length: periods.length, complete: periods.complete }),
+            too_close,
+            short_against,
         })
     }
 

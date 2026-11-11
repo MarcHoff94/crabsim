@@ -2538,3 +2538,56 @@ fn turning_animation_off_while_running_races_on_and_on_again_animates_from_there
     assert_eq!(watched.shown, secs(10_003), "animated again at speed 1");
     assert!(!seen.occurrences.is_empty() && seen.occurrences.iter().all(|o| o.time > secs(10_000)));
 }
+
+// ---------- Measuring periods ----------
+
+/// The demo, measuring in hour-long periods, as the window builds it.
+fn demo_measured() -> SimulationRun {
+    let mut run = crabsim::demo::model().build(3);
+    run.set_measuring_period(Some(secs(3_600)));
+    run
+}
+
+#[test]
+fn a_session_measures_the_same_periods_as_a_headless_run_however_it_gets_there() {
+    // Checkpoints close together, so going back restores one and replays across period ends.
+    let settings = SessionSettings { checkpoint_spacing: 2_000, ..SessionSettings::default() };
+    let mut watched = Watched::with_settings(demo_measured, settings);
+    watched.session.set_speed(3_600.0).unwrap();
+    watched.session.start().unwrap();
+    watched.at(5);
+    watched.look();
+    watched.session.halt().unwrap();
+    let animated = watched.state_now();
+    assert_eq!(animated.time, secs(5 * 3_600));
+    assert_eq!(animated, headless_at(demo_measured, secs(5 * 3_600)));
+    assert_eq!(animated.periods.as_ref().unwrap().complete, 5);
+
+    watched.session.go_back(secs(9_000)).unwrap();
+    let back = watched.state_now();
+    assert_eq!(back, headless_at(demo_measured, secs(9_000)));
+    assert_eq!(back.periods.as_ref().unwrap().complete, 2, "the periods after 2:30 are gone with the future");
+
+    watched.session.set_animation(false).unwrap();
+    watched.session.go_to(secs(20 * 3_600 + 600)).unwrap();
+    let raced = watched.state_now();
+    assert_eq!(raced, headless_at(demo_measured, secs(20 * 3_600 + 600)));
+    assert_eq!(raced.periods.as_ref().unwrap().complete, 20);
+
+    watched.session.reset().unwrap();
+    watched.session.go_to(secs(3 * 3_600)).unwrap();
+    assert_eq!(watched.state_now(), headless_at(demo_measured, secs(3 * 3_600)), "Reset keeps the setting");
+}
+
+#[test]
+fn clearing_statistics_in_a_session_starts_its_periods_afresh() {
+    let mut watched = Watched::new(demo_measured);
+    watched.session.set_animation(false).unwrap();
+    watched.session.go_to(secs(5_400)).unwrap();
+    watched.look();
+    watched.session.clear_statistics().unwrap();
+    watched.session.go_to(secs(5 * 3_600)).unwrap();
+    let state = watched.state_now();
+    assert_eq!(state.statistics_since, secs(5_400));
+    assert_eq!(state.periods.as_ref().unwrap().complete, 3, "periods end at 2:30, 3:30 and 4:30");
+}

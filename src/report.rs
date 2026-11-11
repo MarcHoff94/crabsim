@@ -2,7 +2,7 @@
 //! these instead of reaching into material-flow objects or engine events.
 
 use crate::flows::ProcessState;
-use crate::statistics::ObjectStatistics;
+use crate::statistics::{MeasuringPeriods, ObjectStatistics};
 use crate::time::SimTime;
 
 /// Something that happened in the model at a point in simulation time.
@@ -153,4 +153,7 @@ pub struct RunState {
     /// When the objects' statistics began: t=0, or the last time they were cleared.
     pub statistics_since: SimTime,
     pub objects: Vec<ObjectState>,
+    /// Each object's figures over the complete measuring periods since statistics began, when
+    /// the run measures in periods. See `SimulationRun::set_measuring_period`.
+    pub periods: Option<MeasuringPeriods>,
 }

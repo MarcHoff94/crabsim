@@ -25,8 +25,9 @@ use clap::Parser;
 use crabsim::{LiveSession, SessionStatus, SimTime, TimeMode, WallClock};
 use crabsim_ui::camera::Camera as ViewCamera;
 use crabsim_ui::view::{
-    Change, Control, DEFAULT_SPEED, Details, EndTimeProblem, Inspection, Intervention, JumpProblem, MAX_SPEED, MIN_SPEED, Mark,
-    Point, MU_METRES, Shade, StepBack, ViewState, format_time, format_time_exact, label_size, parse_time, rgb,
+    Change, Control, DEFAULT_SPEED, Details, EndTimeProblem, GoingOn, Inspection, Intervention, JumpProblem, MAX_SPEED, MIN_SPEED,
+    Mark, Point, MU_METRES, Shade, StepBack, ViewState, format_time, format_time_exact, label_size, parse_time, rgb,
+    wall_time_roughly,
 };
 use crabsim_ui::attributes::{Form, RepairKind};
 use crabsim_ui::editing::{ActRefusal, Claim, EditAction, Editors};
@@ -58,6 +59,8 @@ const BACKGROUND: Color = Color::srgb(0.10, 0.11, 0.13);
 const CONNECTION: Color = Color::srgba(0.65, 0.67, 0.75, 0.6);
 const INSPECTOR_WIDTH: f32 = 280.0;
 const MODELS_WIDTH: f32 = 230.0;
+/// The model's name in the top bar, so the run controls after it never move.
+const NAME_WIDTH: f32 = 160.0;
 /// The longest wait between frames while anything can change: about 60 frames a second.
 const FRAME_INTERVAL: Duration = Duration::from_micros(16_667);
 
@@ -123,6 +126,7 @@ fn main() {
             press: None,
             process_time_text: (None, String::new()),
             pending: None,
+            long_trip: None,
             workspace,
             seed_text,
             end_text: String::new(),
@@ -187,6 +191,9 @@ struct Ui {
     process_time_text: (Option<u32>, String),
     /// Going back that drops interventions, waiting for the user to confirm it.
     pending: Option<GoingBack>,
+    /// Going on to a later time that would take long animated, waiting for the user to choose
+    /// racing there or animating anyway, with how long animating would take.
+    long_trip: Option<(SimTime, Duration)>,
     /// The models folder and the model open.
     workspace: Workspace,
     /// What has been typed into the seed field.
@@ -812,7 +819,10 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
                     attribute_change = attributes_section(panel, attributes, &mut ui.forms, editable, ui.refused.as_ref());
                 }
             }
-            Tab::Results => results_chosen = results_tab(panel, ui.view.results().as_ref(), &mut ui.results_sort),
+            Tab::Results => {
+                let results = ui.view.results().map(|results| (ui.view.results_time(&results), results));
+                results_chosen = results_tab(panel, results.as_ref().map(|(at, results)| (at.as_str(), results)), &mut ui.results_sort);
+            }
             Tab::Agents => editors_action = agents_tab(panel, ui.workspace.opened(), ui.editors.as_ref(), ui.editors_note.as_deref()),
         });
     });
@@ -919,6 +929,13 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
             ui.pending = Some(GoingBack::To(to));
             None
         }
+        Some(Request::GoTo(to)) => match ui.view.going_on(to) {
+            GoingOn::Now => Some(Request::GoTo(to)),
+            GoingOn::Ask { wall } => {
+                ui.long_trip = Some((to, wall));
+                None
+            }
+        },
         Some(Request::Control(Control::StepBack)) => stepping_back(ui, ui.view.step_back()),
         other => other,
     };
@@ -927,6 +944,9 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
         stepping_back(ui, located)
     });
     let request = request.or_else(|| confirm_going_back(&ctx, ui));
+    let request = request.or_else(|| confirm_long_trip(&ctx, ui));
+    // A raced trip ended, so the session animates again, as the view does already.
+    let request = request.or_else(|| ui.view.trip_ended().then_some(Request::Animate(true)));
 
     // A model clicked replaces the run, so a run in progress is replaced only once confirmed.
     if let Some(path) = chosen {
@@ -987,6 +1007,10 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
                 session.set_time_mode(mode)
             }
             Request::GoTo(to) => session.go_to(to),
+            Request::RaceTo(to) => {
+                ui.view.race_to();
+                session.set_animation(false).and_then(|()| session.go_to(to))
+            }
             Request::Animate(on) => {
                 ui.view.set_animate(on);
                 session.set_animation(on)
@@ -1030,6 +1054,8 @@ enum Request {
     TimeMode(TimeMode),
     /// Go to a time: back to an earlier one, or on to a later one.
     GoTo(SimTime),
+    /// Go on to a later time as fast as possible, with animation off until there.
+    RaceTo(SimTime),
     /// Animation on or off.
     Animate(bool),
     /// Ask the session where stepping back goes, before deciding whether to ask the user.
@@ -1253,7 +1279,13 @@ fn top_bar(
     // Two rows, each narrower than the window's minimum width, so neither wraps or loses a
     // control off its end: running the model first, then where and how fast it goes.
     ui.horizontal(|ui| {
-        ui.label(egui::RichText::new(workspace.opened().unwrap_or("No model open")).strong());
+        // A fixed width, so the controls after it stay where they are when a model opens. A
+        // longer name is cut short, with all of it on hover.
+        let name = egui::Label::new(egui::RichText::new(workspace.opened().unwrap_or("No model open")).strong()).truncate();
+        ui.allocate_ui_with_layout(egui::vec2(NAME_WIDTH, ui.spacing().interact_size.y), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+            ui.set_width(NAME_WIDTH);
+            ui.add(name);
+        });
         ui.label("seed").on_hover_text(SEED_HINT);
         let seed_field = ui
             .add_enabled(view.allows_seed(), egui::TextEdit::singleline(seed_text).desired_width(70.0))
@@ -1439,6 +1471,40 @@ fn confirm_going_back(ctx: &egui::Context, ui: &mut Ui) -> Option<Request> {
     answer.then_some(match pending {
         GoingBack::To(to) | GoingBack::Step(to) => Request::GoTo(to),
     })
+}
+
+/// Asks before going on animated to a time that would take long, offering to race there instead.
+/// Returns the request once answered.
+fn confirm_long_trip(ctx: &egui::Context, ui: &mut Ui) -> Option<Request> {
+    let (to, wall) = ui.long_trip?;
+    let mut answer = None;
+    let modal = egui::Modal::new(egui::Id::new("confirm long trip")).show(ctx, |modal| {
+        modal.set_max_width(420.0);
+        modal.heading(format!("Go to {}?", format_time_exact(to)));
+        modal.label(format!(
+            "Animated at {}× it takes {}. Racing there takes as long as the machine needs, then animation goes on again.",
+            (ui.view.speed() * 10.0).round() / 10.0,
+            wall_time_roughly(wall)
+        ));
+        modal.add_space(8.0);
+        modal.horizontal(|row| {
+            if row.button("Race there").on_hover_text("Go there as fast as it can, without drawing the way").clicked() {
+                answer = Some(Some(Request::RaceTo(to)));
+            }
+            if row.button("Animate anyway").on_hover_text("Go there at the chosen speed, drawing everything").clicked() {
+                answer = Some(Some(Request::GoTo(to)));
+            }
+            if row.button("Cancel").clicked() {
+                answer = Some(None);
+            }
+        });
+    });
+    if modal.should_close() && answer.is_none() {
+        answer = Some(None);
+    }
+    let answer = answer?;
+    ui.long_trip = None;
+    answer
 }
 
 const SEED_HINT: &str = "The number every random value in a run follows from, such as when a Station fails. The same seed gives the same result.";
@@ -1737,9 +1803,9 @@ fn percent(share: f64) -> String {
 /// The run so far: each Drain's throughput and lead time, the likely bottleneck with its
 /// neighbours as evidence, and every Station's shares of time, sorted by a column clicked.
 /// Returns an object whose name was clicked, to select it.
-fn results_tab(ui: &mut egui::Ui, results: Option<&crabsim_ui::view::Results>, sort: &mut SortBy) -> Option<u32> {
+fn results_tab(ui: &mut egui::Ui, results: Option<(&str, &crabsim_ui::view::Results)>, sort: &mut SortBy) -> Option<u32> {
     ui.heading("Results");
-    let Some(results) = results else {
+    let Some((at, results)) = results else {
         ui.label(egui::RichText::new("Start the model, or go to a time such as 8:00:00, and its results show here.").weak());
         return None;
     };
@@ -1749,7 +1815,7 @@ fn results_tab(ui: &mut egui::Ui, results: Option<&crabsim_ui::view::Results>, s
             *chosen = Some(id);
         }
     };
-    ui.label(egui::RichText::new(format!("At {}, measured since {}", format_time_exact(results.as_of), format_time(results.since))).weak());
+    ui.label(egui::RichText::new(format!("At {at}, measured since {}", format_time(results.since))).weak());
     ui.add_space(6.0);
 
     ui.label(egui::RichText::new("Drains").strong());

@@ -8,8 +8,8 @@ use crabsim::{
 use crabsim::random_numbers::Distribution;
 use crabsim_ui::camera::Camera;
 use crabsim_ui::view::{
-    label_size, Control, JumpProblem, Point, Rect, Shade, ViewState, DEFAULT_SPEED,
-    MAX_LABEL_PIXELS, MAX_SPEED, MIN_LABEL_PIXELS, MIN_SPEED,
+    label_size, wall_time_roughly, Control, GoingOn, JumpProblem, Point, Rect, Shade, ViewState,
+    DEFAULT_SPEED, MAX_LABEL_PIXELS, MAX_SPEED, MIN_LABEL_PIXELS, MIN_SPEED,
 };
 use std::time::Duration;
 
@@ -429,6 +429,90 @@ fn going_to_a_time_goes_back_or_on() {
     watched.frame();
     assert_eq!(watched.view.shown_time(), "00:00:05");
     assert_eq!(watched.view.status(), SessionStatus::Halted);
+}
+
+#[test]
+fn going_on_animated_asks_first_only_when_it_would_take_more_than_a_minute() {
+    let mut view = ViewState::new(&demo::model());
+    let day = SimTime::from_secs(86_400);
+    // A day at 60 times real time is 24 minutes of wall time.
+    assert_eq!(view.going_on(day), GoingOn::Ask { wall: Duration::from_secs(1_440) });
+    assert_eq!(view.going_on(SimTime::from_secs(3_600)), GoingOn::Now, "an hour is a minute");
+    assert_eq!(view.going_on(SimTime::from_secs(3_660)), GoingOn::Ask { wall: Duration::from_secs(61) });
+    view.set_speed(3_600.0);
+    assert_eq!(view.going_on(day), GoingOn::Now, "24 seconds at 3,600 times");
+    view.set_speed(DEFAULT_SPEED);
+    view.set_end_time(Some(SimTime::from_secs(1_800)));
+    assert_eq!(view.going_on(day), GoingOn::Now, "the run halts at its end time first");
+    view.set_end_time(None);
+    view.set_animate(false);
+    assert_eq!(view.going_on(day), GoingOn::Now, "racing anyway");
+    view.set_animate(true);
+    shown_at(&mut view, 86_000, 1.0);
+    assert_eq!(view.going_on(day), GoingOn::Now, "it counts from shown time");
+    assert_eq!(view.going_on(SimTime::from_secs(60)), GoingOn::Now, "going back never asks");
+}
+
+#[test]
+fn the_wait_is_said_roughly() {
+    assert_eq!(wall_time_roughly(Duration::from_secs(90)), "about 2 minutes");
+    assert_eq!(wall_time_roughly(Duration::from_secs(1_440)), "about 24 minutes");
+    assert_eq!(wall_time_roughly(Duration::from_secs(43_200)), "about 12 hours");
+    assert_eq!(wall_time_roughly(Duration::from_secs(3_600)), "about 1 hour");
+    assert_eq!(wall_time_roughly(Duration::from_secs(5 * 86_400)), "about 5 days");
+}
+
+#[test]
+fn racing_there_turns_animation_off_for_the_trip_only() {
+    let mut watched = Watched::demo();
+    let to = SimTime::from_secs(2 * 86_400);
+    assert!(matches!(watched.view.going_on(to), GoingOn::Ask { .. }));
+    // Race there: the window turns animation off and goes to the time.
+    watched.view.race_to();
+    assert!(!watched.view.animate(), "off for the trip");
+    watched.session.set_animation(false).unwrap();
+    watched.session.go_to(to).unwrap();
+    watched.frame();
+    assert_eq!(watched.view.shown_time(), "2d 00:00:00", "raced there without the clock moving");
+    assert_eq!(watched.view.status(), SessionStatus::Halted);
+    assert!(watched.view.animate(), "on again once there");
+    assert!(watched.view.trip_ended(), "so the window turns it on in the session too");
+    assert!(!watched.view.trip_ended(), "once");
+    watched.session.set_animation(true).unwrap();
+    watched.session.set_speed(watched.view.speed()).unwrap();
+    watched.session.start().unwrap();
+    watched.at(1);
+    assert_eq!(watched.view.shown_time(), "2d 00:01:00", "animated again, at the speed");
+}
+
+#[test]
+fn a_raced_trip_ends_when_halted_on_the_way_and_animating_anyway_changes_nothing() {
+    let mut view = ViewState::new(&demo::model());
+    view.race_to();
+    view.observe(&SessionOutput::Status(SessionStatus::Advancing), Duration::ZERO);
+    assert!(!view.trip_ended());
+    view.observe(&SessionOutput::Status(SessionStatus::Halted), Duration::ZERO);
+    assert!(view.animate());
+    assert!(view.trip_ended(), "Halt on the way ends the trip too");
+
+    view.race_to();
+    view.set_animate(false);
+    view.observe(&SessionOutput::Status(SessionStatus::Advancing), Duration::ZERO);
+    view.observe(&SessionOutput::Status(SessionStatus::Halted), Duration::ZERO);
+    assert!(!view.animate(), "the user chose animation off on the way, which stays");
+    assert!(!view.trip_ended());
+
+    let mut view = ViewState::new(&demo::model());
+    view.observe(&SessionOutput::Status(SessionStatus::Advancing), Duration::ZERO);
+    view.observe(&SessionOutput::Status(SessionStatus::Halted), Duration::ZERO);
+    assert!(view.animate() && !view.trip_ended(), "animating anyway is a plain go to");
+}
+
+#[test]
+fn a_new_model_during_a_raced_trip_animates() {
+    let mut view = ViewState::new(&demo::model());
+    view.race_to();
+    assert!(ViewState::with_settings_of(&demo::model(), &view).animate());
 }
 
 #[test]

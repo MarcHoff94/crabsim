@@ -97,6 +97,28 @@ pub enum JumpProblem {
     NotATime,
 }
 
+/// What going on to a later time should do. Animated, a trip far ahead can take hours at the
+/// speed asked for, so the window asks first whether to race there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GoingOn {
+    /// Go there.
+    Now,
+    /// Getting there animated would take about `wall` of wall time, more than `LONG_TRIP`, so ask
+    /// whether to race there, with animation off for the trip, or animate anyway.
+    Ask { wall: Duration },
+}
+
+/// The longest an animated trip to a later time takes before going there asks first.
+pub const LONG_TRIP: Duration = Duration::from_secs(60);
+
+/// A trip raced there after asking, with animation off until it ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Trip {
+    /// Sent, but the session hasn't said it is advancing yet.
+    Sent,
+    Racing,
+}
+
 /// Why a time typed in as the end time can't be used.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EndTimeProblem {
@@ -153,6 +175,20 @@ const SETTLE: Duration = Duration::from_secs(1);
 /// somewhere in Bevy or the graphics driver, wasn't found.
 const STARTUP: Duration = Duration::from_secs(3);
 
+/// The wait for a trip, as people say it: in minutes, hours or days.
+pub fn wall_time_roughly(wall: Duration) -> String {
+    let secs = wall.as_secs_f64();
+    let (count, unit) = if secs < 3_600.0 {
+        ((secs / 60.0).round().max(1.0), "minute")
+    } else if secs < 2.0 * 86_400.0 {
+        ((secs / 3_600.0).round(), "hour")
+    } else {
+        ((secs / 86_400.0).round(), "day")
+    };
+    let count = count as u64;
+    format!("about {count} {unit}{}", if count == 1 { "" } else { "s" })
+}
+
 /// Space between objects placed by the fallback, for objects the model hasn't placed.
 const FALLBACK_SPACING: f64 = 3.0;
 
@@ -187,6 +223,10 @@ pub struct ViewState {
     end_time: Option<SimTime>,
     /// The model file changed during a run, so Reset will use the new model.
     model_changed: bool,
+    /// A trip raced there with animation off, which goes on again when it ends.
+    trip: Option<Trip>,
+    /// A raced trip ended, so the window turns animation on in the session too.
+    trip_ended: bool,
 }
 
 /// What the inspector says about the selected object.
@@ -398,6 +438,8 @@ impl ViewState {
             locating: false,
             end_time: None,
             model_changed: false,
+            trip: None,
+            trip_ended: false,
             animate: true,
             results_open: false,
         }
@@ -410,7 +452,8 @@ impl ViewState {
         view.speed = old.speed;
         view.time_mode = old.time_mode;
         view.end_time = old.end_time;
-        view.animate = old.animate;
+        // A raced trip is over for a new session, so animation is as it was before it.
+        view.animate = old.animate || old.trip.is_some();
         view
     }
 
@@ -422,7 +465,45 @@ impl ViewState {
     /// Notes that animation went on or off, as the window tells the session too.
     pub fn set_animate(&mut self, on: bool) {
         self.animate = on;
+        // The user chose, so a raced trip leaves animation as they set it.
+        self.trip = None;
         self.pace.clear();
+    }
+
+    /// What going on to `to` should do: ask first when animated it would take more than
+    /// `LONG_TRIP` of wall time at the speed asked for, up to the end time if that comes first.
+    /// Skipping gaps can make a trip shorter, which this doesn't foresee. Going back never asks
+    /// this.
+    pub fn going_on(&self, to: SimTime) -> GoingOn {
+        let shown = self.picture.shown();
+        let to = self.end_time.map_or(to, |end| to.min(end));
+        if !self.animate || to <= shown {
+            return GoingOn::Now;
+        }
+        let wall = Duration::from_millis((to.saturating_sub(shown).as_millis() as f64 / self.speed).round() as u64);
+        if wall > LONG_TRIP { GoingOn::Ask { wall } } else { GoingOn::Now }
+    }
+
+    /// Notes that the user chose to race to a later time: the window turns animation off and
+    /// goes there. Animation goes on again when the trip ends, by arriving, Halt or anything else
+    /// that stops the run, and `trip_ended` then tells the window to say so to the session.
+    pub fn race_to(&mut self) {
+        self.animate = false;
+        self.pace.clear();
+        self.trip = Some(if self.status == SessionStatus::Advancing { Trip::Racing } else { Trip::Sent });
+        self.trip_ended = false;
+    }
+
+    /// Whether a raced trip has just ended, so the window turns animation on in the session.
+    /// True once per trip.
+    pub fn trip_ended(&mut self) -> bool {
+        std::mem::take(&mut self.trip_ended)
+    }
+
+    fn end_trip(&mut self) {
+        self.trip = None;
+        self.animate = true;
+        self.trip_ended = true;
     }
 
     /// Takes in one output from the session, read at wall time `wall`.
@@ -453,12 +534,21 @@ impl ViewState {
                 }
                 self.status = *status;
                 self.pace.clear();
+                match self.trip {
+                    Some(Trip::Sent) if *status == SessionStatus::Advancing => self.trip = Some(Trip::Racing),
+                    Some(Trip::Racing) if *status != SessionStatus::Advancing => self.end_trip(),
+                    _ => {}
+                }
                 if *status == SessionStatus::Advancing {
                     self.locating = false;
                 }
             }
             SessionOutput::Error(error) => {
                 self.error = Some(error.to_string());
+                // Going there was refused, such as at the end time, so the trip never began.
+                if self.trip == Some(Trip::Sent) {
+                    self.end_trip();
+                }
                 self.locating = false;
             }
             SessionOutput::Occurrences(occurrences) => self.marks.saw_occurrences(occurrences),
@@ -893,6 +983,15 @@ impl ViewState {
             stations,
             bottleneck: likely_bottleneck(&shares, &connections),
         })
+    }
+
+    /// When the results are from, as the Results tab says it: whole seconds while the run is
+    /// advancing, and to the millisecond once it stands still.
+    pub fn results_time(&self, results: &Results) -> String {
+        match self.status {
+            SessionStatus::Advancing => format_time(results.as_of),
+            _ => format_time_exact(results.as_of),
+        }
     }
 
     /// Notes that the window asked the session for a full state at wall time `wall`, so the

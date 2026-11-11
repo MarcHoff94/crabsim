@@ -5,7 +5,9 @@
 mod common;
 
 use common::Watched;
-use crabsim::SimTime;
+use crabsim::{demo, SessionOutput, SessionStatus, SimTime};
+use crabsim_ui::view::ViewState;
+use std::time::Duration;
 
 #[test]
 fn results_come_only_once_a_full_state_is_there_and_are_asked_for_while_the_tab_is_open() {
@@ -51,4 +53,21 @@ fn results_give_every_drain_and_station_and_the_likely_bottleneck_by_the_catalog
     assert!((likely.not_idle_share - most).abs() < 1e-12, "the Station busy or stopped most");
     assert!(results.stations.iter().any(|station| station.name == likely.instance));
     assert!(!likely.upstream.is_empty(), "with its neighbours upstream as evidence");
+}
+
+#[test]
+fn results_say_whole_seconds_while_running_and_milliseconds_when_halted() {
+    let model = demo::model();
+    let mut view = ViewState::new(&model);
+    let mut run = model.build(0);
+    run.init().unwrap();
+    run.advance_to(SimTime::from_millis(1_104_151)).unwrap();
+    view.observe(&SessionOutput::State(run.state()), Duration::ZERO);
+    view.observe(&SessionOutput::Status(SessionStatus::Advancing), Duration::ZERO);
+    let results = view.results().unwrap();
+    assert_eq!(view.results_time(&results), "00:18:24");
+    view.observe(&SessionOutput::Status(SessionStatus::Halted), Duration::ZERO);
+    assert_eq!(view.results_time(&results), "00:18:24.151");
+    view.observe(&SessionOutput::Status(SessionStatus::ReachedEnd), Duration::ZERO);
+    assert_eq!(view.results_time(&results), "00:18:24.151");
 }

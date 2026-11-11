@@ -208,6 +208,8 @@ pub struct ViewState {
     /// Wall time and shown time while advancing, oldest first, over the last `ACHIEVED_WINDOW`.
     pace: VecDeque<(Duration, SimTime)>,
     selected: Option<u32>,
+    /// The connection selected, from and to, instead of an object.
+    selected_connection: Option<(u32, u32)>,
     /// Whether the Results tab is open, which wants full states as a selection does.
     results_open: bool,
     /// The last full state, for what only a full state says, such as statistics.
@@ -230,6 +232,30 @@ pub struct ViewState {
     /// The model's longest mean time between failures or repair time, which measuring periods
     /// should be long against.
     longest_failure_time: Option<SimTime>,
+}
+
+/// What Delete removes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Deletion {
+    Connection { from: String, to: String },
+    /// An instance, and its connections with it, as (from, to).
+    Instance { name: String, connections: Vec<(String, String)> },
+}
+
+impl Deletion {
+    /// Whether the window asks before removing: when an instance's connections go with it.
+    pub fn asks_first(&self) -> bool {
+        matches!(self, Deletion::Instance { connections, .. } if !connections.is_empty())
+    }
+}
+
+/// How far `point` is from the segment from `start` to `end`.
+fn distance_to_segment(point: Point, start: Point, end: Point) -> f64 {
+    let (dx, dy) = (end.x - start.x, end.y - start.y);
+    let length_squared = dx * dx + dy * dy;
+    let along = if length_squared == 0.0 { 0.0 } else { (((point.x - start.x) * dx + (point.y - start.y) * dy) / length_squared).clamp(0.0, 1.0) };
+    let (x, y) = (start.x + along * dx, start.y + along * dy);
+    ((point.x - x).powi(2) + (point.y - y).powi(2)).sqrt()
 }
 
 /// What the inspector says about the selected object.
@@ -504,6 +530,7 @@ impl ViewState {
             time_mode: TimeMode::Continuous,
             pace: VecDeque::new(),
             selected: None,
+            selected_connection: None,
             details: None,
             details_stale: false,
             last_request: None,
@@ -907,8 +934,57 @@ impl ViewState {
         }
     }
 
+    /// Selects the object, or nothing, which unselects any connection too.
     pub fn select(&mut self, id: Option<u32>) {
         self.selected = id.filter(|&id| (id as usize) < self.objects.len());
+        self.selected_connection = None;
+    }
+
+    /// Selects the connection from and to these objects, or nothing, which unselects any object
+    /// too. One the model hasn't selects nothing.
+    pub fn select_connection(&mut self, connection: Option<(u32, u32)>) {
+        self.selected_connection = connection.filter(|&(from, to)| self.connections.iter().any(|c| c.from == from && c.to == to));
+        self.selected = None;
+    }
+
+    pub fn selected_connection(&self) -> Option<(u32, u32)> {
+        self.selected_connection
+    }
+
+    /// The connection whose line passes within `within` metres of `floor`, the nearest if more
+    /// do, such as for a click on its arrow. The window gives `within` from the zoom, so a line is
+    /// as easy to hit however close the view is.
+    pub fn connection_at(&self, floor: Point, within: f64) -> Option<(u32, u32)> {
+        self.connections
+            .iter()
+            .map(|connection| (distance_to_segment(floor, connection.start, connection.end), connection))
+            .filter(|(distance, _)| *distance <= within)
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .map(|(_, connection)| (connection.from, connection.to))
+    }
+
+    /// Whether the model can be built on now: only with no run in progress, before Init or after
+    /// Reset, as with changing attributes. During a run the window says "Reset first to change the
+    /// model".
+    pub fn allows_building(&self) -> bool {
+        self.reloads_now()
+    }
+
+    /// What Delete does with what is selected: removes a connection at once, or an instance,
+    /// which first names the connections going with it. `None` with nothing selected or a run in
+    /// progress.
+    pub fn deletion(&self) -> Option<Deletion> {
+        if !self.allows_building() {
+            return None;
+        }
+        let name = |id: u32| self.objects[id as usize].name.clone();
+        if let Some((from, to)) = self.selected_connection {
+            return Some(Deletion::Connection { from: name(from), to: name(to) });
+        }
+        let id = self.selected?;
+        let connections =
+            self.connections.iter().filter(|c| c.from == id || c.to == id).map(|c| (name(c.from), name(c.to))).collect();
+        Some(Deletion::Instance { name: name(id), connections })
     }
 
     pub fn selected(&self) -> Option<u32> {

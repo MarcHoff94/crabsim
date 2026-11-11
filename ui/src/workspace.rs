@@ -6,11 +6,16 @@
 //! `check` is the one seam for noticing that the open model file changed, such as by an agent: it
 //! compares the file's size and modified time, and only when they differ reads it again through
 //! the catalogue and compares its hash. A file watcher could take its place later.
+//!
+//! Building a model is a set of actions here, each exactly one `edit_model` batch, the unit a later
+//! undo will step through (spec issue 87). The window offers them only with no run in progress, and
+//! picks up what they saved through `check`, as it does an agent's change.
 
 use crate::editing::{ActRefusal, EditAction, Editors};
 use crate::view::{Change, DEFAULT_MEASURING_PERIOD};
 use crabsim::{Clock, Dimensions, LiveSession, ModelDescription, ObjectKind, Position, SimTime};
 use crabsim_catalogue::{Catalogue, ErrorKind, Settings, Source};
+use crabsim_model::{Attribute, Model, BUILT_IN_CLASSES};
 use serde_json::{json, Value};
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -19,6 +24,79 @@ use std::time::SystemTime;
 /// The demo model, saved in a models folder made on a first start. Built in, so a downloaded
 /// program has it without the repository.
 const DEMO: &str = include_str!("../../models/demo.json");
+
+/// One class in the Classes panel, as a tree by inheritance.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClassEntry {
+    pub name: String,
+    /// The class it derives from, none for a built-in class.
+    pub parent: Option<String>,
+    /// 0 for a built-in class, 1 for one derived from it, and so on.
+    pub depth: usize,
+    pub built_in: bool,
+}
+
+/// Which of a connection's two places.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum End {
+    /// Its place among the connections out of its object.
+    Exit,
+    /// Its place among the connections into its successor.
+    Entrance,
+}
+
+/// A connection as the inspector shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConnectionView {
+    pub from: String,
+    pub to: String,
+    pub exit: u64,
+    /// How many connections leave `from`.
+    pub exits: u64,
+    pub entrance: u64,
+    /// How many connections lead into `to`.
+    pub entrances: u64,
+    pub description: Option<String>,
+}
+
+impl ConnectionView {
+    /// Such as "2nd of Station A's 3 exits".
+    pub fn exit_text(&self) -> String {
+        format!("{} of {}'s {} exit{}", ordinal(self.exit), self.from, self.exits, if self.exits == 1 { "" } else { "s" })
+    }
+
+    /// Such as "1st of Station B's 2 entrances".
+    pub fn entrance_text(&self) -> String {
+        format!("{} of {}'s {} entrance{}", ordinal(self.entrance), self.to, self.entrances, if self.entrances == 1 { "" } else { "s" })
+    }
+}
+
+/// 1st, 2nd, 3rd, 4th, 11th, 21st and so on.
+pub fn ordinal(n: u64) -> String {
+    let suffix = match (n % 10, n % 100) {
+        (_, 11..=13) => "th",
+        (1, _) => "st",
+        (2, _) => "nd",
+        (3, _) => "rd",
+        _ => "th",
+    };
+    format!("{n}{suffix}")
+}
+
+/// What removing a class takes with it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Dependents {
+    /// The classes deriving from it, at any depth.
+    pub classes: Vec<String>,
+    /// The instances of it or of those classes.
+    pub instances: Vec<String>,
+}
+
+impl Dependents {
+    pub fn is_empty(&self) -> bool {
+        self.classes.is_empty() && self.instances.is_empty()
+    }
+}
 
 /// Space left between objects the window places itself, in metres.
 const GAP: f64 = 2.0;
@@ -119,12 +197,14 @@ pub struct Workspace {
     models: Vec<ModelEntry>,
     /// The model the window runs, laid out. Empty until one is opened.
     description: ModelDescription,
+    /// The same model as its file has it, with its classes and connections, for building.
+    model: Model,
     /// Its path, until one is opened none.
     opened: Option<String>,
     /// The open file as last read.
     read: Option<Read>,
     /// The open file's model since it changed, not used yet.
-    pending: Option<ModelDescription>,
+    pending: Option<(ModelDescription, Model)>,
     problems: Option<ProblemReport>,
     seed: u64,
     /// How long the measuring periods of runs are, a setting of runs rather than of the model.
@@ -140,6 +220,7 @@ impl Workspace {
             banner: None,
             models: Vec::new(),
             description: ModelDescription::new(),
+            model: Model::default(),
             opened: None,
             read: None,
             pending: None,
@@ -222,8 +303,9 @@ impl Workspace {
     /// for the window to show, and the model open before stays. Returns whether it opened.
     pub fn open_model(&mut self, path: &str) -> bool {
         match self.load(path) {
-            Some((description, read)) => {
+            Some((description, model, read)) => {
                 self.description = description;
+                self.model = model;
                 self.opened = Some(path.to_string());
                 self.read = Some(read);
                 self.pending = None;
@@ -234,8 +316,9 @@ impl Workspace {
         }
     }
 
-    /// The model file at `path`, laid out, and what was read, or none with its problems kept.
-    fn load(&mut self, path: &str) -> Option<(ModelDescription, Read)> {
+    /// The model file at `path`, laid out, as its file has it, and what was read, or none with its
+    /// problems kept.
+    fn load(&mut self, path: &str) -> Option<(ModelDescription, Model, Read)> {
         let catalogue = self.catalogue.as_ref()?;
         let stamp = catalogue.folder().model_file(path).ok().and_then(|file| stamp_of(&file));
         let read = match catalogue.call("read_model", json!({ "path": path })) {
@@ -251,7 +334,7 @@ impl Workspace {
             Ok(model) => {
                 let mut description = model.to_description();
                 lay_out(&mut description);
-                Some((description, known))
+                Some((description, model, known))
             }
             Err(problems) => {
                 let summary = catalogue.call("describe_model", json!({ "path": path })).map_or_else(|error| vec![error.to_string()], |summary| summarise(&summary));
@@ -282,9 +365,9 @@ impl Workspace {
             return None;
         }
         match self.load(&path) {
-            Some((description, read)) => {
+            Some((description, model, read)) => {
                 self.read = Some(read);
-                self.pending = Some(description);
+                self.pending = Some((description, model));
                 self.problems = None;
                 Some(ModelChange::Changed)
             }
@@ -302,17 +385,28 @@ impl Workspace {
 
     /// Uses the changed model: `description` and `session` give it from now on.
     pub fn apply_pending(&mut self) {
-        if let Some(description) = self.pending.take() {
+        if let Some((description, model)) = self.pending.take() {
             self.description = description;
+            self.model = model;
         }
     }
 
     /// Every attribute the instance's built-in class has, with its value and where it comes
     /// from, as `get_attributes` gives them.
     pub fn attributes(&self, instance: &str) -> Result<Vec<AttributeView>, String> {
+        self.attributes_of(json!({ "instance": instance }))
+    }
+
+    /// Every attribute a class gives its instances, with its value and where it comes from: the
+    /// class itself, a class it derives from, or built in. `class` may be a built-in class.
+    pub fn class_attributes(&self, class: &str) -> Result<Vec<AttributeView>, String> {
+        self.attributes_of(json!({ "class": class }))
+    }
+
+    fn attributes_of(&self, target: Value) -> Result<Vec<AttributeView>, String> {
         let path = self.opened.as_deref().ok_or("no model file is open")?;
         let catalogue = self.catalogue.as_ref().ok_or("no models folder is open")?;
-        let got = catalogue.call("get_attributes", json!({ "path": path, "target": { "instance": instance } })).map_err(|error| error.to_string())?;
+        let got = catalogue.call("get_attributes", json!({ "path": path, "target": target })).map_err(|error| error.to_string())?;
         Ok(got["attributes"]
             .as_array()
             .into_iter()
@@ -375,14 +469,7 @@ impl Workspace {
         let catalogue = self.catalogue.as_ref().ok_or(Refusal::NoModel)?;
         let read = catalogue.call("read_model", json!({ "path": path })).map_err(|error| Refusal::Invalid(error.to_string()))?;
         let in_file = crabsim_model::load(read["text"].as_str().unwrap_or_default()).map_err(|_| Refusal::Invalid(format!("{path} has problems now")))?.to_description();
-        let move_to = |name: &str, to: Position| {
-            let round = |metres: f64| (metres * 100.0).round() / 100.0;
-            let mut position = json!({ "x": round(to.x), "y": round(to.y) });
-            if to.z != 0.0 {
-                position["z"] = json!(round(to.z));
-            }
-            json!({ "change": "move_instance", "name": name, "position": position })
-        };
+        let move_to = |name: &str, to: Position| json!({ "change": "move_instance", "name": name, "position": position_json(to) });
         let mut changes: Vec<Value> = (0..in_file.object_count())
             .filter(|&id| in_file.position(id).is_none())
             .filter_map(|id| Some((self.description.name(id)?, self.description.position(id)?)))
@@ -392,6 +479,199 @@ impl Workspace {
         changes.push(move_to(instance, to));
         let expected = self.read.as_ref().map(|read| read.hash.clone());
         self.edit(changes, expected, take_over)
+    }
+
+    // ---------- Building ----------
+
+    /// Makes an empty model file at `path`, `.json` added if it lacks it, saved by crabsim so it can
+    /// be built on at once, lists it and opens it. Returns its path. A file already there is
+    /// refused.
+    pub fn new_model(&mut self, path: &str) -> Result<String, Refusal> {
+        let path = with_json(path);
+        let catalogue = self.catalogue.as_ref().ok_or(Refusal::NoModel)?;
+        catalogue
+            .call("write_model", json!({ "path": path, "text": "{\"format_version\": 2, \"instances\": []}" }))
+            .map_err(|error| Refusal::Invalid(error.to_string()))?;
+        self.refresh();
+        self.open_model(&path);
+        Ok(path)
+    }
+
+    /// Copies the model file at `from` to `to`, `.json` added if it lacks it, and lists it. The
+    /// model open stays open. Returns the copy's path. A file already there is refused.
+    pub fn duplicate_model(&mut self, from: &str, to: &str) -> Result<String, Refusal> {
+        let to = with_json(to);
+        let catalogue = self.catalogue.as_ref().ok_or(Refusal::NoModel)?;
+        catalogue.call("copy_model", json!({ "from": from, "to": to })).map_err(|error| Refusal::Invalid(error.to_string()))?;
+        self.refresh();
+        Ok(to)
+    }
+
+    /// The classes an instance can be placed from, as a tree by inheritance: each built-in class
+    /// followed by the model's classes derived from it, depth first, in file order. Buffer and the
+    /// classes derived from it are left out until build step 7 fixes Buffer.
+    pub fn classes(&self) -> Vec<ClassEntry> {
+        fn below(model: &Model, parent: &str, depth: usize, into: &mut Vec<ClassEntry>) {
+            for class in model.classes.iter().filter(|class| class.parent == parent) {
+                into.push(ClassEntry { name: class.name.clone(), parent: Some(parent.to_string()), depth, built_in: false });
+                below(model, &class.name, depth + 1, into);
+            }
+        }
+        let mut entries = Vec::new();
+        for built_in in BUILT_IN_CLASSES.into_iter().filter(|&class| class != "Buffer") {
+            entries.push(ClassEntry { name: built_in.to_string(), parent: None, depth: 0, built_in: true });
+            below(&self.model, built_in, 1, &mut entries);
+        }
+        entries
+    }
+
+    /// The name an instance of `class` gets when placed: the class's name and one more than the
+    /// highest number any instance called that way has, such as "Station 6".
+    pub fn next_name(&self, class: &str) -> String {
+        let prefix = format!("{class} ");
+        let highest = self
+            .model
+            .instances
+            .iter()
+            .filter_map(|instance| instance.name.strip_prefix(&prefix)?.parse::<u64>().ok())
+            .max()
+            .unwrap_or(0);
+        format!("{class} {}", highest + 1)
+    }
+
+    /// Places an instance of `class` at `at`, to the centimetre, named by `next_name`, with
+    /// nothing set on it, so it inherits every value. Its stream is given when the file is saved.
+    /// Returns its name.
+    pub fn add_instance(&mut self, class: &str, at: Position, take_over: bool) -> Result<String, Refusal> {
+        let name = self.next_name(class);
+        self.change(json!({ "change": "add_instance", "name": name, "class": class, "position": position_json(at) }), take_over)?;
+        Ok(name)
+    }
+
+    /// Connects `from` to `to`, as `from`'s last exit and `to`'s last entrance. One the file's
+    /// rules refuse, such as out of a Drain, is refused with their message.
+    pub fn connect(&mut self, from: &str, to: &str, take_over: bool) -> Result<(), Refusal> {
+        self.change(json!({ "change": "connect", "from": from, "to": to }), take_over)
+    }
+
+    /// Removes the connection from `from` to `to`, closing up the places of the others.
+    pub fn disconnect(&mut self, from: &str, to: &str, take_over: bool) -> Result<(), Refusal> {
+        self.change(json!({ "change": "disconnect", "from": from, "to": to }), take_over)
+    }
+
+    /// Moves the connection from `from` to `to` to `place` among its object's exits, or its
+    /// successor's entrances, the others moving to make room.
+    pub fn move_connection(&mut self, from: &str, to: &str, end: End, place: u64, take_over: bool) -> Result<(), Refusal> {
+        let field = match end {
+            End::Exit => "exit",
+            End::Entrance => "entrance",
+        };
+        let mut change = json!({ "change": "set_connection", "from": from, "to": to });
+        change[field] = json!(place);
+        self.change(change, take_over)
+    }
+
+    /// Sets the connection's description, or removes it when `description` is empty.
+    pub fn describe_connection(&mut self, from: &str, to: &str, description: &str, take_over: bool) -> Result<(), Refusal> {
+        self.change(json!({ "change": "set_connection", "from": from, "to": to, "description": description }), take_over)
+    }
+
+    /// The connection from `from` to `to` as the inspector shows it, with its places and how many
+    /// there are at each end.
+    pub fn connection(&self, from: &str, to: &str) -> Option<ConnectionView> {
+        let connection = self.model.connections.iter().find(|connection| connection.from == from && connection.to == to)?;
+        Some(ConnectionView {
+            from: from.to_string(),
+            to: to.to_string(),
+            exit: connection.exit,
+            exits: self.model.connections_out(from).len() as u64,
+            entrance: connection.entrance,
+            entrances: self.model.connections_in(to).len() as u64,
+            description: connection.description.clone(),
+        })
+    }
+
+    /// Every connection to and from the instance called `name`, as (from, to), which removing it
+    /// takes with it, in the order the file lists them.
+    pub fn instance_connections(&self, name: &str) -> Vec<(String, String)> {
+        self.model
+            .connections
+            .iter()
+            .filter(|connection| connection.from == name || connection.to == name)
+            .map(|connection| (connection.from.clone(), connection.to.clone()))
+            .collect()
+    }
+
+    /// Removes the instance and its connections, closing up the places of the instances they
+    /// joined it to.
+    pub fn remove_instance(&mut self, name: &str, take_over: bool) -> Result<(), Refusal> {
+        self.change(json!({ "change": "remove_instance", "name": name }), take_over)
+    }
+
+    /// Renames the instance, and its connections with it.
+    pub fn rename_instance(&mut self, name: &str, to: &str, take_over: bool) -> Result<(), Refusal> {
+        self.change(json!({ "change": "rename_instance", "name": name, "to": to }), take_over)
+    }
+
+    /// Adds a class called `name` derived from `parent`, a built-in or another class, setting
+    /// nothing, so it gives exactly what its parent gives.
+    pub fn derive_class(&mut self, parent: &str, name: &str, take_over: bool) -> Result<(), Refusal> {
+        self.change(json!({ "change": "add_class", "name": name, "parent": parent }), take_over)
+    }
+
+    /// Adds a copy of the class, with its parent and values, not linked to it.
+    pub fn duplicate_class(&mut self, name: &str, to: &str, take_over: bool) -> Result<(), Refusal> {
+        self.change(json!({ "change": "duplicate_class", "name": name, "to": to }), take_over)
+    }
+
+    /// Renames the class, and every class and instance naming it.
+    pub fn rename_class(&mut self, name: &str, to: &str, take_over: bool) -> Result<(), Refusal> {
+        self.change(json!({ "change": "rename_class", "name": name, "to": to }), take_over)
+    }
+
+    /// What removing the class takes with it, as `remove_class` says: the classes deriving from
+    /// it at any depth, and the instances of it or of them, each in file order.
+    pub fn class_dependents(&self, name: &str) -> Dependents {
+        let mut family = vec![name.to_string()];
+        let mut classes = Vec::new();
+        loop {
+            let more: Vec<String> = self
+                .model
+                .classes
+                .iter()
+                .filter(|class| family.contains(&class.parent) && !family.contains(&class.name))
+                .map(|class| class.name.clone())
+                .collect();
+            if more.is_empty() {
+                break;
+            }
+            family.extend(more.iter().cloned());
+            classes.extend(more);
+        }
+        let order = |name: &String| self.model.classes.iter().position(|class| &class.name == name);
+        classes.sort_by_key(order);
+        let instances = self.model.instances.iter().filter(|instance| family.contains(&instance.class)).map(|instance| instance.name.clone()).collect();
+        Dependents { classes, instances }
+    }
+
+    /// Removes the class with everything `class_dependents` names, and their connections, in one
+    /// change. The window asks first, naming them.
+    pub fn remove_class(&mut self, name: &str, take_over: bool) -> Result<(), Refusal> {
+        self.change(json!({ "change": "remove_class", "name": name, "delete_dependents": true }), take_over)
+    }
+
+    /// Makes a class of the instance's tuned values: a class called `name`, derived from the
+    /// instance's class, with the values set on the instance, which then come off the instance as
+    /// it becomes one of the new class. It behaves as before. One change, so a refusal changes
+    /// nothing.
+    pub fn make_class(&mut self, instance: &str, name: &str, take_over: bool) -> Result<(), Refusal> {
+        let found = self.model.instances.iter().find(|candidate| candidate.name == instance).ok_or_else(|| Refusal::Invalid(format!("no instance is called `{instance}`")))?;
+        let mut changes = vec![json!({ "change": "add_class", "name": name, "parent": found.class, "attributes": found.attributes.to_json() })];
+        for attribute in Attribute::ALL.into_iter().filter(|&attribute| found.attributes.is_set(attribute)) {
+            changes.push(json!({ "change": "restore_inheritance", "target": { "instance": instance }, "attribute": attribute.name() }));
+        }
+        changes.push(json!({ "change": "set_class", "name": instance, "class": name }));
+        self.edit(changes, None, take_over)
     }
 
     /// One change to the open model file, through `edit_model`.
@@ -536,6 +816,22 @@ impl Workspace {
     pub fn catalogue(&self) -> Option<&Catalogue> {
         self.catalogue.as_ref()
     }
+}
+
+/// A position as a model file writes it, to the centimetre so the file stays readable.
+fn position_json(at: Position) -> Value {
+    let round = |metres: f64| (metres * 100.0).round() / 100.0;
+    let mut position = json!({ "x": round(at.x), "y": round(at.y) });
+    if at.z != 0.0 {
+        position["z"] = json!(round(at.z));
+    }
+    position
+}
+
+/// `path` with `.json` at the end.
+fn with_json(path: &str) -> String {
+    let path = path.trim();
+    if path.ends_with(".json") { path.to_string() } else { format!("{path}.json") }
 }
 
 fn strings(list: &Value) -> Vec<String> {

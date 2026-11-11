@@ -15,13 +15,16 @@ impl Camera {
     pub const MIN_PIXELS_PER_METRE: f64 = 1.0;
     /// About 2 cm a pixel.
     pub const MAX_PIXELS_PER_METRE: f64 = 500.0;
+    /// The least a fitted view shows each way, in metres: room for a few objects side by side.
+    pub const MIN_FITTED_METRES: f64 = 20.0;
     /// Space left around the model when it is fitted into view, in pixels.
     const MARGIN: f64 = 40.0;
 
-    /// A camera with all of `bounds` in a canvas of `size`.
+    /// A camera with all of `bounds` in a canvas of `size`, showing at least `MIN_FITTED_METRES`
+    /// each way, so a new or small model leaves room to build on.
     pub fn fitting(bounds: Rect, size: Point) -> Camera {
-        let width = (bounds.max.x - bounds.min.x).max(1.0);
-        let height = (bounds.max.y - bounds.min.y).max(1.0);
+        let width = (bounds.max.x - bounds.min.x).max(Self::MIN_FITTED_METRES);
+        let height = (bounds.max.y - bounds.min.y).max(Self::MIN_FITTED_METRES);
         let usable = Point { x: (size.x - 2.0 * Self::MARGIN).max(1.0), y: (size.y - 2.0 * Self::MARGIN).max(1.0) };
         let pixels_per_metre = (usable.x / width).min(usable.y / height);
         Camera {

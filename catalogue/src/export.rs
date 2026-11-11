@@ -136,13 +136,24 @@ impl Graph {
             .iter()
             .map(|name| Node { labels: vec!["Class"], properties: vec![("name", Value::Text(name.to_string())), ("built_in", Value::Bool(true))] })
             .collect();
+        // The model's own values for a built-in class go on the built-in's node.
         for class in &model.classes {
+            if class.refines_built_in() {
+                let at = BUILT_IN_CLASSES.iter().position(|name| *name == class.name).expect("a refinement is named like a built-in");
+                attribute_properties(&class.attributes, |_| true, &mut classes[at].properties);
+                continue;
+            }
             let mut properties = vec![("name", Value::Text(class.name.clone())), ("built_in", Value::Bool(false))];
             attribute_properties(&class.attributes, |_| true, &mut properties);
             classes.push(Node { labels: vec!["Class"], properties });
         }
         let class_at = |name: &str| classes.iter().position(|class| class.name() == name).expect("a valid model's classes exist");
-        let derives_from = model.classes.iter().enumerate().map(|(i, class)| (BUILT_IN_CLASSES.len() + i, class_at(&class.parent))).collect();
+        let derives_from = model
+            .classes
+            .iter()
+            .filter(|class| !class.refines_built_in())
+            .map(|class| (class_at(&class.name), class_at(&class.parent)))
+            .collect();
 
         let mut instances = Vec::new();
         let mut is_a = Vec::new();

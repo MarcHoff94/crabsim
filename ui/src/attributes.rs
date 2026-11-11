@@ -109,11 +109,12 @@ fn text_of(value: Option<&Value>) -> String {
 
 impl Form {
     /// The fields for `attribute`, filled from its value as a model file writes it, if it has one.
-    /// Failures without a value start from a typical profile, to be applied only if wanted.
+    /// Failures without a value start at 100 % available with a constant repair time: one that
+    /// never fails, until the availability is lowered.
     pub fn new(attribute: &str, value: Option<&Value>) -> Form {
         let (parts, repair) = match attribute {
             "failures" => {
-                let failures = value.cloned().unwrap_or_else(|| json!({ "availability": 0.95, "repair_time": { "erlang": { "mean": "00:01:00", "k": 2 } } }));
+                let failures = value.cloned().unwrap_or_else(|| json!({ "availability": 1.0, "repair_time": { "constant": "00:01:00" } }));
                 let availability = failures["availability"].as_f64().map_or(String::new(), |a| number(a * 100.0));
                 let (kind, first, second) = match failures["repair_time"].as_object().and_then(|repair| repair.iter().next()) {
                     Some((name, spread)) => match name.as_str() {
@@ -161,7 +162,8 @@ impl Form {
         self.parts[2].label = second;
     }
 
-    /// The value as a model file writes it, or what is wrong with what was typed.
+    /// The value as a model file writes it, or what is wrong with what was typed. `null` for
+    /// failures at 100 % available: none at all.
     pub fn value(&self) -> Result<Value, String> {
         let text = |index: usize| self.parts[index].text.trim();
         let time = |index: usize| -> Result<Value, String> {
@@ -178,8 +180,12 @@ impl Form {
             "starting_mus" | "capacity" => whole(0).map(|n| json!(n)),
             "failures" => {
                 let percent = float(0)?;
-                if percent <= 0.0 || percent >= 100.0 {
-                    return Err("available % has to be above 0 and below 100: restore the attribute for one that never fails".into());
+                // 100 % available never fails, which a model file says by leaving failures out.
+                if percent == 100.0 {
+                    return Ok(Value::Null);
+                }
+                if percent <= 0.0 || percent > 100.0 {
+                    return Err("available % has to be above 0, and 100 for one that never fails".into());
                 }
                 let spread = match self.repair.unwrap_or(RepairKind::Constant) {
                     RepairKind::Constant => time(1)?,

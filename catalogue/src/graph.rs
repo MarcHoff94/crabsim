@@ -1145,7 +1145,7 @@ fn class_tree(model: &Model, what: &str, class: Option<String>, with_instances: 
         Some(name) => return Err(OperationError::not_found(format!("{what} has no class called `{name}`"))),
     };
     let mut derived: HashMap<&str, Vec<&str>> = HashMap::new();
-    for class in &model.classes {
+    for class in model.classes.iter().filter(|class| !class.refines_built_in()) {
         derived.entry(class.parent.as_str()).or_default().push(&class.name);
     }
     let mut own: HashMap<&str, Vec<&str>> = HashMap::new();
@@ -1174,7 +1174,7 @@ fn class_tree(model: &Model, what: &str, class: Option<String>, with_instances: 
         });
         classes.push(ClassNode {
             name: name.to_string(),
-            parent: model.class(name).map(|class| class.parent.clone()),
+            parent: model.class(name).filter(|class| !class.refines_built_in()).map(|class| class.parent.clone()),
             depth,
             sets: model.class(name).map_or_else(|| Value::Object(Map::new()), |class| class.attributes.to_json()),
             derived: below.iter().map(|child| child.to_string()).collect(),

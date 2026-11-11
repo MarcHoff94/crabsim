@@ -324,6 +324,7 @@ impl Workspace {
         let read = match catalogue.call("read_model", json!({ "path": path })) {
             Ok(read) => read,
             Err(error) => {
+                // The window's font has no arrow, so a connection's name reads "In to Mill" there.
                 self.problems = Some(ProblemReport { path: path.to_string(), summary: Vec::new(), problems: vec![error.to_string()] });
                 return None;
             }
@@ -338,7 +339,7 @@ impl Workspace {
             }
             Err(problems) => {
                 let summary = catalogue.call("describe_model", json!({ "path": path })).map_or_else(|error| vec![error.to_string()], |summary| summarise(&summary));
-                self.problems = Some(ProblemReport { path: path.to_string(), summary, problems: problems.iter().map(ToString::to_string).collect() });
+                self.problems = Some(ProblemReport { path: path.to_string(), summary, problems: problems.iter().map(|problem| problem.to_string().replace(" → ", " to ")).collect() });
                 // What was read is kept, so the same broken file isn't reported again.
                 if self.opened.as_deref() == Some(path) {
                     self.read = Some(known);
@@ -400,7 +401,25 @@ impl Workspace {
     /// Every attribute a class gives its instances, with its value and where it comes from: the
     /// class itself, a class it derives from, or built in. `class` may be a built-in class.
     pub fn class_attributes(&self, class: &str) -> Result<Vec<AttributeView>, String> {
-        self.attributes_of(json!({ "class": class }))
+        let mut values = self.attributes_of(json!({ "class": class }))?;
+        // What the class sets itself is set here, as on an instance.
+        for view in &mut values {
+            if view.from == ValueFrom::Class(class.to_string()) {
+                view.from = ValueFrom::Instance;
+            }
+        }
+        Ok(values)
+    }
+
+    /// Sets an attribute on a class of the model's own, which every instance following it and
+    /// not setting it itself then takes.
+    pub fn set_class_attribute(&mut self, class: &str, attribute: &str, value: Value, take_over: bool) -> Result<(), Refusal> {
+        self.change(json!({ "change": "set_attribute", "target": { "class": class }, "attribute": attribute, "value": value }), take_over)
+    }
+
+    /// Takes an attribute set on a class back to what its parent gives.
+    pub fn restore_class_attribute(&mut self, class: &str, attribute: &str, take_over: bool) -> Result<(), Refusal> {
+        self.change(json!({ "change": "restore_inheritance", "target": { "class": class }, "attribute": attribute }), take_over)
     }
 
     fn attributes_of(&self, target: Value) -> Result<Vec<AttributeView>, String> {
@@ -465,18 +484,24 @@ impl Workspace {
     /// elsewhere. Refused as a conflict if the file changed since the window read it. `take_over`
     /// makes the one move while an agent holds the editor right.
     pub fn move_instance(&mut self, instance: &str, to: Position, take_over: bool) -> Result<(), Refusal> {
+        self.move_instances(&[(instance.to_string(), to)], take_over)
+    }
+
+    /// Moves each instance to its position, all in one change, as `move_instance` does one.
+    pub fn move_instances(&mut self, moves: &[(String, Position)], take_over: bool) -> Result<(), Refusal> {
         let path = self.opened.clone().ok_or(Refusal::NoModel)?;
         let catalogue = self.catalogue.as_ref().ok_or(Refusal::NoModel)?;
         let read = catalogue.call("read_model", json!({ "path": path })).map_err(|error| Refusal::Invalid(error.to_string()))?;
         let in_file = crabsim_model::load(read["text"].as_str().unwrap_or_default()).map_err(|_| Refusal::Invalid(format!("{path} has problems now")))?.to_description();
         let move_to = |name: &str, to: Position| json!({ "change": "move_instance", "name": name, "position": position_json(to) });
+        let moved = |name: &str| moves.iter().any(|(moving, _)| moving == name);
         let mut changes: Vec<Value> = (0..in_file.object_count())
             .filter(|&id| in_file.position(id).is_none())
             .filter_map(|id| Some((self.description.name(id)?, self.description.position(id)?)))
-            .filter(|(name, _)| *name != instance)
+            .filter(|(name, _)| !moved(name))
             .map(|(name, drawn)| move_to(name, drawn))
             .collect();
-        changes.push(move_to(instance, to));
+        changes.extend(moves.iter().map(|(name, to)| move_to(name, *to)));
         let expected = self.read.as_ref().map(|read| read.hash.clone());
         self.edit(changes, expected, take_over)
     }
@@ -490,7 +515,7 @@ impl Workspace {
         let path = with_json(path);
         let catalogue = self.catalogue.as_ref().ok_or(Refusal::NoModel)?;
         catalogue
-            .call("write_model", json!({ "path": path, "text": "{\"format_version\": 2, \"instances\": []}" }))
+            .call("write_model", json!({ "path": path, "text": NEW_MODEL }))
             .map_err(|error| Refusal::Invalid(error.to_string()))?;
         self.refresh();
         self.open_model(&path);
@@ -507,12 +532,13 @@ impl Workspace {
         Ok(to)
     }
 
-    /// The classes an instance can be placed from, as a tree by inheritance: each built-in class
-    /// followed by the model's classes derived from it, depth first, in file order. Buffer and the
-    /// classes derived from it are left out until build step 7 fixes Buffer.
+    /// The classes an instance can be placed from, as a tree by inheritance: each built-in class,
+    /// which stands for the model's own values for it, followed by the model's classes derived
+    /// from it, depth first, in file order. Buffer and the classes derived from it are left out
+    /// until build step 7 fixes Buffer.
     pub fn classes(&self) -> Vec<ClassEntry> {
         fn below(model: &Model, parent: &str, depth: usize, into: &mut Vec<ClassEntry>) {
-            for class in model.classes.iter().filter(|class| class.parent == parent) {
+            for class in model.classes.iter().filter(|class| class.parent == parent && !class.refines_built_in()) {
                 into.push(ClassEntry { name: class.name.clone(), parent: Some(parent.to_string()), depth, built_in: false });
                 below(model, &class.name, depth + 1, into);
             }
@@ -523,6 +549,11 @@ impl Workspace {
             below(&self.model, built_in, 1, &mut entries);
         }
         entries
+    }
+
+    /// The built-in class at the root of `class`'s chain, if it has a sound one.
+    pub fn built_in_of(&self, class: &str) -> Option<&'static str> {
+        self.model.chain(class).map(|(_, built_in)| built_in)
     }
 
     /// The name an instance of `class` gets when placed: the class's name and one more than the
@@ -544,8 +575,40 @@ impl Workspace {
     /// Returns its name.
     pub fn add_instance(&mut self, class: &str, at: Position, take_over: bool) -> Result<String, Refusal> {
         let name = self.next_name(class);
-        self.change(json!({ "change": "add_instance", "name": name, "class": class, "position": position_json(at) }), take_over)?;
+        let mut change = json!({ "change": "add_instance", "name": name, "class": class, "position": position_json(at) });
+        let (mut changes, values) = self.starting_values(class);
+        if let Some(values) = values {
+            change["attributes"] = values;
+        }
+        changes.push(change);
+        self.edit(changes, None, take_over)?;
         Ok(name)
+    }
+
+    /// What building on `class` starts with, as the changes to make first and the values to set
+    /// on what is built. A Station works 10 s on each MU to start with: the model's own Station
+    /// gets it, where nothing in the model is built on Station yet, so every Station placed
+    /// later inherits it and changing it there changes them all. A model that already has
+    /// Stations without it keeps their values, and what is built gets it set on itself.
+    fn starting_values(&self, class: &str) -> (Vec<Value>, Option<Value>) {
+        let Some(built_in) = self.built_in_of(class) else { return (Vec::new(), None) };
+        let Some(values) = template(built_in) else { return (Vec::new(), None) };
+        if self.model.class(built_in).is_some() {
+            return (Vec::new(), None);
+        }
+        let built_on = |name: &str| self.built_in_of(name) == Some(built_in);
+        let in_use = self.model.instances.iter().any(|instance| built_on(&instance.class))
+            || self.model.classes.iter().any(|class| built_on(&class.name));
+        if in_use {
+            return (Vec::new(), (class == built_in).then_some(values));
+        }
+        let changes = values
+            .as_object()
+            .into_iter()
+            .flatten()
+            .map(|(attribute, value)| json!({ "change": "set_attribute", "target": { "class": built_in }, "attribute": attribute, "value": value }))
+            .collect();
+        (changes, None)
     }
 
     /// Connects `from` to `to`, as `from`'s last exit and `to`'s last entrance. One the file's
@@ -608,6 +671,51 @@ impl Workspace {
         self.change(json!({ "change": "remove_instance", "name": name }), take_over)
     }
 
+    /// Removes these instances and all their connections in one change.
+    pub fn remove_instances(&mut self, names: &[String], take_over: bool) -> Result<(), Refusal> {
+        let changes = names.iter().map(|name| json!({ "change": "remove_instance", "name": name })).collect();
+        self.edit(changes, None, take_over)
+    }
+
+    /// Sets an attribute on each of these instances, in one change.
+    pub fn set_attribute_on_all(&mut self, names: &[String], attribute: &str, value: Value, take_over: bool) -> Result<(), Refusal> {
+        let changes = names
+            .iter()
+            .map(|name| json!({ "change": "set_attribute", "target": { "instance": name }, "attribute": attribute, "value": value }))
+            .collect();
+        self.edit(changes, None, take_over)
+    }
+
+    /// Makes a class called `name` from several instances of one class: derived from it, with the
+    /// values every one of them sets alike, which then come off them as they all follow the new
+    /// class. Values they set differently stay on each. One change. Instances of different
+    /// classes are refused.
+    pub fn make_class_from_all(&mut self, names: &[String], name: &str, take_over: bool) -> Result<(), Refusal> {
+        let found: Vec<&crabsim_model::Instance> = names
+            .iter()
+            .map(|wanted| self.model.instances.iter().find(|instance| &instance.name == wanted).ok_or_else(|| Refusal::Invalid(format!("no instance is called `{wanted}`"))))
+            .collect::<Result<_, _>>()?;
+        let Some(first) = found.first() else { return Ok(()) };
+        if found.iter().any(|instance| instance.class != first.class) {
+            return Err(Refusal::Invalid("a class can only be made from instances of one class, so it can derive from it".into()));
+        }
+        let shared: Vec<Attribute> = Attribute::ALL
+            .into_iter()
+            .filter(|&attribute| first.attributes.is_set(attribute))
+            .filter(|&attribute| found.iter().all(|instance| instance.attributes.to_json().get(attribute.name()) == first.attributes.to_json().get(attribute.name())))
+            .collect();
+        let values = first.attributes.to_json();
+        let class_values: serde_json::Map<String, Value> = shared.iter().filter_map(|attribute| Some((attribute.name().to_string(), values.get(attribute.name())?.clone()))).collect();
+        let mut changes = vec![json!({ "change": "add_class", "name": name, "parent": first.class, "attributes": class_values })];
+        for instance in &found {
+            for attribute in &shared {
+                changes.push(json!({ "change": "restore_inheritance", "target": { "instance": instance.name }, "attribute": attribute.name() }));
+            }
+            changes.push(json!({ "change": "set_class", "name": instance.name, "class": name }));
+        }
+        self.edit(changes, None, take_over)
+    }
+
     /// Renames the instance, and its connections with it.
     pub fn rename_instance(&mut self, name: &str, to: &str, take_over: bool) -> Result<(), Refusal> {
         self.change(json!({ "change": "rename_instance", "name": name, "to": to }), take_over)
@@ -616,7 +724,13 @@ impl Workspace {
     /// Adds a class called `name` derived from `parent`, a built-in or another class, setting
     /// nothing, so it gives exactly what its parent gives.
     pub fn derive_class(&mut self, parent: &str, name: &str, take_over: bool) -> Result<(), Refusal> {
-        self.change(json!({ "change": "add_class", "name": name, "parent": parent }), take_over)
+        let mut change = json!({ "change": "add_class", "name": name, "parent": parent });
+        let (mut changes, values) = self.starting_values(parent);
+        if let Some(values) = values {
+            change["attributes"] = values;
+        }
+        changes.push(change);
+        self.edit(changes, None, take_over)
     }
 
     /// Adds a copy of the class, with its parent and values, not linked to it.
@@ -632,6 +746,9 @@ impl Workspace {
     /// What removing the class takes with it, as `remove_class` says: the classes deriving from
     /// it at any depth, and the instances of it or of them, each in file order.
     pub fn class_dependents(&self, name: &str) -> Dependents {
+        if BUILT_IN_CLASSES.contains(&name) {
+            return Dependents { classes: Vec::new(), instances: Vec::new() };
+        }
         let mut family = vec![name.to_string()];
         let mut classes = Vec::new();
         loop {
@@ -694,7 +811,8 @@ impl Workspace {
         changed.map(|_| ()).map_err(|error| match error.kind {
             ErrorKind::NotEditor => Refusal::NotEditor(error.message.clone()),
             ErrorKind::ChangedOutside => Refusal::ChangedOutside(error.message.clone()),
-            _ => Refusal::Invalid(error.to_string()),
+            // The window's font has no arrow, so a connection's name reads "In to Mill" there.
+            _ => Refusal::Invalid(error.to_string().replace(" → ", " to ")),
         })
     }
 
@@ -815,6 +933,18 @@ impl Workspace {
     /// The catalogue on the folder, for what the window asks of it.
     pub fn catalogue(&self) -> Option<&Catalogue> {
         self.catalogue.as_ref()
+    }
+}
+
+/// A new model file: the model's own Station with what a Station starts with, and nothing else.
+const NEW_MODEL: &str = r#"{"format_version": 2, "classes": [{"name": "Station", "attributes": {"process_time": "00:00:10"}}], "instances": []}"#;
+
+/// The values building on a built-in class starts with: a Station works 10 s on each MU, where
+/// the built-in Station's default is 0. See `Workspace::starting_values` for where they go.
+pub fn template(class: &str) -> Option<Value> {
+    match class {
+        "Station" => Some(json!({ "process_time": "00:00:10" })),
+        _ => None,
     }
 }
 

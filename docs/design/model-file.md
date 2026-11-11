@@ -67,13 +67,14 @@ A file holds the model only: classes, instances, their attributes, names, positi
 ```
 
 - The built-in classes are Source, Station, Buffer and Drain. A derived class names its `parent`, a built-in or another derived class, so chains are allowed.
+- A class named like a built-in class, with no `parent`, is this model's own values for that built-in class (ADR 0015), such as `{ "name": "Station", "attributes": { "process_time": "0:10" } }`. Every class and instance built on the built-in class inherits them, between its own chain and the built-in's defaults, so a model can change what a Station is without a class of its own. A model has at most one for each built-in class, and one that names a `parent` is a validation error. `edit_model` makes it when a value is set on the built-in class's name and removes it when the last is restored, and the window's class library shows it as the built-in class. A new model made in the window starts with one for Station at 10 s, and so does a model when the first Station is placed or a class is first derived from Station.
 - Classes can appear in any order. A cycle in the class tree is a validation error.
 - A class writes only the attributes it changes from its parent, the same way an instance does.
 - A class's attributes must suit the built-in class at the root of its chain, as an instance's must, and are checked the same way, with problems reported on the class.
 
 ## Where a value comes from
 
-An instance's value of an attribute is the first one set along its chain: on the instance itself, then on its class, then on that class's parent, and so on, ending at the built-in class's default, if it has one. Setting a value cuts inheritance of that attribute only, and removing it from the file restores it.
+An instance's value of an attribute is the first one set along its chain: on the instance itself, then on its class, then on that class's parent, and so on, then on the model's own values for the built-in class, if it has them, ending at the built-in class's default, if it has one. Setting a value cuts inheritance of that attribute only, and removing it from the file restores it.
 
 `Model::resolve(instance)` gives every value an instance ends up with, and its origin: `Instance`, `Class(name)` of the nearest class that sets it, or `BuiltIn`. This is what the operation catalogue's `get_attributes` will show, so a person or agent can see why an instance behaves as it does.
 
@@ -114,7 +115,7 @@ Which attributes an instance has depends on its built-in class at the root of it
 
 - Instance names and class names are each unique, compared exactly (case-sensitive).
 - A name can't be empty or have spaces at either end, and may otherwise contain anything.
-- Instances and classes are separate namespaces. A class can't take a built-in's name.
+- Instances and classes are separate namespaces. A class takes a built-in's name only as the model's own values for it, with no parent.
 
 ## Validation
 
@@ -137,7 +138,7 @@ They come in file order, as JSON for agents, and one per line on the CLI:
 What it catches:
 
 - JSON that doesn't parse, a missing or unsupported `format_version`, wrong types, and unknown fields, such as a typo like `proces_time`, which would otherwise leave a value silently inherited.
-- Names that are missing, empty, padded or used twice, and a class named like a built-in.
+- Names that are missing, empty, padded or used twice, and a class named like a built-in that names a parent.
 - Unknown classes, a class deriving from itself, and classes deriving from each other in a circle, named in the order they go round.
 - Connections to an unknown name, into a Source, out of a Drain, from an object to itself, or the same connection twice, each with the connection's pointer, such as `/connections/3/to`, and its ends as its name, such as `In → Mill`.
 - Exits or entrances with gaps or repeats, such as an exit of 3 out of an object with 2 connections out, or two connections out of one object with exit 1.

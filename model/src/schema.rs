@@ -69,14 +69,17 @@ pub struct ConnectionFile {
     pub description: Option<String>,
 }
 
-/// A class of the model's own.
+/// A class of the model's own, or, named like a built-in class and with no parent, this model's
+/// own values for that built-in class, which every class and instance built on it inherits.
 #[derive(JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ClassFile {
-    /// Unique among classes, and not the name of a built-in class.
+    /// Unique among classes. Source, Station, Buffer or Drain makes it this model's own values for
+    /// that built-in class.
     pub name: Name,
     /// The class it derives from: Source, Station, Buffer, Drain or another class in the file.
-    pub parent: String,
+    /// Left out only on a class named like a built-in class, and required on every other.
+    pub parent: Option<String>,
     /// Only the values this class changes from its parent.
     pub attributes: Option<AttributesFile>,
 }

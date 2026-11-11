@@ -74,7 +74,7 @@ fn names(model: &crabsim_model::Model) -> Vec<&str> {
 // ---------- Model files ----------
 
 #[test]
-fn a_new_model_is_an_empty_file_saved_by_crabsim_and_opened() {
+fn a_new_model_is_a_file_saved_by_crabsim_with_its_own_station_and_opened() {
     let folder = Folder::new("new");
     let mut workspace = open(&folder);
     assert_eq!(workspace.new_model("plant/press line").unwrap(), "plant/press line.json", ".json is added");
@@ -84,6 +84,14 @@ fn a_new_model_is_an_empty_file_saved_by_crabsim_and_opened() {
     assert!(!workspace.changed_outside(), "crabsim saved it, so it can be built on at once");
     workspace.add_instance("Source", Position { x: 0.0, y: 0.0, z: 0.0 }, false).unwrap();
     assert!(matches!(workspace.new_model("plant/press line.json"), Err(Refusal::Invalid(_))), "an existing file is refused");
+    // Its own Station works 10 s on each MU, which a Station placed inherits, setting nothing.
+    let model = crabsim_model::load(&folder.read("plant/press line.json")).unwrap();
+    assert_eq!(model.class("Station").unwrap().attributes.to_json(), json!({ "process_time": "00:00:10" }));
+    workspace.apply_pending();
+    workspace.add_instance("Station", Position { x: 4.0, y: 0.0, z: 0.0 }, false).unwrap();
+    let model = crabsim_model::load(&folder.read("plant/press line.json")).unwrap();
+    assert!(model.instances.last().unwrap().attributes.is_empty());
+    assert_eq!(model.resolve(1).unwrap().attributes.process_time, Some(crabsim::SimTime::from_secs(10)));
 }
 
 #[test]
@@ -133,11 +141,16 @@ fn a_class_dropped_on_the_canvas_adds_an_instance_named_after_it_with_the_next_n
     assert_eq!((added.name.as_str(), added.class.as_str()), ("Station 5", "Station"));
     assert_eq!(added.position, Some(Position { x: 7.12, y: -3.46, z: 0.0 }), "to the centimetre");
     assert_eq!(added.stream, Some(4), "a stream of its own, one more than the highest");
-    assert!(added.attributes.is_empty(), "nothing set: it inherits everything");
+    assert_eq!(added.attributes.process_time, Some(crabsim::SimTime::from_secs(10)), "a Station from the panel starts at 10 s, set on it to change at once");
+    assert_eq!(added.attributes.to_json(), json!({ "process_time": "00:00:10" }), "and nothing else");
     picked_up(&mut workspace);
     assert_eq!(workspace.next_name("Station"), "Station 6");
     // A Source needs nothing set first: its interval is 0 by default.
     assert_eq!(workspace.add_instance("Source", Position { x: 0.0, y: 5.0, z: 0.0 }, false).unwrap(), "Source 1");
+    // An instance of the model's own class takes everything from it.
+    picked_up(&mut workspace);
+    workspace.add_instance("Mill", Position { x: 3.0, y: 5.0, z: 0.0 }, false).unwrap();
+    assert!(folder.model().instances.last().unwrap().attributes.is_empty());
 }
 
 // ---------- Connections ----------
@@ -234,7 +247,7 @@ fn classes_are_derived_duplicated_and_renamed_through_their_references() {
     workspace.rename_class("Mill", "CNC mill", false).unwrap();
     let model = folder.model();
     assert_eq!(model.class("Lathe").unwrap().parent, "Station");
-    assert!(model.class("Lathe").unwrap().attributes.is_empty());
+    assert_eq!(model.class("Lathe").unwrap().attributes.to_json(), json!({ "process_time": "00:00:10" }), "from Station, at 10 s as a placed one starts");
     assert_eq!(model.class("Mill copy").unwrap().attributes, model.class("CNC mill").unwrap().attributes);
     assert_eq!(model.class("Fast mill").unwrap().parent, "CNC mill");
     assert_eq!(model.instances[1].class, "CNC mill");
@@ -276,4 +289,111 @@ fn a_class_made_from_a_tuned_instance_takes_its_values_and_the_instance_follows_
     let before = folder.read("line.json");
     assert!(workspace.make_class("Station 1", "Fast mill", false).is_err());
     assert_eq!(folder.read("line.json"), before);
+}
+
+#[test]
+fn a_classs_own_values_are_set_and_restored_and_read_as_set_here() {
+    let folder = Folder::new("class-values");
+    let mut workspace = open(&folder);
+    workspace.set_class_attribute("Fast mill", "process_time", json!("0:20"), false).unwrap();
+    workspace.restore_class_attribute("Mill", "process_time", false).unwrap();
+    let model = folder.model();
+    assert_eq!(model.class("Fast mill").unwrap().attributes.process_time, Some(crabsim::SimTime::from_secs(20)));
+    assert_eq!(model.class("Mill").unwrap().attributes.process_time, None);
+    picked_up(&mut workspace);
+    let values = workspace.class_attributes("Fast mill").unwrap();
+    let process_time = values.iter().find(|view| view.attribute == "process_time").unwrap();
+    assert_eq!(process_time.from, crabsim_ui::workspace::ValueFrom::Instance, "set on the class shown reads as set here");
+}
+
+#[test]
+fn a_built_in_classs_values_are_this_models_own_and_reach_everything_built_on_it() {
+    let folder = Folder::new("built-in-values");
+    let mut workspace = open(&folder);
+    workspace.set_class_attribute("Station", "description", json!("ours"), false).unwrap();
+    picked_up(&mut workspace);
+    let model = folder.model();
+    assert!(model.class("Station").unwrap().refines_built_in());
+    let station = workspace.class_attributes("Station").unwrap();
+    let description = station.iter().find(|view| view.attribute == "description").unwrap();
+    assert_eq!((description.value.clone(), description.from.clone()), (Some(json!("ours")), crabsim_ui::workspace::ValueFrom::Instance));
+    let mill = workspace.attributes("Station 1").unwrap();
+    let description = mill.iter().find(|view| view.attribute == "description").unwrap();
+    assert_eq!(description.from, crabsim_ui::workspace::ValueFrom::Class("Station".into()), "a Mill inherits it");
+    // The panel shows it as the built-in class, once.
+    let names: Vec<String> = workspace.classes().into_iter().map(|entry| entry.name).collect();
+    assert_eq!(names, ["Source", "Station", "Mill", "Fast mill", "Drain"]);
+    // Nothing depends on it in a way removing it would take: the built-in is still there.
+    assert_eq!(workspace.class_dependents("Station"), Dependents::default());
+    // Restoring its last value removes it.
+    workspace.restore_class_attribute("Station", "description", false).unwrap();
+    assert!(folder.model().class("Station").is_none());
+}
+
+#[test]
+fn a_model_with_no_stations_gets_its_own_station_at_10_s_when_the_first_is_placed() {
+    let folder = Folder::new("first-station");
+    let mut workspace = open(&folder);
+    workspace.remove_class("Mill", false).unwrap();
+    picked_up(&mut workspace);
+    workspace.add_instance("Station", Position { x: 4.0, y: 0.0, z: 0.0 }, false).unwrap();
+    let model = folder.model();
+    assert_eq!(model.class("Station").unwrap().attributes.to_json(), json!({ "process_time": "00:00:10" }));
+    assert!(model.instances.last().unwrap().attributes.is_empty(), "it inherits the 10 s");
+    picked_up(&mut workspace);
+    workspace.derive_class("Station", "Lathe", false).unwrap();
+    assert!(folder.model().class("Lathe").unwrap().attributes.is_empty(), "and so does a class derived from Station");
+}
+
+// ---------- Several at once ----------
+
+#[test]
+fn several_instances_are_removed_in_one_change_with_their_connections() {
+    let folder = Folder::new("remove-several");
+    let mut workspace = open(&folder);
+    workspace.remove_instances(&["Station 1".to_string(), "Station 4".to_string()], false).unwrap();
+    let model = folder.model();
+    assert_eq!(names(&model), ["In", "Out"]);
+    assert!(model.connections.is_empty());
+    let before = folder.read("line.json");
+    assert!(workspace.remove_instances(&["In".to_string(), "Nobody".to_string()], false).is_err());
+    assert_eq!(folder.read("line.json"), before, "one change: a name not there refuses all of it");
+}
+
+#[test]
+fn several_instances_move_together_in_one_change() {
+    let folder = Folder::new("move-several");
+    let mut workspace = open(&folder);
+    let to = |x: f64, y: f64| Position { x, y, z: 0.0 };
+    workspace.move_instances(&[("Station 1".to_string(), to(7.0, 3.0)), ("Station 4".to_string(), to(7.0, -1.0))], false).unwrap();
+    let model = folder.model();
+    assert_eq!(model.instances[1].position, Some(to(7.0, 3.0)));
+    assert_eq!(model.instances[2].position, Some(to(7.0, -1.0)));
+}
+
+#[test]
+fn a_value_is_set_on_several_in_one_change_and_they_can_share_a_new_class() {
+    let folder = Folder::new("several-values");
+    let mut workspace = open(&folder);
+    let both = ["Station 1".to_string(), "Station 4".to_string()];
+    workspace.set_attribute_on_all(&both, "process_time", json!("0:40"), false).unwrap();
+    let model = folder.model();
+    for index in [1, 2] {
+        assert_eq!(model.instances[index].attributes.process_time, Some(crabsim::SimTime::from_secs(40)));
+    }
+    picked_up(&mut workspace);
+    workspace.make_class_from_all(&both, "Paired mill", false).unwrap();
+    let model = folder.model();
+    let class = model.class("Paired mill").unwrap();
+    assert_eq!(class.parent, "Mill", "derived from the class they share");
+    assert_eq!(class.attributes.process_time, Some(crabsim::SimTime::from_secs(40)), "the values they all set alike");
+    assert_eq!(class.attributes.description, None, "but not one only Station 4 sets");
+    assert_eq!(model.instances[1].class, "Paired mill");
+    assert!(model.instances[1].attributes.is_empty());
+    assert_eq!(model.instances[2].attributes.description.as_deref(), Some("the old one"), "what differs stays on the instance");
+    picked_up(&mut workspace);
+    let Err(Refusal::Invalid(why)) = workspace.make_class_from_all(&["In".to_string(), "Station 1".to_string()], "Mixed", false) else {
+        panic!("instances of different classes")
+    };
+    assert!(why.contains("one class"), "{why}");
 }

@@ -48,15 +48,15 @@
   ],
   "$defs": {
     "ClassFile": {
-      "description": "A class of the model's own.",
+      "description": "A class of the model's own, or, named like a built-in class and with no parent, this model's own values for that built-in class, which every class and instance built on it inherits.",
       "type": "object",
       "properties": {
         "name": {
-          "description": "Unique among classes, and not the name of a built-in class.",
+          "description": "Unique among classes. Source, Station, Buffer or Drain makes it this model's own values for that built-in class.",
           "$ref": "#/$defs/Name"
         },
         "parent": {
-          "description": "The class it derives from: Source, Station, Buffer, Drain or another class in the file.",
+          "description": "The class it derives from: Source, Station, Buffer, Drain or another class in the file. Left out only on a class named like a built-in class, and required on every other.",
           "type": "string"
         },
         "attributes": {
@@ -66,8 +66,7 @@
       },
       "additionalProperties": false,
       "required": [
-        "name",
-        "parent"
+        "name"
       ]
     },
     "Name": {

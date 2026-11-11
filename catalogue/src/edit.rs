@@ -56,8 +56,10 @@ impl Position {
 pub enum Target {
     /// An instance, by name, such as `{"instance": "Mill 1"}`.
     Instance(String),
-    /// A class, by name, such as `{"class": "CNC mill"}`. Built-in classes can be read but not
-    /// changed.
+    /// A class, by name, such as `{"class": "CNC mill"}`. A built-in class's name, such as
+    /// `{"class": "Station"}`, means this model's own values for it, which every class and
+    /// instance built on it inherits: setting one makes them, and restoring the last one removes
+    /// them, so the built-in's defaults hold again.
     Class(String),
 }
 
@@ -114,6 +116,8 @@ pub enum Change {
     },
     /// Removes a class. Refused while classes derive from it or instances are of it, listing
     /// them, unless `delete_dependents` is true, which removes them all with their connections.
+    /// On a built-in class's name it removes only this model's own values for it, so the
+    /// built-in's defaults hold again, and nothing depending on it goes.
     RemoveClass {
         name: String,
         #[serde(default)]
@@ -204,11 +208,18 @@ impl Draft {
         self.instances().iter().position(|instance| instance["name"] == name).ok_or_else(|| format!("no instance is called `{name}`"))
     }
 
+    /// The class called `name`, which mustn't be a built-in class: those keep their names and
+    /// parents, and only their values change, through `Target::Class`.
     fn class(&mut self, name: &str) -> Result<usize, Refusal> {
         if BUILT_IN_CLASSES.contains(&name) {
-            return Err(format!("`{name}` is a built-in class, which can't be changed"));
+            return Err(format!("`{name}` is a built-in class, which keeps its name and parent: only its values can change for this model"));
         }
         self.classes().iter().position(|class| class["name"] == name).ok_or_else(|| format!("no class is called `{name}`"))
+    }
+
+    /// This model's own values for the built-in class `name`, if it has set any.
+    fn refinement(&mut self, name: &str) -> Option<usize> {
+        self.classes().iter().position(|class| class["name"] == name)
     }
 
     fn class_exists(&mut self, name: &str) -> Result<(), Refusal> {
@@ -330,6 +341,16 @@ impl Draft {
             Target::Instance(name) => {
                 let index = self.instance(name)?;
                 (&mut self.instances()[index], format!("instance `{name}`"))
+            }
+            Target::Class(name) if BUILT_IN_CLASSES.contains(&name.as_str()) => {
+                let index = match self.refinement(name) {
+                    Some(index) => index,
+                    None => {
+                        self.classes().push(json!({ "name": name }));
+                        self.classes().len() - 1
+                    }
+                };
+                (&mut self.classes()[index], format!("this model's class `{name}`"))
             }
             Target::Class(name) => {
                 let index = self.class(name)?;
@@ -479,6 +500,10 @@ impl Draft {
                 }
                 self.classes().push(class);
             }
+            Change::RemoveClass { name, .. } if BUILT_IN_CLASSES.contains(&name.as_str()) => {
+                let index = self.refinement(&name).ok_or_else(|| format!("this model sets nothing on the built-in class `{name}`, so there's nothing to remove"))?;
+                self.classes().remove(index);
+            }
             Change::RemoveClass { name, delete_dependents } => {
                 self.class(&name)?;
                 let derived = self.derived_from(&name);
@@ -544,9 +569,24 @@ impl Draft {
                 attributes.insert(attribute, value);
             }
             Change::RestoreInheritance { target, attribute } => {
+                if let Target::Class(name) = &target
+                    && BUILT_IN_CLASSES.contains(&name.as_str())
+                    && self.refinement(name).is_none()
+                {
+                    return Err(format!("`{attribute}` isn't set on this model's class `{name}`, so it has the built-in default"));
+                }
                 let (attributes, what) = self.attributes(&target)?;
                 if attributes.remove(&attribute).is_none() {
                     return Err(format!("`{attribute}` isn't set on {what}, so it already inherits it"));
+                }
+                let nothing_left = attributes.is_empty();
+                // With nothing left set, this model's values for a built-in class go.
+                if let Target::Class(name) = &target
+                    && BUILT_IN_CLASSES.contains(&name.as_str())
+                    && nothing_left
+                    && let Some(index) = self.refinement(name)
+                {
+                    self.classes().remove(index);
                 }
             }
             Change::SetStream { name, stream } => {
@@ -750,7 +790,10 @@ impl Operation for GetAttributes {
         if let Target::Class(name) = &input.target {
             chain.retain(|class| class != name);
         }
-        chain.push(built_in.to_string());
+        // The model's own values for the built-in class, if any, are last in the chain already.
+        if chain.last().map(String::as_str) != Some(built_in) {
+            chain.push(built_in.to_string());
+        }
         let values = resolved.attributes.to_json();
         let attributes = Attribute::ALL
             .into_iter()

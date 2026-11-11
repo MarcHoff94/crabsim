@@ -274,6 +274,54 @@ fn attributes_are_set_and_restored_on_instances_and_classes() {
 }
 
 #[test]
+fn a_built_in_classs_values_are_set_for_the_model_and_go_when_the_last_is_restored() {
+    let setup = setup("built-in-values");
+    edit(&setup, json!([
+        { "change": "set_attribute", "target": { "class": "Station" }, "attribute": "process_time", "value": "0:10" },
+        { "change": "set_attribute", "target": { "class": "Station" }, "attribute": "description", "value": "ours" },
+    ]));
+    assert_eq!(
+        setup.folder.read("line.json"),
+        line_with(|model| {
+            model["classes"].as_array_mut().unwrap().push(json!({ "name": "Station", "attributes": { "process_time": "0:10", "description": "ours" } }));
+        })
+    );
+    // Every class built on it inherits it, and the chain names it once.
+    let mill = setup.ok("get_attributes", json!({ "path": "line.json", "target": { "instance": "Mill 1" } }));
+    assert_eq!(mill["chain"], json!(["Mill", "Station"]));
+    let description = mill["attributes"].as_array().unwrap().iter().find(|a| a["attribute"] == "description").unwrap().clone();
+    assert_eq!(description, json!({ "attribute": "description", "value": "ours", "from": "class", "class": "Station" }));
+    let station = setup.ok("get_attributes", json!({ "path": "line.json", "target": { "class": "Station" } }));
+    assert_eq!(station["chain"], json!(["Station"]));
+
+    // A built-in class keeps its name and parent.
+    for change in [
+        json!({ "change": "rename_class", "name": "Station", "to": "Machine" }),
+        json!({ "change": "set_parent", "name": "Station", "parent": "Source" }),
+        json!({ "change": "duplicate_class", "name": "Station", "to": "Machine" }),
+    ] {
+        let refused = edit_err(&setup, json!([change]));
+        assert!(refused["message"].as_str().unwrap().contains("keeps its name and parent"), "{refused}");
+    }
+
+    // Restoring the last value removes the model's own class, and Mill still derives from Station.
+    edit(&setup, json!([
+        { "change": "restore_inheritance", "target": { "class": "Station" }, "attribute": "process_time" },
+        { "change": "restore_inheritance", "target": { "class": "Station" }, "attribute": "description" },
+    ]));
+    assert_eq!(setup.folder.read("line.json"), canonical(&line()));
+    let refused = edit_err(&setup, json!([{ "change": "restore_inheritance", "target": { "class": "Station" }, "attribute": "description" }]));
+    assert!(refused["message"].as_str().unwrap().contains("has the built-in default"), "{refused}");
+
+    // Removing it takes only its values, never what is built on it.
+    edit(&setup, json!([{ "change": "set_attribute", "target": { "class": "Station" }, "attribute": "starting_mus", "value": 1 }]));
+    edit(&setup, json!([{ "change": "remove_class", "name": "Station" }]));
+    assert_eq!(setup.folder.read("line.json"), canonical(&line()));
+    let refused = edit_err(&setup, json!([{ "change": "remove_class", "name": "Station" }]));
+    assert!(refused["message"].as_str().unwrap().contains("nothing to remove"), "{refused}");
+}
+
+#[test]
 fn instances_move_change_class_and_connect_at_a_chosen_place() {
     let setup = setup("move");
     edit(&setup, json!([

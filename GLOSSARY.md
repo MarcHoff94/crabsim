@@ -158,7 +158,7 @@ Anything about a class or instance that a user can set, such as a process time, 
 _Avoid_: Parameter
 
 **Class**:
-What a material-flow object is. Source, Station, Buffer and Drain are built-in classes, and users make their own by deriving from them.
+What a material-flow object is. Source, Station, Buffer and Drain are built-in classes, and users make their own by deriving from them. A model can also change a built-in class's values for itself alone, with a class of the built-in's name and no parent, which everything built on it inherits.
 
 **Instance**:
 A material-flow object placed in a model, made from a class. Its name, position and connections are its own, and every other attribute, including its dimensions and look, it can inherit.

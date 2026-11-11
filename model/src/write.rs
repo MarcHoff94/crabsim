@@ -40,7 +40,9 @@ fn time(time: SimTime) -> Value {
 fn class(class: &Class) -> Value {
     let mut fields = Map::new();
     fields.insert("name".into(), json!(class.name));
-    fields.insert("parent".into(), json!(class.parent));
+    if !class.refines_built_in() {
+        fields.insert("parent".into(), json!(class.parent));
+    }
     if !class.attributes.is_empty() {
         fields.insert("attributes".into(), attributes(&class.attributes));
     }

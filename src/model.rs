@@ -141,6 +141,18 @@ impl ModelDescription {
         }
     }
 
+    /// The longest mean time between failures or mean repair time among the model's Stations
+    /// that fail, which a measuring period should be long against. `None` if none fail.
+    pub fn longest_failure_time(&self) -> Option<SimTime> {
+        self.objects
+            .iter()
+            .filter_map(ModelObject::as_station)
+            .map(|station| &station.failure_profile)
+            .filter(|failures| failures.active)
+            .map(|failures| failures.mtbf.max(SimTime::from_millis_f64(failures.dist_sampler_mttr.params.mean())))
+            .max()
+    }
+
     /// The object's successors, in the order they were connected, which is the order they are
     /// tried in. Empty for a Drain.
     pub fn successors(&self, id: u32) -> &[u32] {

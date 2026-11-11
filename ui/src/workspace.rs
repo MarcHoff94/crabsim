@@ -8,8 +8,8 @@
 //! the catalogue and compares its hash. A file watcher could take its place later.
 
 use crate::editing::{ActRefusal, EditAction, Editors};
-use crate::view::Change;
-use crabsim::{Clock, Dimensions, LiveSession, ModelDescription, ObjectKind, Position};
+use crate::view::{Change, DEFAULT_MEASURING_PERIOD};
+use crabsim::{Clock, Dimensions, LiveSession, ModelDescription, ObjectKind, Position, SimTime};
 use crabsim_catalogue::{Catalogue, ErrorKind, Settings, Source};
 use serde_json::{json, Value};
 use std::collections::VecDeque;
@@ -127,6 +127,8 @@ pub struct Workspace {
     pending: Option<ModelDescription>,
     problems: Option<ProblemReport>,
     seed: u64,
+    /// How long the measuring periods of runs are, a setting of runs rather than of the model.
+    measuring_period: SimTime,
 }
 
 impl Workspace {
@@ -143,6 +145,7 @@ impl Workspace {
             pending: None,
             problems: None,
             seed: 0,
+            measuring_period: DEFAULT_MEASURING_PERIOD,
         };
         match Catalogue::open(Settings::new(models, Source::Ui)) {
             Ok(catalogue) => {
@@ -505,11 +508,28 @@ impl Workspace {
         self.seed = seed;
     }
 
-    /// A live session on the model open, with the seed, on `clock`.
+    pub fn measuring_period(&self) -> SimTime {
+        self.measuring_period
+    }
+
+    /// The measuring period every run from now on uses, whose figures each count as one sample
+    /// for the Results tab's intervals. It stays for the window, whatever model is open.
+    pub fn set_measuring_period(&mut self, length: SimTime) {
+        self.measuring_period = length;
+    }
+
+    /// A live session on the model open, with the seed and measuring period, on `clock`.
     pub fn session<C: Clock>(&self, clock: C) -> LiveSession {
         let model = self.description.clone();
-        let seed = self.seed;
-        LiveSession::new(move || model.build(seed), clock)
+        let (seed, period) = (self.seed, self.measuring_period);
+        LiveSession::new(
+            move || {
+                let mut run = model.build(seed);
+                run.set_measuring_period(Some(period));
+                run
+            },
+            clock,
+        )
     }
 
     /// The catalogue on the folder, for what the window asks of it.

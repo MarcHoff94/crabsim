@@ -113,6 +113,21 @@ There's no warm-up setting inside the engine. The caller does `advance_to(warm_u
 - An MU's lead time is counted in full if it exits after the warm-up, even if it entered before.
 - Clearing forgets the first and last exit, so no exit interval spans the warm-up and MUs/h runs from the first exit after it.
 
+## Measuring periods
+
+A run can measure in periods of a fixed length of simulated time (glossary: Measuring period), so that one run says how sure its figures are: each period's figures are one sample, and the spread between periods gives a 95% interval (Student's t). This is the batch-means method. Spec issue 87, PR 2, built it, with the owner choosing on 2026-11-11 to keep running sums in the run rather than each period's statistics in the live session.
+
+- **A setting of the run:** `SimulationRun::set_measuring_period`, off by default, so a headless run measures nothing unless asked. Reset keeps it, like recording. Set during a run, periods start afresh from then. The window sets it only before Init or after Reset, an hour by default, beside the end time.
+- **Periods start when statistics do:** at Init, and again whenever `clear_statistics` runs, so a warm-up is never inside a period.
+- **A period ends after every event at its end time.** The run completes it when its clock passes the end, before the first later event, or when an advance leaves the clock at the end or later. So a run halted exactly at a period's end counts it, and a headless run read at that time has the same statistics the period closed with. MUs counted at Init itself fall before the first period.
+- **Running sums, not snapshots:** each period's figures go into a `Spread` per figure and object (count, mean and sum of squared differences, by Welford's method), and the run keeps only the statistics at the last period end to subtract from. So memory doesn't grow with the run's length, which a list of per-period snapshots would break: about 10 GB for a simulated year of the 6,006-object model. The cost is that individual periods can't be read back, such as for a chart over time.
+- **The figures:** MUs in per hour, and the busy, blocked, idle, failed, paused, stopped (failed or paused) and not-idle shares of the period. Not-idle and stopped have their own spreads, because a sum's variance needs the covariance, which separate spreads don't keep.
+- **Per event:** one comparison of the next event's time with the end of the period in progress, which is the end of time without periods. Closing a period reads every object's statistics once.
+- **Checkpoints and replay** need nothing of their own: the periods are part of the run, so a checkpoint holds them and replay closes the same periods again.
+- **`RunState::periods`** reports the length, how many periods are complete and every object's figures.
+
+The Results tab gives intervals once 5 periods are complete, says "Run longer" until then, calls the likely bottleneck too close to call while its not-idle interval overlaps the runner-up's, and notes when the period is shorter than 5 times the model's longest mean time between failures or repair time, since periods then follow each other too closely to be independent samples and the intervals come out too narrow.
+
 ## Per-MU data
 
 `exits` and `exit_ids` are removed from the Drain. The run gets a setting for which occurrence kinds to record: none, all or chosen kinds. A live session records everything, and a headless run records nothing by default. `MuLeft` gains `lead_time`.

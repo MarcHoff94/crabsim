@@ -6,7 +6,7 @@ mod common;
 
 use common::{FakeClock, Watched};
 use crabsim::{ModelDescription, ObjectKind, Position, RunState, SessionOutput, SessionStatus, SimTime};
-use crabsim_ui::view::{Control, EndTimeProblem, ViewState};
+use crabsim_ui::view::{Control, EndTimeProblem, ViewState, DEFAULT_MEASURING_PERIOD};
 use crabsim_ui::workspace::Workspace;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -284,9 +284,15 @@ fn a_folder_that_cant_be_opened_says_so_and_opens_nothing() {
 
 // ---------- The seed ----------
 
-/// The state of `model` at simulation time `t` in a headless run with `seed`.
+/// The state of `model` at simulation time `t` in a headless run with `seed`, measuring in the
+/// window's periods.
 fn headless(model: &ModelDescription, seed: u64, t: SimTime) -> RunState {
+    headless_measuring(model, seed, Some(DEFAULT_MEASURING_PERIOD), t)
+}
+
+fn headless_measuring(model: &ModelDescription, seed: u64, period: Option<SimTime>, t: SimTime) -> RunState {
     let mut run = model.build(seed);
+    run.set_measuring_period(period);
     run.init().unwrap();
     run.advance_to(t).unwrap();
     run.state()
@@ -345,6 +351,27 @@ fn the_seed_can_change_only_before_init_or_after_reset() {
     watched.session.reset().unwrap();
     watched.frame();
     assert!(watched.view.allows_seed(), "again after Reset");
+}
+
+// ---------- The measuring period ----------
+
+#[test]
+fn runs_measure_in_hour_long_periods_until_another_is_set_which_stays_for_the_window() {
+    let folder = folder("period");
+    let mut workspace = Workspace::open(&folder.0);
+    assert_eq!(workspace.measuring_period(), SimTime::from_secs(3_600));
+    assert!(workspace.open_model("demo.json"));
+    let t = SimTime::from_secs(4 * 3_600);
+    let state = session_state(&workspace, t);
+    assert_eq!(state.periods.as_ref().unwrap().length, SimTime::from_secs(3_600));
+    assert_eq!(state, headless(workspace.description(), 0, t));
+
+    workspace.set_measuring_period(SimTime::from_secs(600));
+    let state = session_state(&workspace, t);
+    assert_eq!(state.periods.as_ref().unwrap().complete, 24);
+    assert_eq!(state, headless_measuring(workspace.description(), 0, Some(SimTime::from_secs(600)), t));
+    assert!(workspace.open_model("placed.json"));
+    assert_eq!(workspace.measuring_period(), SimTime::from_secs(600), "it stays for the window, as the seed does");
 }
 
 // ---------- The end time ----------

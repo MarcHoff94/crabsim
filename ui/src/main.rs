@@ -25,8 +25,8 @@ use clap::Parser;
 use crabsim::{LiveSession, SessionStatus, SimTime, TimeMode, WallClock};
 use crabsim_ui::camera::Camera as ViewCamera;
 use crabsim_ui::view::{
-    Change, Control, DEFAULT_SPEED, Details, EndTimeProblem, GoingOn, Inspection, Intervention, JumpProblem, MAX_SPEED, MIN_SPEED,
-    Mark, Point, MU_METRES, Shade, StepBack, ViewState, format_time, format_time_exact, label_size, parse_time, rgb,
+    Change, Control, DEFAULT_SPEED, Details, EndTimeProblem, GoingOn, Inspection, Intervention, Interval, JumpProblem, MAX_SPEED,
+    MIN_PERIODS, MIN_SPEED, Mark, PERIOD_FAILURE_FACTOR, Point, MU_METRES, Shade, StepBack, ViewState, format_time, format_time_exact, label_size, parse_time, rgb,
     wall_time_roughly,
 };
 use crabsim_ui::attributes::{Form, RepairKind};
@@ -93,6 +93,7 @@ fn main() {
     let session = workspace.session(WallClock::new());
     session.set_speed(DEFAULT_SPEED).expect("a positive speed");
     let seed_text = workspace.seed().to_string();
+    let period_text = format_time(workspace.measuring_period());
 
     App::new()
         .insert_resource(ClearColor(BACKGROUND))
@@ -129,6 +130,7 @@ fn main() {
             long_trip: None,
             workspace,
             seed_text,
+            period_text,
             end_text: String::new(),
             replacing: None,
             rebuild_scene: false,
@@ -198,6 +200,8 @@ struct Ui {
     workspace: Workspace,
     /// What has been typed into the seed field.
     seed_text: String,
+    /// What has been typed into the measuring period field.
+    period_text: String,
     /// What has been typed into the end time field.
     end_text: String,
     /// A model chosen while a run is in progress, waiting for the user to confirm replacing it.
@@ -727,8 +731,8 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
     }
     let mut request = None;
     let top = egui::Panel::top("top bar").show(&mut root, |panel| {
-        let Ui { view, workspace, jump_text, seed_text, end_text, keep_changes, .. } = &mut *ui;
-        request = top_bar(panel, view, workspace, jump_text, seed_text, end_text, keep_changes)
+        let Ui { view, workspace, jump_text, seed_text, period_text, end_text, keep_changes, .. } = &mut *ui;
+        request = top_bar(panel, view, workspace, jump_text, seed_text, period_text, end_text, keep_changes)
     });
     let mut bottom_of_bars = top.response.rect.bottom();
     // An agent's claim on the open model, whichever tab is open.
@@ -980,6 +984,11 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
             replace_session(ui, &session, false, wall);
             None
         }
+        Some(Request::MeasuringPeriod(length)) => {
+            ui.workspace.set_measuring_period(length);
+            replace_session(ui, &session, false, wall);
+            None
+        }
         // Reset uses a model that changed during the run, such as by keeping its changes: a new
         // session is at its default state.
         Some(Request::Control(Control::Reset)) if ui.workspace.has_pending() => {
@@ -1021,7 +1030,7 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
                 ui.view.set_end_time(end);
                 session.set_end_time(end)
             }
-            Request::Seed(_) => unreachable!("handled above"),
+            Request::Seed(_) | Request::MeasuringPeriod(_) => unreachable!("handled above"),
         };
         ui.view.commanded(wall);
         match sent {
@@ -1064,6 +1073,8 @@ enum Request {
     EndTime(Option<SimTime>),
     /// Run with this seed from now on, which means a new session.
     Seed(u64),
+    /// Measure in periods this long from now on, which means a new session too.
+    MeasuringPeriod(SimTime),
 }
 
 /// Opens the model at `path` in the folder: a new view and session for it. One with problems
@@ -1097,6 +1108,7 @@ fn replace_session(ui: &mut Ui, session: &Session, new_model: bool, wall: Durati
     ui.forms.clear();
     ui.refused = None;
     ui.seed_text = ui.workspace.seed().to_string();
+    ui.period_text = format_time(ui.workspace.measuring_period());
     if new_model {
         ui.camera_moved = false;
         ui.camera = None;
@@ -1266,12 +1278,14 @@ fn stepping_back(ui: &mut Ui, decided: StepBack) -> Option<Request> {
 
 /// The run controls, shown time, going back to a time, speed and time mode. `jump_text` is what
 /// has been typed into the field for going back. Returns what was asked for, if anything.
+#[allow(clippy::too_many_arguments)]
 fn top_bar(
     ui: &mut egui::Ui,
     view: &ViewState,
     workspace: &Workspace,
     jump_text: &mut String,
     seed_text: &mut String,
+    period_text: &mut String,
     end_text: &mut String,
     keep_changes: &mut bool,
 ) -> Option<Request> {
@@ -1345,6 +1359,17 @@ fn top_bar(
         }
         if view.end_time().is_some() && ui.button("Clear").on_hover_text("Run with no end time").clicked() {
             request = Some(Request::EndTime(None));
+        }
+        ui.label("Period").on_hover_text(PERIOD_HINT);
+        let period_field = ui
+            .add_enabled(view.allows_seed(), egui::TextEdit::singleline(period_text).desired_width(60.0))
+            .on_hover_text(PERIOD_HINT)
+            .on_disabled_hover_text("The measuring period can change only before Init or after Reset");
+        if period_field.lost_focus() {
+            match parse_time(period_text).filter(|&length| length > SimTime::ZERO) {
+                Some(length) if length != workspace.measuring_period() => request = Some(Request::MeasuringPeriod(length)),
+                _ => *period_text = format_time(workspace.measuring_period()),
+            }
         }
         ui.separator();
 
@@ -1506,6 +1531,8 @@ fn confirm_long_trip(ctx: &egui::Context, ui: &mut Ui) -> Option<Request> {
     ui.long_trip = None;
     answer
 }
+
+const PERIOD_HINT: &str = "The measuring period: a stretch of simulated time whose figures count as one sample, such as 1:00:00. The Results tab gives intervals from the spread between periods once 5 are complete. Make it long against the time between failures.";
 
 const SEED_HINT: &str = "The number every random value in a run follows from, such as when a Station fails. The same seed gives the same result.";
 
@@ -1800,6 +1827,14 @@ fn percent(share: f64) -> String {
     format!("{:.1} %", share * 100.0)
 }
 
+/// A share as its mean over measuring periods, plus or minus half its 95% interval.
+fn percent_interval(interval: Interval) -> String {
+    format!("{:.1} ± {:.1} %", interval.mean * 100.0, interval.half_width * 100.0)
+}
+
+/// Notes that ask the user to do something, such as run longer.
+const NOTE_COLOUR: egui::Color32 = egui::Color32::from_rgb(240, 200, 80);
+
 /// The run so far: each Drain's throughput and lead time, the likely bottleneck with its
 /// neighbours as evidence, and every Station's shares of time, sorted by a column clicked.
 /// Returns an object whose name was clicked, to select it.
@@ -1816,6 +1851,29 @@ fn results_tab(ui: &mut egui::Ui, results: Option<(&str, &crabsim_ui::view::Resu
         }
     };
     ui.label(egui::RichText::new(format!("At {at}, measured since {}", format_time(results.since))).weak());
+    let intervals = results.periods.is_some_and(|periods| periods.complete >= MIN_PERIODS);
+    if let Some(periods) = results.periods {
+        let length = format_time(periods.length);
+        if intervals {
+            ui.label(egui::RichText::new(format!("± is a 95% interval from {} measuring periods of {length}", periods.complete)).weak())
+                .on_hover_text("Each period's figures are one sample, and the interval comes from how much they vary between periods. Narrower takes a longer run.");
+        } else {
+            ui.colored_label(
+                NOTE_COLOUR,
+                format!("Run longer: {} of {MIN_PERIODS} measuring periods of {length}, before anything says how sure it is.", periods.complete),
+            );
+        }
+    }
+    if let Some(longest) = results.short_against {
+        ui.colored_label(
+            NOTE_COLOUR,
+            format!(
+                "Periods are short against the model's failures, {} between failures or repairs at the longest, so the intervals may be too narrow. Make the period at least {} after Reset.",
+                format_time(longest),
+                format_time(longest.times(PERIOD_FAILURE_FACTOR))
+            ),
+        );
+    }
     ui.add_space(6.0);
 
     ui.label(egui::RichText::new("Drains").strong());
@@ -1826,7 +1884,11 @@ fn results_tab(ui: &mut egui::Ui, results: Option<(&str, &crabsim_ui::view::Resu
         grid.end_row();
         for drain in &results.drains {
             pick(grid, drain.id, &drain.name, &mut chosen);
-            grid.label(drain.throughput_per_hour.map_or_else(|| "–".to_string(), |per_hour| format!("{per_hour:.1} an hour")));
+            grid.label(match (drain.throughput_interval, drain.throughput_per_hour) {
+                (Some(interval), _) => format!("{:.1} ± {:.1} an hour", interval.mean, interval.half_width),
+                (None, Some(per_hour)) => format!("{per_hour:.1} an hour"),
+                (None, None) => "–".to_string(),
+            });
             grid.label(drain.mean_lead_time.map_or_else(|| "–".to_string(), format_time_exact));
             grid.end_row();
         }
@@ -1849,6 +1911,12 @@ fn results_tab(ui: &mut egui::Ui, results: Option<(&str, &crabsim_ui::view::Resu
                 }
                 row.label(format!("busy or stopped {}", percent(likely.not_idle_share)));
             });
+            if let Some(runner_up) = &results.too_close {
+                ui.colored_label(
+                    NOTE_COLOUR,
+                    format!("Too close to call: {} and {runner_up} can't be told apart yet, since their busy-or-stopped intervals overlap.", likely.instance),
+                );
+            }
             for (name, blocked) in &likely.upstream {
                 ui.label(format!("Upstream {name}: blocked {}", percent(*blocked)));
             }
@@ -1888,10 +1956,19 @@ fn results_tab(ui: &mut egui::Ui, results: Option<(&str, &crabsim_ui::view::Resu
         grid.end_row();
         for station in stations {
             pick(grid, station.id, &station.name, &mut chosen);
-            grid.label(percent(station.busy));
-            grid.label(percent(station.blocked));
-            grid.label(percent(station.idle));
-            grid.label(percent(station.failed + station.paused));
+            match station.intervals {
+                Some(intervals) => {
+                    for interval in [intervals.busy, intervals.blocked, intervals.idle, intervals.stopped] {
+                        grid.label(percent_interval(interval));
+                    }
+                }
+                None => {
+                    grid.label(percent(station.busy));
+                    grid.label(percent(station.blocked));
+                    grid.label(percent(station.idle));
+                    grid.label(percent(station.failed + station.paused));
+                }
+            }
             grid.end_row();
         }
     });

@@ -92,17 +92,18 @@ fn a_single_run_needs_a_model_file() {
 #[test]
 fn an_invalid_model_file_prints_every_problem_and_runs_nothing() {
     let path = std::env::temp_dir().join(format!("crabsim-cli-invalid-{}.json", std::process::id()));
-    let text = r#"{ "format_version": 1, "instances": [
-        { "name": "In", "class": "Source", "successors": ["Nowhere"] },
-        { "name": "Out", "class": "Drain", "attributes": { "process_time": "10" } } ] }"#;
+    let text = r#"{"format_version":2,"instances":[
+  {"name":"In","class":"Source","attributes":{"interval":"soon"}},
+  {"name":"Out","class":"Drain","attributes":{"process_time":"10"}}],"connections":[
+  {"from":"In","to":"Nowhere","exit":1,"entrance":1}]}"#;
     std::fs::write(&path, text).unwrap();
     let output = crabsim(&["--model", path.to_str().unwrap()]);
     std::fs::remove_file(&path).unwrap();
 
     assert!(!output.status.success());
     let errors = String::from_utf8_lossy(&output.stderr);
-    assert!(errors.contains("/instances/0 \"In\": a Source needs an `interval`"), "{errors}");
-    assert!(errors.contains("/instances/0/successors/0 \"In\": no instance is called `Nowhere`"), "{errors}");
+    assert!(errors.contains("/instances/0/attributes/interval \"In\": \"soon\" is not a time"), "{errors}");
+    assert!(errors.contains("/connections/0/to \"In → Nowhere\": no instance is called `Nowhere`"), "{errors}");
     assert!(errors.contains("/instances/1/attributes/process_time \"Out\": a Drain has no attribute `process_time`"), "{errors}");
     assert!(!stdout(&output).contains("Ran "), "nothing ran");
 }
@@ -216,12 +217,14 @@ fn a_folder_holding_source_code_is_refused_as_a_models_folder() {
 #[test]
 fn an_invalid_model_is_refused_by_run_with_every_problem() {
     let models = Models::new("invalid");
-    std::fs::write(models.0.join("broken.json"), r#"{ "format_version": 1, "instances": [ { "name": "In", "class": "Source", "successors": ["Nowhere"] } ] }"#).unwrap();
+    std::fs::write(models.0.join("broken.json"), r#"{"format_version":2,"instances":[
+  {"name":"In","class":"Source","attributes":{"interval":"soon"}}],"connections":[
+  {"from":"In","to":"Nowhere","exit":1,"entrance":1}]}"#).unwrap();
     let output = crabsim(&["run", "--models", models.arg(), "--model", "broken.json"]);
     assert!(!output.status.success());
     let errors = String::from_utf8_lossy(&output.stderr);
-    assert!(errors.contains("/instances/0 \"In\": a Source needs an `interval`"), "{errors}");
-    assert!(errors.contains("/instances/0/successors/0 \"In\": no instance is called `Nowhere`"), "{errors}");
+    assert!(errors.contains("/instances/0/attributes/interval \"In\": \"soon\" is not a time"), "{errors}");
+    assert!(errors.contains("/connections/0/to \"In → Nowhere\": no instance is called `Nowhere`"), "{errors}");
 }
 
 #[test]
@@ -329,7 +332,7 @@ fn attributes_prints_each_value_and_where_it_comes_from() {
     assert!(line("starting_mus").contains("built in"), "{printed}");
     assert!(line("description").contains("class Demo station"), "{printed}");
     let source = stdout(&crabsim(&["attributes", "--models", models.arg(), "demo.json", "Source", "--class"]));
-    assert!(source.lines().any(|line| line.starts_with("interval") && line.contains("not set")), "a built-in Source has no interval: {source}");
+    assert!(source.lines().any(|line| line.starts_with("interval") && line.contains("00:00:00") && line.contains("built in")), "a built-in Source's interval is 0: {source}");
     assert!(printed.contains("changed outside crabsim"), "the copied demo isn't adopted: {printed}");
 
     let class = stdout(&crabsim(&["attributes", "--models", models.arg(), "demo.json", "Demo station", "--class"]));
@@ -435,7 +438,9 @@ fn describe_prints_a_models_summary_from_a_file_or_a_run() {
 #[test]
 fn describe_prints_the_problems_of_a_model_with_problems() {
     let models = Models::new("describe-broken");
-    std::fs::write(models.0.join("broken.json"), r#"{ "format_version": 1, "instances": [ { "name": "In", "class": "Source", "successors": ["Nowhere"] } ] }"#).unwrap();
+    std::fs::write(models.0.join("broken.json"), r#"{"format_version":2,"instances":[
+  {"name":"In","class":"Source","attributes":{"interval":"soon"}}],"connections":[
+  {"from":"In","to":"Nowhere","exit":1,"entrance":1}]}"#).unwrap();
     let printed = ok(&["describe", "--models", models.arg(), "--model", "broken.json"]);
     assert!(printed.contains("2 problems"), "{printed}");
     assert!(printed.contains("Nowhere"), "{printed}");

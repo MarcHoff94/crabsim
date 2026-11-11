@@ -9,10 +9,12 @@ use crabsim_catalogue::{Catalogue, Settings, Source};
 use serde_json::{json, Value};
 use std::time::Duration;
 
-const LINE: &str = r#"{"format_version":1,"instances":[
-  {"name":"In","class":"Source","successors":["Work"],"attributes":{"interval":"10"}},
-  {"name":"Work","class":"Station","successors":["Out"],"attributes":{"process_time":"8"}},
-  {"name":"Out","class":"Drain"}]}"#;
+const LINE: &str = r#"{"format_version":2,"instances":[
+  {"name":"In","class":"Source","attributes":{"interval":"10"}},
+  {"name":"Work","class":"Station","attributes":{"process_time":"8"}},
+  {"name":"Out","class":"Drain"}],"connections":[
+  {"from":"In","to":"Work","exit":1,"entrance":1},
+  {"from":"Work","to":"Out","exit":1,"entrance":1}]}"#;
 
 /// A models folder holding `line.json`, and whoever works on it.
 struct Folder {

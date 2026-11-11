@@ -14,9 +14,29 @@ fn demo_file() -> String {
     std::fs::read_to_string(path).expect("models/demo.json exists").replace("\r\n", "\n")
 }
 
-/// A model file holding these instances.
+/// A model file holding these instances. For short tests an instance may list its `successors`,
+/// which become connections, numbered in the order they come.
 fn file(instances: Value) -> String {
-    json!({ "format_version": 1, "instances": instances }).to_string()
+    let (instances, connections) = connected(instances);
+    json!({ "format_version": 2, "instances": instances, "connections": connections }).to_string()
+}
+
+/// `instances` without their `successors`, and the connections they list: each successor's exit
+/// is its place in the list, and each object's entrances follow the order connections come in.
+fn connected(mut instances: Value) -> (Value, Value) {
+    let mut connections = Vec::new();
+    let mut entrances: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+    for instance in instances.as_array_mut().into_iter().flatten() {
+        let Some(fields) = instance.as_object_mut() else { continue };
+        let Some(Value::Array(successors)) = fields.remove("successors") else { continue };
+        let from = fields["name"].clone();
+        for (place, to) in successors.into_iter().enumerate() {
+            let entrance = entrances.entry(to.as_str().unwrap_or_default().to_string()).or_default();
+            *entrance += 1;
+            connections.push(json!({ "from": from, "to": to, "exit": place + 1, "entrance": *entrance }));
+        }
+    }
+    (instances, Value::Array(connections))
 }
 
 fn problems(text: &str) -> Vec<Problem> {
@@ -91,7 +111,7 @@ fn a_hand_written_file_is_saved_in_canonical_form_and_then_stays_the_same() {
     ]));
     let saved = load(&text).unwrap().save();
     let expected = r#"{
-  "format_version": 1,
+  "format_version": 2,
   "instances": [
     {
       "name": "In",
@@ -101,9 +121,6 @@ fn a_hand_written_file_is_saved_in_canonical_form_and_then_stays_the_same() {
         "x": 1.0,
         "y": 2.0
       },
-      "successors": [
-        "Out"
-      ],
       "attributes": {
         "interval": "00:01:30"
       }
@@ -112,6 +129,14 @@ fn a_hand_written_file_is_saved_in_canonical_form_and_then_stays_the_same() {
       "name": "Out",
       "class": "Drain",
       "stream": 1
+    }
+  ],
+  "connections": [
+    {
+      "from": "In",
+      "to": "Out",
+      "exit": 1,
+      "entrance": 1
     }
   ]
 }
@@ -142,11 +167,16 @@ fn copies_of_the_demo(copies: usize) -> Model {
             let mut instance: Instance = instance.clone();
             instance.name = rename(&instance.name);
             instance.stream = instance.stream.map(|stream| stream + 100 * copy as u64);
-            instance.successors = instance.successors.iter().map(|name| rename(name)).collect();
             if let Some(position) = &mut instance.position {
                 position.y += 20.0 * copy as f64;
             }
             model.instances.push(instance);
+        }
+        for connection in &demo.connections {
+            let mut connection = connection.clone();
+            connection.from = rename(&connection.from);
+            connection.to = rename(&connection.to);
+            model.connections.push(connection);
         }
     }
     model
@@ -222,7 +252,11 @@ fn names_positions_dimensions_and_descriptions_change_no_result() {
     let renamed: Vec<String> = dressed.instances.iter().map(|instance| format!("{} renamed", instance.name)).collect();
     for instance in &mut dressed.instances {
         instance.name = format!("{} renamed", instance.name);
-        instance.successors = instance.successors.iter().map(|name| format!("{name} renamed")).collect();
+    }
+    for connection in &mut dressed.connections {
+        connection.from = format!("{} renamed", connection.from);
+        connection.to = format!("{} renamed", connection.to);
+        connection.description = Some("described, which changes nothing either".into());
     }
     assert!(renamed.iter().all(|name| name.ends_with("renamed")));
     let (plain_run, _) = run_for(&plain.to_description(), 3, secs(86_400));
@@ -235,19 +269,20 @@ fn names_positions_dimensions_and_descriptions_change_no_result() {
 #[test]
 fn every_problem_comes_back_at_once_in_file_order() {
     let text = file(json!([
-        { "name": "In", "class": "Source", "successors": ["Nowhere"] },
+        { "name": "In", "class": "Source", "successors": ["Nowhere"], "attributes": { "interval": "10" } },
         { "name": "Mill", "class": "Station", "attributes": { "proces_time": "10", "starting_mus": 2 } },
         { "name": "Mill", "class": "Drain", "successors": ["In"] },
+        { "name": "B", "class": "Buffer" },
     ]));
     assert_eq!(
         found(&text),
         vec![
-            "/instances/0: a Source needs an `interval`: the time between creating an MU and offering it on. Set it on the instance or one of its classes",
-            "/instances/0/successors/0: no instance is called `Nowhere`",
             "/instances/1/attributes/proces_time: unknown attribute `proces_time`: did you mean `process_time`?",
             "/instances/1/attributes/starting_mus: a Station can start with 0 or 1 MUs, until Stations have a capacity",
             "/instances/2/name: instance 1 already has this name",
-            "/instances/2/successors: a Drain takes MUs out of the model, so it can't have successors",
+            "/instances/3: a Buffer needs a `capacity`: how many MUs it holds. Set it on the instance or one of its classes",
+            "/connections/0/to: no instance is called `Nowhere`",
+            "/connections/1/to: `In` is a Source, which creates MUs and can't take any in",
         ]
     );
 }
@@ -286,7 +321,7 @@ fn a_name_one_or_two_edits_from_a_known_one_gets_a_did_you_mean() {
             { "name": "CNC mill", "parent": "Statin" },
         ]),
         json!([
-            { "name": "In", "class": "Source", "succesors": ["Station 2"], "attributes": { "interval": "10" } },
+            { "name": "In", "class": "Source", "clas": "Source", "attributes": { "interval": "10" } },
             { "name": "Station 2", "class": "Statoin", "successors": ["Out"] },
             { "name": "Station 3", "class": "Station", "successors": ["Otu"], "attributes": { "proces_time": "10" } },
             { "name": "Out", "class": "Drain" },
@@ -296,10 +331,10 @@ fn a_name_one_or_two_edits_from_a_known_one_gets_a_did_you_mean() {
         found(&text),
         vec![
             "/classes/0/parent: unknown class `Statin` (did you mean `Station`?): its attributes weren't checked",
-            "/instances/0/succesors: unknown field `succesors` in an instance: did you mean `successors`?",
+            "/instances/0/clas: unknown field `clas` in an instance: did you mean `class`?",
             "/instances/1/class: unknown class `Statoin` (did you mean `Station`?): its attributes weren't checked",
             "/instances/2/attributes/proces_time: unknown attribute `proces_time`: did you mean `process_time`?",
-            "/instances/2/successors/0: no instance is called `Otu`: did you mean `Out`?",
+            "/connections/1/to: no instance is called `Otu`: did you mean `Out`?",
         ]
     );
     // Nothing close: no guess.
@@ -309,11 +344,23 @@ fn a_name_one_or_two_edits_from_a_known_one_gets_a_did_you_mean() {
 
 #[test]
 fn a_file_that_isnt_json_or_has_the_wrong_version_is_refused() {
-    assert_found("{ \"format_version\": 1, ", "", "this isn't JSON");
+    assert_found("{ \"format_version\": 2, ", "", "this isn't JSON");
     assert_found(&json!({ "instances": [] }).to_string(), "", "`format_version` is missing");
-    assert_found(&json!({ "format_version": 2, "instances": [] }).to_string(), "/format_version", "format version 2 isn't supported");
-    assert_found(&json!({ "format_version": 1 }).to_string(), "", "`instances` is missing");
-    assert_found(&json!({ "format_version": 1, "instances": [], "seed": 3 }).to_string(), "/seed", "unknown field `seed`");
+    assert_found(&json!({ "format_version": 3, "instances": [] }).to_string(), "/format_version", "format version 3 isn't supported");
+    assert_found(&json!({ "format_version": 2 }).to_string(), "", "`instances` is missing");
+    assert_found(&json!({ "format_version": 2, "instances": [], "seed": 3 }).to_string(), "/seed", "unknown field `seed`");
+}
+
+#[test]
+fn a_version_1_file_is_refused_with_one_problem_saying_what_changed() {
+    let version_1 = json!({ "format_version": 1, "instances": [
+        { "name": "In", "class": "Source", "successors": ["Out"], "attributes": { "interval": "10" } },
+        { "name": "Out", "class": "Drain" },
+    ] });
+    let problems = problems(&version_1.to_string());
+    assert_eq!(problems.len(), 1, "{problems:#?}");
+    assert_eq!(problems[0].pointer, "/format_version");
+    assert!(problems[0].message.contains("connections are their own list"), "{}", problems[0].message);
 }
 
 #[test]
@@ -354,16 +401,108 @@ fn a_value_that_cant_be_read_isnt_also_reported_missing() {
     assert_eq!(found(&text).len(), 1, "{:#?}", found(&text));
 }
 
+/// A file with three instances and exactly these connections.
+fn with_connections(connections: Value) -> String {
+    json!({ "format_version": 2, "instances": [
+        { "name": "In", "class": "Source", "attributes": { "interval": "5" } },
+        { "name": "Mill", "class": "Station" },
+        { "name": "Out", "class": "Drain" },
+    ], "connections": connections })
+    .to_string()
+}
+
 #[test]
 fn illegal_connections_are_refused() {
+    let text = with_connections(json!([
+        { "from": "In", "to": "Mill", "exit": 1, "entrance": 1 },
+        { "from": "In", "to": "Mill", "exit": 2, "entrance": 2 },
+        { "from": "Mill", "to": "Mill", "exit": 1, "entrance": 3 },
+        { "from": "Mill", "to": "In", "exit": 2, "entrance": 1 },
+        { "from": "Out", "to": "Mill", "exit": 1, "entrance": 4 },
+        { "from": "Mill", "to": "Elsewhere", "exit": 3, "entrance": 1 },
+    ]));
+    assert_found(&text, "/connections/1", "connection 0 already connects `In` to `Mill`");
+    assert_found(&text, "/connections/2/to", "can't be its own successor");
+    assert_found(&text, "/connections/3/to", "`In` is a Source");
+    assert_found(&text, "/connections/4/from", "`Out` is a Drain");
+    assert_found(&text, "/connections/5/to", "no instance is called `Elsewhere`");
+    assert_eq!(problems(&text)[0].name.as_deref(), Some("In → Mill"), "a problem names the connection by its ends");
+}
+
+#[test]
+fn exits_and_entrances_run_from_1_with_no_gaps_or_repeats() {
+    let text = with_connections(json!([
+        { "from": "In", "to": "Mill", "exit": 1, "entrance": 1 },
+        { "from": "Mill", "to": "Out", "exit": 2, "entrance": 1 },
+    ]));
+    assert_eq!(found(&text), vec!["/connections/1/exit: 1 connection leads out of `Mill`, so its exits are numbered 1, not 2"]);
+
+    let mut model = Model::default();
+    for (name, class) in [("A", "Source"), ("B", "Source"), ("X", "Station"), ("Y", "Station"), ("Out", "Drain")] {
+        let mut instance = Instance::new(name, class);
+        if class == "Source" {
+            instance.attributes.interval = Some(secs(5));
+        }
+        model.instances.push(instance);
+    }
+    // The example in ADR 0014: no order of the list gives these four, so both are written.
+    for (from, to, exit, entrance) in [("A", "X", 1, 2), ("A", "Y", 2, 1), ("B", "Y", 1, 2), ("B", "X", 2, 1)] {
+        model.connections.push(crabsim_model::Connection::new(from, to, exit, entrance));
+    }
+    model.connect("X", "Out");
+    model.connect("Y", "Out");
+    assert_eq!(model.check(), vec![]);
+    assert_eq!(model.successors("B"), vec!["Y", "X"]);
+    assert_eq!(model.predecessors("X"), vec!["B", "A"]);
+    assert_eq!(model.predecessors("Out"), vec!["X", "Y"]);
+
+    let mut repeated = model.clone();
+    repeated.connections[1].exit = 1;
+    repeated.connections[3].entrance = 2;
+    let found: Vec<String> = repeated.check().iter().map(|problem| format!("{}: {}", problem.pointer, problem.message)).collect();
+    assert_eq!(
+        found,
+        vec![
+            "/connections/1/exit: connection 0 out of `A` already has exit 1",
+            "/connections/3/entrance: connection 0 into `X` already has entrance 2",
+        ]
+    );
+    for (field, value) in [("exit", json!(0)), ("entrance", json!("first"))] {
+        let mut broken = json!({ "from": "In", "to": "Mill", "exit": 1, "entrance": 1 });
+        broken[field] = value;
+        let text = with_connections(json!([broken, { "from": "Mill", "to": "Out", "exit": 1, "entrance": 1 }]));
+        assert_found(&text, &format!("/connections/0/{field}"), "is not a place: write a whole number, 1 or more");
+    }
+}
+
+#[test]
+fn the_list_of_connections_can_come_in_any_order_and_saves_in_one() {
     let text = file(json!([
-        { "name": "In", "class": "Source", "successors": ["Mill", "Mill"], "attributes": { "interval": "5" } },
-        { "name": "Mill", "class": "Station", "successors": ["Mill", "In", "Out"] },
+        { "name": "In", "class": "Source", "successors": ["A", "B"], "attributes": { "interval": "5" } },
+        { "name": "A", "class": "Station", "successors": ["Out"], "attributes": { "process_time": "8" } },
+        { "name": "B", "class": "Station", "successors": ["Out"], "attributes": { "process_time": "9" } },
         { "name": "Out", "class": "Drain" },
     ]));
-    assert_found(&text, "/instances/0/successors/1", "`Mill` is listed twice");
-    assert_found(&text, "/instances/1/successors/0", "can't be its own successor");
-    assert_found(&text, "/instances/1/successors/1", "`In` is a Source");
+    let mut shuffled: Value = serde_json::from_str(&text).unwrap();
+    shuffled["connections"].as_array_mut().unwrap().reverse();
+    let shuffled = shuffled.to_string();
+    assert_eq!(load(&shuffled).unwrap().save(), load(&text).unwrap().save());
+    assert_eq!(run_for(&built(&shuffled), 1, secs(3_600)), run_for(&built(&text), 1, secs(3_600)));
+}
+
+#[test]
+fn a_connection_keeps_its_description_and_the_exit_order_is_the_order_mus_are_offered() {
+    let model = load(&with_connections(json!([
+        { "from": "In", "to": "Out", "exit": 2, "entrance": 2 },
+        { "from": "In", "to": "Mill", "exit": 1, "entrance": 1, "description": "via the lift" },
+        { "from": "Mill", "to": "Out", "exit": 1, "entrance": 1 },
+    ])))
+    .unwrap();
+    assert_eq!(model.connections_out("In")[0].description.as_deref(), Some("via the lift"));
+    assert!(model.save().contains("\"description\": \"via the lift\""));
+    let description = model.to_description();
+    let (mill, out) = (1, 2);
+    assert_eq!(description.successors(0), &[mill, out], "Mill first: its exit is 1, though it comes second in the list");
 }
 
 #[test]
@@ -382,6 +521,13 @@ fn a_source_that_would_create_mus_forever_is_refused() {
              (Trigger, Check), so nothing ever blocks it and it would create MUs forever without time passing"
         ]
     );
+    // A Source's interval is 0 by default, so one placed and connected straight to a Drain is
+    // refused until it gets one.
+    let default_into_a_drain = file(json!([
+        { "name": "Feeder", "class": "Source", "successors": ["Out"] },
+        { "name": "Out", "class": "Drain" },
+    ]));
+    assert_found(&default_into_a_drain, "/instances/0", "reaches Drain `Out`, so nothing ever blocks it");
     let straight_into_a_drain = file(json!([
         { "name": "Feeder", "class": "Source", "successors": ["Out"], "attributes": { "interval": "0" } },
         { "name": "Out", "class": "Drain" },
@@ -394,11 +540,13 @@ fn odd_shapes_are_problems_not_panics() {
     for text in [
         "null",
         "[]",
-        "{\"format_version\": 1, \"instances\": {}}",
-        "{\"format_version\": 1, \"instances\": [null, 3, []]}",
-        "{\"format_version\": 1, \"instances\": [{\"name\": \"A\", \"class\": \"Station\", \"attributes\": [], \"position\": 3, \"successors\": \"B\"}]}",
-        "{\"format_version\": 1, \"instances\": [{\"name\": \"A\", \"class\": \"Station\", \"attributes\": {\"failures\": {\"repair_time\": {}}, \"dimensions\": {}}}]}",
-        "{\"format_version\": 1, \"classes\": 3, \"instances\": []}",
+        "{\"format_version\": 2, \"instances\": {}}",
+        "{\"format_version\": 2, \"instances\": [null, 3, []]}",
+        "{\"format_version\": 2, \"instances\": [{\"name\": \"A\", \"class\": \"Station\", \"attributes\": [], \"position\": 3}]}",
+        "{\"format_version\": 2, \"instances\": [{\"name\": \"A\", \"class\": \"Station\", \"attributes\": {\"failures\": {\"repair_time\": {}}, \"dimensions\": {}}}]}",
+        "{\"format_version\": 2, \"classes\": 3, \"instances\": []}",
+        "{\"format_version\": 2, \"instances\": [], \"connections\": 3}",
+        "{\"format_version\": 2, \"instances\": [], \"connections\": [null, 3, {\"from\": 1, \"exit\": -1}]}",
     ] {
         assert!(!problems(text).is_empty(), "{text}");
     }
@@ -408,17 +556,15 @@ fn odd_shapes_are_problems_not_panics() {
 fn problems_can_be_sent_as_json() {
     let text = file(json!([{ "name": "Out", "class": "Drain", "successors": ["Out"] }]));
     let as_json = serde_json::to_value(problems(&text)).unwrap();
-    assert_eq!(
-        as_json,
-        json!([{ "pointer": "/instances/0/successors", "name": "Out", "message": "a Drain takes MUs out of the model, so it can't have successors" }])
-    );
+    assert_eq!(as_json, json!([{ "pointer": "/connections/0/to", "name": "Out → Out", "message": "an object can't be its own successor" }]));
 }
 
 // ---------- Classes and inheritance ----------
 
 /// A file with these classes and instances.
 fn with_classes(classes: Value, instances: Value) -> String {
-    json!({ "format_version": 1, "classes": classes, "instances": instances }).to_string()
+    let (instances, connections) = connected(instances);
+    json!({ "format_version": 2, "classes": classes, "instances": instances, "connections": connections }).to_string()
 }
 
 /// Mills: a Mill, a CNC mill derived from it, and instances of both.
@@ -490,14 +636,16 @@ fn a_class_change_reaches_exactly_the_instances_that_inherit_it() {
 
 #[test]
 fn a_required_value_can_come_from_a_class() {
-    let classes = json!([{ "name": "Feeder", "parent": "Source", "attributes": { "interval": "5" } }]);
-    let instances = json!([
-        { "name": "In", "class": "Feeder", "successors": ["Out"] },
-        { "name": "Out", "class": "Drain" },
-    ]);
+    let classes = json!([{ "name": "Store", "parent": "Buffer", "attributes": { "capacity": 5 } }]);
+    let instances = json!([{ "name": "Shelf", "class": "Store" }]);
     assert!(load(&with_classes(classes, instances)).is_ok());
-    let unset = with_classes(json!([{ "name": "Feeder", "parent": "Source" }]), json!([{ "name": "In", "class": "Feeder" }]));
-    assert_found(&unset, "/instances/0", "Set it on the instance or one of its classes");
+    let unset = with_classes(json!([{ "name": "Store", "parent": "Buffer" }]), json!([{ "name": "Shelf", "class": "Store" }]));
+    assert_found(&unset, "/instances/0", "a Buffer needs a `capacity`: how many MUs it holds. Set it on the instance or one of its classes");
+    // A Source's interval isn't required: it is 0 by default.
+    let source = with_classes(json!([]), json!([{ "name": "In", "class": "Source" }]));
+    let model = load(&source).unwrap();
+    assert_eq!(model.resolve(0).unwrap().attributes.interval, Some(SimTime::ZERO));
+    assert_eq!(model.resolve(0).unwrap().origin(Attribute::Interval), &Origin::BuiltIn);
 }
 
 #[test]

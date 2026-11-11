@@ -8,6 +8,34 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+/// A version 2 model from `model`, whose instances may list their `successors` for short: they
+/// become connections, each successor's exit its place in the list and each object's entrances
+/// numbered in the order connections come.
+pub fn connected(mut model: Value) -> Value {
+    let mut connections = Vec::new();
+    let mut entrances: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+    for instance in model["instances"].as_array_mut().into_iter().flatten() {
+        let Some(fields) = instance.as_object_mut() else { continue };
+        let Some(Value::Array(successors)) = fields.remove("successors") else { continue };
+        let from = fields["name"].clone();
+        for (place, to) in successors.into_iter().enumerate() {
+            let entrance = entrances.entry(to.as_str().unwrap_or_default().to_string()).or_default();
+            *entrance += 1;
+            connections.push(serde_json::json!({ "from": from, "to": to, "exit": place + 1, "entrance": *entrance }));
+        }
+    }
+    model["format_version"] = serde_json::json!(2);
+    if !connections.is_empty() {
+        model["connections"] = Value::Array(connections);
+    }
+    model
+}
+
+/// As `connected`, for a model written as text.
+pub fn connected_text(text: &str) -> String {
+    connected(serde_json::from_str(text).expect("JSON")).to_string()
+}
+
 /// A folder of its own under the system's temporary folder, removed when dropped.
 pub struct TempFolder {
     pub path: PathBuf,
@@ -101,15 +129,18 @@ pub fn demo_text() -> String {
 }
 
 /// A small valid model, in a form other than canonical.
-pub const SMALL: &str = r#"{"format_version":1,"instances":[
-  {"name":"In","class":"Source","successors":["Work"],"attributes":{"interval":"10"}},
-  {"name":"Work","class":"Station","successors":["Out"],"attributes":{"process_time":"8"}},
-  {"name":"Out","class":"Drain"}]}"#;
+pub const SMALL: &str = r#"{"format_version":2,"instances":[
+  {"name":"In","class":"Source","attributes":{"interval":"10"}},
+  {"name":"Work","class":"Station","attributes":{"process_time":"8"}},
+  {"name":"Out","class":"Drain"}],"connections":[
+  {"from":"In","to":"Work","exit":1,"entrance":1},
+  {"from":"Work","to":"Out","exit":1,"entrance":1}]}"#;
 
 /// A model with three problems.
-pub const BROKEN: &str = r#"{ "format_version": 1, "instances": [
-    { "name": "In", "class": "Source", "successors": ["Nowhere"] },
-    { "name": "Out", "class": "Drain", "attributes": { "process_time": "10" } } ] }"#;
+pub const BROKEN: &str = r#"{"format_version":2,"instances":[
+  {"name":"In","class":"Source","attributes":{"interval":"soon"}},
+  {"name":"Out","class":"Drain","attributes":{"process_time":"10"}}],"connections":[
+  {"from":"In","to":"Nowhere","exit":1,"entrance":1}]}"#;
 
 impl Setup {
     /// A catalogue whose pool has `threads` threads.
@@ -203,19 +234,22 @@ pub fn wide_line() -> String {
     let class = |name: &str, availability: f64| {
         format!(r#"{{"name":"{name}","parent":"Station","attributes":{{"failures":{{"availability":{availability},"repair_time":{{"erlang":{{"mean":"1:00","k":2}}}}}}}}}}"#)
     };
-    format!(r#"{{"format_version":1,"classes":[{},{}],"instances":[{}]}}"#, class("Weak", 0.6), class("Sturdy", 0.97), instances.join(","))
+    connected_text(&format!(r#"{{"format_version":1,"classes":[{},{}],"instances":[{}]}}"#, class("Weak", 0.6), class("Sturdy", 0.97), instances.join(",")))
 }
 
 /// MUs pass a Gate that often fails, and an MU through it reaches two dummy Stations that pass
 /// it back and forth for ever without time moving: a zero-time loop, which is a run error. So an
 /// observation fails unless the Gate fails before its first MU is through, which depends on the
 /// seed.
-pub const LOOP: &str = r#"{"format_version":1,"instances":[
-  {"name":"In","class":"Source","successors":["Gate"],"attributes":{"interval":"10"}},
-  {"name":"Gate","class":"Station","successors":["A"],"attributes":{"process_time":"10",
-     "failures":{"availability":0.2,"repair_time":{"erlang":{"mean":"1:00","k":1}}}}},
-  {"name":"A","class":"Station","successors":["B"]},
-  {"name":"B","class":"Station","successors":["A"]}]}"#;
+pub const LOOP: &str = r#"{"format_version":2,"instances":[
+  {"name":"In","class":"Source","attributes":{"interval":"10"}},
+  {"name":"Gate","class":"Station","attributes":{"process_time":"10","failures":{"availability":0.2,"repair_time":{"erlang":{"mean":"1:00","k":1}}}}},
+  {"name":"A","class":"Station"},
+  {"name":"B","class":"Station"}],"connections":[
+  {"from":"In","to":"Gate","exit":1,"entrance":1},
+  {"from":"Gate","to":"A","exit":1,"entrance":1},
+  {"from":"A","to":"B","exit":1,"entrance":1},
+  {"from":"B","to":"A","exit":1,"entrance":2}]}"#;
 
 /// A line of 16 Stations before a slow one, with failures on 12 of them, so more than 10 are
 /// blocked and more than 10 fail, and a class of the model's own.
@@ -228,8 +262,8 @@ pub fn long_line() -> String {
     }
     instances.push(r#"{"name":"Slow","class":"Station","successors":["Out"],"attributes":{"process_time":"9"}}"#.to_string());
     instances.push(r#"{"name":"Out","class":"Drain"}"#.to_string());
-    format!(
+    connected_text(&format!(
         r#"{{"format_version":1,"classes":[{{"name":"Fragile","parent":"Station","attributes":{{"failures":{{"availability":0.8,"repair_time":{{"erlang":{{"mean":"1:00","k":2}}}}}}}}}}],"instances":[{}]}}"#,
         instances.join(",")
-    )
+    ))
 }

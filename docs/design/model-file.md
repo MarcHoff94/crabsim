@@ -1,6 +1,6 @@
 # The model file
 
-Agreed with the owner on 2026-11-07 in a design round, as step 2 of the AI-native order of work (issue 28). The code is in `model/` (`crabsim-model`, ADR 0009). It's built in three slices: today's objects with the built-in classes only, then derived classes and inheritance, then the published JSON Schema. All three are built.
+Agreed with the owner on 2026-11-07 in a design round, as step 2 of the AI-native order of work (issue 28). The code is in `model/` (`crabsim-model`, ADR 0009). It's built in three slices: today's objects with the built-in classes only, then derived classes and inheritance, then the published JSON Schema. All three are built. Format version 2 (spec issue 87, ADR 0014) made connections a list of their own and gave a Source's interval a default of 0.
 
 ## What it is
 
@@ -13,19 +13,20 @@ A file holds the model only: classes, instances, their attributes, names, positi
 ```json
 {
   "$schema": "./model-file.schema.json",
-  "format_version": 1,
+  "format_version": 2,
   "description": "A line with two branches",
   "classes": [ ... ],
-  "instances": [ ... ]
+  "instances": [ ... ],
+  "connections": [ ... ]
 }
 ```
 
 - `$schema` is optional: where the JSON Schema is, so an editor checks the file as it's typed. crabsim keeps it when saving and otherwise ignores it.
-- `$schema` is optional: where the JSON Schema is, so an editor checks the file as it's typed. crabsim keeps it when saving and otherwise ignores it.
-- `format_version` is required. Only 1 exists, and any other is refused with a clear error. When the format has a reason to change, the version goes up and older files are migrated.
+- `format_version` is required, and is 2. Version 1, where each instance listed its `successors`, is refused with one problem saying connections are their own list since version 2: no code reads or converts it (ADR 0014). Any other version is refused too.
 - `description` is optional, for the model as a whole.
 - `classes` is optional.
 - `instances` is in Init order: ids follow it.
+- `connections` is optional, and its order means nothing.
 
 ## Instances
 
@@ -35,16 +36,29 @@ A file holds the model only: classes, instances, their attributes, names, positi
   "class": "CNC mill",
   "stream": 7,
   "position": { "x": 4, "y": 0 },
-  "successors": ["Station 2", "Station 3"],
   "attributes": { "process_time": "0:45" }
 }
 ```
 
-- An instance owns `name` and `class`, both required, `stream`, `position` and `successors`.
+- An instance owns `name` and `class`, both required, `stream` and `position`. Its connections are in the list of connections, not in the instance.
 - `stream` (ADR 0012) is the number that, with a run's seed, gives the instance's random numbers. crabsim gives one when the instance is placed: one more than the highest in the model, or, for a file from before streams, its position. It stays whatever else changes, so variants of a model keep their common random numbers. Saving always writes it, and two instances with one stream are a problem. The user may change it by hand or with `edit_model`'s `set_stream`, which agents can't use, and which ends pairing with earlier runs.
 - `position` is in metres, the centre of the object's footprint: `x` and `y`, and `z` optional, 0 until there's a 3D view. Without a position, the UI places the object where it puts unplaced objects.
-- `successors` names the instances an object passes MUs to, in the order they are tried. Optional, none by default.
-- `attributes` holds only the values set on this instance, where its inheritance is cut. Anything not there comes from its class. It is left out when empty, so an instance that changes nothing is a name, a class, a position and its successors.
+- `attributes` holds only the values set on this instance, where its inheritance is cut. Anything not there comes from its class. It is left out when empty, so an instance that changes nothing is a name, a class, a stream and a position.
+
+## Connections
+
+```json
+{ "from": "Mill 1", "to": "Station 2", "exit": 1, "entrance": 2, "description": "via the lift" }
+```
+
+- A connection (glossary: Connection) is a thing of its own, an edge of the model's graph with properties, so it lives in a top-level list rather than inside the instance it leaves (ADR 0014).
+- `from` and `to` name instances. `to` is a successor of `from`.
+- `exit` is the connection's place among the connections out of `from`, from 1: the order MUs are offered to successors, round-robin. The engine connects each object's successors in exit order.
+- `entrance` is its place among the connections into `to`, from 1. Nothing reads it yet, so it doesn't change results until an entrance rule, such as pull or priorities, does. The inspector will say so on hover once it shows connections, in spec 87 PR 4.
+- Both run 1 to n per object, n being how many connections leave it or lead into it, with no gaps or repeats. Both are written on every connection because no single order of the list could give both orders at once, and so that sorting or editing the list by hand can't change a result.
+- `description` is optional.
+- Saving writes the list in one order: by the place of the instance each connection leaves, then by exit, so it reads as each object's exits in turn.
+- `edit_model`'s `connect`, `disconnect` and `set_connection`, and removing or renaming an instance, number the exits and entrances at both ends again, so people never number connections themselves.
 
 ## Classes
 
@@ -71,7 +85,7 @@ Which attributes an instance has depends on its built-in class at the root of it
 
 | Attribute | On | Built-in default | Rule |
 |---|---|---|---|
-| `interval` | Source | none: must be set somewhere in the chain | A time, 0 or more |
+| `interval` | Source | 0, so every Source is valid when placed | A time, 0 or more |
 | `process_time` | Station | 0, a dummy Station | A time, 0 or more |
 | `failures` | Station | none: never fails | See below |
 | `starting_mus` | Station | 0 | 0 or 1, until Station capacity exists |
@@ -110,7 +124,7 @@ Loading returns every problem at once and never panics. Each problem has:
 - the name of the instance or class it is about, when there is one,
 - a plain message.
 
-- a "did you mean" when a mistyped name is one or two edits from a known one (an insertion, deletion, substitution or two letters swapped each count as one, and no more than a third of the name may change), for attributes, fields, classes and successors, such as `unknown attribute proces_time: did you mean process_time?`.
+- a "did you mean" when a mistyped name is one or two edits from a known one (an insertion, deletion, substitution or two letters swapped each count as one, and no more than a third of the name may change), for attributes, fields, classes and the instances connections name, such as `unknown attribute proces_time: did you mean process_time?`.
 
 An instance or class whose class is unknown can't have its attributes checked, so the message says they weren't: fixing it may bring up more problems.
 
@@ -125,7 +139,8 @@ What it catches:
 - JSON that doesn't parse, a missing or unsupported `format_version`, wrong types, and unknown fields, such as a typo like `proces_time`, which would otherwise leave a value silently inherited.
 - Names that are missing, empty, padded or used twice, and a class named like a built-in.
 - Unknown classes, a class deriving from itself, and classes deriving from each other in a circle, named in the order they go round.
-- Connections to an unknown name, into a Source, out of a Drain, from an object to itself, or to the same successor twice.
+- Connections to an unknown name, into a Source, out of a Drain, from an object to itself, or the same connection twice, each with the connection's pointer, such as `/connections/3/to`, and its ends as its name, such as `In → Mill`.
+- Exits or entrances with gaps or repeats, such as an exit of 3 out of an object with 2 connections out, or two connections out of one object with exit 1.
 - Attributes the class doesn't have, values out of range, and required values set nowhere in the chain.
 - **A Source that would create MUs forever:** a Source with an interval of 0 that can reach a Drain through nothing but zero-time Stations and Buffers. Nothing ever fills, so it would create MUs without time passing. The run's zero-time-loop error stays as the backstop. Once Buffer is fixed and Station capacity exists, a full Buffer can block a Source, and this check gets refined.
 

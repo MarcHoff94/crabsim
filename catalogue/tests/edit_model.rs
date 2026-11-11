@@ -6,7 +6,8 @@ mod common;
 use common::Setup;
 use serde_json::{json, Value};
 
-/// A Source feeding two mills of one class, which feed a Drain.
+/// A Source feeding two mills of one class, which feed a Drain. Instances list their successors
+/// for short, which `canonical` turns into connections.
 fn line() -> Value {
     json!({
         "format_version": 1,
@@ -24,9 +25,26 @@ fn line() -> Value {
     })
 }
 
-/// A model as crabsim saves it.
+/// A model as crabsim saves it, from one whose instances may list their successors for short.
 fn canonical(model: &Value) -> String {
+    let model = common::connected(model.clone());
     crabsim_model::load(&model.to_string()).unwrap_or_else(|problems| panic!("{problems:?}")).save()
+}
+
+/// The connections out of `name` in the saved file, by exit, as (to, exit, entrance).
+fn out_of(setup: &Setup, name: &str) -> Vec<(String, u64, u64)> {
+    let model = crabsim_model::load(&setup.folder.read("line.json")).unwrap();
+    model.connections_out(name).into_iter().map(|c| (c.to.clone(), c.exit, c.entrance)).collect()
+}
+
+/// The connections into `name` in the saved file, by entrance, as (from, exit, entrance).
+fn into(setup: &Setup, name: &str) -> Vec<(String, u64, u64)> {
+    let model = crabsim_model::load(&setup.folder.read("line.json")).unwrap();
+    model.connections_in(name).into_iter().map(|c| (c.from.clone(), c.exit, c.entrance)).collect()
+}
+
+fn three(name: &str, exit: u64, entrance: u64) -> (String, u64, u64) {
+    (name.to_string(), exit, entrance)
 }
 
 fn setup(name: &str) -> Setup {
@@ -110,7 +128,10 @@ fn a_change_that_cant_apply_refuses_the_batch_naming_its_place_and_changes_nothi
         (json!([{ "change": "restore_inheritance", "target": { "instance": "Mill 1" }, "attribute": "process_time" }]), "changes/0 (restore_inheritance): `process_time` isn't set on instance `Mill 1`, so it already inherits it"),
         (json!([{ "change": "set_attribute", "target": { "class": "Lathe" }, "attribute": "process_time", "value": "1:00" }]), "changes/0 (set_attribute): no class is called `Lathe`"),
         (json!([{ "change": "rename_class", "name": "Mill", "to": "Station" }]), "changes/0 (rename_class): `Station` is a built-in class"),
-        (json!([{ "change": "connect", "from": "Mill 1", "to": "Mill 2", "place": 5 }]), "changes/0 (connect): `Mill 1` has 1 successor, so the place can be 0 to 1"),
+        (json!([{ "change": "connect", "from": "Mill 1", "to": "Mill 2", "exit": 5 }]), "changes/0 (connect): `Mill 1` has 1 other connection out, so its exit can be 1 to 2, not 5"),
+        (json!([{ "change": "connect", "from": "Mill 1", "to": "Mill 2", "entrance": 0 }]), "changes/0 (connect): `Mill 2` has 1 other connection in, so its entrance can be 1 to 2, not 0"),
+        (json!([{ "change": "set_connection", "from": "In", "to": "Mill 1", "exit": 3 }]), "changes/0 (set_connection): `In` has 1 other connection out, so its exit can be 1 to 2, not 3"),
+        (json!([{ "change": "set_connection", "from": "In", "to": "Out" }]), "changes/0 (set_connection): `In` isn't connected to `Out`"),
     ] {
         let error = edit_err(&setup, changes.clone());
         assert_eq!(error["kind"], "invalid_input", "{changes}");
@@ -261,7 +282,7 @@ fn instances_move_change_class_and_connect_at_a_chosen_place() {
         { "change": "set_class", "name": "Mill 1", "class": "Lathe" },
         { "change": "set_parent", "name": "Lathe", "parent": "Mill" },
         { "change": "add_instance", "name": "Spare", "class": "Mill", "successors": ["Out"] },
-        { "change": "connect", "from": "In", "to": "Spare", "place": 0 },
+        { "change": "connect", "from": "In", "to": "Spare", "exit": 1 },
     ]));
     assert_eq!(
         setup.folder.read("line.json"),
@@ -275,6 +296,60 @@ fn instances_move_change_class_and_connect_at_a_chosen_place() {
     );
 }
 
+// ---------- Connections and their places ----------
+
+#[test]
+fn connecting_at_a_chosen_exit_and_entrance_moves_the_others_up() {
+    let setup = setup("connect-places");
+    edit(&setup, json!([{ "change": "connect", "from": "In", "to": "Out", "exit": 1, "entrance": 1, "description": "the bypass" }]));
+    assert_eq!(out_of(&setup, "In"), [three("Out", 1, 1), three("Mill 1", 2, 1), three("Mill 2", 3, 1)]);
+    assert_eq!(into(&setup, "Out"), [three("In", 1, 1), three("Mill 1", 1, 2), three("Mill 2", 1, 3)]);
+    let model = crabsim_model::load(&setup.folder.read("line.json")).unwrap();
+    assert_eq!(model.connections_out("In")[0].description.as_deref(), Some("the bypass"));
+
+    // Left out, a connection goes last at both ends.
+    edit(&setup, json!([{ "change": "connect", "from": "Mill 1", "to": "Mill 2" }]));
+    assert_eq!(out_of(&setup, "Mill 1"), [three("Out", 1, 2), three("Mill 2", 2, 2)]);
+}
+
+#[test]
+fn disconnecting_closes_up_the_places_at_both_ends() {
+    let setup = setup("disconnect-places");
+    edit(&setup, json!([{ "change": "disconnect", "from": "Mill 1", "to": "Out" }, { "change": "disconnect", "from": "In", "to": "Mill 1" }]));
+    assert_eq!(into(&setup, "Out"), [three("Mill 2", 1, 1)]);
+    assert_eq!(out_of(&setup, "In"), [three("Mill 2", 1, 1)]);
+}
+
+#[test]
+fn set_connection_moves_a_connection_and_sets_or_removes_its_description() {
+    let setup = setup("set-connection");
+    edit(&setup, json!([
+        { "change": "set_connection", "from": "In", "to": "Mill 2", "exit": 1 },
+        { "change": "set_connection", "from": "Mill 2", "to": "Out", "entrance": 1, "description": "via the lift" },
+    ]));
+    assert_eq!(out_of(&setup, "In"), [three("Mill 2", 1, 1), three("Mill 1", 2, 1)]);
+    assert_eq!(into(&setup, "Out"), [three("Mill 2", 1, 1), three("Mill 1", 1, 2)]);
+    assert!(setup.folder.read("line.json").contains("via the lift"));
+    edit(&setup, json!([{ "change": "set_connection", "from": "Mill 2", "to": "Out", "description": "" }]));
+    assert!(!setup.folder.read("line.json").contains("via the lift"), "an empty description removes it");
+    assert_eq!(into(&setup, "Out"), [three("Mill 2", 1, 1), three("Mill 1", 1, 2)], "and leaves its places alone");
+}
+
+#[test]
+fn removing_or_renaming_an_instance_updates_its_connections_in_the_same_change() {
+    let setup = setup("remove-rename-places");
+    edit(&setup, json!([
+        { "change": "connect", "from": "In", "to": "Out", "exit": 2, "entrance": 2 },
+        { "change": "rename_instance", "name": "Mill 2", "to": "Lathe" },
+    ]));
+    assert_eq!(out_of(&setup, "In"), [three("Mill 1", 1, 1), three("Out", 2, 2), three("Lathe", 3, 1)]);
+    assert_eq!(into(&setup, "Out"), [three("Mill 1", 1, 1), three("In", 2, 2), three("Lathe", 1, 3)]);
+    let output = edit(&setup, json!([{ "change": "remove_instance", "name": "Mill 1" }]));
+    assert_eq!(out_of(&setup, "In"), [three("Out", 1, 1), three("Lathe", 2, 1)]);
+    assert_eq!(into(&setup, "Out"), [three("In", 1, 1), three("Lathe", 1, 2)]);
+    assert_eq!(output["also_removed"]["connections"], json!([{ "from": "In", "to": "Mill 1" }, { "from": "Mill 1", "to": "Out" }]));
+}
+
 // ---------- get_attributes ----------
 
 #[test]
@@ -285,6 +360,7 @@ fn get_attributes_gives_every_attribute_with_its_value_and_origin() {
     assert_eq!(got["chain"], json!(["Mill", "Station"]));
     assert_eq!(got["position"], json!({ "x": 4.0, "y": -2.0 }));
     assert_eq!(got["successors"], json!(["Out"]));
+    assert_eq!(got["predecessors"], json!(["In"]));
     assert_eq!(got["file_hash"], hash(&setup.folder.read("line.json")));
     let attributes: Vec<(String, Value)> = got["attributes"].as_array().unwrap().iter().map(|a| (a["attribute"].as_str().unwrap().to_string(), a.clone())).collect();
     let names: Vec<&str> = attributes.iter().map(|(name, _)| name.as_str()).collect();
@@ -318,13 +394,13 @@ fn get_attributes_of_a_class_and_of_a_source_without_a_value() {
     let setup = setup("get-class");
     let mill = setup.ok("get_attributes", json!({ "path": "line.json", "target": { "class": "Mill" } }));
     assert_eq!(mill["chain"], json!(["Station"]));
-    assert!(mill.get("position").is_none() && mill.get("successors").is_none());
+    assert!(mill.get("position").is_none() && mill.get("successors").is_none() && mill.get("predecessors").is_none());
     let process_time = mill["attributes"].as_array().unwrap().iter().find(|a| a["attribute"] == "process_time").unwrap().clone();
     assert_eq!(process_time, json!({ "attribute": "process_time", "value": "00:00:45", "from": "class", "class": "Mill" }));
 
     let source = setup.ok("get_attributes", json!({ "path": "line.json", "target": { "class": "Source" } }));
     let interval = source["attributes"].as_array().unwrap().iter().find(|a| a["attribute"] == "interval").unwrap().clone();
-    assert_eq!(interval, json!({ "attribute": "interval", "from": "not_set" }), "a Source's interval has no default");
+    assert_eq!(interval, json!({ "attribute": "interval", "value": "00:00:00", "from": "built_in" }), "a Source's interval is 0 by default");
 
     assert_eq!(setup.err("get_attributes", json!({ "path": "line.json", "target": { "instance": "Nobody" } }))["kind"], "not_found");
     assert_eq!(setup.err("get_attributes", json!({ "path": "line.json", "target": { "class": "Lathe" } }))["kind"], "not_found");
@@ -356,11 +432,16 @@ fn get_attributes_and_edit_model_on_6006_objects() {
             let mut instance = instance.clone();
             instance.name = rename(&instance.name);
             instance.stream = instance.stream.map(|stream| stream + 100 * copy as u64);
-            instance.successors = instance.successors.iter().map(|name| rename(name)).collect();
             if let Some(position) = &mut instance.position {
                 position.y += 20.0 * copy as f64;
             }
             model.instances.push(instance);
+        }
+        for connection in &demo.connections {
+            let mut connection = connection.clone();
+            connection.from = rename(&connection.from);
+            connection.to = rename(&connection.to);
+            model.connections.push(connection);
         }
     }
     let text = model.save();

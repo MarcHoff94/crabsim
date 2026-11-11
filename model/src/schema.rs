@@ -33,8 +33,9 @@ pub struct ModelFile {
     /// needs the file it names to exist.
     #[serde(rename = "$schema")]
     pub schema: Option<String>,
-    /// The format's version. Only 1 exists.
-    #[schemars(extend("const" = 1))]
+    /// The format's version, 2. Version 1, with each instance's `successors` instead of a list of
+    /// connections, isn't read any more.
+    #[schemars(extend("const" = 2))]
     pub format_version: u64,
     /// What the model is, as a whole.
     pub description: Option<String>,
@@ -43,6 +44,29 @@ pub struct ModelFile {
     pub classes: Option<Vec<ClassFile>>,
     /// The material-flow objects, in the order a run initialises them.
     pub instances: Vec<InstanceFile>,
+    /// The ways MUs pass from one instance to another, in any order: each says its own place in
+    /// both orders it belongs to, so sorting the list changes nothing.
+    pub connections: Option<Vec<ConnectionFile>>,
+}
+
+/// A connection from one instance to another. Moving along it takes no time.
+#[derive(JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ConnectionFile {
+    /// The instance MUs leave, which can't be a Drain.
+    pub from: String,
+    /// The instance MUs enter, which can't be a Source or `from` itself.
+    pub to: String,
+    /// Its place among the connections out of `from`, the order MUs are offered round-robin:
+    /// 1 to n with no gaps or repeats.
+    #[schemars(range(min = 1))]
+    pub exit: u64,
+    /// Its place among the connections into `to`, 1 to n with no gaps or repeats. Nothing reads
+    /// it yet, so it doesn't change results until an entrance rule does.
+    #[schemars(range(min = 1))]
+    pub entrance: u64,
+    /// What the connection is, such as "via the lift".
+    pub description: Option<String>,
 }
 
 /// A class of the model's own.
@@ -71,8 +95,6 @@ pub struct InstanceFile {
     pub stream: Option<u64>,
     /// The centre of its footprint, in metres. Visual only.
     pub position: Option<PositionFile>,
-    /// The instances it passes MUs to, by name, in the order they are tried.
-    pub successors: Option<Vec<String>>,
     /// Only the values set on this instance. Anything else comes from its class.
     pub attributes: Option<AttributesFile>,
 }
@@ -92,8 +114,8 @@ pub struct PositionFile {
 #[derive(JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AttributesFile {
-    /// Source: the time between creating an MU and offering it on. Must be set somewhere in the
-    /// chain of classes. 0 offers each MU at once.
+    /// Source: the time between creating an MU and offering it on. 0 by default, which creates
+    /// the next MU as soon as one leaves.
     pub interval: Option<Time>,
     /// Station: the time it works on each MU. 0 by default, a dummy Station that takes no time.
     pub process_time: Option<Time>,

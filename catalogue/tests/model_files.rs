@@ -211,7 +211,8 @@ fn list_models_lists_only_json_files_that_are_model_files_even_broken_ones() {
     let setup = Setup::new("list-only-models");
     setup.folder.write("line.json", SMALL);
     // A model file with problems is still a model file, so it is listed to show them.
-    setup.folder.write("broken.json", r#"{ "format_version": 1, "instances": [{ "name": "x", "class": "Nothing" }] }"#);
+    setup.folder.write("broken.json", r#"{"format_version":2,"instances":[
+  {"name":"x","class":"Nothing"}]}"#);
     // So is one that isn't JSON any more, part way through being written by hand.
     setup.folder.write("half.json", r#"{ "format_version": 1, "instances": [ "#);
     // A JSON Schema names `format_version` among its properties, but not at its top level.

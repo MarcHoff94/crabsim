@@ -21,8 +21,9 @@ use serde::Serialize;
 use std::collections::HashSet;
 use std::fmt;
 
-/// The only format version this crabsim reads and writes.
-pub const FORMAT_VERSION: u64 = 1;
+/// The only format version this crabsim reads and writes. Version 2 made connections a list of
+/// their own (ADR 0014), and version 1 isn't read any more.
+pub const FORMAT_VERSION: u64 = 2;
 
 /// The built-in classes every chain of classes ends in.
 pub const BUILT_IN_CLASSES: [&str; 4] = ["Source", "Station", "Buffer", "Drain"];
@@ -38,6 +39,31 @@ pub struct Model {
     pub classes: Vec<Class>,
     /// In Init order: an instance's id is its place here.
     pub instances: Vec<Instance>,
+    /// The ways MUs pass from one instance to another, in any order: each carries its own place
+    /// in both orders it belongs to.
+    pub connections: Vec<Connection>,
+}
+
+/// The way from one instance to another along which MUs pass, with its place in the order its
+/// object offers MUs on and in the order of the connections into the object it leads to.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Connection {
+    pub from: String,
+    pub to: String,
+    /// Its place among the connections out of `from`, from 1: the order MUs are offered to its
+    /// successors, round-robin. 1 to n with no gaps or repeats.
+    pub exit: u64,
+    /// Its place among the connections into `to`, from 1, for an entrance rule to read. Nothing
+    /// reads it yet, so it doesn't change results. 1 to n with no gaps or repeats.
+    pub entrance: u64,
+    /// What the connection is, such as "via the lift".
+    pub description: Option<String>,
+}
+
+impl Connection {
+    pub fn new(from: impl Into<String>, to: impl Into<String>, exit: u64, entrance: u64) -> Connection {
+        Connection { from: from.into(), to: to.into(), exit, entrance, description: None }
+    }
 }
 
 /// A class of the user's own, derived from a built-in class or another derived class.
@@ -71,8 +97,6 @@ pub struct Instance {
     pub stream: Option<u64>,
     /// The centre of its footprint, in metres. `None` leaves placing it to a view.
     pub position: Option<Position>,
-    /// The instances it passes MUs to, by name, in the order they are tried.
-    pub successors: Vec<String>,
     /// Only the values set on this instance, where its inheritance is cut. Anything else comes
     /// from its class.
     pub attributes: Attributes,
@@ -81,14 +105,15 @@ pub struct Instance {
 impl Instance {
     /// An instance of `class` called `name`, with nothing set on it.
     pub fn new(name: impl Into<String>, class: impl Into<String>) -> Instance {
-        Instance { name: name.into(), class: class.into(), stream: None, position: None, successors: Vec::new(), attributes: Attributes::default() }
+        Instance { name: name.into(), class: class.into(), stream: None, position: None, attributes: Attributes::default() }
     }
 }
 
 /// The attributes a class or instance can set. `None` means not set here, so inherited.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Attributes {
-    /// A Source's time between creating an MU and offering it on. Must be set somewhere.
+    /// A Source's time between creating an MU and offering it on. 0 by default: the next MU as
+    /// soon as one leaves.
     pub interval: Option<SimTime>,
     /// A Station's time working on each MU. 0 by default: a dummy Station.
     pub process_time: Option<SimTime>,
@@ -342,7 +367,7 @@ pub fn load(text: &str) -> Result<Model, Vec<Problem>> {
 }
 
 /// Reads as much of a model file as can be read, along with every problem in it, as `load`
-/// reports them. With problems, the model may name unknown classes and successors, and what
+/// reports them. With problems, the model may name unknown classes and instances, and what
 /// couldn't be read is left at its default, such as an empty name. For a summary of a model
 /// being worked on: only a model without problems can be run.
 pub fn load_what_can_be_read(text: &str) -> (Model, Vec<Problem>) {
@@ -354,13 +379,14 @@ pub fn load_what_can_be_read(text: &str) -> (Model, Vec<Problem>) {
 }
 
 /// Orders pointers as they come in the file: by each part, numbers as numbers. Classes come
-/// before instances, as a saved file writes them.
+/// before instances, and instances before connections, as a saved file writes them.
 fn order(pointer: &str) -> Vec<(u64, String)> {
     pointer
         .split('/')
         .map(|part| match part {
             "classes" => (0, String::new()),
             "instances" => (1, String::new()),
+            "connections" => (2, String::new()),
             _ => part.parse::<u64>().map_or((u64::MAX, part.to_string()), |n| (n, String::new())),
         })
         .collect()
@@ -404,6 +430,38 @@ impl Model {
 
     pub fn class(&self, name: &str) -> Option<&Class> {
         self.classes.iter().find(|class| class.name == name)
+    }
+
+    /// The connections out of the instance called `name`, by exit: the order it offers MUs on.
+    pub fn connections_out(&self, name: &str) -> Vec<&Connection> {
+        let mut out: Vec<&Connection> = self.connections.iter().filter(|connection| connection.from == name).collect();
+        out.sort_by_key(|connection| connection.exit);
+        out
+    }
+
+    /// The connections into the instance called `name`, by entrance.
+    pub fn connections_in(&self, name: &str) -> Vec<&Connection> {
+        let mut into: Vec<&Connection> = self.connections.iter().filter(|connection| connection.to == name).collect();
+        into.sort_by_key(|connection| connection.entrance);
+        into
+    }
+
+    /// The instances `name` passes MUs to, by exit.
+    pub fn successors(&self, name: &str) -> Vec<&str> {
+        self.connections_out(name).into_iter().map(|connection| connection.to.as_str()).collect()
+    }
+
+    /// The instances passing MUs to `name`, by entrance.
+    pub fn predecessors(&self, name: &str) -> Vec<&str> {
+        self.connections_in(name).into_iter().map(|connection| connection.from.as_str()).collect()
+    }
+
+    /// Connects `from` to `to` as the last exit of `from` and the last entrance of `to`, for
+    /// models built in code.
+    pub fn connect(&mut self, from: &str, to: &str) {
+        let exit = self.connections.iter().filter(|connection| connection.from == from).count() as u64 + 1;
+        let entrance = self.connections.iter().filter(|connection| connection.to == to).count() as u64 + 1;
+        self.connections.push(Connection::new(from, to, exit, entrance));
     }
 
     /// The derived classes from `class` up to its built-in class, nearest first, and that built-in
@@ -457,6 +515,9 @@ impl Model {
             origins.push((attribute, origin));
         }
         // Built-in defaults, where there are any.
+        if built_in == "Source" {
+            attributes.interval.get_or_insert(SimTime::ZERO);
+        }
         if built_in == "Station" {
             attributes.process_time.get_or_insert(SimTime::ZERO);
             attributes.starting_mus.get_or_insert(0);

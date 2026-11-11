@@ -2,7 +2,7 @@
 //! stopping at the first. What can't be read is left at its default, and noted in `Broken`, so the
 //! checks that follow don't report it a second time.
 
-use crate::{Attributes, Class, Failures, Instance, Model, Problem, RepairTime, State, StateNotes, FORMAT_VERSION, escape};
+use crate::{Attributes, Class, Connection, Failures, Instance, Model, Problem, RepairTime, State, StateNotes, FORMAT_VERSION, escape};
 use crabsim::time::parse_time;
 use crabsim::{Dimensions, Position, SimTime};
 use serde_json::{Map, Value};
@@ -19,8 +19,12 @@ pub(crate) struct Broken {
     pub classes: HashSet<usize>,
     /// Attributes of instances that were there but couldn't be read.
     pub attributes: HashSet<(usize, &'static str)>,
-    /// Instances whose successors couldn't all be read.
-    pub successors: HashSet<usize>,
+    /// Connections, by index, whose `from` or `to` couldn't be read.
+    pub connections: HashSet<usize>,
+    /// Connections whose `exit` couldn't be read.
+    pub exits: HashSet<usize>,
+    /// Connections whose `entrance` couldn't be read.
+    pub entrances: HashSet<usize>,
     /// Classes, by index, whose name couldn't be read.
     pub class_names: HashSet<usize>,
     /// Classes whose parent couldn't be read.
@@ -29,8 +33,9 @@ pub(crate) struct Broken {
     pub class_attributes: HashSet<(usize, &'static str)>,
 }
 
-const TOP_LEVEL: [&str; 5] = ["$schema", "format_version", "description", "classes", "instances"];
-const INSTANCE: [&str; 6] = ["name", "class", "stream", "position", "successors", "attributes"];
+const TOP_LEVEL: [&str; 6] = ["$schema", "format_version", "description", "classes", "instances", "connections"];
+const INSTANCE: [&str; 5] = ["name", "class", "stream", "position", "attributes"];
+const CONNECTION: [&str; 5] = ["from", "to", "exit", "entrance", "description"];
 const CLASS: [&str; 3] = ["name", "parent", "attributes"];
 const ATTRIBUTES: [&str; 8] = ["interval", "process_time", "failures", "starting_mus", "capacity", "dimensions", "description", "state_notes"];
 
@@ -81,6 +86,17 @@ impl Reader {
         match fields.get("format_version") {
             None => self.problem(String::new(), None, format!("`format_version` is missing: this crabsim reads version {FORMAT_VERSION}")),
             Some(version) if version.as_u64() == Some(FORMAT_VERSION) => {}
+            // Nothing else is read: every instance's successors would be a problem of its own.
+            Some(version) if version.as_u64() == Some(1) => {
+                self.problem(
+                    "/format_version".into(),
+                    None,
+                    format!(
+                        "format version 1 isn't read any more: since version {FORMAT_VERSION}, connections are their own list beside the instances, each with `from`, `to`, its `exit` and its `entrance`, instead of each instance's `successors`. model_file_format shows the format"
+                    ),
+                );
+                return Model::default();
+            }
             Some(version) => self.problem(
                 "/format_version".into(),
                 None,
@@ -108,7 +124,70 @@ impl Reader {
                 Vec::new()
             }
         };
-        Model { schema, description, classes, instances }
+        let connections = match fields.get("connections") {
+            None => Vec::new(),
+            Some(Value::Array(connections)) => connections.iter().enumerate().map(|(index, value)| self.connection(index, value)).collect(),
+            Some(_) => {
+                self.problem("/connections".into(), None, "`connections` should be a list");
+                Vec::new()
+            }
+        };
+        Model { schema, description, classes, instances, connections }
+    }
+
+    fn connection(&mut self, index: usize, value: &Value) -> Connection {
+        let pointer = format!("/connections/{index}");
+        let mut connection = Connection::new(String::new(), String::new(), 0, 0);
+        let Some(fields) = self.object(value, &pointer, None, "a connection", &CONNECTION) else {
+            self.broken.connections.insert(index);
+            self.broken.exits.insert(index);
+            self.broken.entrances.insert(index);
+            return connection;
+        };
+        for key in ["from", "to"] {
+            match fields.get(key).map(|value| value.as_str()) {
+                Some(Some(text)) => {
+                    if key == "from" { connection.from = text.to_owned() } else { connection.to = text.to_owned() }
+                }
+                Some(None) => {
+                    self.problem(format!("{pointer}/{key}"), None, format!("`{key}` should be an instance's name"));
+                    self.broken.connections.insert(index);
+                }
+                None => {
+                    self.problem(pointer.clone(), None, format!("`{key}` is missing"));
+                    self.broken.connections.insert(index);
+                }
+            }
+        }
+        for key in ["exit", "entrance"] {
+            let place = match fields.get(key) {
+                Some(value) => match value.as_u64().filter(|&place| place >= 1) {
+                    Some(place) => Some(place),
+                    None => {
+                        self.problem(format!("{pointer}/{key}"), None, format!("{value} is not a place: write a whole number, 1 or more"));
+                        None
+                    }
+                },
+                None => {
+                    self.problem(pointer.clone(), None, format!("`{key}` is missing"));
+                    None
+                }
+            };
+            match (key, place) {
+                ("exit", Some(place)) => connection.exit = place,
+                ("exit", None) => {
+                    self.broken.exits.insert(index);
+                }
+                (_, Some(place)) => connection.entrance = place,
+                (_, None) => {
+                    self.broken.entrances.insert(index);
+                }
+            }
+        }
+        if let Some(description) = fields.get("description") {
+            connection.description = self.text(description, &format!("{pointer}/description"), None);
+        }
+        connection
     }
 
     fn instance(&mut self, index: usize, value: &Value) -> Instance {
@@ -154,25 +233,6 @@ impl Reader {
         }
         if let Some(position) = fields.get("position") {
             instance.position = self.position(position, &format!("{pointer}/position"), name);
-        }
-        if let Some(successors) = fields.get("successors") {
-            match successors.as_array() {
-                Some(list) => {
-                    for (place, successor) in list.iter().enumerate() {
-                        match successor.as_str() {
-                            Some(successor) => instance.successors.push(successor.to_owned()),
-                            None => {
-                                self.problem(format!("{pointer}/successors/{place}"), name, "a successor should be an instance's name");
-                                self.broken.successors.insert(index);
-                            }
-                        }
-                    }
-                }
-                None => {
-                    self.problem(format!("{pointer}/successors"), name, "`successors` should be a list of names");
-                    self.broken.successors.insert(index);
-                }
-            }
         }
         if let Some(attributes) = fields.get("attributes") {
             let (attributes, broken) = self.attributes(attributes, &format!("{pointer}/attributes"), name);

@@ -190,9 +190,11 @@ pub fn attributes(name: &str, got: &Value) -> String {
         })
         .collect();
     text += &table(&["Attribute", "Value", "From"], &rows);
-    if let Some(successors) = got["successors"].as_array() {
-        let names: Vec<String> = successors.iter().map(cell).collect();
-        text += &format!("Successors, in the order tried: {}\n", if names.is_empty() { "none".to_string() } else { names.join(", ") });
+    for (field, what) in [("successors", "Successors, by exit"), ("predecessors", "Predecessors, by entrance")] {
+        if let Some(list) = got[field].as_array() {
+            let names: Vec<String> = list.iter().map(cell).collect();
+            text += &format!("{what}: {}\n", if names.is_empty() { "none".to_string() } else { names.join(", ") });
+        }
     }
     text
 }
@@ -476,7 +478,11 @@ pub fn answer(answer: &Value) -> String {
             }
             text += "Connections between them:\n";
             for edge in answer["edges"].as_array().into_iter().flatten() {
-                text += &format!("  {} -> {}\n", cell(&edge["from"]), cell(&edge["to"]));
+                text += &format!("  {} -> {}, exit {}, entrance {}", cell(&edge["from"]), cell(&edge["to"]), edge["exit"], edge["entrance"]);
+                if let Some(description) = edge["description"].as_str() {
+                    text += &format!(": {description}");
+                }
+                text.push('\n');
             }
             text
         }

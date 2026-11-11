@@ -194,7 +194,7 @@ impl Operation for FindBottleneck {
         }
         let connections: Vec<(String, String)> = crabsim_model::load(&model_text)
             .map(|model| {
-                model.instances.iter().flat_map(|instance| instance.successors.iter().map(|to| (instance.name.clone(), to.clone()))).collect()
+                model.instances.iter().flat_map(|instance| model.successors(&instance.name).into_iter().map(|to| (instance.name.clone(), to.to_string()))).collect()
             })
             .unwrap_or_default();
 

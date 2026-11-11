@@ -80,8 +80,8 @@ impl Node {
 struct Graph {
     instances: Vec<Node>,
     classes: Vec<Node>,
-    /// From an instance to a successor, with its place in the successor order.
-    feeds: Vec<(usize, usize, u64)>,
+    /// The connections, from an instance to a successor, each with its properties.
+    feeds: Vec<(usize, usize, Vec<(&'static str, Value)>)>,
     /// From an instance to its class.
     is_a: Vec<(usize, usize)>,
     /// From a class to its parent.
@@ -162,12 +162,19 @@ impl Graph {
             is_a.push((index, class_at(&instance.class)));
         }
         let place: std::collections::HashMap<&str, usize> = model.instances.iter().enumerate().map(|(i, instance)| (instance.name.as_str(), i)).collect();
+        // Each instance's connections out in turn, by exit, as a saved file lists them.
         let feeds = model
             .instances
             .iter()
             .enumerate()
-            .flat_map(|(from, instance)| instance.successors.iter().enumerate().map(move |(order, to)| (from, to, order as u64)))
-            .map(|(from, to, order)| (from, place[to.as_str()], order))
+            .flat_map(|(from, instance)| model.connections_out(&instance.name).into_iter().map(move |connection| (from, connection)))
+            .map(|(from, connection)| {
+                let mut properties = vec![("exit", Value::Long(connection.exit)), ("entrance", Value::Long(connection.entrance))];
+                if let Some(description) = &connection.description {
+                    properties.push(("description", Value::Text(description.clone())));
+                }
+                (from, place[connection.to.as_str()], properties)
+            })
             .collect();
         Graph { instances, classes, feeds, is_a, derives_from }
     }
@@ -223,8 +230,10 @@ fn cypher(graph: &Graph, what: &str) -> String {
             cypher_text(to.name())
         );
     };
-    for &(from, to, order) in &graph.feeds {
-        edge(&mut script, ("Instance", &graph.instances[from]), ("Instance", &graph.instances[to]), &format!("FEEDS {{order: {order}}}"));
+    for (from, to, properties) in &graph.feeds {
+        let properties: Vec<String> = properties.iter().map(|(key, value)| format!("{key}: {}", value.cypher())).collect();
+        let kind = format!("FEEDS {{{}}}", properties.join(", "));
+        edge(&mut script, ("Instance", &graph.instances[*from]), ("Instance", &graph.instances[*to]), &kind);
     }
     for &(instance, class) in &graph.is_a {
         edge(&mut script, ("Instance", &graph.instances[instance]), ("Class", &graph.classes[class]), "IS_A");
@@ -266,33 +275,41 @@ fn csv_nodes(nodes: &[Node], space: &str) -> String {
     text
 }
 
-fn csv_edges<'g>(header: [&str; 2], kind: &str, edges: impl Iterator<Item = (&'g str, &'g str, Option<u64>)>, with_order: bool) -> String {
+/// One relationship file: the two ends, then a column for each of `properties`, typed as Neo4j's
+/// import reads it, and empty where an edge hasn't the property.
+fn csv_edges<'g>(
+    header: [&str; 2],
+    kind: &str,
+    properties: &[(&str, &str)],
+    edges: impl Iterator<Item = (&'g str, &'g str, &'g [(&'static str, Value)])>,
+) -> String {
     let mut columns: Vec<String> = header.iter().map(|column| column.to_string()).collect();
-    if with_order {
-        columns.push("order:int".to_string());
-    }
+    columns.extend(properties.iter().map(|(key, kind)| if *kind == "string" { key.to_string() } else { format!("{key}:{kind}") }));
     columns.push(":TYPE".to_string());
     let mut text = csv_line(columns);
-    for (from, to, order) in edges {
+    for (from, to, values) in edges {
         let mut row = vec![from.to_string(), to.to_string()];
-        row.extend(order.map(|order| order.to_string()));
+        row.extend(properties.iter().map(|(key, _)| values.iter().find(|(k, _)| k == key).map_or(String::new(), |(_, value)| value.plain())));
         row.push(kind.to_string());
         text += &csv_line(row);
     }
     text
 }
 
+/// A FEEDS edge's properties, with their types.
+const FEEDS_PROPERTIES: [(&str, &str); 3] = [("exit", "long"), ("entrance", "long"), ("description", "string")];
+
 /// The five files, by name.
 fn neo4j_csv(graph: &Graph) -> Vec<(&'static str, String)> {
-    let feeds = graph.feeds.iter().map(|&(from, to, order)| (graph.instances[from].name(), graph.instances[to].name(), Some(order)));
-    let is_a = graph.is_a.iter().map(|&(instance, class)| (graph.instances[instance].name(), graph.classes[class].name(), None));
-    let derives = graph.derives_from.iter().map(|&(class, parent)| (graph.classes[class].name(), graph.classes[parent].name(), None));
+    let feeds = graph.feeds.iter().map(|(from, to, properties)| (graph.instances[*from].name(), graph.instances[*to].name(), properties.as_slice()));
+    let is_a = graph.is_a.iter().map(|&(instance, class)| (graph.instances[instance].name(), graph.classes[class].name(), &[][..]));
+    let derives = graph.derives_from.iter().map(|&(class, parent)| (graph.classes[class].name(), graph.classes[parent].name(), &[][..]));
     vec![
         ("instances.csv", csv_nodes(&graph.instances, "Instance")),
         ("classes.csv", csv_nodes(&graph.classes, "Class")),
-        ("feeds.csv", csv_edges([":START_ID(Instance)", ":END_ID(Instance)"], "FEEDS", feeds, true)),
-        ("is_a.csv", csv_edges([":START_ID(Instance)", ":END_ID(Class)"], "IS_A", is_a, false)),
-        ("derives_from.csv", csv_edges([":START_ID(Class)", ":END_ID(Class)"], "DERIVES_FROM", derives, false)),
+        ("feeds.csv", csv_edges([":START_ID(Instance)", ":END_ID(Instance)"], "FEEDS", &FEEDS_PROPERTIES, feeds)),
+        ("is_a.csv", csv_edges([":START_ID(Instance)", ":END_ID(Class)"], "IS_A", &[], is_a)),
+        ("derives_from.csv", csv_edges([":START_ID(Class)", ":END_ID(Class)"], "DERIVES_FROM", &[], derives)),
     ]
 }
 
@@ -323,7 +340,9 @@ fn graphml(graph: &Graph, what: &str) -> String {
         let _ = writeln!(text, "  <key id=\"n_{key}\" for=\"node\" attr.name=\"{key}\" attr.type=\"{kind}\"/>");
     }
     text += "  <key id=\"type\" for=\"edge\" attr.name=\"type\" attr.type=\"string\"/>\n";
-    text += "  <key id=\"e_order\" for=\"edge\" attr.name=\"order\" attr.type=\"int\"/>\n";
+    for (key, kind) in FEEDS_PROPERTIES {
+        let _ = writeln!(text, "  <key id=\"e_{key}\" for=\"edge\" attr.name=\"{key}\" attr.type=\"{kind}\"/>");
+    }
     text += "  <graph id=\"model\" edgedefault=\"directed\">\n";
     let node = |text: &mut String, id: String, node: &Node| {
         let _ = write!(text, "    <node id=\"{id}\"><data key=\"labels\">:{}</data>", node.labels.join(":"));
@@ -335,22 +354,22 @@ fn graphml(graph: &Graph, what: &str) -> String {
     graph.classes.iter().enumerate().for_each(|(i, class)| node(&mut text, format!("c{i}"), class));
     graph.instances.iter().enumerate().for_each(|(i, instance)| node(&mut text, format!("i{i}"), instance));
     let mut edges = 0;
-    let mut edge = |text: &mut String, from: String, to: String, kind: &str, order: Option<u64>| {
+    let mut edge = |text: &mut String, from: String, to: String, kind: &str, properties: &[(&'static str, Value)]| {
         let _ = write!(text, "    <edge id=\"e{edges}\" source=\"{from}\" target=\"{to}\"><data key=\"type\">{kind}</data>");
-        if let Some(order) = order {
-            let _ = write!(text, "<data key=\"e_order\">{order}</data>");
+        for (key, value) in properties {
+            let _ = write!(text, "<data key=\"e_{key}\">{}</data>", xml_text(&value.plain()));
         }
         text.push_str("</edge>\n");
         edges += 1;
     };
-    for &(from, to, order) in &graph.feeds {
-        edge(&mut text, format!("i{from}"), format!("i{to}"), "FEEDS", Some(order));
+    for (from, to, properties) in &graph.feeds {
+        edge(&mut text, format!("i{from}"), format!("i{to}"), "FEEDS", properties);
     }
     for &(instance, class) in &graph.is_a {
-        edge(&mut text, format!("i{instance}"), format!("c{class}"), "IS_A", None);
+        edge(&mut text, format!("i{instance}"), format!("c{class}"), "IS_A", &[]);
     }
     for &(class, parent) in &graph.derives_from {
-        edge(&mut text, format!("c{class}"), format!("c{parent}"), "DERIVES_FROM", None);
+        edge(&mut text, format!("c{class}"), format!("c{parent}"), "DERIVES_FROM", &[]);
     }
     text += "  </graph>\n</graphml>\n";
     text
@@ -406,7 +425,7 @@ pub struct ExportModelOutput {
 
 impl Operation for ExportModel {
     const NAME: &'static str = "export_model";
-    const DESCRIPTION: &'static str = "Writes a valid model, from a file in the models folder (`path`) or the one a run ran (`run`), as a graph for other tools, into the models folder's `exports` folder, overwriting an earlier export of it in the same format. `format` is cypher (one script of Cypher statements, for Neo4j), neo4j-csv (a folder of CSV files for Neo4j's bulk import) or graphml (for Gephi, yEd, NetworkX and others). The graph is the same in every format: Instance nodes, labelled with their built-in class, with name, class, stream, position and every resolved attribute value (times in seconds, such as process_time_s); Class nodes, the built-in ones too, with the values each sets; FEEDS from an instance to each successor, with its `order` in the successor order; IS_A from an instance to its class; and DERIVES_FROM from a class to its parent. Returns the paths and sizes of the files written, not their content, which for a large model is several MB: to answer questions about a model, use describe_model and query_model instead.";
+    const DESCRIPTION: &'static str = "Writes a valid model, from a file in the models folder (`path`) or the one a run ran (`run`), as a graph for other tools, into the models folder's `exports` folder, overwriting an earlier export of it in the same format. `format` is cypher (one script of Cypher statements, for Neo4j), neo4j-csv (a folder of CSV files for Neo4j's bulk import) or graphml (for Gephi, yEd, NetworkX and others). The graph is the same in every format: Instance nodes, labelled with their built-in class, with name, class, stream, position and every resolved attribute value (times in seconds, such as process_time_s); Class nodes, the built-in ones too, with the values each sets; FEEDS for each connection, from an instance to a successor, with its `exit` (its place in the order the instance offers MUs on, from 1), its `entrance` (its place among the connections into the successor) and its `description` if it has one; IS_A from an instance to its class; and DERIVES_FROM from a class to its parent. Returns the paths and sizes of the files written, not their content, which for a large model is several MB: to answer questions about a model, use describe_model and query_model instead.";
     const EFFECT: Effect = Effect::Destructive;
     type Input = ExportModelInput;
     type Output = ExportModelOutput;

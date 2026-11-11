@@ -1,6 +1,6 @@
 {
   "$schema": "./model-file.schema.json",
-  "format_version": 1,
+  "format_version": 2,
   "description": "The demo model: a Source, a line that splits into two branches with parallel Stations, and a Drain. Every Station fails at random, available 90% of the time.",
   "classes": [
     {
@@ -29,9 +29,6 @@
         "x": 0.0,
         "y": 0.0
       },
-      "successors": [
-        "Station 1"
-      ],
       "attributes": {
         "interval": "00:00:05"
       }
@@ -44,9 +41,6 @@
         "x": 4.0,
         "y": 0.0
       },
-      "successors": [
-        "Station 2"
-      ],
       "attributes": {
         "process_time": "00:00:10"
       }
@@ -59,10 +53,6 @@
         "x": 8.0,
         "y": 0.0
       },
-      "successors": [
-        "Station 3",
-        "Station 5"
-      ],
       "attributes": {
         "process_time": "00:00:15"
       }
@@ -75,9 +65,6 @@
         "x": 12.0,
         "y": 4.0
       },
-      "successors": [
-        "Station 4"
-      ],
       "attributes": {
         "process_time": "00:00:20"
       }
@@ -90,11 +77,6 @@
         "x": 16.0,
         "y": 4.0
       },
-      "successors": [
-        "Station 4a",
-        "Station 4b",
-        "Station 4c"
-      ],
       "attributes": {
         "process_time": "00:00:25"
       }
@@ -107,9 +89,6 @@
         "x": 20.0,
         "y": 7.0
       },
-      "successors": [
-        "Station 7"
-      ],
       "attributes": {
         "process_time": "00:00:12"
       }
@@ -122,9 +101,6 @@
         "x": 20.0,
         "y": 4.0
       },
-      "successors": [
-        "Station 7"
-      ],
       "attributes": {
         "process_time": "00:00:15"
       }
@@ -137,9 +113,6 @@
         "x": 20.0,
         "y": 1.0
       },
-      "successors": [
-        "Station 7"
-      ],
       "attributes": {
         "process_time": "00:00:18"
       }
@@ -152,9 +125,6 @@
         "x": 24.0,
         "y": 4.0
       },
-      "successors": [
-        "Drain"
-      ],
       "attributes": {
         "process_time": "00:00:30"
       }
@@ -167,11 +137,6 @@
         "x": 12.0,
         "y": -4.0
       },
-      "successors": [
-        "Station 5a",
-        "Station 5b",
-        "Station 5c"
-      ],
       "attributes": {
         "process_time": "00:00:18"
       }
@@ -184,9 +149,6 @@
         "x": 16.0,
         "y": -1.0
       },
-      "successors": [
-        "Drain"
-      ],
       "attributes": {
         "process_time": "00:00:10"
       }
@@ -199,9 +161,6 @@
         "x": 16.0,
         "y": -4.0
       },
-      "successors": [
-        "Drain"
-      ],
       "attributes": {
         "process_time": "00:00:14"
       }
@@ -214,9 +173,6 @@
         "x": 16.0,
         "y": -7.0
       },
-      "successors": [
-        "Drain"
-      ],
       "attributes": {
         "process_time": "00:00:16"
       }
@@ -229,6 +185,116 @@
         "x": 28.0,
         "y": 0.0
       }
+    }
+  ],
+  "connections": [
+    {
+      "from": "Source",
+      "to": "Station 1",
+      "exit": 1,
+      "entrance": 1
+    },
+    {
+      "from": "Station 1",
+      "to": "Station 2",
+      "exit": 1,
+      "entrance": 1
+    },
+    {
+      "from": "Station 2",
+      "to": "Station 3",
+      "exit": 1,
+      "entrance": 1
+    },
+    {
+      "from": "Station 2",
+      "to": "Station 5",
+      "exit": 2,
+      "entrance": 1
+    },
+    {
+      "from": "Station 3",
+      "to": "Station 4",
+      "exit": 1,
+      "entrance": 1
+    },
+    {
+      "from": "Station 4",
+      "to": "Station 4a",
+      "exit": 1,
+      "entrance": 1
+    },
+    {
+      "from": "Station 4",
+      "to": "Station 4b",
+      "exit": 2,
+      "entrance": 1
+    },
+    {
+      "from": "Station 4",
+      "to": "Station 4c",
+      "exit": 3,
+      "entrance": 1
+    },
+    {
+      "from": "Station 4a",
+      "to": "Station 7",
+      "exit": 1,
+      "entrance": 1
+    },
+    {
+      "from": "Station 4b",
+      "to": "Station 7",
+      "exit": 1,
+      "entrance": 2
+    },
+    {
+      "from": "Station 4c",
+      "to": "Station 7",
+      "exit": 1,
+      "entrance": 3
+    },
+    {
+      "from": "Station 7",
+      "to": "Drain",
+      "exit": 1,
+      "entrance": 1
+    },
+    {
+      "from": "Station 5",
+      "to": "Station 5a",
+      "exit": 1,
+      "entrance": 1
+    },
+    {
+      "from": "Station 5",
+      "to": "Station 5b",
+      "exit": 2,
+      "entrance": 1
+    },
+    {
+      "from": "Station 5",
+      "to": "Station 5c",
+      "exit": 3,
+      "entrance": 1
+    },
+    {
+      "from": "Station 5a",
+      "to": "Drain",
+      "exit": 1,
+      "entrance": 2
+    },
+    {
+      "from": "Station 5b",
+      "to": "Drain",
+      "exit": 1,
+      "entrance": 3
+    },
+    {
+      "from": "Station 5c",
+      "to": "Drain",
+      "exit": 1,
+      "entrance": 4
     }
   ]
 }

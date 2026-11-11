@@ -45,12 +45,16 @@ fn without_stations_there_is_no_likely_bottleneck() {
 }
 
 /// Fast, then Slow taking the longest, then After: Slow limits the line.
-const LINE: &str = r#"{"format_version":1,"instances":[
-  {"name":"In","class":"Source","successors":["Fast"],"attributes":{"interval":"5"}},
-  {"name":"Fast","class":"Station","successors":["Slow"],"attributes":{"process_time":"4"}},
-  {"name":"Slow","class":"Station","successors":["After"],"attributes":{"process_time":"9"}},
-  {"name":"After","class":"Station","successors":["Out"],"attributes":{"process_time":"2"}},
-  {"name":"Out","class":"Drain"}]}"#;
+const LINE: &str = r#"{"format_version":2,"instances":[
+  {"name":"In","class":"Source","attributes":{"interval":"5"}},
+  {"name":"Fast","class":"Station","attributes":{"process_time":"4"}},
+  {"name":"Slow","class":"Station","attributes":{"process_time":"9"}},
+  {"name":"After","class":"Station","attributes":{"process_time":"2"}},
+  {"name":"Out","class":"Drain"}],"connections":[
+  {"from":"In","to":"Fast","exit":1,"entrance":1},
+  {"from":"Fast","to":"Slow","exit":1,"entrance":1},
+  {"from":"Slow","to":"After","exit":1,"entrance":1},
+  {"from":"After","to":"Out","exit":1,"entrance":1}]}"#;
 
 #[test]
 fn find_bottleneck_names_it_for_a_run_from_the_means_over_its_observations() {

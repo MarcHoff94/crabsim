@@ -104,9 +104,7 @@ impl<'m> Checker<'m> {
                 continue;
             }
             self.name_problems(Owner::Class(index), &class.name);
-            if BUILT_IN_CLASSES.contains(&class.name.as_str()) {
-                self.problem(Owner::Class(index), "/name", format!("`{}` is a built-in class", class.name));
-            } else if let Some(&first) = seen.get(class.name.as_str()) {
+            if let Some(&first) = seen.get(class.name.as_str()) {
                 self.problem(Owner::Class(index), "/name", format!("class {first} already has this name"));
             } else {
                 seen.insert(&class.name, index);
@@ -119,7 +117,11 @@ impl<'m> Checker<'m> {
         let class = &model.classes[index];
         let owner = Owner::Class(index);
         if !self.broken.class_parents.contains(&index) {
-            if class.parent == class.name {
+            if class.refines_built_in() {
+                if class.parent != class.name {
+                    self.problem(owner, "/parent", crate::read::refinement_with_parent(&class.name));
+                }
+            } else if class.parent == class.name {
                 self.problem(owner, "/parent", "a class can't derive from itself");
             } else if !BUILT_IN_CLASSES.contains(&class.parent.as_str()) && model.class(&class.parent).is_none() {
                 let message = self.unknown_class(&class.parent);

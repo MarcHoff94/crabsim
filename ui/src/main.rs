@@ -25,14 +25,14 @@ use clap::Parser;
 use crabsim::{LiveSession, SessionStatus, SimTime, TimeMode, WallClock};
 use crabsim_ui::camera::Camera as ViewCamera;
 use crabsim_ui::view::{
-    Change, Control, DEFAULT_SPEED, Details, EndTimeProblem, GoingOn, Inspection, Intervention, Interval, JumpProblem, MAX_SPEED,
+    Change, Control, DEFAULT_SPEED, Deletion, Details, EndTimeProblem, GoingOn, Inspection, Intervention, Interval, JumpProblem, MAX_SPEED,
     MIN_PERIODS, MIN_SPEED, Mark, PERIOD_FAILURE_FACTOR, Point, MU_METRES, Shade, StepBack, ViewState, format_time, format_time_exact, label_size, parse_time, rgb,
     wall_time_roughly,
 };
 use crabsim_ui::attributes::{Form, RepairKind};
 use crabsim_ui::editing::{ActRefusal, Claim, EditAction, Editors};
 use crabsim_ui::help;
-use crabsim_ui::workspace::{AttributeView, ClassEntry, ModelChange, Refusal, ValueFrom, Workspace};
+use crabsim_ui::workspace::{AttributeView, ClassEntry, ConnectionView, End, ModelChange, Refusal, ValueFrom, Workspace};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -156,6 +156,16 @@ fn main() {
             placing: None,
             name_text: (None, String::new()),
             select_name: None,
+            connecting: None,
+            pointer_floor: None,
+            boxing: None,
+            description_text: (None, String::new()),
+            asking: None,
+            confirm_removal: None,
+            class_forms: (None, HashMap::new()),
+            several: (Vec::new(), Vec::new()),
+            build_error: None,
+            several_forms: HashMap::new(),
         })
         .insert_resource(Session(Mutex::new(session)))
         .insert_resource(WatchedFile(Arc::new(Mutex::new(Vec::new()))))
@@ -265,6 +275,93 @@ struct Ui {
     name_text: (Option<u32>, String),
     /// An instance to select once the model it was just saved into is drawn, by name.
     select_name: Option<String>,
+    /// The object a connection is being dragged from, by its connect handle.
+    connecting: Option<u32>,
+    /// Where the pointer is on the floor while it is over the canvas, for the handle and the
+    /// connection being dragged.
+    pointer_floor: Option<Point>,
+    /// Where a rectangle to select with began on the floor, while it is being dragged.
+    boxing: Option<Point>,
+    /// What has been typed into the selected connection's description, and for which connection.
+    description_text: (Option<(u32, u32)>, String),
+    /// A name being asked for, such as for a new class, while its dialog is open.
+    asking: Option<Asking>,
+    /// A removal that takes more than it names, waiting for the user to confirm it.
+    confirm_removal: Option<Removal>,
+    /// The fields for the selected class's values, and for which class they were made. `None`
+    /// makes them again from the values read, as after the class changed.
+    class_forms: (Option<String>, HashMap<String, Form>),
+    /// Why a building change was refused, to show once the frame's other commands are done.
+    build_error: Option<String>,
+    /// The objects selected together, and the values they share, each with a value only where
+    /// all of them have the same one.
+    several: (Vec<u32>, Vec<AttributeView>),
+    /// The fields for the values several selected objects share.
+    several_forms: HashMap<String, Form>,
+}
+
+/// A dialog asking for a name, and what the name is for.
+#[derive(Clone, Debug)]
+struct Asking {
+    for_what: AskFor,
+    typed: String,
+}
+
+/// What a name asked for is used for.
+#[derive(Clone, Debug)]
+enum AskFor {
+    DeriveClass { parent: String },
+    DuplicateClass { name: String },
+    RenameClass { name: String },
+    MakeClass { instance: String },
+    MakeClassFromAll { names: Vec<String> },
+}
+
+impl AskFor {
+    fn heading(&self) -> String {
+        match self {
+            AskFor::DeriveClass { parent } => format!("A class derived from {parent}"),
+            AskFor::DuplicateClass { name } => format!("Duplicate {name}"),
+            AskFor::RenameClass { name } => format!("Rename {name}"),
+            AskFor::MakeClass { instance } => format!("Make a class from {instance}"),
+            AskFor::MakeClassFromAll { names } => format!("Make a class from these {}", names.len()),
+        }
+    }
+
+    fn explanation(&self) -> &'static str {
+        match self {
+            AskFor::DeriveClass { .. } => "The new class's name. It gives what its parent gives until you set its own values.",
+            AskFor::DuplicateClass { .. } => "The copy's name. It has the same parent and values, and isn't linked to the original.",
+            AskFor::RenameClass { .. } => "Its new name. Classes and instances of it follow it.",
+            AskFor::MakeClassFromAll { .. } => {
+                "The new class's name. It derives from the class they share and takes the values they all set alike, which they then follow."
+            }
+            AskFor::MakeClass { .. } => {
+                "The new class's name. It derives from the instance's class and takes the values set on the instance, which then follows it and behaves as before."
+            }
+        }
+    }
+
+    fn building(&self, name: String) -> Building {
+        match self {
+            AskFor::DeriveClass { parent } => Building::DeriveClass { parent: parent.clone(), name },
+            AskFor::DuplicateClass { name: from } => Building::DuplicateClass { name: from.clone(), to: name },
+            AskFor::RenameClass { name: from } => Building::RenameClass { name: from.clone(), to: name },
+            AskFor::MakeClass { instance } => Building::MakeClass { instance: instance.clone(), name },
+            AskFor::MakeClassFromAll { names } => Building::MakeClassFromAll { names: names.clone(), name },
+        }
+    }
+}
+
+/// A removal that takes more with it, named before it goes ahead.
+#[derive(Clone, Debug)]
+enum Removal {
+    /// An instance, with its connections as (from, to).
+    Instance { name: String, connections: Vec<(String, String)> },
+    /// Several instances, with their connections.
+    Instances { names: Vec<String>, connections: Vec<(String, String)> },
+    /// A class, with the classes deriving from it and the instances of any of them.
+    Class { name: String, classes: Vec<String>, instances: Vec<String> },
 }
 
 /// A change to the model's structure, made with no run in progress, each one `edit_model` batch.
@@ -273,6 +370,23 @@ enum Building {
     /// An instance of the class at this point on the floor.
     AddInstance { class: String, at: crabsim::Position },
     RenameInstance { name: String, to: String },
+    RemoveInstance { name: String },
+    RemoveInstances { names: Vec<String> },
+    SetAttributeOnAll { names: Vec<String>, attribute: String, value: serde_json::Value },
+    MakeClassFromAll { names: Vec<String>, name: String },
+    Connect { from: String, to: String },
+    Disconnect { from: String, to: String },
+    /// A connection moved to another place among its object's exits or its successor's entrances.
+    MoveConnection { from: String, to: String, end: End, place: u64 },
+    DescribeConnection { from: String, to: String, description: String },
+    DeriveClass { parent: String, name: String },
+    DuplicateClass { name: String, to: String },
+    RenameClass { name: String, to: String },
+    /// A class, with everything depending on it.
+    RemoveClass { name: String },
+    MakeClass { instance: String, name: String },
+    SetClassAttribute { class: String, attribute: String, value: serde_json::Value },
+    RestoreClassAttribute { class: String, attribute: String },
 }
 
 impl Building {
@@ -281,6 +395,21 @@ impl Building {
         match self {
             Building::AddInstance { class, .. } => format!("Placing a {class}"),
             Building::RenameInstance { name, to } => format!("Renaming {name} to {to}"),
+            Building::RemoveInstance { name } => format!("Removing {name}"),
+            Building::RemoveInstances { names } => format!("Removing {} objects", names.len()),
+            Building::SetAttributeOnAll { names, attribute, .. } => format!("Setting the {} of {} objects", attribute_label(attribute).to_lowercase(), names.len()),
+            Building::MakeClassFromAll { name, .. } => format!("Making the class {name}"),
+            Building::Connect { from, to } => format!("Connecting {from} to {to}"),
+            Building::Disconnect { from, to } => format!("Removing the connection from {from} to {to}"),
+            Building::MoveConnection { from, to, .. } => format!("Moving the connection from {from} to {to}"),
+            Building::DescribeConnection { from, to, .. } => format!("Describing the connection from {from} to {to}"),
+            Building::DeriveClass { name, .. } => format!("Adding the class {name}"),
+            Building::DuplicateClass { name, .. } => format!("Duplicating the class {name}"),
+            Building::RenameClass { name, to } => format!("Renaming the class {name} to {to}"),
+            Building::RemoveClass { name } => format!("Removing the class {name}"),
+            Building::MakeClass { name, .. } => format!("Making the class {name}"),
+            Building::SetClassAttribute { class, attribute, .. } => format!("Setting {class}'s {}", attribute_label(attribute).to_lowercase()),
+            Building::RestoreClassAttribute { class, attribute } => format!("Restoring {class}'s {}", attribute_label(attribute).to_lowercase()),
         }
     }
 
@@ -289,6 +418,23 @@ impl Building {
         match self {
             Building::AddInstance { class, at } => workspace.add_instance(class, *at, take_over).map(Some),
             Building::RenameInstance { name, to } => workspace.rename_instance(name, to, take_over).map(|()| Some(to.clone())),
+            Building::RemoveInstance { name } => workspace.remove_instance(name, take_over).map(|()| None),
+            Building::RemoveInstances { names } => workspace.remove_instances(names, take_over).map(|()| None),
+            Building::SetAttributeOnAll { names, attribute, value } => workspace.set_attribute_on_all(names, attribute, value.clone(), take_over).map(|()| None),
+            Building::MakeClassFromAll { names, name } => workspace.make_class_from_all(names, name, take_over).map(|()| None),
+            Building::Connect { from, to } => workspace.connect(from, to, take_over).map(|()| None),
+            Building::Disconnect { from, to } => workspace.disconnect(from, to, take_over).map(|()| None),
+            Building::MoveConnection { from, to, end, place } => workspace.move_connection(from, to, *end, *place, take_over).map(|()| None),
+            Building::DescribeConnection { from, to, description } => {
+                workspace.describe_connection(from, to, description, take_over).map(|()| None)
+            }
+            Building::DeriveClass { parent, name } => workspace.derive_class(parent, name, take_over).map(|()| None),
+            Building::DuplicateClass { name, to } => workspace.duplicate_class(name, to, take_over).map(|()| None),
+            Building::RenameClass { name, to } => workspace.rename_class(name, to, take_over).map(|()| None),
+            Building::RemoveClass { name } => workspace.remove_class(name, take_over).map(|()| None),
+            Building::MakeClass { instance, name } => workspace.make_class(instance, name, take_over).map(|()| Some(instance.clone())),
+            Building::SetClassAttribute { class, attribute, value } => workspace.set_class_attribute(class, attribute, value.clone(), take_over).map(|()| None),
+            Building::RestoreClassAttribute { class, attribute } => workspace.restore_class_attribute(class, attribute, take_over).map(|()| None),
         }
     }
 }
@@ -302,8 +448,9 @@ enum ResetAsk {
     Keep(Vec<Change>, Refusal),
 }
 
-/// An object dragged on the canvas, before Init or after Reset.
-#[derive(Clone, Copy)]
+/// An object dragged on the canvas, before Init or after Reset, and the others selected with it,
+/// which move by as much.
+#[derive(Clone)]
 struct Moving {
     id: u32,
     /// Where the object's centre was when the drag began, to put it back if the move is refused.
@@ -312,6 +459,15 @@ struct Moving {
     grip: Point,
     /// Whether the pointer has gone far enough for a drag rather than a click.
     dragged: bool,
+    /// The other objects selected, each with where its centre was when the drag began.
+    others: Vec<(u32, Point)>,
+}
+
+impl Moving {
+    /// Every object moving, with where its centre was when the drag began.
+    fn all(&self) -> Vec<(u32, Point)> {
+        std::iter::once((self.id, self.from)).chain(self.others.iter().copied()).collect()
+    }
 }
 
 /// The tabs of the right-hand column.
@@ -354,6 +510,12 @@ enum GoingBack {
     /// Stepping back, to the instant before the one on screen.
     Step(SimTime),
 }
+
+/// How close to a connect handle a press must be to grip it, in logical pixels.
+const HANDLE_PIXELS: f64 = 9.0;
+/// How close to a connection's line a click must be to select it, in logical pixels.
+const CLICK_PIXELS: f64 = 6.0;
+const HANDLE_COLOUR: Color = Color::srgb(0.45, 0.75, 1.0);
 
 /// A press that moves less than this, in logical pixels, is a click rather than a drag.
 const CLICK_SLOP: f32 = 4.0;
@@ -547,6 +709,7 @@ fn apply_shades(ui: Res<Ui>, mut scene: ResMut<Scene>, mut drawn: Query<&mut Mes
 #[allow(clippy::too_many_arguments)]
 fn canvas_input(
     mut ui: ResMut<Ui>,
+    keys: Res<ButtonInput<KeyCode>>,
     motion: Res<AccumulatedMouseMotion>,
     scroll: Res<AccumulatedMouseScroll>,
     buttons: Res<ButtonInput<MouseButton>>,
@@ -560,17 +723,38 @@ fn canvas_input(
     let ui = &mut *ui;
     let Some(camera) = ui.camera else { return };
     let floor = |at: Vec2| camera.to_world(Point { x: (at.x - canvas.min.x) as f64, y: (at.y - canvas.min.y) as f64 }, size);
+    // A handle or a line is as easy to hit however close the view is.
+    let within = |pixels: f64| pixels / camera.pixels_per_metre;
+    ui.pointer_floor = window.cursor_position().filter(|at| canvas.contains(egui::pos2(at.x, at.y))).map(floor);
+    // Ctrl held, or pressed or let go this frame, as a quick Ctrl+click can be.
+    let control = [KeyCode::ControlLeft, KeyCode::ControlRight];
+    let ctrl = keys.any_pressed(control) || keys.any_just_pressed(control) || keys.any_just_released(control);
     if buttons.just_pressed(MouseButton::Left) && ui.confirm_move.is_none() {
         // Only a press on the canvas is the canvas's: one on a panel, which egui may not have
         // claimed yet when the pointer arrived and pressed within one frame, leaves it alone.
         ui.press = window.cursor_position().filter(|at| canvas.contains(egui::pos2(at.x, at.y))).map(|at| (at, 0.0));
+        // Pressing on an object's connect handle starts a connection from it.
+        ui.connecting = ui.press.filter(|_| ui.workspace.opened().is_some()).and_then(|(at, _)| ui.view.handle_at(floor(at), within(HANDLE_PIXELS)));
+        // Pressing on empty canvas starts a rectangle to select with.
+        ui.boxing = ui
+            .press
+            .filter(|_| ui.connecting.is_none())
+            .map(|(at, _)| floor(at))
+            .filter(|&at| ui.view.object_at(at).is_none() && ui.view.connection_at(at, within(CLICK_PIXELS)).is_none());
         // Before Init or after Reset, pressing on an object grips it, to move it.
-        let movable = ui.view.reloads_now() && ui.workspace.opened().is_some();
+        let movable = ui.view.reloads_now() && ui.workspace.opened().is_some() && ui.connecting.is_none() && !ctrl;
         ui.moving = ui.press.filter(|_| movable).and_then(|(at, _)| {
             let pointer = floor(at);
             let id = ui.view.object_at(pointer)?;
             let from = ui.view.objects()[id as usize].centre;
-            Some(Moving { id, from, grip: Point { x: from.x - pointer.x, y: from.y - pointer.y }, dragged: false })
+            // Gripping one of several selected moves them all.
+            let selection = ui.view.selection();
+            let others = if selection.len() > 1 && selection.contains(&id) {
+                selection.iter().filter(|&&other| other != id).map(|&other| (other, ui.view.objects()[other as usize].centre)).collect()
+            } else {
+                Vec::new()
+            };
+            Some(Moving { id, from, grip: Point { x: from.x - pointer.x, y: from.y - pointer.y }, dragged: false, others })
         });
     }
     if let Some((_, travelled)) = ui.press.as_mut() {
@@ -583,9 +767,29 @@ fn canvas_input(
         moving.dragged = true;
         let pointer = floor(cursor);
         let centre = Point { x: pointer.x + moving.grip.x, y: pointer.y + moving.grip.y };
-        ui.view.move_object(moving.id, centre);
-        ui.view.select(Some(moving.id));
-        place_object(&scene, &mut transforms, moving.id, centre);
+        let (dx, dy) = (centre.x - moving.from.x, centre.y - moving.from.y);
+        for (id, start) in moving.all() {
+            let at = Point { x: start.x + dx, y: start.y + dy };
+            ui.view.move_object(id, at);
+            place_object(&scene, &mut transforms, id, at);
+        }
+        if moving.others.is_empty() {
+            ui.view.select(Some(moving.id));
+        }
+    }
+    // A connection dragged from a handle ends on the object let go over, if any.
+    if !buttons.pressed(MouseButton::Left)
+        && let Some(from) = ui.connecting.take()
+    {
+        ui.press = None;
+        ui.boxing = None;
+        let to = ui.pointer_floor.and_then(|at| ui.view.object_at(at)).filter(|&to| to != from);
+        if let Some(to) = to {
+            let names = |id: u32| ui.view.objects()[id as usize].name.clone();
+            let building = Building::Connect { from: names(from), to: names(to) };
+            ui.view.commanded(time.elapsed());
+            build(ui, building, false);
+        }
     }
     // A release over a panel never reaches the canvas, so a drag ends whenever the button is up.
     if !buttons.pressed(MouseButton::Left)
@@ -595,16 +799,35 @@ fn canvas_input(
         ui.view.commanded(time.elapsed());
         save_move(ui, &scene, &mut transforms, moving, false);
     }
-    if buttons.just_released(MouseButton::Left) {
-        if let Some((at, travelled)) = ui.press.take() {
-            if travelled < CLICK_SLOP {
-                ui.view.select(ui.view.object_at(floor(at)));
+    if buttons.just_released(MouseButton::Left)
+        && let Some((at, travelled)) = ui.press.take()
+    {
+        let started = ui.boxing.take();
+        if let (Some(start), Some(end)) = (started, ui.pointer_floor)
+            && travelled >= CLICK_SLOP
+        {
+            // A rectangle dragged on empty canvas selects every object inside it.
+            ui.view.select_within(start, end);
+        } else if travelled < CLICK_SLOP && ctrl {
+            // Ctrl+click adds an object to the selection, or takes it away.
+            if let Some(id) = ui.view.object_at(floor(at)) {
+                ui.view.toggle(id);
+            }
+        } else if travelled < CLICK_SLOP {
+            let pointer = floor(at);
+            match ui.view.object_at(pointer) {
+                Some(id) => ui.view.select(Some(id)),
+                // Off every object, a click near a connection's line selects the connection.
+                None => match ui.view.connection_at(pointer, within(CLICK_PIXELS)) {
+                    Some(connection) => ui.view.select_connection(Some(connection)),
+                    None => ui.view.select(None),
+                },
             }
         }
     }
     let Some(camera) = ui.camera.as_mut() else { return };
-    let panning = ui.moving.is_none() && ui.press.is_some() && buttons.pressed(MouseButton::Left);
-    let dragging = panning || [MouseButton::Right, MouseButton::Middle].iter().any(|&b| buttons.pressed(b));
+    // The left button selects with a rectangle on empty canvas, so panning is on the others.
+    let dragging = [MouseButton::Right, MouseButton::Middle].iter().any(|&b| buttons.pressed(b));
     if dragging && motion.delta != Vec2::ZERO {
         camera.pan(Point { x: motion.delta.x as f64, y: motion.delta.y as f64 });
         ui.camera_moved = true;
@@ -636,12 +859,14 @@ fn place_object(scene: &Scene, transforms: &mut Query<&mut Transform>, id: u32, 
 /// crabsim, it asks whether to move it anyway, and any other refusal puts the object back and
 /// says why.
 fn save_move(ui: &mut Ui, scene: &Scene, transforms: &mut Query<&mut Transform>, moving: Moving, take_over: bool) {
-    match moved(ui, moving, take_over) {
+    match moved(ui, moving.clone(), take_over) {
         Ok(()) => {}
         Err(refusal @ (Refusal::NotEditor(_) | Refusal::ChangedOutside(_))) => ui.confirm_move = Some((moving, refusal)),
         Err(refusal) => {
-            ui.view.move_object(moving.id, moving.from);
-            place_object(scene, transforms, moving.id, moving.from);
+            for (id, from) in moving.all() {
+                ui.view.move_object(id, from);
+                place_object(scene, transforms, id, from);
+            }
             let name = &ui.view.objects()[moving.id as usize].name;
             ui.view.show_error(format!("{name} wasn't moved: {refusal}"));
         }
@@ -650,10 +875,16 @@ fn save_move(ui: &mut Ui, scene: &Scene, transforms: &mut Query<&mut Transform>,
 
 /// Saves the dragged object where the view now draws it.
 fn moved(ui: &mut Ui, moving: Moving, take_over: bool) -> Result<(), Refusal> {
-    let object = &ui.view.objects()[moving.id as usize];
-    let (name, centre) = (object.name.clone(), object.centre);
-    let z = ui.workspace.description().position(moving.id).map_or(0.0, |position| position.z);
-    ui.workspace.move_instance(&name, crabsim::Position { x: centre.x, y: centre.y, z }, take_over)
+    let moves: Vec<(String, crabsim::Position)> = moving
+        .all()
+        .into_iter()
+        .map(|(id, _)| {
+            let object = &ui.view.objects()[id as usize];
+            let z = ui.workspace.description().position(id).map_or(0.0, |position| position.z);
+            (object.name.clone(), crabsim::Position { x: object.centre.x, y: object.centre.y, z })
+        })
+        .collect();
+    ui.workspace.move_instances(&moves, take_over)
 }
 
 /// Points the Bevy camera so that the view camera's centre sits in the middle of the canvas. The
@@ -750,10 +981,35 @@ fn draw_connections(mut gizmos: Gizmos, ui: Res<Ui>) {
         let end = Vec3::new(connection.end.x as f32, connection.end.y as f32, 0.0);
         gizmos.arrow(start, end, CONNECTION).with_tip_length(0.4);
     }
-    if let Some(id) = ui.view.selected() {
+    for &id in ui.view.selection() {
         let outline = ui.view.objects()[id as usize].outline(0.15);
         let corner = |point: Point| Vec3::new(point.x as f32, point.y as f32, 0.1);
         gizmos.linestrip(outline.iter().chain(outline.first()).map(|&point| corner(point)), SELECTION);
+    }
+    if let (Some(start), Some(end)) = (ui.boxing, ui.pointer_floor) {
+        let corners = [start, Point { x: end.x, y: start.y }, end, Point { x: start.x, y: end.y }, start];
+        gizmos.linestrip(corners.map(|point| Vec3::new(point.x as f32, point.y as f32, 0.3)), HANDLE_COLOUR);
+    }
+    let at = |point: Point, z: f32| Vec3::new(point.x as f32, point.y as f32, z);
+    if let Some((from, to)) = ui.view.selected_connection()
+        && let Some(connection) = ui.view.connections().iter().find(|connection| connection.from == from && connection.to == to)
+    {
+        gizmos.arrow(at(connection.start, 0.1), at(connection.end, 0.1), SELECTION).with_tip_length(0.5);
+    }
+    let Some(camera) = ui.camera else { return };
+    let radius = (HANDLE_PIXELS / camera.pixels_per_metre) as f32 * 0.6;
+    // The handle of the object under the pointer, or of the one a connection is dragged from.
+    let hovered = ui.connecting.or_else(|| {
+        let pointer = ui.pointer_floor?;
+        ui.view.object_at(pointer).or_else(|| ui.view.handle_at(pointer, HANDLE_PIXELS / camera.pixels_per_metre))
+    });
+    if let Some(handle) = hovered.and_then(|id| ui.view.handle_of(id)) {
+        gizmos.circle(Isometry3d::from_translation(at(handle, 0.2)), radius, HANDLE_COLOUR);
+        if ui.connecting.is_some()
+            && let Some(pointer) = ui.pointer_floor
+        {
+            gizmos.arrow(at(handle, 0.2), at(pointer, 0.2), HANDLE_COLOUR).with_tip_length(0.4);
+        }
     }
 }
 
@@ -766,6 +1022,32 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
     );
     let ui = &mut *ui;
     let wall = time.elapsed();
+    // Tab and Shift+Tab step through the objects, unless a field is being typed in or a dialog is
+    // open. They're taken before anything is drawn, and egui's own move of the keyboard focus to
+    // the next widget is called off, since that happens while the widgets are drawn.
+    let dialog_open = ui.asking.is_some() || ui.confirm_removal.is_some() || ui.confirm_building.is_some() || ui.new_model.is_some() || ui.duplicating.is_some();
+    let tab = if dialog_open || ctx.text_edit_focused() {
+        None
+    } else {
+        let tab = ctx.input_mut(|input| {
+            if input.consume_key(egui::Modifiers::SHIFT, egui::Key::Tab) {
+                Some(true)
+            } else if input.consume_key(egui::Modifiers::NONE, egui::Key::Tab) {
+                Some(false)
+            } else {
+                None
+            }
+        });
+        if tab.is_some() {
+            ctx.memory_mut(|memory| {
+                memory.move_focus(egui::FocusDirection::None);
+                if let Some(focused) = memory.focused() {
+                    memory.surrender_focus(focused);
+                }
+            });
+        }
+        tab
+    };
     // Who holds each model, for the marker and the Editing tab, read whenever the edit state
     // changes and when a tab opens. A claim also ends without the file changing, when its agent's
     // process ends or it times out, which only reading finds out. So while a claim is shown it's
@@ -853,6 +1135,49 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
     let mut editors_action = None;
     let mut results_chosen = None;
     let mut renamed = None;
+    let mut several_asked = None;
+    // The values shared by several selected objects, read again when the selection changes.
+    let several: Vec<u32> = ui.view.selection().to_vec();
+    if several.len() > 1 && ui.several.0 != several {
+        let names: Vec<String> = several.iter().map(|&id| ui.view.objects()[id as usize].name.clone()).collect();
+        let shared = shared_values(&ui.workspace, &names);
+        ui.several_forms = shared.iter().map(|view| (view.attribute.clone(), Form::new(&view.attribute, view.value.as_ref()))).collect();
+        ui.several = (several.clone(), shared);
+    }
+    let mut class_asked_change = None;
+    // The selected class's fields, made from its values whenever they were read again.
+    if let Some((class, Ok(values))) = &ui.class_selected
+        && ui.class_forms.0.as_deref() != Some(class.as_str())
+    {
+        let states = crabsim_model::State::of(ui.workspace.built_in_of(class).unwrap_or("Station"));
+        ui.class_forms.1 = values
+            .iter()
+            .map(|view| {
+                let form = match view.attribute.as_str() {
+                    "state_notes" => Form::state_notes(states, view.value.as_ref()),
+                    attribute => Form::new(attribute, view.value.as_ref()),
+                };
+                (view.attribute.clone(), form)
+            })
+            .collect();
+        ui.class_forms.0 = Some(class.clone());
+    }
+    let mut connection_asked = None;
+    let mut instance_asked = None;
+    // What has been typed for a description belongs to the connection it was typed for.
+    let shown_connection = ui.view.selected_connection();
+    if ui.description_text.0 != shown_connection {
+        let text = shown_connection
+            .and_then(|(from, to)| {
+                let names = (ui.view.objects()[from as usize].name.clone(), ui.view.objects()[to as usize].name.clone());
+                ui.workspace.connection(&names.0, &names.1)?.description
+            })
+            .unwrap_or_default();
+        ui.description_text = (shown_connection, text);
+    }
+    if shown_connection.is_some() {
+        ui.class_selected = None;
+    }
     // What has been typed for a name belongs to the object it was typed for.
     if ui.name_text.0 != selected {
         let name = selected.map_or_else(String::new, |id| ui.view.objects()[id as usize].name.clone());
@@ -877,12 +1202,29 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
         });
         panel.separator();
         egui::ScrollArea::vertical().show(panel, |panel| match ui.tab {
-            Tab::Inspector => match (&ui.class_selected, selected) {
-                (Some((class, values)), None) => class_view(panel, class, values, ui.workspace.classes().iter().find(|entry| &entry.name == class)),
+            Tab::Inspector => match (&ui.class_selected, selected, ui.view.selected_connection()) {
+                (_, None, Some((from, to))) => {
+                    let names = (ui.view.objects()[from as usize].name.clone(), ui.view.objects()[to as usize].name.clone());
+                    match ui.workspace.connection(&names.0, &names.1) {
+                        Some(view) => connection_asked = connection_view(panel, &view, &mut ui.description_text.1, editable),
+                        None => {
+                            panel.label("This connection isn't in the model file any more.");
+                        }
+                    }
+                }
+                (Some((class, values)), None, None) => {
+                    let entry = ui.workspace.classes().into_iter().find(|entry| &entry.name == class);
+                    class_asked_change = class_view(panel, class, values, entry.as_ref(), &mut ui.class_forms.1, editable).map(|change| (class.clone(), change));
+                }
+                _ if ui.view.selection().len() > 1 => {
+                    let names: Vec<String> = ui.view.selection().iter().map(|&id| ui.view.objects()[id as usize].name.clone()).collect();
+                    several_asked = several_view(panel, &names, &ui.several, &mut ui.several_forms, editable);
+                }
                 _ => {
                     intervention = inspector(panel, inspection.as_ref(), &mut ui.process_time_text.1, &mut ui.help_open);
                     if let Some(id) = selected {
                         renamed = name_field(panel, &ui.view.objects()[id as usize].name, &mut ui.name_text.1, editable);
+                        instance_asked = instance_actions(panel, editable);
                     }
                     if let Some((_, attributes)) = &ui.attributes {
                         attribute_change = attributes_section(panel, attributes, &mut ui.forms, editable, ui.refused.as_ref());
@@ -927,12 +1269,14 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
         ui.view.commanded(wall);
         let done = match (anyway, &refusal) {
             (false, _) => Ok(()),
-            (true, Refusal::ChangedOutside(_)) => ui.workspace.adopt().map_err(Refusal::Invalid).and_then(|()| moved(ui, moving, false)),
-            (true, _) => moved(ui, moving, true),
+            (true, Refusal::ChangedOutside(_)) => ui.workspace.adopt().map_err(Refusal::Invalid).and_then(|()| moved(ui, moving.clone(), false)),
+            (true, _) => moved(ui, moving.clone(), true),
         };
         if !anyway || done.is_err() {
-            // Back where it was: the window draws the objects afresh from the view.
-            ui.view.move_object(moving.id, moving.from);
+            // Back where they were: the window draws the objects afresh from the view.
+            for (id, from) in moving.all() {
+                ui.view.move_object(id, from);
+            }
             ui.rebuild_scene = true;
         }
         if let Err(refusal) = done {
@@ -958,7 +1302,76 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
     }
     if let (Some(to), Some(id)) = (renamed, selected) {
         let name = ui.view.objects()[id as usize].name.clone();
+        ui.view.commanded(wall);
         build(ui, Building::RenameInstance { name, to }, false);
+    }
+    if let Some(asked) = several_asked {
+        let names: Vec<String> = ui.view.selection().iter().map(|&id| ui.view.objects()[id as usize].name.clone()).collect();
+        match asked {
+            SeveralAsk::Remove => delete_selected(ui),
+            SeveralAsk::MakeClass => ui.asking = Some(Asking { for_what: AskFor::MakeClassFromAll { names }, typed: String::new() }),
+            SeveralAsk::Set(attribute, value) => {
+                ui.several.0.clear();
+                build(ui, Building::SetAttributeOnAll { names, attribute, value }, false);
+            }
+        }
+        ui.view.commanded(wall);
+    }
+    if let Some((class, (change, take_over))) = class_asked_change {
+        let building = match change {
+            AttributeChange::Set(attribute, value) => Building::SetClassAttribute { class, attribute, value },
+            AttributeChange::Restore(attribute) => Building::RestoreClassAttribute { class, attribute },
+        };
+        ui.view.commanded(wall);
+        build(ui, building, take_over);
+    }
+    if let (Some(asked), Some((from, to))) = (connection_asked, shown_connection) {
+        let (from, to) = (ui.view.objects()[from as usize].name.clone(), ui.view.objects()[to as usize].name.clone());
+        let building = match asked {
+            ConnectionAsk::Move(end, place) => Building::MoveConnection { from, to, end, place },
+            ConnectionAsk::Describe(description) => Building::DescribeConnection { from, to, description },
+            ConnectionAsk::Remove => Building::Disconnect { from, to },
+        };
+        ui.view.commanded(wall);
+        build(ui, building, false);
+    }
+    match (instance_asked, selected) {
+        (Some(InstanceAsk::Remove), Some(_)) => delete_selected(ui),
+        (Some(InstanceAsk::MakeClass), Some(id)) => {
+            let instance = ui.view.objects()[id as usize].name.clone();
+            ui.asking = Some(Asking { for_what: AskFor::MakeClass { instance }, typed: String::new() });
+        }
+        _ => {}
+    }
+    // Delete removes what is selected, unless a field is being typed in or a dialog is open.
+    let dialog_open = ui.asking.is_some() || ui.confirm_removal.is_some() || ui.confirm_building.is_some() || ui.new_model.is_some() || ui.duplicating.is_some();
+    if let Some(backwards) = tab
+        && let Some(next) = ui.view.next_object(ui.view.selected().or(ui.view.selection().last().copied()), backwards)
+    {
+        ui.view.select(Some(next));
+        ui.class_selected = None;
+        // The view follows the object when it's out of sight.
+        if let (Some(camera), Some(canvas)) = (ui.camera.as_mut(), ui.canvas) {
+            let size = Point { x: canvas.width() as f64, y: canvas.height() as f64 };
+            let centre = ui.view.objects()[next as usize].centre;
+            let at = camera.to_screen(centre, size);
+            if at.x < 0.0 || at.y < 0.0 || at.x > size.x || at.y > size.y {
+                camera.centre = centre;
+                ui.camera_moved = true;
+            }
+        }
+        ui.view.commanded(wall);
+    }
+    if !dialog_open && !ctx.text_edit_focused() && ctx.input(|input| input.key_pressed(egui::Key::Delete)) {
+        match (&ui.class_selected, ui.view.selected(), ui.view.selected_connection()) {
+            // A built-in class stays: its values are restored one by one.
+            (Some((class, _)), None, None) if crabsim_model::BUILT_IN_CLASSES.contains(&class.as_str()) => {}
+            (Some((class, _)), None, None) if ui.view.allows_building() => {
+                let class = class.clone();
+                remove_class_asking(ui, class);
+            }
+            _ => delete_selected(ui),
+        }
         ui.view.commanded(wall);
     }
     let mut chosen = None;
@@ -991,11 +1404,25 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
         Some(ClassAsk::Select(class)) => {
             let values = ui.workspace.class_attributes(&class);
             ui.class_selected = Some((class, values));
+            ui.class_forms.0 = None;
             ui.view.select(None);
             ui.tab = Tab::Inspector;
             ui.view.commanded(wall);
         }
         Some(ClassAsk::Place(class)) => ui.placing = Some(class),
+        Some(ClassAsk::Derive(parent)) => ui.asking = Some(Asking { for_what: AskFor::DeriveClass { parent }, typed: String::new() }),
+        Some(ClassAsk::Duplicate(name)) => {
+            let typed = format!("{name} copy");
+            ui.asking = Some(Asking { for_what: AskFor::DuplicateClass { name }, typed });
+        }
+        Some(ClassAsk::Rename(name)) => {
+            let typed = name.clone();
+            ui.asking = Some(Asking { for_what: AskFor::RenameClass { name }, typed });
+        }
+        Some(ClassAsk::Remove(name)) => {
+            remove_class_asking(ui, name);
+            ui.view.commanded(wall);
+        }
         None => {}
     }
     if let Some(error) = panel_error {
@@ -1020,6 +1447,19 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
             ui.view.show_error(format!("{from} wasn't duplicated: {refusal}"));
         }
         ui.view.commanded(wall);
+    }
+    if let Some((for_what, name)) = ask_name(&ctx, ui) {
+        ui.view.commanded(wall);
+        build(ui, for_what.building(name), false);
+    }
+    if let Some(removal) = confirm_removal(&ctx, ui) {
+        let building = match removal {
+            Removal::Instance { name, .. } => Building::RemoveInstance { name },
+            Removal::Instances { names, .. } => Building::RemoveInstances { names },
+            Removal::Class { name, .. } => Building::RemoveClass { name },
+        };
+        ui.view.commanded(wall);
+        build(ui, building, false);
     }
     if let Some((building, refusal)) = ui.confirm_building.clone()
         && let Some(anyway) = confirm_building(&ctx, &building, &refusal)
@@ -1183,6 +1623,10 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
     if let Some((camera, size)) = ui.camera.and_then(|camera| Some((camera, label_size(&camera)?))) {
         labels(&ctx, &ui.view, &camera, canvas, size as f32);
     }
+    // A building change refused this frame, or from the canvas before it, says why last of all.
+    if let Some(error) = ui.build_error.take() {
+        ui.view.show_error(error);
+    }
     Ok(())
 }
 
@@ -1222,8 +1666,21 @@ fn replace_session(ui: &mut Ui, session: &Session, new_model: bool, wall: Durati
     let mut view = ViewState::with_settings_of(ui.workspace.description(), &ui.view);
     // The same model, reloaded or with another seed, keeps the object selected, found by its name.
     if !new_model {
-        let name = ui.view.selected().map(|id| ui.view.objects()[id as usize].name.clone());
-        view.select(name.and_then(|name| view.objects().iter().find(|object| object.name == name).map(|object| object.id)));
+        // Everything selected stays selected, found by name.
+        let names: Vec<String> = ui.view.selection().iter().map(|&id| ui.view.objects()[id as usize].name.clone()).collect();
+        for name in names {
+            if let Some(id) = view.objects().iter().find(|object| object.name == name).map(|object| object.id) {
+                view.toggle(id);
+            }
+        }
+    }
+    // A connection selected stays selected, found by the names of its ends.
+    if !new_model && let Some((from, to)) = ui.view.selected_connection() {
+        let names = (ui.view.objects()[from as usize].name.clone(), ui.view.objects()[to as usize].name.clone());
+        let id = |name: &str| view.objects().iter().find(|object| object.name == name).map(|object| object.id);
+        if let (Some(from), Some(to)) = (id(&names.0), id(&names.1)) {
+            view.select_connection(Some((from, to)));
+        }
     }
     // An instance just placed or renamed is selected, found by its name.
     if let Some(name) = ui.select_name.take() {
@@ -1251,6 +1708,7 @@ fn replace_session(ui: &mut Ui, session: &Session, new_model: bool, wall: Durati
         // The same model, changed: the class's values are read again, if it's still there.
         let values = ui.workspace.class_attributes(&class);
         ui.class_selected = values.is_ok().then_some((class, values));
+        ui.class_forms.0 = None;
     }
     ui.rebuild_scene = true;
     ui.view.commanded(wall);
@@ -1301,14 +1759,9 @@ fn confirm_reset(ctx: &egui::Context, ui: &mut Ui) -> Option<Request> {
             modal.label(egui::RichText::new("Tick Keep changes beside Reset to save them to the model file instead.").weak());
         }
         modal.add_space(8.0);
-        modal.horizontal(|row| {
-            if row.button(go).clicked() {
-                answer = Some(true);
-            }
-            if row.button("Cancel").clicked() {
-                answer = Some(false);
-            }
-        });
+        if let Some(chosen) = answers(modal, &[go, "Cancel"]) {
+            answer = Some(chosen == 0);
+        }
     });
     if modal.should_close() && answer.is_none() {
         answer = Some(false);
@@ -1330,14 +1783,9 @@ fn confirm_replacing(ctx: &egui::Context, ui: &mut Ui) -> Option<String> {
         modal.heading(format!("Open {path}?"));
         modal.label("The run in progress ends, with everything it has done.");
         modal.add_space(8.0);
-        modal.horizontal(|row| {
-            if row.button("Open").clicked() {
-                answer = Some(true);
-            }
-            if row.button("Cancel").clicked() {
-                answer = Some(false);
-            }
-        });
+        if let Some(chosen) = answers(modal, &["Open", "Cancel"]) {
+            answer = Some(chosen == 0);
+        }
     });
     if modal.should_close() && answer.is_none() {
         answer = Some(false);
@@ -1432,6 +1880,121 @@ enum ClassAsk {
     Select(String),
     /// Placing an instance of the class where it is dropped on the canvas.
     Place(String),
+    Derive(String),
+    Duplicate(String),
+    Rename(String),
+    Remove(String),
+}
+
+/// What the selected connection's inspector asks for.
+enum ConnectionAsk {
+    /// Its place at one end, from 1.
+    Move(End, u64),
+    /// Its description, which an empty one removes.
+    Describe(String),
+    Remove,
+}
+
+/// What the inspector asks for with several objects selected.
+enum SeveralAsk {
+    Remove,
+    MakeClass,
+    /// An attribute's value, set on all of them.
+    Set(String, serde_json::Value),
+}
+
+/// The attributes several instances share, which they have when they come from one built-in class:
+/// each with a value only where all of them have the same one. None when their built-in classes
+/// differ.
+fn shared_values(workspace: &Workspace, names: &[String]) -> Vec<AttributeView> {
+    let all: Vec<Vec<AttributeView>> = names.iter().filter_map(|name| workspace.attributes(name).ok()).collect();
+    let Some(first) = all.first() else { return Vec::new() };
+    if all.len() != names.len() || all.iter().any(|views| views.iter().map(|view| &view.attribute).ne(first.iter().map(|view| &view.attribute))) {
+        return Vec::new();
+    }
+    first
+        .iter()
+        .enumerate()
+        .map(|(place, view)| {
+            let alike = all.iter().all(|views| views[place].value == view.value);
+            AttributeView { attribute: view.attribute.clone(), value: if alike { view.value.clone() } else { None }, from: view.from.clone() }
+        })
+        .collect()
+}
+
+/// Several selected objects: their names, Remove, Make a class from them, and the values they
+/// share, any of which can be set on all of them at once.
+fn several_view(
+    ui: &mut egui::Ui,
+    names: &[String],
+    several: &(Vec<u32>, Vec<AttributeView>),
+    forms: &mut HashMap<String, Form>,
+    editable: bool,
+) -> Option<SeveralAsk> {
+    let mut asked = None;
+    ui.heading(format!("{} objects", names.len()));
+    ui.add(egui::Label::new(egui::RichText::new(names.join(", ")).weak()).wrap());
+    ui.label(egui::RichText::new("Ctrl+click adds or takes one away. Dragging one moves them all.").weak());
+    if editable {
+        ui.horizontal(|row| {
+            if row.button("Make a class from them…").on_hover_text("A class derived from the class they share, with the values they all set alike, which they then follow").clicked() {
+                asked = Some(SeveralAsk::MakeClass);
+            }
+            if row.button("Remove…").on_hover_text("Remove them all and their connections. Delete does the same").clicked() {
+                asked = Some(SeveralAsk::Remove);
+            }
+        });
+    }
+    ui.add_space(8.0);
+    ui.separator();
+    ui.label(egui::RichText::new("Values they share").strong());
+    if several.1.is_empty() {
+        ui.label(egui::RichText::new("They're of different kinds, so they share no values.").weak());
+        return asked;
+    }
+    if !editable {
+        ui.label("Values change before Init or after Reset.");
+        return asked;
+    }
+    ui.label(egui::RichText::new("Empty where they differ. A value applied is set on every one of them.").weak());
+    for view in &several.1 {
+        let Some(form) = forms.get_mut(&view.attribute) else { continue };
+        if view.attribute == "state_notes" {
+            continue;
+        }
+        ui.add_space(4.0);
+        ui.label(egui::RichText::new(attribute_label(&view.attribute)).strong());
+        let mut commit = false;
+        egui::Grid::new(("several", &view.attribute)).num_columns(2).spacing([8.0, 2.0]).show(ui, |grid| {
+            for part in form.parts.iter_mut().filter(|part| !part.label.is_empty() || form.repair.is_none()) {
+                grid.label(part.label);
+                commit |= grid.add(egui::TextEdit::singleline(&mut part.text).desired_width(120.0)).lost_focus();
+                grid.end_row();
+            }
+        });
+        if !form.matches(view.value.as_ref()) {
+            match form.value() {
+                Ok(serde_json::Value::Null) => {
+                    ui.label(egui::RichText::new("Never failing can't be set on several at once yet: restore each one's failures instead.").weak());
+                }
+                Ok(value) => {
+                    if ui.small_button("Apply to all").clicked() || commit {
+                        asked = Some(SeveralAsk::Set(view.attribute.clone(), value));
+                    }
+                }
+                Err(problem) => {
+                    ui.colored_label(egui::Color32::from_rgb(240, 120, 120), problem);
+                }
+            }
+        }
+    }
+    asked
+}
+
+/// What the selected instance's inspector asks for besides its values.
+enum InstanceAsk {
+    Remove,
+    MakeClass,
 }
 
 /// Why a building control is greyed out during a run.
@@ -1450,8 +2013,10 @@ fn classes_panel(ui: &mut egui::Ui, classes: &[ClassEntry], selected: Option<&st
             let text = egui::RichText::new(&entry.name);
             let text = if entry.built_in { text.strong() } else { text };
             let text = if selected == Some(entry.name.as_str()) { text.background_color(row.visuals().selection.bg_fill) } else { text };
-            let hint = if building {
-                "Drag it onto the canvas to place one, or click to see its values"
+            let hint = if entry.built_in && building {
+                "Drag it onto the canvas to place one, click to see and change this model's values for it, or right-click to derive a class of your own from it"
+            } else if building {
+                "Drag it onto the canvas to place one, click to see and change its values, or right-click for more"
             } else {
                 "Click to see its values. Reset first to place one"
             };
@@ -1464,45 +2029,47 @@ fn classes_panel(ui: &mut egui::Ui, classes: &[ClassEntry], selected: Option<&st
             if label.hovered() && building {
                 row.ctx().set_cursor_icon(egui::CursorIcon::Grab);
             }
+            label.context_menu(|menu| {
+                let mut item = |menu: &mut egui::Ui, text: &str, hint: &str, ask: ClassAsk| {
+                    let clicked = menu.add_enabled(building, egui::Button::new(text)).on_hover_text(hint).on_disabled_hover_text(RESET_FIRST).clicked();
+                    if clicked {
+                        asked = Some(ask);
+                        menu.close();
+                    }
+                };
+                item(menu, "Derive…", "A new class derived from this one, giving what it gives", ClassAsk::Derive(entry.name.clone()));
+                if !entry.built_in {
+                    item(menu, "Duplicate…", "A copy of this class, with its parent and values, not linked to it", ClassAsk::Duplicate(entry.name.clone()));
+                    item(menu, "Rename…", "Give this class another name, which its classes and instances follow", ClassAsk::Rename(entry.name.clone()));
+                    item(menu, "Remove…", "Remove this class, naming first what depends on it", ClassAsk::Remove(entry.name.clone()));
+                }
+            });
         });
     }
     asked
 }
 
 /// A class's values in the inspector, each with where it comes from, read-only.
-fn class_view(ui: &mut egui::Ui, class: &str, values: &Result<Vec<AttributeView>, String>, entry: Option<&ClassEntry>) {
+fn class_view(
+    ui: &mut egui::Ui,
+    class: &str,
+    values: &Result<Vec<AttributeView>, String>,
+    entry: Option<&ClassEntry>,
+    forms: &mut HashMap<String, Form>,
+    editable: bool,
+) -> Option<(AttributeChange, bool)> {
     ui.heading("Class");
     ui.label(egui::RichText::new(class).strong().size(16.0));
-    match entry.and_then(|entry| entry.parent.as_deref()) {
-        Some(parent) => ui.label(egui::RichText::new(format!("Derived from {parent}")).weak()),
-        None => ui.label(egui::RichText::new("Built in").weak()),
-    };
-    ui.label(egui::RichText::new("Drag it from the Classes panel onto the canvas to place one.").weak());
-    ui.add_space(8.0);
-    let values = match values {
-        Ok(values) => values,
-        Err(error) => {
-            ui.label(egui::RichText::new(error).weak());
-            return;
-        }
-    };
-    for view in values {
-        let from = match &view.from {
-            ValueFrom::Instance => "set here".to_string(),
-            ValueFrom::Class(owner) if owner == class => "set here".to_string(),
-            ValueFrom::Class(owner) => format!("from class {owner}"),
-            ValueFrom::BuiltIn => "built in".to_string(),
-            ValueFrom::NotSet => "not set".to_string(),
-        };
-        ui.add_space(4.0);
-        ui.horizontal(|row| {
-            row.label(egui::RichText::new(attribute_label(&view.attribute)).strong());
-            row.label(egui::RichText::new(from).weak().small());
-        });
-        if let Some(value) = &view.value {
-            ui.add(egui::Label::new(crabsim_ui::attributes::summary(value)).wrap());
-        }
+    if let Some(parent) = entry.and_then(|entry| entry.parent.as_deref()) {
+        ui.label(egui::RichText::new(format!("Derived from {parent}")).weak());
     }
+    let reach = if entry.is_some_and(|entry| entry.built_in) {
+        "This model's values for every class and instance built on it, unless they set their own. Restore takes one back to crabsim's default. Drag it onto the canvas to place one."
+    } else {
+        "Its values reach every instance of it that doesn't set its own. Drag it onto the canvas to place one."
+    };
+    ui.label(egui::RichText::new(reach).weak());
+    attributes_section(ui, values, forms, editable, None)
 }
 
 /// The selected instance's name, which can be changed with no run in progress. Returns a new name
@@ -1528,14 +2095,202 @@ fn name_field(ui: &mut egui::Ui, name: &str, text: &mut String, editable: bool) 
     renamed
 }
 
+/// The selected connection: its ends, its place among its object's exits and among its
+/// successor's entrances, each movable up or down, its description and Remove. Everything but
+/// looking waits for no run in progress.
+fn connection_view(ui: &mut egui::Ui, view: &ConnectionView, description: &mut String, editable: bool) -> Option<ConnectionAsk> {
+    let mut asked = None;
+    ui.heading("Connection");
+    ui.label(egui::RichText::new(format!("{} to {}", view.from, view.to)).strong().size(16.0));
+    ui.label(egui::RichText::new("MUs pass along it at once, taking no time.").weak());
+    ui.add_space(6.0);
+    let mut place = |ui: &mut egui::Ui, text: String, hint: &str, end: End, at: u64, of: u64| {
+        ui.horizontal(|row| {
+            row.label(text).on_hover_text(hint);
+            let up = row.add_enabled(editable && at > 1, egui::Button::new("Up").small()).on_hover_text("One place earlier").on_disabled_hover_text(if editable { "Already first" } else { RESET_FIRST });
+            if up.clicked() {
+                asked = Some(ConnectionAsk::Move(end, at - 1));
+            }
+            let down = row.add_enabled(editable && at < of, egui::Button::new("Down").small()).on_hover_text("One place later").on_disabled_hover_text(if editable { "Already last" } else { RESET_FIRST });
+            if down.clicked() {
+                asked = Some(ConnectionAsk::Move(end, at + 1));
+            }
+        });
+    };
+    place(ui, view.exit_text(), "Its exit: the order its object offers MUs to its successors, round-robin", End::Exit, view.exit, view.exits);
+    place(
+        ui,
+        view.entrance_text(),
+        "Its entrance: its place among the connections into its successor. Nothing reads it yet, so it doesn't change results until an entrance rule does",
+        End::Entrance,
+        view.entrance,
+        view.entrances,
+    );
+    ui.add_space(6.0);
+    ui.label(egui::RichText::new("Description").strong());
+    let field = ui.add_enabled(editable, egui::TextEdit::singleline(description).hint_text("such as via the lift").desired_width(240.0)).on_disabled_hover_text(RESET_FIRST);
+    if field.lost_focus() && description.trim() != view.description.as_deref().unwrap_or_default() {
+        asked = Some(ConnectionAsk::Describe(description.trim().to_string()));
+    }
+    ui.add_space(8.0);
+    let remove = ui.add_enabled(editable, egui::Button::new("Remove")).on_hover_text("Remove this connection. Delete does the same").on_disabled_hover_text(RESET_FIRST);
+    if remove.clicked() {
+        asked = Some(ConnectionAsk::Remove);
+    }
+    asked
+}
+
+/// The selected instance's building actions, with no run in progress.
+fn instance_actions(ui: &mut egui::Ui, editable: bool) -> Option<InstanceAsk> {
+    if !editable {
+        return None;
+    }
+    let mut asked = None;
+    ui.horizontal(|row| {
+        if row.button("Make a class from this…").on_hover_text("A class derived from its class, with the values set on it, which it then follows").clicked() {
+            asked = Some(InstanceAsk::MakeClass);
+        }
+        if row.button("Remove…").on_hover_text("Remove it and its connections. Delete does the same").clicked() {
+            asked = Some(InstanceAsk::Remove);
+        }
+    });
+    asked
+}
+
+/// Removes a class of the model's own, first naming what depends on it if anything does.
+fn remove_class_asking(ui: &mut Ui, name: String) {
+    let dependents = ui.workspace.class_dependents(&name);
+    if dependents.is_empty() {
+        build(ui, Building::RemoveClass { name }, false);
+    } else {
+        ui.confirm_removal = Some(Removal::Class { name, classes: dependents.classes, instances: dependents.instances });
+    }
+}
+
+/// Removes what is selected, as Delete does: a connection at once, or an instance, first naming
+/// the connections going with it.
+fn delete_selected(ui: &mut Ui) {
+    match ui.view.deletion() {
+        Some(Deletion::Connection { from, to }) => build(ui, Building::Disconnect { from, to }, false),
+        Some(deletion @ Deletion::Instance { .. }) if deletion.asks_first() => {
+            if let Deletion::Instance { name, connections } = deletion {
+                ui.confirm_removal = Some(Removal::Instance { name, connections });
+            }
+        }
+        Some(Deletion::Instance { name, .. }) => build(ui, Building::RemoveInstance { name }, false),
+        Some(Deletion::Instances { names, connections }) if !connections.is_empty() => {
+            ui.confirm_removal = Some(Removal::Instances { names, connections });
+        }
+        Some(Deletion::Instances { names, .. }) => build(ui, Building::RemoveInstances { names }, false),
+        None => {}
+    }
+}
+
+/// Asks for a name while its dialog is open. Returns what it is for and the name once confirmed.
+fn ask_name(ctx: &egui::Context, ui: &mut Ui) -> Option<(AskFor, String)> {
+    let asking = ui.asking.as_mut()?;
+    let mut answer = None;
+    let modal = egui::Modal::new(egui::Id::new("ask a name")).show(ctx, |modal| {
+        modal.set_max_width(420.0);
+        modal.heading(asking.for_what.heading());
+        modal.label(asking.for_what.explanation());
+        let field = modal.add(egui::TextEdit::singleline(&mut asking.typed).desired_width(300.0));
+        let entered = field.lost_focus() && modal.input(|input| input.key_pressed(egui::Key::Enter));
+        if !entered && modal.memory(|memory| memory.focused().is_none()) {
+            field.request_focus();
+        }
+        let typed = asking.typed.trim().to_string();
+        modal.add_space(8.0);
+        modal.horizontal(|row| {
+            if (row.add_enabled(!typed.is_empty(), egui::Button::new("OK")).clicked() || entered) && !typed.is_empty() {
+                answer = Some(Some((asking.for_what.clone(), typed.clone())));
+            }
+            if row.button("Cancel").clicked() {
+                answer = Some(None);
+            }
+        });
+    });
+    if modal.should_close() && answer.is_none() {
+        answer = Some(None);
+    }
+    let answer = answer?;
+    ui.asking = None;
+    answer
+}
+
+/// Asks before a removal that takes more than it names, naming everything that goes. Returns the
+/// removal once confirmed.
+fn confirm_removal(ctx: &egui::Context, ui: &mut Ui) -> Option<Removal> {
+    let removal = ui.confirm_removal.clone()?;
+    let mut answer = None;
+    let modal = egui::Modal::new(egui::Id::new("confirm removal")).show(ctx, |modal| {
+        modal.set_max_width(420.0);
+        match &removal {
+            Removal::Instance { name, connections } => {
+                modal.heading(format!("Remove {name}?"));
+                modal.label(if connections.len() == 1 { "Its connection goes with it:".to_string() } else { format!("Its {} connections go with it:", connections.len()) });
+                for (from, to) in connections {
+                    modal.label(format!("•  {from} to {to}"));
+                }
+            }
+            Removal::Instances { names, connections } => {
+                modal.heading(format!("Remove these {} objects?", names.len()));
+                modal.label(names.join(", "));
+                modal.label(if connections.len() == 1 { "Their connection goes with them:".to_string() } else { format!("Their {} connections go with them:", connections.len()) });
+                for (from, to) in connections {
+                    modal.label(format!("•  {from} to {to}"));
+                }
+            }
+            Removal::Class { name, classes, instances } => {
+                modal.heading(format!("Remove the class {name}?"));
+                if !classes.is_empty() {
+                    modal.label(format!("The class{} deriving from it go{} with it:", if classes.len() == 1 { "" } else { "es" }, if classes.len() == 1 { "es" } else { "" }));
+                    for class in classes {
+                        modal.label(format!("•  {class}"));
+                    }
+                }
+                if !instances.is_empty() {
+                    modal.label(format!("So do these instance{}, with their connections:", plural(instances.len())));
+                    for instance in instances {
+                        modal.label(format!("•  {instance}"));
+                    }
+                }
+            }
+        }
+        modal.add_space(8.0);
+        if let Some(chosen) = answers(modal, &["Remove", "Cancel"]) {
+            answer = Some(chosen == 0);
+        }
+    });
+    if modal.should_close() && answer.is_none() {
+        answer = Some(false);
+    }
+    let answer = answer?;
+    ui.confirm_removal = None;
+    answer.then_some(removal)
+}
+
 /// Makes a building change. While an agent holds the file, or when it changed outside crabsim, it
 /// asks whether to make it anyway, and any other refusal says why in the banner.
 fn build(ui: &mut Ui, building: Building, take_over: bool) {
     match building.apply(&mut ui.workspace, take_over) {
         // The window picks up the saved file next frame and draws the model again.
-        Ok(select) => ui.select_name = select,
+        Ok(select) => {
+            ui.select_name = select;
+            // A class renamed or added stays, or becomes, the one shown.
+            let shown = match &building {
+                Building::RenameClass { to, .. } | Building::DuplicateClass { to, .. } => Some(to.clone()),
+                Building::DeriveClass { name, .. } => Some(name.clone()),
+                _ => None,
+            };
+            if let Some(class) = shown {
+                ui.class_selected = Some((class, Err(String::new())));
+                ui.view.select(None);
+            }
+        }
         Err(refusal @ (Refusal::NotEditor(_) | Refusal::ChangedOutside(_))) => ui.confirm_building = Some((building, refusal)),
-        Err(refusal) => ui.view.show_error(format!("{} didn't happen: {refusal}", building.what())),
+        // Shown at the end of the frame, after whatever else this frame clears the banner for.
+        Err(refusal) => ui.build_error = Some(format!("{} didn't happen: {refusal}", building.what())),
     }
 }
 
@@ -1554,14 +2309,9 @@ fn confirm_building(ctx: &egui::Context, building: &Building, refused: &Refusal)
             "Changing it anyway makes this one change, and the agent keeps its right."
         });
         modal.add_space(8.0);
-        modal.horizontal(|row| {
-            if row.button(if outside { "Adopt and change" } else { "Change anyway" }).clicked() {
-                answer = Some(true);
-            }
-            if row.button("Leave it").clicked() {
-                answer = Some(false);
-            }
-        });
+        if let Some(chosen) = answers(modal, &[if outside { "Adopt and change" } else { "Change anyway" }, "Leave it"]) {
+            answer = Some(chosen == 0);
+        }
     });
     if modal.should_close() && answer.is_none() {
         answer = Some(false);
@@ -1877,14 +2627,9 @@ fn confirm_going_back(ctx: &egui::Context, ui: &mut Ui) -> Option<Request> {
             modal.label(format!("•  {}  {}", format_time_exact(mark.at), ui.view.describe(mark)));
         }
         modal.add_space(8.0);
-        modal.horizontal(|row| {
-            if row.button(button).clicked() {
-                answer = Some(true);
-            }
-            if row.button("Cancel").clicked() {
-                answer = Some(false);
-            }
-        });
+        if let Some(chosen) = answers(modal, &[button, "Cancel"]) {
+            answer = Some(chosen == 0);
+        }
     });
     if modal.should_close() && answer.is_none() {
         answer = Some(false);
@@ -1912,17 +2657,12 @@ fn confirm_long_trip(ctx: &egui::Context, ui: &mut Ui) -> Option<Request> {
             wall_time_roughly(wall)
         ));
         modal.add_space(8.0);
-        modal.horizontal(|row| {
-            if row.button("Race there").on_hover_text("Go there as fast as it can, without drawing the way").clicked() {
-                answer = Some(Some(Request::RaceTo(to)));
-            }
-            if row.button("Animate anyway").on_hover_text("Go there at the chosen speed, drawing everything").clicked() {
-                answer = Some(Some(Request::GoTo(to)));
-            }
-            if row.button("Cancel").clicked() {
-                answer = Some(None);
-            }
-        });
+        match answers(modal, &["Race there", "Animate anyway", "Cancel"]) {
+            Some(0) => answer = Some(Some(Request::RaceTo(to))),
+            Some(1) => answer = Some(Some(Request::GoTo(to))),
+            Some(_) => answer = Some(None),
+            None => {}
+        }
     });
     if modal.should_close() && answer.is_none() {
         answer = Some(None);
@@ -1951,7 +2691,7 @@ fn control_hint(control: Control) -> &'static str {
 /// The name and state of the object under the pointer on the canvas, beside the pointer.
 fn hover_tooltip(ctx: &egui::Context, ui: &Ui, canvas: egui::Rect) {
     let (Some(pointer), Some(camera)) = (ctx.pointer_hover_pos(), ui.camera) else { return };
-    if !canvas.contains(pointer) || ctx.is_pointer_over_egui() || ui.moving.is_some_and(|moving| moving.dragged) {
+    if !canvas.contains(pointer) || ctx.is_pointer_over_egui() || ui.moving.as_ref().is_some_and(|moving| moving.dragged) {
         return;
     }
     let size = Point { x: canvas.width() as f64, y: canvas.height() as f64 };
@@ -2182,19 +2922,53 @@ fn confirm_moving(ctx: &egui::Context, name: &str, refused: &Refusal) -> Option<
             "Moving it anyway makes this one change, and the agent keeps its right."
         });
         modal.add_space(8.0);
-        modal.horizontal(|row| {
-            if row.button(if outside { "Adopt and move" } else { "Move anyway" }).clicked() {
-                answer = Some(true);
-            }
-            if row.button("Put it back").clicked() {
-                answer = Some(false);
-            }
-        });
+        if let Some(chosen) = answers(modal, &[if outside { "Adopt and move" } else { "Move anyway" }, "Put it back"]) {
+            answer = Some(chosen == 0);
+        }
     });
     if modal.should_close() && answer.is_none() {
         answer = Some(false);
     }
     answer
+}
+
+/// A dialog's answers as a row of buttons, the one marked drawn selected: the first to start
+/// with, so Enter confirms. The arrow keys move the mark and Enter presses it, as does a click.
+/// Escape closes the dialog as cancelled, as egui's modals do. Returns the answer pressed, by
+/// place.
+fn answers(modal: &mut egui::Ui, labels: &[&str]) -> Option<usize> {
+    let id = modal.id().with("marked answer");
+    let mut marked = modal.data(|data| data.get_temp::<usize>(id)).unwrap_or(0).min(labels.len() - 1);
+    let (back, on, enter) = modal.input(|input| {
+        (
+            input.key_pressed(egui::Key::ArrowLeft) || input.key_pressed(egui::Key::ArrowUp),
+            input.key_pressed(egui::Key::ArrowRight) || input.key_pressed(egui::Key::ArrowDown),
+            input.key_pressed(egui::Key::Enter),
+        )
+    });
+    if back {
+        marked = marked.saturating_sub(1);
+    }
+    if on {
+        marked = (marked + 1).min(labels.len() - 1);
+    }
+    let mut chosen = None;
+    modal.horizontal(|row| {
+        for (place, label) in labels.iter().enumerate() {
+            if row.add(egui::Button::new(*label).selected(place == marked)).clicked() {
+                chosen = Some(place);
+            }
+        }
+    });
+    if enter && chosen.is_none() {
+        chosen = Some(marked);
+    }
+    if chosen.is_some() {
+        modal.data_mut(|data| data.remove::<usize>(id));
+    } else {
+        modal.data_mut(|data| data.insert_temp(id, marked));
+    }
+    chosen
 }
 
 /// Asks before taking the right to change the model from the agent that holds it. `Some(true)`
@@ -2207,14 +2981,9 @@ fn confirm_taking(ctx: &egui::Context, claim: &Claim) -> Option<bool> {
         modal.label(format!("{} ({}) is working on it, with the goal \"{}\": {}.", claim.agent, claim.client, claim.goal, claim.doing));
         modal.label("Its claim is paused while you hold the model, and comes back to it when you release it. If you change the model, it reads it again before its next change.");
         modal.add_space(8.0);
-        modal.horizontal(|row| {
-            if row.button("Take it").clicked() {
-                answer = Some(true);
-            }
-            if row.button("Cancel").clicked() {
-                answer = Some(false);
-            }
-        });
+        if let Some(chosen) = answers(modal, &["Take it", "Cancel"]) {
+            answer = Some(chosen == 0);
+        }
     });
     if modal.should_close() && answer.is_none() {
         answer = Some(false);
@@ -2579,6 +3348,19 @@ fn attributes_section(
         let waiting = !form.matches(view.value.as_ref());
         if waiting {
             match form.value() {
+                // Failures at 100 %: none, so whatever was set here comes off.
+                Ok(serde_json::Value::Null) if view.from == ValueFrom::Instance => {
+                    let apply = ui.small_button("Apply").on_hover_text("Takes its own failures off, so it never fails");
+                    if commit || apply.clicked() {
+                        asked = Some((AttributeChange::Restore(view.attribute.clone()), false));
+                    }
+                }
+                Ok(serde_json::Value::Null) => {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(240, 120, 120),
+                        "Its class gives it failures, and a model file can't take them off one instance. Change the class, or give this one its own class.",
+                    );
+                }
                 Ok(value) => {
                     let apply = ui.small_button("Apply").on_hover_text("Saves it to the model file, cutting its inheritance");
                     if commit || apply.clicked() {

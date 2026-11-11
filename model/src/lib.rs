@@ -66,12 +66,14 @@ impl Connection {
     }
 }
 
-/// A class of the user's own, derived from a built-in class or another derived class.
+/// A class of the user's own, derived from a built-in class or another derived class, or this
+/// model's own values for a built-in class, which takes its name and has no parent.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Class {
-    /// Unique among classes, and not a built-in class's name.
+    /// Unique among classes. A built-in class's name makes it that built-in's refinement.
     pub name: String,
-    /// The class it derives from, built-in or derived.
+    /// The class it derives from, built-in or derived. A refinement's is its own name, as the
+    /// built-in class it refines, and isn't written to the file.
     pub parent: String,
     /// Only the values this class changes from its parent.
     pub attributes: Attributes,
@@ -80,6 +82,17 @@ pub struct Class {
 impl Class {
     pub fn new(name: impl Into<String>, parent: impl Into<String>) -> Class {
         Class { name: name.into(), parent: parent.into(), attributes: Attributes::default() }
+    }
+
+    /// This model's own values for the built-in class `built_in`, with none set yet.
+    pub fn refining(built_in: &str) -> Class {
+        Class::new(built_in, built_in)
+    }
+
+    /// Whether this is this model's own values for a built-in class, rather than a class derived
+    /// from one.
+    pub fn refines_built_in(&self) -> bool {
+        BUILT_IN_CLASSES.contains(&self.name.as_str())
     }
 }
 
@@ -466,13 +479,15 @@ impl Model {
     }
 
     /// The derived classes from `class` up to its built-in class, nearest first, and that built-in
-    /// class. `None` if the chain reaches an unknown class or goes round in a circle.
+    /// class. The model's refinement of the built-in class, if it has one, is the last class in the
+    /// chain. `None` if the chain reaches an unknown class or goes round in a circle.
     pub fn chain(&self, class: &str) -> Option<(Vec<&Class>, &'static str)> {
         let mut chain = Vec::new();
         let mut seen = HashSet::new();
         let mut at = class;
         loop {
             if let Some(built_in) = BUILT_IN_CLASSES.iter().find(|&&built_in| built_in == at) {
+                chain.extend(self.class(built_in));
                 return Some((chain, built_in));
             }
             if !seen.insert(at) {

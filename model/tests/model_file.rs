@@ -672,8 +672,7 @@ fn class_problems_are_reported_with_the_class() {
             "/classes/0/parent: the classes derive from each other in a circle: Loop A \u{2192} Loop B \u{2192} Loop A",
             "/classes/1/parent: the classes derive from each other in a circle: Loop B \u{2192} Loop A \u{2192} Loop B",
             "/classes/2/parent: unknown class `Nothing`: its attributes weren't checked",
-            "/classes/3/name: `Station` is a built-in class",
-            "/classes/3/parent: a class can't derive from itself",
+            "/classes/3/parent: a class named `Station` is this model's own values for the built-in class, so it has no parent",
             "/classes/4/attributes/process_time: a Drain has no attribute `process_time`",
             "/classes/5/name: class 4 already has this name",
             "/classes/6/attributes/failures/availability: an availability must be above 0 and below 1, not 1.5: leave out `failures` for one that never fails",
@@ -682,6 +681,44 @@ fn class_problems_are_reported_with_the_class() {
         ]
     );
     assert_eq!(problems(&text)[0].name.as_deref(), Some("Loop A"));
+}
+
+#[test]
+fn a_class_named_like_a_built_in_is_the_models_own_values_for_it() {
+    let text = with_classes(
+        json!([
+            { "name": "Station", "attributes": { "process_time": "10", "description": "ours" } },
+            { "name": "Mill", "parent": "Station", "attributes": { "process_time": "45" } },
+            { "name": "Station", "attributes": { "starting_mus": 1 } },
+        ]),
+        json!([{ "name": "M", "class": "Mill" }, { "name": "S", "class": "Station" }]),
+    );
+    assert_eq!(found(&text), vec!["/classes/2/name: class 0 already has this name"]);
+    let text = with_classes(
+        json!([
+            { "name": "Station", "attributes": { "process_time": "10", "description": "ours" } },
+            { "name": "Mill", "parent": "Station", "attributes": { "process_time": "45" } },
+        ]),
+        json!([{ "name": "M", "class": "Mill" }, { "name": "S", "class": "Station" }]),
+    );
+    let model = load(&text).unwrap();
+    // An instance of the built-in class, and one of a class derived from it, both inherit it.
+    let station = model.resolve(1).unwrap();
+    assert_eq!(station.attributes.process_time, Some(secs(10)));
+    assert_eq!(station.origin(Attribute::ProcessTime), &Origin::Class("Station".to_string()));
+    let mill = model.resolve(0).unwrap();
+    assert_eq!(mill.attributes.process_time, Some(secs(45)));
+    assert_eq!(mill.attributes.description.as_deref(), Some("ours"));
+    assert_eq!(mill.origin(Attribute::Description), &Origin::Class("Station".to_string()));
+    assert_eq!(model.chain("Mill").map(|(chain, built_in)| (chain.len(), built_in)), Some((2, "Station")));
+    // Saved without a parent, and read back the same.
+    let saved = model.save();
+    assert!(saved.contains("\"name\": \"Station\",
+      \"attributes\""), "{saved}");
+    assert_eq!(load(&saved).unwrap(), model);
+    // Its attributes are checked against the built-in class it refines.
+    let wrong = with_classes(json!([{ "name": "Drain", "attributes": { "process_time": "10" } }]), json!([]));
+    assert_eq!(found(&wrong), vec!["/classes/0/attributes/process_time: a Drain has no attribute `process_time`"]);
 }
 
 #[test]

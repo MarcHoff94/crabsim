@@ -189,6 +189,9 @@ pub fn wall_time_roughly(wall: Duration) -> String {
     format!("about {count} {unit}{}", if count == 1 { "" } else { "s" })
 }
 
+/// How far past an object's outgoing side its connect handle sits, in metres.
+pub const HANDLE_GAP: f64 = 0.3;
+
 /// Space between objects placed by the fallback, for objects the model hasn't placed.
 const FALLBACK_SPACING: f64 = 3.0;
 
@@ -207,7 +210,8 @@ pub struct ViewState {
     animate: bool,
     /// Wall time and shown time while advancing, oldest first, over the last `ACHIEVED_WINDOW`.
     pace: VecDeque<(Duration, SimTime)>,
-    selected: Option<u32>,
+    /// The objects selected, in the order they were. One alone is the object the inspector shows.
+    selection: Vec<u32>,
     /// The connection selected, from and to, instead of an object.
     selected_connection: Option<(u32, u32)>,
     /// Whether the Results tab is open, which wants full states as a selection does.
@@ -240,12 +244,14 @@ pub enum Deletion {
     Connection { from: String, to: String },
     /// An instance, and its connections with it, as (from, to).
     Instance { name: String, connections: Vec<(String, String)> },
+    /// Several instances, in model order, and every connection to or from any of them.
+    Instances { names: Vec<String>, connections: Vec<(String, String)> },
 }
 
 impl Deletion {
     /// Whether the window asks before removing: when an instance's connections go with it.
     pub fn asks_first(&self) -> bool {
-        matches!(self, Deletion::Instance { connections, .. } if !connections.is_empty())
+        matches!(self, Deletion::Instance { connections, .. } | Deletion::Instances { connections, .. } if !connections.is_empty())
     }
 }
 
@@ -529,7 +535,7 @@ impl ViewState {
             speed: DEFAULT_SPEED,
             time_mode: TimeMode::Continuous,
             pace: VecDeque::new(),
-            selected: None,
+            selection: Vec::new(),
             selected_connection: None,
             details: None,
             details_stale: false,
@@ -936,15 +942,63 @@ impl ViewState {
 
     /// Selects the object, or nothing, which unselects any connection too.
     pub fn select(&mut self, id: Option<u32>) {
-        self.selected = id.filter(|&id| (id as usize) < self.objects.len());
+        self.selection = id.filter(|&id| (id as usize) < self.objects.len()).into_iter().collect();
         self.selected_connection = None;
+    }
+
+    /// Adds the object to the selection, or takes it away if it's there, as Ctrl+click does.
+    pub fn toggle(&mut self, id: u32) {
+        if (id as usize) >= self.objects.len() {
+            return;
+        }
+        match self.selection.iter().position(|&selected| selected == id) {
+            Some(place) => {
+                self.selection.remove(place);
+            }
+            None => self.selection.push(id),
+        }
+        self.selected_connection = None;
+    }
+
+    /// Selects every object whose centre lies in the rectangle between two corners, as dragging
+    /// one on the canvas does, in model order.
+    pub fn select_within(&mut self, corner: Point, opposite: Point) {
+        let (low_x, high_x) = (corner.x.min(opposite.x), corner.x.max(opposite.x));
+        let (low_y, high_y) = (corner.y.min(opposite.y), corner.y.max(opposite.y));
+        self.selection = self
+            .objects
+            .iter()
+            .filter(|object| (low_x..=high_x).contains(&object.centre.x) && (low_y..=high_y).contains(&object.centre.y))
+            .map(|object| object.id)
+            .collect();
+        self.selected_connection = None;
+    }
+
+    /// Every object selected.
+    pub fn selection(&self) -> &[u32] {
+        &self.selection
+    }
+
+    /// The object after `from` in model order, or before it `backwards`, going round, as Tab
+    /// and Shift+Tab step through them. From nothing, the first, or the last.
+    pub fn next_object(&self, from: Option<u32>, backwards: bool) -> Option<u32> {
+        let count = self.objects.len() as u32;
+        if count == 0 {
+            return None;
+        }
+        Some(match (from.filter(|&id| id < count), backwards) {
+            (None, false) => 0,
+            (None, true) => count - 1,
+            (Some(id), false) => (id + 1) % count,
+            (Some(id), true) => (id + count - 1) % count,
+        })
     }
 
     /// Selects the connection from and to these objects, or nothing, which unselects any object
     /// too. One the model hasn't selects nothing.
     pub fn select_connection(&mut self, connection: Option<(u32, u32)>) {
         self.selected_connection = connection.filter(|&(from, to)| self.connections.iter().any(|c| c.from == from && c.to == to));
-        self.selected = None;
+        self.selection.clear();
     }
 
     pub fn selected_connection(&self) -> Option<(u32, u32)> {
@@ -961,6 +1015,31 @@ impl ViewState {
             .filter(|(distance, _)| *distance <= within)
             .min_by(|a, b| a.0.total_cmp(&b.0))
             .map(|(_, connection)| (connection.from, connection.to))
+    }
+
+    /// Where the object's connect handle is: just past the middle of its outgoing side, the side
+    /// its own x axis points to. Dragging from it to another object connects the two. `None` for
+    /// a Drain, which passes no MU on, and while a run is in progress.
+    pub fn handle_of(&self, id: u32) -> Option<Point> {
+        let object = self.objects.get(id as usize).filter(|object| object.kind != ObjectKind::Drain)?;
+        if !self.allows_building() {
+            return None;
+        }
+        Some(object.from_local(Point { x: object.length / 2.0 + HANDLE_GAP, y: 0.0 }))
+    }
+
+    /// The object whose connect handle is within `within` metres of `floor`, the nearest if more
+    /// are. The window gives `within` from the zoom, as for `connection_at`.
+    pub fn handle_at(&self, floor: Point, within: f64) -> Option<u32> {
+        self.objects
+            .iter()
+            .filter_map(|object| {
+                let handle = self.handle_of(object.id)?;
+                let distance = ((handle.x - floor.x).powi(2) + (handle.y - floor.y).powi(2)).sqrt();
+                (distance <= within).then_some((distance, object.id))
+            })
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .map(|(_, id)| id)
     }
 
     /// Whether the model can be built on now: only with no run in progress, before Init or after
@@ -981,14 +1060,25 @@ impl ViewState {
         if let Some((from, to)) = self.selected_connection {
             return Some(Deletion::Connection { from: name(from), to: name(to) });
         }
-        let id = self.selected?;
-        let connections =
-            self.connections.iter().filter(|c| c.from == id || c.to == id).map(|c| (name(c.from), name(c.to))).collect();
-        Some(Deletion::Instance { name: name(id), connections })
+        let touching = |c: &&Connection| self.selection.contains(&c.from) || self.selection.contains(&c.to);
+        let connections: Vec<(String, String)> = self.connections.iter().filter(touching).map(|c| (name(c.from), name(c.to))).collect();
+        match self.selection.as_slice() {
+            [] => None,
+            [id] => Some(Deletion::Instance { name: name(*id), connections }),
+            several => {
+                let mut ids = several.to_vec();
+                ids.sort_unstable();
+                Some(Deletion::Instances { names: ids.into_iter().map(name).collect(), connections })
+            }
+        }
     }
 
+    /// The object selected, when exactly one is.
     pub fn selected(&self) -> Option<u32> {
-        self.selected
+        match self.selection.as_slice() {
+            [id] => Some(*id),
+            _ => None,
+        }
     }
 
     /// What hovering over an object on the canvas says: its name and the state it shows, such as
@@ -1000,7 +1090,7 @@ impl ViewState {
 
     /// What the inspector says about the selected object.
     pub fn inspection(&self) -> Option<Inspection> {
-        let id = self.selected?;
+        let id = self.selected()?;
         let object = &self.objects[id as usize];
         let pictured = self.picture.object(id);
         let state = match pictured {
@@ -1067,7 +1157,7 @@ impl ViewState {
     pub fn wants_state(&self, wall: Duration) -> bool {
         let out_of_date = self.details_stale
             || self.details.as_ref().is_none_or(|state| state.time != self.picture.shown() || !state.initialised);
-        (self.selected.is_some() || self.results_open)
+        (self.selected().is_some() || self.results_open)
             && self.initialised
             && out_of_date
             && self.last_request.is_none_or(|last| wall >= last + DETAILS_INTERVAL)

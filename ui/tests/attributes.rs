@@ -296,14 +296,9 @@ fn failures_go_round_from_a_value_to_fields_and_back() {
     form.set_repair(RepairKind::Constant);
     assert_eq!(form.value(), Ok(json!({ "availability": 0.9, "repair_time": { "constant": "00:01:00" } })), "what was typed stays");
     typed(&mut form, &["100"]);
-    assert!(form.value().unwrap_err().contains("below 100"));
-}
-
-#[test]
-fn failures_not_set_start_from_a_typical_profile() {
-    let form = Form::new("failures", None);
-    assert_eq!(form.repair, Some(RepairKind::Erlang));
-    assert_eq!(form.value(), Ok(json!({ "availability": 0.95, "repair_time": { "erlang": { "mean": "00:01:00", "k": 2 } } })));
+    assert_eq!(form.value(), Ok(Value::Null), "100 % is never failing, which leaves failures out");
+    typed(&mut form, &["101"]);
+    assert!(form.value().unwrap_err().contains("100 for one that never fails"));
 }
 
 #[test]
@@ -329,4 +324,17 @@ fn a_value_reads_as_one_short_line_for_a_class_shown_in_the_inspector() {
     assert_eq!(summary(&json!({ "availability": 0.9, "repair_time": { "uniform": { "min": "0:10", "max": "0:20" } } })), "90 % available, repair 0:10 to 0:20");
     assert_eq!(summary(&json!({ "availability": 0.9, "repair_time": { "normal": { "mean": "1:00", "std": "0:10" } } })), "90 % available, repair mean 1:00 (normal, sd 0:10)");
     assert_eq!(summary(&json!({ "blocked": "waits for the crane", "failed": "spindle" })), "notes on blocked, failed");
+}
+
+#[test]
+fn unset_failures_start_at_100_percent_with_a_constant_repair_which_means_never_fails() {
+    let mut form = Form::new("failures", None);
+    assert_eq!(form.repair, Some(RepairKind::Constant));
+    assert_eq!(form.parts[0].text, "100");
+    assert_eq!(form.value(), Ok(Value::Null), "100 % available is no failures at all");
+    assert!(form.matches(None), "untouched, it waits for nothing");
+    form.parts[0].text = "90".into();
+    assert_eq!(form.value(), Ok(json!({ "availability": 0.9, "repair_time": { "constant": "00:01:00" } })));
+    form.parts[0].text = "0".into();
+    assert!(form.value().is_err());
 }

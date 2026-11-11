@@ -2,7 +2,7 @@
 //! stopping at the first. What can't be read is left at its default, and noted in `Broken`, so the
 //! checks that follow don't report it a second time.
 
-use crate::{Attributes, Class, Connection, Failures, Instance, Model, Problem, RepairTime, State, StateNotes, FORMAT_VERSION, escape};
+use crate::{Attributes, BUILT_IN_CLASSES, Class, Connection, Failures, Instance, Model, Problem, RepairTime, State, StateNotes, FORMAT_VERSION, escape};
 use crabsim::time::parse_time;
 use crabsim::{Dimensions, Position, SimTime};
 use serde_json::{Map, Value};
@@ -254,11 +254,20 @@ impl Reader {
         };
         for (key, broken) in [("name", &mut self.broken.class_names), ("parent", &mut self.broken.class_parents)] {
             let (at, message) = match fields.get(key).map(|value| value.as_str()) {
+                Some(Some(_)) if key == "parent" && class.refines_built_in() => {
+                    class.parent = class.name.clone();
+                    (format!("{pointer}/parent"), refinement_with_parent(&class.name))
+                }
                 Some(Some(text)) => {
                     if key == "name" { class.name = text.to_owned() } else { class.parent = text.to_owned() }
                     continue;
                 }
                 Some(None) => (format!("{pointer}/{key}"), format!("`{key}` should be text")),
+                // A class named like a built-in is the model's own values for it, with no parent.
+                None if key == "parent" && BUILT_IN_CLASSES.contains(&class.name.as_str()) => {
+                    class.parent = class.name.clone();
+                    continue;
+                }
                 None => (pointer.clone(), format!("`{key}` is missing")),
             };
             broken.insert(index);
@@ -451,4 +460,9 @@ impl Reader {
             Some(value) => self.time(value, &format!("{pointer}/{key}"), name),
         }
     }
+}
+
+/// What to say about a class named like a built-in class that names a parent.
+pub(crate) fn refinement_with_parent(name: &str) -> String {
+    format!("a class named `{name}` is this model's own values for the built-in class, so it has no parent")
 }

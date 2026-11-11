@@ -138,7 +138,8 @@ impl Attributes {
         write::attributes(self)
     }
 
-    pub(crate) fn is_empty(&self) -> bool {
+    /// Whether nothing is set here.
+    pub fn is_empty(&self) -> bool {
         *self == Attributes::default()
     }
 

@@ -180,6 +180,7 @@ fn main() {
             search: (Vec::new(), 0),
             steps_pending: (0, 0),
             keys_help: false,
+            cursor: None,
         })
         .insert_resource(Session(Mutex::new(session)))
         .insert_resource(WatchedFile(Arc::new(Mutex::new(Vec::new()))))
@@ -339,6 +340,8 @@ struct Ui {
     steps_pending: (u32, u32),
     /// Whether the panel listing every key is open.
     keys_help: bool,
+    /// The object the last key move landed on: in visual mode moves go from it.
+    cursor: Option<u32>,
 }
 
 /// What the Paths tab's weights and strategies were worked out for: the model, by generation, the
@@ -1068,6 +1071,13 @@ fn draw_connections(mut gizmos: Gizmos, ui: Res<Ui>) {
         && let Some(connection) = ui.view.connections().iter().find(|connection| connection.from == from && connection.to == to)
     {
         gizmos.arrow(at(connection.start, 0.1), at(connection.end, 0.1), SELECTION).with_tip_length(0.5);
+    }
+    // The visual selection's cursor, where the next move starts.
+    if ui.keys.visual()
+        && let Some(object) = ui.cursor.and_then(|id| ui.view.objects().get(id as usize))
+    {
+        let outline = object.outline(0.3);
+        gizmos.linestrip(outline.iter().chain(outline.first()).map(|&point| Vec3::new(point.x as f32, point.y as f32, 0.25)), HANDLE_COLOUR);
     }
     // What a search found.
     for &id in &ui.search.0 {
@@ -3138,7 +3148,9 @@ fn results_tab(ui: &mut egui::Ui, results: Option<(&str, &crabsim_ui::view::Resu
     };
     let mut chosen = None;
     let pick = |ui: &mut egui::Ui, id: u32, name: &str, chosen: &mut Option<u32>| {
-        if ui.link(name).on_hover_text("Select it on the canvas").clicked() {
+        let link = ui.link(name).on_hover_text("Select it on the canvas");
+        focus_if_wanted(ui, &link, "tab");
+        if link.clicked() {
             *chosen = Some(id);
         }
     };
@@ -3316,14 +3328,18 @@ fn agents_tab(ui: &mut egui::Ui, opened: Option<&str>, editors: Option<&Result<E
             ui.label(egui::RichText::new(path).strong());
             if let Some(since) = &file.user_since {
                 ui.label(format!("You hold it, since {since}."));
-                if ui.button("Release").on_hover_text("Let go of it, giving a paused claim back to its agent").clicked() {
+                let release = ui.button("Release").on_hover_text("Let go of it, giving a paused claim back to its agent");
+                focus_if_wanted(ui, &release, "tab");
+                if release.clicked() {
                     asked = Some(EditAction::Release);
                 }
             }
             match &file.claim {
                 None if file.user_since.is_none() => {
                     ui.label("Nobody holds it.");
-                    if ui.button("Take").on_hover_text("Hold this model until you release it or close the window").clicked() {
+                    let take = ui.button("Take").on_hover_text("Hold this model until you release it or close the window");
+                    focus_if_wanted(ui, &take, "tab");
+                    if take.clicked() {
                         asked = Some(EditAction::Take);
                     }
                 }
@@ -3335,7 +3351,9 @@ fn agents_tab(ui: &mut egui::Ui, opened: Option<&str>, editors: Option<&Result<E
                         if !claim.paused && row.button("Take").on_hover_text("Take it now. The agent's claim is paused until you release it").clicked() {
                             asked = Some(EditAction::Take);
                         }
-                        if row.button("Revoke").on_hover_text("End the agent's claim").clicked() {
+                        let revoke = row.button("Revoke").on_hover_text("End the agent's claim");
+                        focus_if_wanted(row, &revoke, "tab");
+                        if revoke.clicked() {
                             asked = Some(EditAction::Revoke(path.to_string()));
                         }
                         if row.button("Block").on_hover_text("Block this agent session from changing models in the folder").clicked() {
@@ -3599,6 +3617,7 @@ fn delete_what_is_selected(ui: &mut Ui) {
 /// Selects the object, or adds it to the selection while selecting visually, and moves the view
 /// to it when it is out of sight.
 fn select_and_follow(ui: &mut Ui, id: u32) {
+    ui.cursor = Some(id);
     if ui.keys.visual() {
         if !ui.view.selection().contains(&id) {
             ui.view.toggle(id);
@@ -3720,7 +3739,13 @@ fn answer_edit(ctx: &egui::Context, ui: &mut Ui, text: &str) {
 /// Carries out one key's command, giving a request for the run when it asks for one.
 fn run_key(ctx: &egui::Context, ui: &mut Ui, session: &Session, command: Command, wall: Duration) -> Option<Request> {
     ui.view.commanded(wall);
-    let from = ui.view.selected().or(ui.view.selection().last().copied());
+    // In visual mode moves go from the cursor, the object last landed on, whatever the
+    // selection holds (issue 101). Otherwise from the selection.
+    let from = if ui.keys.visual() {
+        ui.cursor.filter(|&id| (id as usize) < ui.view.objects().len()).or(ui.view.selection().last().copied())
+    } else {
+        ui.view.selected().or(ui.view.selection().last().copied())
+    };
     let count = ui.view.objects().len() as u32;
     let needs_object = |ui: &mut Ui| {
         ui.key_note = Some("Select an object first".to_string());
@@ -3786,7 +3811,16 @@ fn run_key(ctx: &egui::Context, ui: &mut Ui, session: &Session, command: Command
             ui.class_selected = None;
             ui.search.0.clear();
         }
-        Command::Visual(_) => {}
+        Command::Visual(on) => {
+            // The cursor starts on what was last selected.
+            if on {
+                ui.cursor = ui.view.selected().or(ui.view.selection().last().copied());
+            }
+        }
+        Command::TakeOut => match ui.cursor.filter(|id| ui.view.selection().contains(id)) {
+            Some(id) => ui.view.toggle(id),
+            None => ui.key_note = Some("The cursor isn't on a selected object".to_string()),
+        },
         Command::Delete => delete_what_is_selected(ui),
         Command::Pan(direction) => {
             if let Some(camera) = ui.camera.as_mut() {
@@ -3838,6 +3872,8 @@ fn run_key(ctx: &egui::Context, ui: &mut Ui, session: &Session, command: Command
         Command::Tab(place) => {
             ui.tab = [Tab::Inspector, Tab::Results, Tab::Paths, Tab::Agents][place.clamp(1, 4) - 1];
         }
+        // On another tab, Enter goes to its first control, and Tab on from there.
+        Command::Edit if ui.tab != Tab::Inspector => want_focus(ctx, "tab"),
         Command::Edit => {
             let field = if ui.view.selected_connection().is_some() {
                 Some("description".to_string())
@@ -3928,7 +3964,7 @@ fn key_line(ctx: &egui::Context, ui: &Ui, canvas: egui::Rect) {
         };
         format!("{}{text}_{what}", kind.sign())
     } else if ui.keys.visual() {
-        "-- VISUAL --   motions add what they land on, d deletes, Esc ends".to_string()
+        "-- VISUAL --   motions add what they land on, x takes one out, d deletes, Esc ends".to_string()
     } else if let Some(count) = ui.keys.count() {
         count.to_string()
     } else if let Some(note) = &ui.key_note {
@@ -3960,7 +3996,7 @@ fn keys_help(ctx: &egui::Context, ui: &mut Ui) {
                 ("> <", "a successor, a predecessor: 3> takes the third exit, and 3>2>1> chains"),
                 ("gg G", "the first, the last object"),
                 ("Tab", "the next object, Shift+Tab the one before"),
-                ("v", "select visually: motions add what they land on"),
+                ("v", "select visually: motions add what they land on, x takes the one under the cursor out"),
                 ("d", "delete what is selected, asking first"),
                 ("Esc", "unselect, or leave a field"),
             ],
@@ -3977,7 +4013,7 @@ fn keys_help(ctx: &egui::Context, ui: &mut Ui) {
                 ("gt", "go to a time"),
             ],
         ),
-        ("Panels", &[("t1 to t4", "Inspector, Results, Paths, Agents"), ("Enter", "into the selection's first field"), ("o", "open a model file")]),
+        ("Panels", &[("t1 to t4", "Inspector, Results, Paths, Agents"), ("Enter", "into the selection's first field, or the open tab's first control, then Tab on"), ("o", "open a model file")]),
         ("Find", &[("/", "search by name, then n and N for the next and previous"), ("e", "go to a value, such as proc or Station 3.proc")]),
         ("Help", &[("?", "this list")]),
     ];
@@ -4009,7 +4045,7 @@ fn paths_tab(ui: &mut egui::Ui, paths: &mut Paths, objects: &[crabsim_ui::view::
     // What routes and weights are weighed by, shared by both views.
     ui.horizontal(|row| {
         row.label("Weigh by");
-        egui::ComboBox::from_id_salt("paths weigh").selected_text(paths.weigh.label()).show_ui(row, |menu| {
+        let weigh = egui::ComboBox::from_id_salt("paths weigh").selected_text(paths.weigh.label()).show_ui(row, |menu| {
             menu.selectable_value(&mut paths.weigh, Weigh::Connections, "Connections").on_hover_text("Each connection counts one");
             menu.separator();
             for (name, label) in crabsim_ui::paths::ATTRIBUTES {
@@ -4025,6 +4061,7 @@ fn paths_tab(ui: &mut egui::Ui, paths: &mut Paths, objects: &[crabsim_ui::view::
                 .on_disabled_hover_text("A figure of the run, after Init");
             }
         });
+        focus_if_wanted(row, &weigh.response, "tab");
     });
     if matches!(paths.weigh, Weigh::Figure(_)) && !live {
         paths.weigh = Weigh::Connections;

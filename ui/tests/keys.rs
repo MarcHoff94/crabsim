@@ -136,3 +136,14 @@ fn an_address_is_an_attribute_or_an_object_and_an_attribute() {
     assert!(!attribute_matches("fail", "process_time", "Process time"));
     assert!(!attribute_matches("", "process_time", "Process time"));
 }
+
+#[test]
+fn x_takes_one_out_while_selecting_visually_and_steps_otherwise() {
+    let mut keys = Keys::default();
+    assert_eq!(typed(&mut keys, "x"), vec![Command::StepForward(1)]);
+    typed(&mut keys, "v");
+    assert_eq!(typed(&mut keys, "x"), vec![Command::TakeOut]);
+    assert_eq!(typed(&mut keys, "lx"), vec![Command::Move(Direction::Right, 1), Command::TakeOut]);
+    keys.press(Key::Escape);
+    assert_eq!(typed(&mut keys, "x"), vec![Command::StepForward(1)], "steps again once visual mode ends");
+}

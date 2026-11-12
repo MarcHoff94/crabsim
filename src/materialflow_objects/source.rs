@@ -5,7 +5,7 @@ use crate::statistics::{MachineState, StatisticsKeeper};
 use crate::time::SimTime;
 use crate::materialflow_objects::OtherObjects;
 use crate::flows::{
-	EventInterface, InterruptionState, MaterialFlow, MoveableUnit, ProcessState, StopCtrl, SuccessorContainer, retry_move_to_successor, try_to_move_to_successor,
+	EventInterface, InterruptionState, MaterialFlow, MoveableUnit, ProcessState, StopCtrl, SuccessorContainer, Distributing, retry_move_to_successor, try_to_move_to_successor,
 };
 use super::flows::BaseObject;
 
@@ -47,6 +47,8 @@ pub struct Source {
 	pub completion_time: Option<SimTime>,
 	pub succ: Vec<u32>,
 	pub succ_pointer: usize,
+	/// How it picks the successor for its MU. Set by the run, which ranks the successors.
+	pub distribution: Distributing,
 	pub state: ProcessState,
 	pub interruption: InterruptionState,
 	pub statistics: StatisticsKeeper,
@@ -64,6 +66,7 @@ impl Source {
 			completion_time: None,
 			succ,
 			succ_pointer: 0,
+			distribution: Distributing::RoundRobin,
 			state: ProcessState::Idle,
 			interruption: InterruptionState::None,
 			statistics: StatisticsKeeper::new(0),
@@ -238,6 +241,9 @@ impl MaterialFlow for Source {
 }
 
 impl SuccessorContainer for Source {
+	fn distribution_mut(&mut self) -> &mut Distributing {
+		&mut self.distribution
+	}
 	fn successors(&self) -> &[u32] {
 		&self.succ
 	}

@@ -3,7 +3,7 @@ use crate::event::{EventContext, EventTemplate, EventType, ExitTicket};
 use crate::report::{ObjectKind, ObjectState};
 use crate::statistics::{MachineState, StatisticsKeeper};
 use crate::materialflow_objects::OtherObjects;
-use super::flows::{BaseObject, ProcessState, InterruptionState, MaterialFlow, StopCtrl, SuccessorContainer, MoveableUnit, EventInterface, list_blocked, retries_for_blocked, try_to_move_to_successor};
+use super::flows::{BaseObject, ProcessState, InterruptionState, MaterialFlow, StopCtrl, SuccessorContainer, Distributing, MoveableUnit, EventInterface, list_blocked, retries_for_blocked, try_to_move_to_successor};
 
 /// A buffer that can hold up to `capacity` moveable units.
 /// It forwards units to successors when they become available.
@@ -14,6 +14,8 @@ pub struct Buffer {
     pub content: Vec<MoveableUnit>,
     pub succ: Vec<u32>,
     pub succ_pointer: usize,
+    /// How it picks the successor for its MU. Set by the run, which ranks the successors.
+    pub distribution: Distributing,
     pub blockedlist: Vec<u32>,
     pub entrancelocked: bool,
     pub exitlocked: bool,
@@ -34,6 +36,7 @@ impl Buffer {
             content: Vec::new(),
             succ,
             succ_pointer: 0,
+            distribution: Distributing::RoundRobin,
             blockedlist: Vec::new(),
             entrancelocked: false,
             exitlocked: false,
@@ -176,6 +179,9 @@ impl MaterialFlow for Buffer {
 }
 
 impl SuccessorContainer for Buffer {
+    fn distribution_mut(&mut self) -> &mut Distributing {
+        &mut self.distribution
+    }
     fn successors(&self) -> &[u32] {
         &self.succ
     }

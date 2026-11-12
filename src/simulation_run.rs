@@ -1,7 +1,8 @@
 use crate::error::{AdvanceFailure, RunError};
 use crate::event::{EventContext, EventType, ScheduledEvent};
 use crate::flows::EventInterface;
-use crate::materialflow_objects::{ModelObject, OtherObjects};
+use crate::distribution::DistributionRule;
+use crate::materialflow_objects::{Distributing, ModelObject, OtherObjects, Ranked};
 use crate::report::{Occurrence, OccurrenceKind, Recording, RunState};
 use crate::statistics::{ObjectStatistics, Periods};
 use crate::time::SimTime;
@@ -41,6 +42,9 @@ pub struct SimulationRun {
     seed: u64,
     /// Each object's stream, by id, which with the seed gives its random numbers.
     streams: Vec<u64>,
+    /// Each object's distribution strategy, by id, from which the run ranks the successors of
+    /// the weighted ones (ADR 0016).
+    rules: Vec<DistributionRule>,
     initialised: bool,
     recording: Recording,
     statistics_since: SimTime,
@@ -56,10 +60,12 @@ pub struct SimulationRun {
 impl SimulationRun {
     /// A run of these objects, whose ids must match their positions. `ModelDescription` builds
     /// them that way.
-    pub(crate) fn new(objects: Vec<ModelObject>, seed: u64, streams: Vec<u64>) -> SimulationRun {
+    pub(crate) fn new(objects: Vec<ModelObject>, seed: u64, streams: Vec<u64>, rules: Vec<DistributionRule>) -> SimulationRun {
         debug_assert_eq!(objects.len(), streams.len(), "one stream per object");
-        SimulationRun {
+        debug_assert_eq!(objects.len(), rules.len(), "one distribution strategy per object");
+        let mut run = SimulationRun {
             streams,
+            rules,
             objects,
             queue: BinaryHeap::new(),
             time: SimTime::ZERO,
@@ -74,6 +80,23 @@ impl SimulationRun {
             measuring_period: None,
             periods: None,
             context: EventContext::new(1, Recording::NOTHING),
+        };
+        run.rank_successors();
+        run
+    }
+
+    /// Ranks the successors of every weighted object again from the objects' values now, with
+    /// their turns among equals starting afresh. Done when the run is built, at Reset and when a
+    /// value changes, never per event. Costs nothing in a model of round robin only.
+    fn rank_successors(&mut self) {
+        if self.rules.iter().all(|rule| *rule == DistributionRule::RoundRobin) {
+            return;
+        }
+        let rankings = crate::distribution::rankings(&self.objects, &self.rules);
+        for (object, ranking) in self.objects.iter_mut().zip(rankings) {
+            if let (Some(ranking), Some(distribution)) = (ranking, object.distribution_mut()) {
+                *distribution = Distributing::Weighted(Ranked::new(ranking.groups));
+            }
         }
     }
 
@@ -137,6 +160,8 @@ impl SimulationRun {
         match self.objects.get_mut(id as usize) {
             Some(ModelObject::Station(station)) => {
                 station.proc_time = process_time;
+                // A weighted object may weigh it.
+                self.rank_successors();
                 Ok(())
             }
             Some(_) => Err(RunError::NotAStation(id)),
@@ -253,6 +278,7 @@ impl SimulationRun {
         self.periods = None;
         self.period_end = SimTime::MAX;
         self.context = EventContext::new(1, self.recording);
+        self.rank_successors();
     }
 
     /// Queues an event from outside the model at a given simulation time.
@@ -395,7 +421,7 @@ mod tests {
     }
 
     fn fails_at_five_seconds() -> SimulationRun {
-        let mut run = SimulationRun::new(vec![ModelObject::RecordsThenFails(RecordsThenFails::new(secs(5)))], 0, vec![0]);
+        let mut run = SimulationRun::new(vec![ModelObject::RecordsThenFails(RecordsThenFails::new(secs(5)))], 0, vec![0], vec![DistributionRule::RoundRobin]);
         run.set_recording(Recording::ALL);
         run
     }

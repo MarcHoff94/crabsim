@@ -33,7 +33,8 @@ fn valid_files() -> Vec<Value> {
                 "failures": { "availability": 0.9, "repair_time": { "erlang": { "mean": "2d 06:00:00", "k": 3 } } },
                 "starting_mus": 1,
                 "dimensions": { "length": 2.5, "width": 1, "height": 1.5, "rotation_degrees": 90 },
-                "description": "a mill" } },
+                "description": "a mill",
+                "distribution": { "weighted": { "by": "process_time", "order": "largest", "rank": "successor", "drains": ["Out"] } } } },
             { "name": "Shaky mill", "parent": "Mill", "attributes": {
                 "failures": { "availability": 0.5, "repair_time": { "uniform": { "min": "10", "max": "0:00:20.5" } } } } },
             { "name": "Odd mill", "parent": "Mill", "attributes": {
@@ -43,7 +44,8 @@ fn valid_files() -> Vec<Value> {
             { "name": "Store", "parent": "Buffer", "attributes": { "capacity": 4 } },
         ],
         "instances": [
-            { "name": "In", "class": "Source", "position": { "x": -1.5, "y": 2, "z": 0.5 }, "attributes": { "interval": "0" } },
+            { "name": "In", "class": "Source", "position": { "x": -1.5, "y": 2, "z": 0.5 }, "attributes": { "interval": "0", "distribution": { "weighted": { "by": "interval" } } } },
+            { "name": "Plain", "class": "Station", "attributes": { "distribution": "round_robin" } },
             { "name": "A", "class": "Mill" },
             { "name": "B", "class": "Shaky mill", "attributes": { "starting_mus": 0 } },
             { "name": "C", "class": "Odd mill" },
@@ -134,6 +136,10 @@ fn shape_mistakes_fail_the_schema_as_well_as_the_reader() {
         ("two starting MUs", Box::new(|file| file["classes"][0]["attributes"]["starting_mus"] = json!(2))),
         ("a length of 0", Box::new(|file| file["classes"][0]["attributes"]["dimensions"]["length"] = json!(0))),
         ("a position without y", Box::new(|file| { file["instances"][0]["position"].as_object_mut().unwrap().remove("y"); })),
+        ("an unknown distribution", Box::new(|file| file["instances"][1]["attributes"]["distribution"] = json!("random"))),
+        ("weighing by something that isn't a number", Box::new(|file| file["classes"][0]["attributes"]["distribution"]["weighted"]["by"] = json!("description"))),
+        ("a weighted distribution without `by`", Box::new(|file| file["instances"][0]["attributes"]["distribution"] = json!({ "weighted": {} }))),
+        ("an empty list of drains", Box::new(|file| file["classes"][0]["attributes"]["distribution"]["weighted"]["drains"] = json!([]))),
     ];
     for (what, change) in mistakes {
         let mut file = base();

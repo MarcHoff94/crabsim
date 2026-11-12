@@ -51,10 +51,11 @@ pub(crate) fn read_file(catalogue: &Catalogue, path: &str) -> Result<(std::path:
     Ok((file, text))
 }
 
-fn problems_of(text: &str) -> Vec<ModelProblem> {
+/// A model's problems, and its warnings when it has none.
+fn problems_and_warnings(text: &str) -> (Vec<ModelProblem>, Vec<ModelProblem>) {
     match crabsim_model::load(text) {
-        Ok(_) => Vec::new(),
-        Err(problems) => problems.iter().map(ModelProblem::from).collect(),
+        Ok(model) => (Vec::new(), model.warnings().iter().map(ModelProblem::from).collect()),
+        Err(problems) => (problems.iter().map(ModelProblem::from).collect(), Vec::new()),
     }
 }
 
@@ -83,6 +84,11 @@ pub struct ValidateModelOutput {
     pub valid: bool,
     /// Every problem, in file order, each with a JSON Pointer to where it is.
     pub problems: Vec<ModelProblem>,
+    /// For a model without problems: what can run but is probably a mistake, in file order,
+    /// each with a JSON Pointer: an instance no Source reaches, one with no route to a Drain, a
+    /// Drain list naming something that isn't a Drain, and a weighted object whose weight is
+    /// nothing on every route onward. Warnings never stop a run.
+    pub warnings: Vec<ModelProblem>,
     /// For a file: it was changed outside crabsim, or crabsim never saved it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub changed_outside: Option<bool>,
@@ -90,7 +96,7 @@ pub struct ValidateModelOutput {
 
 impl Operation for ValidateModel {
     const NAME: &'static str = "validate_model";
-    const DESCRIPTION: &'static str = "Checks a crabsim model, given as a path in the models folder or as the file's text, and returns every problem in it at once, each with a JSON Pointer to where it is, the instance or class it's about, and a message. A model with no problems can be run.";
+    const DESCRIPTION: &'static str = "Checks a crabsim model, given as a path in the models folder or as the file's text, and returns every problem in it at once, each with a JSON Pointer to where it is, the instance or class it's about, and a message. A model with no problems can be run. For one without problems it also gives warnings, in the same form: what can run but is probably a mistake, such as an instance no Source reaches, one with no route to a Drain, a weighted distribution's Drain list naming something that isn't a Drain, or a weight that is nothing on every route onward. Warnings never stop a run.";
     const EFFECT: Effect = Effect::ReadOnly;
     type Input = ValidateModelInput;
     type Output = ValidateModelOutput;
@@ -105,8 +111,8 @@ impl Operation for ValidateModel {
             (None, Some(text)) => (text, None),
             _ => return Err(OperationError::invalid_input("give either `path` or `text`, not both and not neither")),
         };
-        let problems = problems_of(&text);
-        Ok(ValidateModelOutput { valid: problems.is_empty(), problems, changed_outside })
+        let (problems, warnings) = problems_and_warnings(&text);
+        Ok(ValidateModelOutput { valid: problems.is_empty(), problems, warnings, changed_outside })
     }
 }
 

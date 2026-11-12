@@ -5,6 +5,7 @@
 //! dimensions. A run never sees them, so they can't change a result and cost a headless run
 //! nothing.
 
+use crate::distribution::{DistributionRule, Ranking};
 use crate::flows::{FailureProfile, MoveableUnit};
 use crate::materialflow_objects::{Buffer, Drain, ModelObject, SingleStation, Source};
 use crate::report::ObjectKind;
@@ -62,6 +63,8 @@ pub struct ModelDescription {
     /// Each object's stream, by id: with the run's seed, it gives the object's random numbers.
     /// Its id unless set, so a model built in code draws as it always did.
     streams: Vec<u64>,
+    /// Each object's distribution strategy, by id: round robin unless set.
+    distributions: Vec<DistributionRule>,
 }
 
 impl ModelDescription {
@@ -109,7 +112,26 @@ impl ModelDescription {
     /// Builds a run of this model, in its default state. Names, positions and dimensions stay
     /// behind: the run has no use for them.
     pub fn build(&self, seed: u64) -> SimulationRun {
-        SimulationRun::new(self.objects.clone(), seed, self.streams.clone())
+        SimulationRun::new(self.objects.clone(), seed, self.streams.clone(), self.distributions.clone())
+    }
+
+    /// Sets how the object picks the successor for its MU (ADR 0016). Round robin unless set.
+    pub fn set_distribution(&mut self, id: u32, rule: DistributionRule) {
+        *self.distributions.get_mut(id as usize).unwrap_or_else(|| panic!("object {id} is not in the model")) = rule;
+    }
+
+    /// How the object picks the successor for its MU.
+    pub fn distribution(&self, id: u32) -> &DistributionRule {
+        &self.distributions[id as usize]
+    }
+
+    /// How a weighted object ranks its successors, as a run of this model starts: `None` for one
+    /// that takes them round robin.
+    pub fn ranking(&self, id: u32) -> Option<Ranking> {
+        match self.distribution(id) {
+            DistributionRule::RoundRobin => None,
+            DistributionRule::Weighted(rule) => Some(crate::distribution::ranking(&self.objects, id, rule)),
+        }
     }
 
     /// Sets the object's stream: with the run's seed, it gives the object's random numbers, so
@@ -201,6 +223,7 @@ impl ModelDescription {
         self.objects.push(object);
         self.layout.push(Layout::default());
         self.streams.push(u64::from(id));
+        self.distributions.push(DistributionRule::RoundRobin);
         id
     }
 

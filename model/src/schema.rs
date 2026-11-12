@@ -138,6 +138,70 @@ pub struct AttributesFile {
     /// crabsim's definition of the state. Only states its built-in class can be in, each note not
     /// empty. Inherited as a whole. Visual only.
     pub state_notes: Option<StateNotesFile>,
+    /// Source, Station: which successor receives the MU it passes on (ADR 0016). Round robin by
+    /// default. Inherited as a whole.
+    pub distribution: Option<DistributionFile>,
+}
+
+/// `"round_robin"`, each successor in turn, or weighted: the best-ranked successor that can take
+/// the MU, those ranking equal taking turns.
+#[derive(JsonSchema)]
+#[serde(untagged)]
+pub enum DistributionFile {
+    RoundRobin(RoundRobinFile),
+    Weighted(WeightedFile),
+}
+
+#[derive(JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RoundRobinFile {
+    RoundRobin,
+}
+
+#[derive(JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WeightedFile {
+    pub weighted: WeightedFields,
+}
+
+#[derive(JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WeightedFields {
+    /// What each object is weighed by, resolved through inheritance. An object without it weighs
+    /// 0, such as a Drain for process_time.
+    pub by: WeighByFile,
+    /// Which totals rank first: smallest by default.
+    pub order: Option<OrderFile>,
+    /// What a successor is ranked by: `route`, its best route onward to a Drain with itself
+    /// included, by default, or `successor`, its own weight only.
+    pub rank: Option<RankFile>,
+    /// The Drains a route may end in. Left out, every Drain counts. A name that isn't a Drain is
+    /// ignored, and validate_model warns about it.
+    #[schemars(length(min = 1))]
+    pub drains: Option<Vec<String>>,
+}
+
+#[derive(JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WeighByFile {
+    ProcessTime,
+    Interval,
+    StartingMus,
+    Capacity,
+}
+
+#[derive(JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum OrderFile {
+    Smallest,
+    Largest,
+}
+
+#[derive(JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RankFile {
+    Route,
+    Successor,
 }
 
 /// A note per state, each left out if there is nothing to say.

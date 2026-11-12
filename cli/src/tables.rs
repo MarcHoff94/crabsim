@@ -515,6 +515,29 @@ pub fn answer(answer: &Value) -> String {
             let found = if rows.is_empty() { String::new() } else { table(&["Name", "Class", "Built-in class", "Values"], &rows) };
             found + &total(answer, "instances")
         }
+        "distribution" => {
+            let name = cell(&answer["name"]);
+            if answer["strategy"] == "round_robin" {
+                let successors: Vec<String> = answer["successors"].as_array().into_iter().flatten().map(|successor| cell(&successor["name"])).collect();
+                return format!("{name} takes its successors round robin, in turn: {}\n", successors.join(", "));
+            }
+            let weighted = &answer["weighted"]["weighted"];
+            let first = if weighted["order"] == "largest" { "largest" } else { "smallest" };
+            let what = if weighted["rank"] == "successor" { "its own" } else { "its best route onward to a Drain" };
+            let mut text = format!("{name} ranks its successors by {what}, {} {first} first:\n", cell(&weighted["by"]));
+            let rows: Vec<Vec<String>> = answer["successors"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|successor| {
+                    let total = if successor["total"].is_null() { "no route".to_string() } else { cell(&successor["total"]) };
+                    vec![cell(&successor["place"]), cell(&successor["name"]), cell(&successor["exit"]), total]
+                })
+                .collect();
+            text += &table(&["place", "successor", "exit", "total"], &rows);
+            text += "Those sharing a place take MUs in turn.\n";
+            text
+        }
         "class_tree" => {
             let mut text = String::new();
             for class in answer["classes"].as_array().into_iter().flatten() {
@@ -551,6 +574,25 @@ fn size(bytes: u64) -> String {
 }
 
 /// What `export_model` wrote.
+/// `validate_model`'s answer: problems, then warnings.
+pub fn validated(validated: &Value) -> String {
+    let list = |what: &str, items: &Value| {
+        let items = items.as_array().map_or(&[][..], Vec::as_slice);
+        let mut text = format!("{}\n", if items.is_empty() { format!("No {what}s") } else { format!("{}:", counted(items.len() as u64, what)) });
+        for item in items {
+            let pointer = item["pointer"].as_str().filter(|pointer| !pointer.is_empty()).unwrap_or("/");
+            let name = item["name"].as_str().map_or(String::new(), |name| format!(" \"{name}\""));
+            text += &format!("  {pointer}{name}: {}\n", cell(&item["message"]));
+        }
+        text
+    };
+    let mut text = list("problem", &validated["problems"]);
+    if validated["valid"] == true {
+        text += &list("warning", &validated["warnings"]);
+    }
+    text
+}
+
 pub fn exported(exported: &Value) -> String {
     let mut text = String::new();
     for file in exported["files"].as_array().into_iter().flatten() {

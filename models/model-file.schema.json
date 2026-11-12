@@ -114,6 +114,10 @@
         "state_notes": {
           "description": "Any object: the model's own note on what a state means for it, by state, shown beside crabsim's definition of the state. Only states its built-in class can be in, each note not empty. Inherited as a whole. Visual only.",
           "$ref": "#/$defs/StateNotesFile"
+        },
+        "distribution": {
+          "description": "Source, Station: which successor receives the MU it passes on (ADR 0016). Round robin by default. Inherited as a whole.",
+          "$ref": "#/$defs/DistributionFile"
         }
       },
       "additionalProperties": false
@@ -310,6 +314,87 @@
         }
       },
       "additionalProperties": false
+    },
+    "DistributionFile": {
+      "description": "`\"round_robin\"`, each successor in turn, or weighted: the best-ranked successor that can take the MU, those ranking equal taking turns.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/RoundRobinFile"
+        },
+        {
+          "$ref": "#/$defs/WeightedFile"
+        }
+      ]
+    },
+    "RoundRobinFile": {
+      "type": "string",
+      "enum": [
+        "round_robin"
+      ]
+    },
+    "WeightedFile": {
+      "type": "object",
+      "properties": {
+        "weighted": {
+          "$ref": "#/$defs/WeightedFields"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "weighted"
+      ]
+    },
+    "WeightedFields": {
+      "type": "object",
+      "properties": {
+        "by": {
+          "description": "What each object is weighed by, resolved through inheritance. An object without it weighs 0, such as a Drain for process_time.",
+          "$ref": "#/$defs/WeighByFile"
+        },
+        "order": {
+          "description": "Which totals rank first: smallest by default.",
+          "$ref": "#/$defs/OrderFile"
+        },
+        "rank": {
+          "description": "What a successor is ranked by: `route`, its best route onward to a Drain with itself included, by default, or `successor`, its own weight only.",
+          "$ref": "#/$defs/RankFile"
+        },
+        "drains": {
+          "description": "The Drains a route may end in. Left out, every Drain counts. A name that isn't a Drain is ignored, and validate_model warns about it.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "by"
+      ]
+    },
+    "WeighByFile": {
+      "type": "string",
+      "enum": [
+        "process_time",
+        "interval",
+        "starting_mus",
+        "capacity"
+      ]
+    },
+    "OrderFile": {
+      "type": "string",
+      "enum": [
+        "smallest",
+        "largest"
+      ]
+    },
+    "RankFile": {
+      "type": "string",
+      "enum": [
+        "route",
+        "successor"
+      ]
     },
     "InstanceFile": {
       "description": "One material-flow object.",

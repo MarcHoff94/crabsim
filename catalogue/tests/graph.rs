@@ -364,6 +364,35 @@ fn weighted(answer: &Value) -> Vec<(Vec<&str>, f64)> {
 }
 
 #[test]
+fn distribution_gives_how_an_instance_ranks_its_successors() {
+    let setup = setup("distribution");
+    setup.ok("write_model", json!({ "path": "plan.json", "text": PLAN }));
+    // Round robin by default, in exit order.
+    let answer = query(&setup, "plan.json", json!({ "kind": "distribution", "name": "In" }));
+    common::assert_fits_its_schema(&setup.catalogue, "query_model", &answer);
+    assert_eq!(answer["strategy"], "round_robin");
+    assert_eq!(names(&answer["successors"]), ["A", "B"]);
+
+    // Weighted by the heaviest route onward: B (3 s) then D (30 s) against A (10 s) then C (5 s).
+    setup.ok("edit_model", json!({ "path": "plan.json", "changes": [{
+        "change": "set_attribute", "target": { "instance": "In" }, "attribute": "distribution",
+        "value": { "weighted": { "by": "process_time", "order": "largest" } } }] }));
+    let answer = query(&setup, "plan.json", json!({ "kind": "distribution", "name": "In" }));
+    assert_eq!(answer["strategy"], "weighted");
+    assert_eq!(answer["weighted"], json!({ "weighted": { "by": "process_time", "order": "largest", "rank": "route" } }));
+    assert_eq!(
+        answer["successors"],
+        json!([{ "name": "B", "exit": 2, "place": 1, "total": 33.0 }, { "name": "A", "exit": 1, "place": 2, "total": 15.0 }])
+    );
+
+    // An unknown weight is refused by the model file's own check.
+    let refused = setup.err("edit_model", json!({ "path": "plan.json", "changes": [{
+        "change": "set_attribute", "target": { "instance": "In" }, "attribute": "distribution",
+        "value": { "weighted": { "by": "speed" } } }] }));
+    assert_eq!(refused["kind"], "invalid_model");
+}
+
+#[test]
 fn weighted_paths_come_by_their_total_the_critical_path_first_when_largest() {
     let setup = setup("paths-weighted");
     setup.folder.write("plan.json", PLAN);

@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 pub mod demo;
+pub mod distribution;
 pub mod error;
 pub mod event;
 pub mod live_session;

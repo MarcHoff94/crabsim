@@ -686,6 +686,9 @@ pub enum Query {
         /// An attribute set on the instance itself rather than inherited, such as `process_time`.
         set_on_instance: Option<String>,
     },
+    /// How an instance picks the successor for its MU: round robin, or weighted, with its
+    /// successors in the order it ranks them, each with its total.
+    Distribution { name: String },
     /// The classes from the built-in classes down, or below one class.
     ClassTree {
         /// Only this class and those derived from it.
@@ -801,6 +804,17 @@ pub enum QueryModelOutput {
         count: usize,
         truncated: bool,
     },
+    Distribution {
+        name: String,
+        /// `round_robin` or `weighted`.
+        strategy: String,
+        /// For a weighted one: the strategy as a model file writes it.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        weighted: Option<Value>,
+        /// Its successors: in exit order for round robin, which takes them in turn, and in
+        /// ranking order for weighted.
+        successors: Vec<RankedSuccessor>,
+    },
     ClassTree {
         /// Each class followed by those derived from it.
         classes: Vec<ClassNode>,
@@ -846,6 +860,21 @@ pub struct WeightedRoute {
     pub total: f64,
 }
 
+/// A successor as a distribution strategy ranks it.
+#[derive(Serialize, JsonSchema)]
+pub struct RankedSuccessor {
+    pub name: String,
+    /// Its place among the instance's exits, from 1.
+    pub exit: usize,
+    /// Its place in the ranking, from 1, the best first. Successors that rank equal share a
+    /// place and take MUs in turn.
+    pub place: usize,
+    /// What its route or itself weighs, in seconds for a time. Left out when it has no route to
+    /// a counted Drain, which ranks last.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total: Option<f64>,
+}
+
 #[derive(Serialize, JsonSchema)]
 pub struct Found {
     pub name: String,
@@ -878,7 +907,7 @@ pub struct ClassNode {
 
 impl Operation for QueryModel {
     const NAME: &'static str = "query_model";
-    const DESCRIPTION: &'static str = "Answers a question about a model's structure, from a file in the models folder (`path`) or the one a run ran (`run`), without reading the whole model. `query` names its kind in `kind`: neighbours {name} gives predecessors and successors; upstream or downstream {name, steps?} every instance that can reach it or that it reaches, with distances; paths {from, to, weight?, order?} the shortest route, up to 20 others shortest first, and how many routes there are, counted up to 10,000, none passing an object twice, and with weight {\"attribute\": \"process_time\"} (also interval, starting_mus or capacity, resolved through inheritance, times in seconds) or, for a run's model, {\"figure\": \"working_share\"} (any statistic the results store keeps, the mean over the run's observations) up to 21 routes by the sum of their objects' weights, smallest first or with order \"largest\" largest first, as for a critical path, each with its total, naming the objects on them that have no value and so weigh 0; subgraph_around {name, steps?} the instances within steps (2 by default) following connections either way, and the connections between them, each with its exit, entrance and description; find_instances {name_contains?, class?, description_contains?, conditions?, set_on_instance?} the instances meeting every criterion, such as conditions [{\"attribute\": \"process_time\", \"op\": \">\", \"value\": \"0:30\"}] with op =, <, >, <= or >=, where class includes derived classes; class_tree {class?, instances?} the classes from the built-ins down with what each sets and how many instances follow it. Lists are capped (1,000 instances, 500 in a neighbourhood) and say so. A model with problems is refused with them: describe_model sums it up anyway. Pass the names it gives to run_results or compare_runs as `objects`.";
+    const DESCRIPTION: &'static str = "Answers a question about a model's structure, from a file in the models folder (`path`) or the one a run ran (`run`), without reading the whole model. `query` names its kind in `kind`: neighbours {name} gives predecessors and successors; upstream or downstream {name, steps?} every instance that can reach it or that it reaches, with distances; paths {from, to, weight?, order?} the shortest route, up to 20 others shortest first, and how many routes there are, counted up to 10,000, none passing an object twice, and with weight {\"attribute\": \"process_time\"} (also interval, starting_mus or capacity, resolved through inheritance, times in seconds) or, for a run's model, {\"figure\": \"working_share\"} (any statistic the results store keeps, the mean over the run's observations) up to 21 routes by the sum of their objects' weights, smallest first or with order \"largest\" largest first, as for a critical path, each with its total, naming the objects on them that have no value and so weigh 0; subgraph_around {name, steps?} the instances within steps (2 by default) following connections either way, and the connections between them, each with its exit, entrance and description; find_instances {name_contains?, class?, description_contains?, conditions?, set_on_instance?} the instances meeting every criterion, such as conditions [{\"attribute\": \"process_time\", \"op\": \">\", \"value\": \"0:30\"}] with op =, <, >, <= or >=, where class includes derived classes; class_tree {class?, instances?} the classes from the built-ins down with what each sets and how many instances follow it; distribution {name} how a Source or Station picks the successor for its MU, round_robin or weighted (ADR 0016), with its successors in the order it ranks them, each with its place and total, those sharing a place taking MUs in turn. Lists are capped (1,000 instances, 500 in a neighbourhood) and say so. A model with problems is refused with them: describe_model sums it up anyway. Pass the names it gives to run_results or compare_runs as `objects`.";
     const EFFECT: Effect = Effect::ReadOnly;
     type Input = QueryModelInput;
     type Output = QueryModelOutput;
@@ -966,6 +995,10 @@ impl Operation for QueryModel {
             }
             Query::FindInstances { name_contains, class, description_contains, conditions, set_on_instance } => {
                 find_instances(&graph, &what, name_contains, class, description_contains, conditions.unwrap_or_default(), set_on_instance)
+            }
+            Query::Distribution { name } => {
+                let at = graph.find(&name, &what)?;
+                distribution(&model, at, name)
             }
             Query::ClassTree { class, instances } => class_tree(&model, &what, class, instances),
         }
@@ -1465,6 +1498,33 @@ fn find_instances(
     let count = found.len();
     found.truncate(REACHED_LIMIT);
     Ok(QueryModelOutput::FindInstances { instances: found, count, truncated: count > REACHED_LIMIT })
+}
+
+/// How the instance at `at` picks its successors, worked out as a run of the model starts.
+fn distribution(model: &Model, at: usize, name: String) -> Result<QueryModelOutput, OperationError> {
+    let resolved = model.resolve(at).expect("a valid model's instances resolve");
+    let successors = model.successors(&name);
+    let strategy = resolved.attributes.distribution.clone().unwrap_or(crabsim_model::DistributionStrategy::RoundRobin);
+    let description = model.to_description();
+    let (strategy, weighted, listed) = match (&strategy, description.ranking(at as u32)) {
+        (crabsim_model::DistributionStrategy::Weighted(weighted), Some(ranking)) => {
+            let in_seconds = matches!(weighted.by, Attribute::ProcessTime | Attribute::Interval);
+            let total = |exit: usize| ranking.totals[exit].map(|total| if in_seconds { total as f64 / 1000.0 } else { total as f64 });
+            let listed = ranking
+                .groups
+                .iter()
+                .enumerate()
+                .flat_map(|(place, group)| group.iter().map(move |&exit| (place, exit)))
+                .map(|(place, exit)| RankedSuccessor { name: successors[exit].to_string(), exit: exit + 1, place: place + 1, total: total(exit) })
+                .collect();
+            ("weighted", Some(crabsim_model::write_distribution(&strategy)), listed)
+        }
+        _ => {
+            let listed = successors.iter().enumerate().map(|(exit, to)| RankedSuccessor { name: to.to_string(), exit: exit + 1, place: 1, total: None }).collect();
+            ("round_robin", None, listed)
+        }
+    };
+    Ok(QueryModelOutput::Distribution { name, strategy: strategy.to_string(), weighted, successors: listed })
 }
 
 fn class_tree(model: &Model, what: &str, class: Option<String>, with_instances: bool) -> Result<QueryModelOutput, OperationError> {

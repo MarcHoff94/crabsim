@@ -72,6 +72,8 @@ pub enum Command {
     Unselect,
     /// Visual selection began or ended: motions add the objects they land on.
     Visual(bool),
+    /// `x` in visual mode: takes the object under the cursor out of the selection.
+    TakeOut,
     Delete,
     Pan(Direction),
     Zoom { closer: bool },
@@ -214,6 +216,8 @@ impl Keys {
             Key::Char('d') => vec![Command::Delete],
             Key::Char('0') => vec![Command::Fit],
             Key::Char(' ') => vec![Command::StartOrHalt],
+            // Stepping while selecting is rare, so in visual mode x cuts, as in vim.
+            Key::Char('x') if self.visual => vec![Command::TakeOut],
             Key::Char('x') => vec![Command::StepForward(times)],
             Key::Char('y') => vec![Command::StepBack(times)],
             Key::Char('R') => vec![Command::Reset],

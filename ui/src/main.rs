@@ -29,6 +29,7 @@ use crabsim_ui::view::{
     MIN_PERIODS, MIN_SPEED, Mark, PERIOD_FAILURE_FACTOR, Point, MU_METRES, Shade, StepBack, ViewState, format_time, format_time_exact, label_size, parse_time, rgb,
     wall_time_roughly,
 };
+use crabsim_ui::keys::{Command, Direction, Key, Keys, PromptKind};
 use crabsim_ui::paths::{Paths, Strategy, Weigh};
 use crabsim_ui::attributes::{Form, RepairKind};
 use crabsim_ui::editing::{ActRefusal, Claim, EditAction, Editors};
@@ -174,6 +175,11 @@ fn main() {
             right_press: None,
             canvas_menu: None,
             over_egui: false,
+            keys: Keys::default(),
+            key_note: None,
+            search: (Vec::new(), 0),
+            steps_pending: (0, 0),
+            keys_help: false,
         })
         .insert_resource(Session(Mutex::new(session)))
         .insert_resource(WatchedFile(Arc::new(Mutex::new(Vec::new()))))
@@ -323,6 +329,16 @@ struct Ui {
     canvas_menu: Option<(u32, egui::Pos2)>,
     /// The pointer was over a panel or window last frame, so a scroll there isn't the canvas's.
     over_egui: bool,
+    /// What has been typed that isn't a command yet: a count, a sequence, a prompt.
+    keys: Keys,
+    /// A word on what the last key did, such as why it did nothing, shown on the key line.
+    key_note: Option<String>,
+    /// The last search's matches, by id, and which of them is selected.
+    search: (Vec<u32>, usize),
+    /// Steps forward and back still to go, asked for with a count.
+    steps_pending: (u32, u32),
+    /// Whether the panel listing every key is open.
+    keys_help: bool,
 }
 
 /// What the Paths tab's weights and strategies were worked out for: the model, by generation, the
@@ -553,6 +569,8 @@ const HANDLE_PIXELS: f64 = 9.0;
 /// How close to a connection's line a click must be to select it, in logical pixels.
 const CLICK_PIXELS: f64 = 6.0;
 const HANDLE_COLOUR: Color = Color::srgb(0.45, 0.75, 1.0);
+/// Objects matching a search.
+const SEARCHED: Color = Color::srgb(0.95, 0.85, 0.3);
 /// The highlighted route in the Paths tab.
 const ROUTE: Color = Color::srgb(1.0, 0.62, 0.2);
 /// A weighted object's preferred successors in the Paths tab's Strategies view.
@@ -1051,6 +1069,13 @@ fn draw_connections(mut gizmos: Gizmos, ui: Res<Ui>) {
     {
         gizmos.arrow(at(connection.start, 0.1), at(connection.end, 0.1), SELECTION).with_tip_length(0.5);
     }
+    // What a search found.
+    for &id in &ui.search.0 {
+        if let Some(object) = ui.view.objects().get(id as usize) {
+            let outline = object.outline(0.35);
+            gizmos.linestrip(outline.iter().chain(outline.first()).map(|&point| Vec3::new(point.x as f32, point.y as f32, 0.2)), SEARCHED);
+        }
+    }
     // The Paths tab's highlighted route, and each weighted object's preferred successors.
     let between = |from: u32, to: u32| ui.view.connections().iter().find(|connection| connection.from == from && connection.to == to).copied();
     if let Some(route) = ui.paths.highlighted() {
@@ -1106,32 +1131,29 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
     );
     let ui = &mut *ui;
     let wall = time.elapsed();
-    // Tab and Shift+Tab step through the objects, unless a field is being typed in or a dialog is
-    // open. They're taken before anything is drawn, and egui's own move of the keyboard focus to
-    // the next widget is called off, since that happens while the widgets are drawn.
+    // The keyboard (spec issue 99): every key is a command unless a widget has the keyboard or a
+    // dialog is open. Keys are taken before anything is drawn, so egui's own handling of Tab,
+    // Space or Enter never sees them, and its Ctrl zoom of the whole window is off: Ctrl + and -
+    // zoom the canvas.
+    ctx.options_mut(|options| options.zoom_with_keyboard = false);
     let dialog_open = ui.asking.is_some() || ui.confirm_removal.is_some() || ui.confirm_building.is_some() || ui.new_model.is_some() || ui.duplicating.is_some();
-    let tab = if dialog_open || ctx.text_edit_focused() {
-        None
-    } else {
-        let tab = ctx.input_mut(|input| {
-            if input.consume_key(egui::Modifiers::SHIFT, egui::Key::Tab) {
-                Some(true)
-            } else if input.consume_key(egui::Modifiers::NONE, egui::Key::Tab) {
-                Some(false)
-            } else {
-                None
-            }
-        });
-        if tab.is_some() {
-            ctx.memory_mut(|memory| {
-                memory.move_focus(egui::FocusDirection::None);
-                if let Some(focused) = memory.focused() {
-                    memory.surrender_focus(focused);
-                }
-            });
+    let keyboard_free = !dialog_open && ctx.memory(|memory| memory.focused().is_none());
+    let key_request = if keyboard_free {
+        let typed = read_keys(&ctx);
+        let commands: Vec<Command> = typed.into_iter().flat_map(|key| ui.keys.press(key)).collect();
+        if !commands.is_empty() {
+            ui.key_note = None;
         }
-        tab
+        let mut asked = None;
+        for command in commands {
+            asked = run_key(&ctx, ui, &session, command, wall).or(asked);
+        }
+        asked
+    } else {
+        None
     };
+    // Steps asked for with a count go one a frame, each once the one before allows it.
+    let key_request = key_request.or_else(|| pending_step(ui));
     // Who holds each model, for the marker and the Editing tab, read whenever the edit state
     // changes and when a tab opens. A claim also ends without the file changing, when its agent's
     // process ends or it times out, which only reading finds out. So while a claim is shown it's
@@ -1264,10 +1286,10 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
     let right = egui::Panel::right("inspector").exact_size(INSPECTOR_WIDTH).show(&mut root, |panel| {
         panel.horizontal(|row| {
             for (tab, label, hint) in [
-                (Tab::Inspector, "Inspector", "The object clicked on the canvas: its state, statistics and attributes"),
-                (Tab::Results, "Results", "The run so far: each Drain's throughput, every Station's shares of time, and the likely bottleneck"),
-                (Tab::Paths, "Paths", "See the model's routes, weights and distribution strategies on the canvas. Values change in the inspector"),
-                (Tab::Agents, "Agents", "The AI agents changing this folder's models, what they're doing, and your control of them"),
+                (Tab::Inspector, "Inspector", "The object clicked on the canvas: its state, statistics and attributes (t1)"),
+                (Tab::Results, "Results", "The run so far: each Drain's throughput, every Station's shares of time, and the likely bottleneck (t2)"),
+                (Tab::Paths, "Paths", "See the model's routes, weights and distribution strategies on the canvas. Values change in the inspector (t3)"),
+                (Tab::Agents, "Agents", "The AI agents changing this folder's models, what they're doing, and your control of them (t4)"),
             ] {
                 if row.selectable_label(ui.tab == tab, label).on_hover_text(hint).clicked() && ui.tab != tab {
                     ui.tab = tab;
@@ -1425,33 +1447,8 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
     }
     // Delete removes what is selected, unless a field is being typed in or a dialog is open.
     let dialog_open = ui.asking.is_some() || ui.confirm_removal.is_some() || ui.confirm_building.is_some() || ui.new_model.is_some() || ui.duplicating.is_some();
-    if let Some(backwards) = tab
-        && let Some(next) = ui.view.next_object(ui.view.selected().or(ui.view.selection().last().copied()), backwards)
-    {
-        ui.view.select(Some(next));
-        ui.class_selected = None;
-        // The view follows the object when it's out of sight.
-        if let (Some(camera), Some(canvas)) = (ui.camera.as_mut(), ui.canvas) {
-            let size = Point { x: canvas.width() as f64, y: canvas.height() as f64 };
-            let centre = ui.view.objects()[next as usize].centre;
-            let at = camera.to_screen(centre, size);
-            if at.x < 0.0 || at.y < 0.0 || at.x > size.x || at.y > size.y {
-                camera.centre = centre;
-                ui.camera_moved = true;
-            }
-        }
-        ui.view.commanded(wall);
-    }
     if !dialog_open && !ctx.text_edit_focused() && ctx.input(|input| input.key_pressed(egui::Key::Delete)) {
-        match (&ui.class_selected, ui.view.selected(), ui.view.selected_connection()) {
-            // A built-in class stays: its values are restored one by one.
-            (Some((class, _)), None, None) if crabsim_model::BUILT_IN_CLASSES.contains(&class.as_str()) => {}
-            (Some((class, _)), None, None) if ui.view.allows_building() => {
-                let class = class.clone();
-                remove_class_asking(ui, class);
-            }
-            _ => delete_selected(ui),
-        }
+        delete_what_is_selected(ui);
         ui.view.commanded(wall);
     }
     let mut chosen = None;
@@ -1557,6 +1554,8 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
     hover_tooltip(&ctx, ui, canvas);
     help_window(&ctx, ui, canvas);
     canvas_menu(&ctx, ui);
+    key_line(&ctx, ui, canvas);
+    keys_help(&ctx, ui);
     ui.over_egui = ctx.is_pointer_over_egui();
     if let Some(issue) = validation_window(&ctx, ui) {
         // Clicking a problem or warning selects what it's about.
@@ -1589,6 +1588,7 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
         }
     }
 
+    let request = request.or(key_request);
     // Going back past interventions drops them, so it asks first. Stepping back may first have to
     // ask the session where it goes, and decides once the answer is in.
     let request = match request {
@@ -2191,6 +2191,7 @@ fn name_field(ui: &mut egui::Ui, name: &str, text: &mut String, editable: bool) 
     ui.horizontal(|row| {
         row.label("Name").on_hover_text("The instance's name in the model file. Its connections keep it.");
         let field = row.add(egui::TextEdit::singleline(text).desired_width(170.0));
+        focus_if_wanted(row, &field, "name");
         if field.lost_focus() {
             let typed = text.trim().to_string();
             if !typed.is_empty() && typed != name {
@@ -2237,6 +2238,7 @@ fn connection_view(ui: &mut egui::Ui, view: &ConnectionView, description: &mut S
     ui.add_space(6.0);
     ui.label(egui::RichText::new("Description").strong());
     let field = ui.add_enabled(editable, egui::TextEdit::singleline(description).hint_text("such as via the lift").desired_width(240.0)).on_disabled_hover_text(RESET_FIRST);
+    focus_if_wanted(ui, &field, "description");
     if field.lost_focus() && description.trim() != view.description.as_deref().unwrap_or_default() {
         asked = Some(ConnectionAsk::Describe(description.trim().to_string()));
     }
@@ -2637,9 +2639,10 @@ fn top_bar(
         }
         ui.separator();
 
-        const GO_HINT: &str = "Goes to a time, such as 30d. An earlier one goes back to it as it was then, dropping interventions made after it, so it asks first. A later one runs there and halts: at the speed while animated, as fast as it can otherwise.";
+        const GO_HINT: &str = "Goes to a time, such as 30d (gt to type one). An earlier one goes back to it as it was then, dropping interventions made after it, so it asks first. A later one runs there and halts: at the speed while animated, as fast as it can otherwise.";
         ui.label("Go to").on_hover_text(GO_HINT);
         let field = ui.add(egui::TextEdit::singleline(jump_text).desired_width(90.0).hint_text(view.shown_time())).on_hover_text(GO_HINT);
+        focus_if_wanted(ui, &field, "goto");
         let target = view.jump_target(jump_text);
         let go = ui.add_enabled(target.is_ok(), egui::Button::new("Go")).on_disabled_hover_text(match target {
             Err(JumpProblem::NotInitialised) => "Init first to go back, or type a later time",
@@ -2794,11 +2797,11 @@ const SEED_HINT: &str = "The number every random value in a run follows from, su
 fn control_hint(control: Control) -> &'static str {
     match control {
         Control::Init => "Set time to 0 and give every object its starting state, ready to run. Start does this by itself if it hasn't happened",
-        Control::Start => "Begin or carry on advancing time, doing Init first if it hasn't happened",
-        Control::Halt => "Stop time advancing, with everything staying exactly as it is. Start carries on from here",
-        Control::Reset => "Return every object to its default state, ready for a new run. The objects stay in the model",
-        Control::StepBack => "Go back to the previous instant, the last time something happened",
-        Control::StepForward => "Go on to the next instant, the next time something happens",
+        Control::Start => "Begin or carry on advancing time, doing Init first if it hasn't happened (Space)",
+        Control::Halt => "Stop time advancing, with everything staying exactly as it is. Start carries on from here (Space)",
+        Control::Reset => "Return every object to its default state, ready for a new run. The objects stay in the model (R)",
+        Control::StepBack => "Go back to the previous instant, the last time something happened (y, or 10y for ten)",
+        Control::StepForward => "Go on to the next instant, the next time something happens (x, or 10x for ten)",
     }
 }
 
@@ -2942,7 +2945,9 @@ fn inspector(ui: &mut egui::Ui, inspection: Option<&Inspection>, process_time_te
             let (pause, pause_label) =
                 if offered.paused { (Intervention::Resume, "Resume") } else { (Intervention::Pause, "Pause") };
             let pause_hint = if offered.paused { "End the Pause: the work carries on where it stopped" } else { "Stop this Station until you resume it. The work on its MU waits" };
-            if row.button(pause_label).on_hover_text(pause_hint).clicked() {
+            let pause_button = row.button(pause_label).on_hover_text(pause_hint);
+            focus_if_wanted(row, &pause_button, "pause");
+            if pause_button.clicked() {
                 asked = Some(pause);
             }
             let (force, force_label) = if offered.forced {
@@ -2955,7 +2960,9 @@ fn inspector(ui: &mut egui::Ui, inspection: Option<&Inspection>, process_time_te
             } else {
                 "Stop this Station as a failure until you end it. It counts as a failure in the statistics"
             };
-            if row.button(force_label).on_hover_text(force_hint).clicked() {
+            let force_button = row.button(force_label).on_hover_text(force_hint);
+            focus_if_wanted(row, &force_button, "forced_failure");
+            if force_button.clicked() {
                 asked = Some(force);
             }
         });
@@ -2969,6 +2976,7 @@ fn inspector(ui: &mut egui::Ui, inspection: Option<&Inspection>, process_time_te
         ui.horizontal(|row| {
             row.label("Change to");
             let field = row.add(egui::TextEdit::singleline(process_time_text).desired_width(80.0).hint_text("such as 25"));
+            focus_if_wanted(row, &field, "process_time");
             let typed = parse_time(process_time_text).filter(|&time| time > SimTime::ZERO);
             let set = row
                 .add_enabled(typed.is_some(), egui::Button::new("Set"))
@@ -3457,9 +3465,12 @@ fn attributes_section(
                 });
             }
             egui::Grid::new(("fields", &view.attribute)).num_columns(2).spacing([8.0, 2.0]).show(fields, |grid| {
-                for part in form.parts.iter_mut().filter(|part| !part.label.is_empty() || form.repair.is_none()) {
+                for (place, part) in form.parts.iter_mut().filter(|part| !part.label.is_empty() || form.repair.is_none()).enumerate() {
                     grid.label(part.label);
                     let field = grid.add(egui::TextEdit::singleline(&mut part.text).desired_width(120.0));
+                    if place == 0 {
+                        focus_if_wanted(grid, &field, &view.attribute);
+                    }
                     commit |= field.lost_focus();
                     grid.end_row();
                 }
@@ -3508,6 +3519,486 @@ fn attributes_section(
         }
     }
     asked
+}
+
+/// The keys typed this frame, taken out of egui's input so no widget acts on them too: every
+/// character, and the keys that type none that the keyboard uses. Delete stays, for its own
+/// handling.
+fn read_keys(ctx: &egui::Context) -> Vec<Key> {
+    let mut keys = Vec::new();
+    ctx.input_mut(|input| {
+        input.events.retain(|event| {
+            let key = match event {
+                egui::Event::Text(text) => {
+                    keys.extend(text.chars().map(Key::Char));
+                    return false;
+                }
+                egui::Event::Key { key, pressed: true, modifiers, .. } => match key {
+                    egui::Key::Enter => Some(Key::Enter),
+                    egui::Key::Escape => Some(Key::Escape),
+                    egui::Key::Backspace => Some(Key::Backspace),
+                    egui::Key::Tab if modifiers.shift => Some(Key::ShiftTab),
+                    egui::Key::Tab => Some(Key::Tab),
+                    egui::Key::ArrowUp => Some(Key::Up),
+                    egui::Key::ArrowDown => Some(Key::Down),
+                    egui::Key::ArrowLeft => Some(Key::Left),
+                    egui::Key::ArrowRight => Some(Key::Right),
+                    egui::Key::Plus | egui::Key::Equals if modifiers.command => Some(Key::ZoomIn),
+                    egui::Key::Minus if modifiers.command => Some(Key::ZoomOut),
+                    _ => None,
+                },
+                _ => None,
+            };
+            match key {
+                Some(key) => {
+                    keys.push(key);
+                    false
+                }
+                None => true,
+            }
+        });
+    });
+    keys
+}
+
+/// Marks the field or button called `key` to take the keyboard when it is next drawn, within a
+/// second, such as `name`, `process_time` or `goto`.
+fn want_focus(ctx: &egui::Context, key: &str) {
+    let now = ctx.input(|input| input.time);
+    ctx.data_mut(|data| data.insert_temp(egui::Id::new("focus wanted"), (key.to_string(), now)));
+}
+
+/// Gives `field` the keyboard, scrolled into sight, if it is the one marked by `want_focus`.
+fn focus_if_wanted(ui: &egui::Ui, field: &egui::Response, key: &str) {
+    let id = egui::Id::new("focus wanted");
+    let wanted: Option<(String, f64)> = ui.data(|data| data.get_temp(id));
+    if let Some((wanted, at)) = wanted
+        && wanted == key
+        && ui.input(|input| input.time) - at < 1.0
+    {
+        field.request_focus();
+        field.scroll_to_me(Some(egui::Align::Center));
+        ui.data_mut(|data| data.remove::<(String, f64)>(id));
+    }
+}
+
+/// Removes what is selected, as Delete and `d` do: a class of the model's own, a connection, or
+/// the objects selected, asking first where more goes with it.
+fn delete_what_is_selected(ui: &mut Ui) {
+    match (&ui.class_selected, ui.view.selected(), ui.view.selected_connection()) {
+        // A built-in class stays: its values are restored one by one.
+        (Some((class, _)), None, None) if crabsim_model::BUILT_IN_CLASSES.contains(&class.as_str()) => {}
+        (Some((class, _)), None, None) if ui.view.allows_building() => {
+            let class = class.clone();
+            remove_class_asking(ui, class);
+        }
+        _ => delete_selected(ui),
+    }
+}
+
+/// Selects the object, or adds it to the selection while selecting visually, and moves the view
+/// to it when it is out of sight.
+fn select_and_follow(ui: &mut Ui, id: u32) {
+    if ui.keys.visual() {
+        if !ui.view.selection().contains(&id) {
+            ui.view.toggle(id);
+        }
+    } else {
+        ui.view.select(Some(id));
+    }
+    ui.class_selected = None;
+    if let (Some(camera), Some(canvas)) = (ui.camera.as_mut(), ui.canvas) {
+        let size = Point { x: canvas.width() as f64, y: canvas.height() as f64 };
+        let centre = ui.view.objects()[id as usize].centre;
+        let at = camera.to_screen(centre, size);
+        if at.x < 0.0 || at.y < 0.0 || at.x > size.x || at.y > size.y {
+            camera.centre = centre;
+            ui.camera_moved = true;
+        }
+    }
+}
+
+/// What the `e` prompt can reach on the object at `id`: before Init or after Reset its name and
+/// every attribute, during a run what an intervention changes. By name and label.
+fn edit_targets(ui: &Ui, id: u32) -> Vec<(String, String)> {
+    let object = &ui.view.objects()[id as usize];
+    if ui.view.reloads_now() {
+        let mut targets = vec![("name".to_string(), "Name".to_string())];
+        if let Ok(values) = ui.workspace.attributes(&object.name) {
+            targets.extend(values.iter().map(|view| (view.attribute.clone(), attribute_label(&view.attribute).to_string())));
+        }
+        return targets;
+    }
+    if object.kind == crabsim::ObjectKind::Station {
+        return [("process_time", "Process time"), ("pause", "Pause"), ("forced_failure", "Forced failure")]
+            .map(|(name, label)| (name.to_string(), label.to_string()))
+            .to_vec();
+    }
+    Vec::new()
+}
+
+/// What the `e` prompt can reach: the selected object's values, or the selected class's.
+fn selected_targets(ui: &Ui) -> Option<Vec<(String, String)>> {
+    if let Some(id) = ui.view.selected() {
+        return Some(edit_targets(ui, id));
+    }
+    let (class, _) = ui.class_selected.as_ref()?;
+    let values = ui.workspace.class_attributes(class).ok()?;
+    Some(values.iter().map(|view| (view.attribute.clone(), attribute_label(&view.attribute).to_string())).collect())
+}
+
+/// The object names, by id.
+fn object_names(ui: &Ui) -> Vec<String> {
+    ui.view.objects().iter().map(|object| object.name.clone()).collect()
+}
+
+/// What a prompt's text could become, for the key line and for Tab: matching names, values or
+/// model files.
+fn prompt_candidates(ui: &Ui, kind: PromptKind, text: &str) -> Vec<String> {
+    let names = object_names(ui);
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    match kind {
+        PromptKind::Search => crabsim_ui::keys::matches(&names, text).into_iter().map(|index| names[index].to_string()).collect(),
+        PromptKind::Open => {
+            let paths: Vec<&str> = ui.workspace.models().iter().map(|entry| entry.path.as_str()).collect();
+            crabsim_ui::keys::matches(&paths, text).into_iter().map(|index| paths[index].to_string()).collect()
+        }
+        PromptKind::Edit => {
+            let address = crabsim_ui::keys::address(text);
+            let targets = match address.object {
+                Some(object) => match crabsim_ui::keys::matches(&names, object).as_slice() {
+                    [only] => edit_targets(ui, *only as u32),
+                    several => return several.iter().map(|&index| format!("{}.", names[index])).collect(),
+                },
+                None => match selected_targets(ui) {
+                    Some(targets) => targets,
+                    // Nothing selected: the prompt names an object first.
+                    None => return crabsim_ui::keys::matches(&names, text).into_iter().map(|index| format!("{}.", names[index])).collect(),
+                },
+            };
+            let prefix = address.object.map_or(String::new(), |object| format!("{object}."));
+            targets
+                .iter()
+                .filter(|(name, label)| address.attribute.is_empty() || crabsim_ui::keys::attribute_matches(address.attribute, name, label))
+                .map(|(name, _)| format!("{prefix}{name}"))
+                .collect()
+        }
+    }
+}
+
+/// What the `e` prompt answered asks for: select the object it names, if any, and put the
+/// keyboard in the value it names.
+fn answer_edit(ctx: &egui::Context, ui: &mut Ui, text: &str) {
+    let address = crabsim_ui::keys::address(text);
+    if let Some(object) = address.object {
+        let names = object_names(ui);
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        match crabsim_ui::keys::matches(&names, object).first() {
+            Some(&index) => select_and_follow(ui, index as u32),
+            None => {
+                ui.key_note = Some(format!("No object is called anything like {object}"));
+                return;
+            }
+        }
+    }
+    if address.attribute.is_empty() {
+        return;
+    }
+    let Some(targets) = selected_targets(ui) else {
+        ui.key_note = Some("Select an object first, or type its name and a dot, such as Station 3.proc".to_string());
+        return;
+    };
+    match targets.iter().find(|(name, label)| crabsim_ui::keys::attribute_matches(address.attribute, name, label)) {
+        Some((name, _)) => {
+            ui.tab = Tab::Inspector;
+            want_focus(ctx, name);
+        }
+        None => ui.key_note = Some(format!("Nothing here matches {}", address.attribute)),
+    }
+}
+
+/// Carries out one key's command, giving a request for the run when it asks for one.
+fn run_key(ctx: &egui::Context, ui: &mut Ui, session: &Session, command: Command, wall: Duration) -> Option<Request> {
+    ui.view.commanded(wall);
+    let from = ui.view.selected().or(ui.view.selection().last().copied());
+    let count = ui.view.objects().len() as u32;
+    let needs_object = |ui: &mut Ui| {
+        ui.key_note = Some("Select an object first".to_string());
+        None
+    };
+    match command {
+        Command::Move(direction, times) => {
+            let Some(mut at) = from else {
+                if count > 0 {
+                    select_and_follow(ui, 0);
+                }
+                return None;
+            };
+            let centres: Vec<Point> = ui.view.objects().iter().map(|object| object.centre).collect();
+            for _ in 0..times {
+                match crabsim_ui::keys::nearest(&centres, at as usize, direction) {
+                    Some(next) => {
+                        at = next as u32;
+                        select_and_follow(ui, at);
+                    }
+                    None => {
+                        ui.key_note = Some("Nothing further that way".to_string());
+                        break;
+                    }
+                }
+            }
+        }
+        Command::Successor(exit) | Command::Predecessor(exit) => {
+            let Some(at) = from else { return needs_object(ui) };
+            let name = ui.view.objects()[at as usize].name.clone();
+            let downstream = matches!(command, Command::Successor(_));
+            let ends: Vec<String> = if downstream {
+                ui.workspace.model().successors(&name).into_iter().map(str::to_string).collect()
+            } else {
+                ui.workspace.model().predecessors(&name).into_iter().map(str::to_string).collect()
+            };
+            let id = |wanted: &str| ui.view.objects().iter().find(|object| object.name == wanted).map(|object| object.id);
+            match ends.get(exit - 1).and_then(|end| id(end)) {
+                Some(next) => select_and_follow(ui, next),
+                None => {
+                    let (what, place) = if downstream { ("exit", "exits") } else { ("entrance", "entrances") };
+                    ui.key_note = Some(match ends.len() {
+                        0 => format!("{name} has no {place}"),
+                        1 => format!("{name} has 1 {what}"),
+                        many => format!("{name} has {many} {place}"),
+                    });
+                }
+            }
+        }
+        Command::First | Command::Last => {
+            if count > 0 {
+                select_and_follow(ui, if command == Command::First { 0 } else { count - 1 });
+            }
+        }
+        Command::Step { backwards } => {
+            if let Some(next) = ui.view.next_object(from, backwards) {
+                select_and_follow(ui, next);
+            }
+        }
+        Command::Unselect => {
+            ui.view.select(None);
+            ui.view.select_connection(None);
+            ui.class_selected = None;
+            ui.search.0.clear();
+        }
+        Command::Visual(_) => {}
+        Command::Delete => delete_what_is_selected(ui),
+        Command::Pan(direction) => {
+            if let Some(camera) = ui.camera.as_mut() {
+                let step = 80.0;
+                let (x, y) = match direction {
+                    Direction::Left => (step, 0.0),
+                    Direction::Right => (-step, 0.0),
+                    Direction::Up => (0.0, step),
+                    Direction::Down => (0.0, -step),
+                };
+                camera.pan(Point { x, y });
+                ui.camera_moved = true;
+            }
+        }
+        Command::Zoom { closer } => {
+            if let (Some(camera), Some(canvas)) = (ui.camera.as_mut(), ui.canvas) {
+                let size = Point { x: canvas.width() as f64, y: canvas.height() as f64 };
+                camera.zoom_at(if closer { 1.25 } else { 0.8 }, Point { x: size.x / 2.0, y: size.y / 2.0 }, size);
+                ui.camera_moved = true;
+            }
+        }
+        Command::Fit => ui.camera_moved = false,
+        Command::Centre => {
+            let Some(at) = from else { return needs_object(ui) };
+            if let Some(camera) = ui.camera.as_mut() {
+                camera.centre = ui.view.objects()[at as usize].centre;
+                ui.camera_moved = true;
+            }
+        }
+        Command::StartOrHalt => {
+            if ui.view.allows(Control::Halt) {
+                return Some(Request::Control(Control::Halt));
+            }
+            if ui.view.allows(Control::Start) {
+                return Some(Request::Control(Control::Start));
+            }
+        }
+        Command::StepForward(times) => ui.steps_pending.0 = ui.steps_pending.0.saturating_add(times).min(10_000),
+        Command::StepBack(times) => ui.steps_pending.1 = ui.steps_pending.1.saturating_add(times).min(10_000),
+        Command::Reset => {
+            if ui.view.allows(Control::Reset) {
+                return Some(Request::Control(Control::Reset));
+            }
+        }
+        Command::Faster => return ui.view.has_model().then(|| Request::Speed(ui.view.speed() * 2.0)),
+        Command::Slower => return ui.view.has_model().then(|| Request::Speed(ui.view.speed() / 2.0)),
+        Command::Animate => return ui.view.has_model().then(|| Request::Animate(!ui.view.animate())),
+        Command::GoTo => want_focus(ctx, "goto"),
+        Command::Tab(place) => {
+            ui.tab = [Tab::Inspector, Tab::Results, Tab::Paths, Tab::Agents][place.clamp(1, 4) - 1];
+        }
+        Command::Edit => {
+            let field = if ui.view.selected_connection().is_some() {
+                Some("description".to_string())
+            } else if let Some(id) = ui.view.selected() {
+                edit_targets(ui, id).first().map(|(name, _)| name.clone())
+            } else {
+                selected_targets(ui).and_then(|targets| targets.first().map(|(name, _)| name.clone()))
+            };
+            match field {
+                Some(field) => {
+                    ui.tab = Tab::Inspector;
+                    want_focus(ctx, &field);
+                }
+                None => return needs_object(ui),
+            }
+        }
+        Command::Prompted(PromptKind::Search, text) => {
+            let names = object_names(ui);
+            let names: Vec<&str> = names.iter().map(String::as_str).collect();
+            ui.search = (crabsim_ui::keys::matches(&names, &text).into_iter().map(|index| index as u32).collect(), 0);
+        }
+        Command::Prompted(..) => {}
+        Command::Complete(kind, text) => {
+            if let Some(first) = prompt_candidates(ui, kind, &text).into_iter().next() {
+                ui.keys.set_prompt_text(first);
+            }
+        }
+        Command::Answered(PromptKind::Search, text) => {
+            let names = object_names(ui);
+            let names: Vec<&str> = names.iter().map(String::as_str).collect();
+            ui.search = (crabsim_ui::keys::matches(&names, &text).into_iter().map(|index| index as u32).collect(), 0);
+            match ui.search.0.first().copied() {
+                Some(first) => select_and_follow(ui, first),
+                None => ui.key_note = Some(format!("No object is called anything like {text}")),
+            }
+        }
+        Command::Answered(PromptKind::Edit, text) => answer_edit(ctx, ui, &text),
+        Command::Answered(PromptKind::Open, text) => match prompt_candidates(ui, PromptKind::Open, &text).into_iter().next() {
+            Some(path) => open_model(ui, session, &path, wall),
+            None => ui.key_note = Some(format!("No model file is called anything like {text}")),
+        },
+        Command::PromptClosed(PromptKind::Search) => ui.search.0.clear(),
+        Command::PromptClosed(_) => {}
+        Command::NextMatch { backwards } => {
+            let found = ui.search.0.len();
+            if found == 0 {
+                ui.key_note = Some("Search first, with /".to_string());
+                return None;
+            }
+            let place = if backwards { (ui.search.1 + found - 1) % found } else { (ui.search.1 + 1) % found };
+            ui.search.1 = place;
+            let next = ui.search.0[place];
+            select_and_follow(ui, next);
+        }
+        Command::Help => ui.keys_help = !ui.keys_help,
+    }
+    None
+}
+
+/// The next step asked for with a count, once the step before allows it. A step that isn't
+/// allowed any more, such as at the end time, ends the count.
+fn pending_step(ui: &mut Ui) -> Option<Request> {
+    for (pending, control) in [(&mut ui.steps_pending.0, Control::StepForward), (&mut ui.steps_pending.1, Control::StepBack)] {
+        if *pending == 0 {
+            continue;
+        }
+        if !ui.view.allows(control) {
+            *pending = 0;
+            continue;
+        }
+        *pending -= 1;
+        return Some(Request::Control(control));
+    }
+    None
+}
+
+/// The line at the foot of the canvas: an open prompt with what it could become, the visual
+/// selection, a count being typed, or what the last key did.
+fn key_line(ctx: &egui::Context, ui: &Ui, canvas: egui::Rect) {
+    let line = if let Some((kind, text)) = ui.keys.prompt() {
+        let candidates = prompt_candidates(ui, kind, text);
+        let shown: Vec<&str> = candidates.iter().take(6).map(String::as_str).collect();
+        let more = if candidates.len() > shown.len() { format!(" and {} more", candidates.len() - shown.len()) } else { String::new() };
+        let what = match kind {
+            PromptKind::Search if !text.is_empty() => format!("   {} found", candidates.len()),
+            _ if shown.is_empty() => String::new(),
+            _ => format!("   {}{more}   (Tab completes)", shown.join(", ")),
+        };
+        format!("{}{text}_{what}", kind.sign())
+    } else if ui.keys.visual() {
+        "-- VISUAL --   motions add what they land on, d deletes, Esc ends".to_string()
+    } else if let Some(count) = ui.keys.count() {
+        count.to_string()
+    } else if let Some(note) = &ui.key_note {
+        note.clone()
+    } else {
+        return;
+    };
+    egui::Area::new(egui::Id::new("key line"))
+        .fixed_pos(egui::pos2(canvas.min.x + 8.0, canvas.max.y - 30.0))
+        .order(egui::Order::Foreground)
+        .interactable(false)
+        .show(ctx, |area| {
+            egui::Frame::popup(area.style()).show(area, |frame| {
+                frame.add(egui::Label::new(egui::RichText::new(line).monospace()).wrap_mode(egui::TextWrapMode::Extend));
+            });
+        });
+}
+
+/// Every key, by area, while `?` has it open.
+fn keys_help(ctx: &egui::Context, ui: &mut Ui) {
+    if !ui.keys_help {
+        return;
+    }
+    const KEYS: [(&str, &[(&str, &str)]); 6] = [
+        (
+            "Select",
+            &[
+                ("h j k l", "the nearest object left, down, up, right"),
+                ("> <", "a successor, a predecessor: 3> takes the third exit, and 3>2>1> chains"),
+                ("gg G", "the first, the last object"),
+                ("Tab", "the next object, Shift+Tab the one before"),
+                ("v", "select visually: motions add what they land on"),
+                ("d", "delete what is selected, asking first"),
+                ("Esc", "unselect, or leave a field"),
+            ],
+        ),
+        ("View", &[("arrows", "pan"), ("Ctrl + / -", "zoom"), ("0", "fit the model"), ("zz", "centre on the selection")]),
+        (
+            "Run",
+            &[
+                ("Space", "start or halt"),
+                ("x y", "step forward, back: 10x steps ten"),
+                ("R", "reset"),
+                ("+ -", "faster, slower"),
+                ("a", "animate on or off"),
+                ("gt", "go to a time"),
+            ],
+        ),
+        ("Panels", &[("t1 to t4", "Inspector, Results, Paths, Agents"), ("Enter", "into the selection's first field"), ("o", "open a model file")]),
+        ("Find", &[("/", "search by name, then n and N for the next and previous"), ("e", "go to a value, such as proc or Station 3.proc")]),
+        ("Help", &[("?", "this list")]),
+    ];
+    let mut open = true;
+    egui::Window::new("Keys").open(&mut open).collapsible(false).resizable(false).show(ctx, |window| {
+        window.label(egui::RichText::new("When no field has the keyboard. A number first repeats a move or a step.").weak());
+        for (area, keys) in KEYS {
+            window.add_space(6.0);
+            window.label(egui::RichText::new(area).strong());
+            egui::Grid::new(("keys", area)).num_columns(2).spacing([16.0, 2.0]).show(window, |grid| {
+                for (key, does) in keys {
+                    grid.label(egui::RichText::new(*key).monospace());
+                    grid.label(*does);
+                    grid.end_row();
+                }
+            });
+        }
+    });
+    if !open {
+        ui.keys_help = false;
+    }
 }
 
 /// The Paths tab: switches for its three views, and the route view's choices and routes. It
@@ -3749,7 +4240,8 @@ fn validation_window(ctx: &egui::Context, ui: &mut Ui) -> Option<crabsim_ui::wor
 /// which totals come first, what it ranks, and the Drains it counts.
 fn distribution_fields(ui: &mut egui::Ui, choice: &mut crabsim_ui::attributes::DistributionChoice, salt: &str) {
     ui.horizontal(|row| {
-        row.selectable_value(&mut choice.weighted, false, "Round robin").on_hover_text("Each successor in turn");
+        let first = row.selectable_value(&mut choice.weighted, false, "Round robin").on_hover_text("Each successor in turn");
+        focus_if_wanted(row, &first, salt);
         row.selectable_value(&mut choice.weighted, true, "Weighted")
             .on_hover_text("The best-ranked successor that can take the MU, those ranking equal taking turns");
     });

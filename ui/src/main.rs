@@ -30,6 +30,7 @@ use crabsim_ui::view::{
     wall_time_roughly,
 };
 use crabsim_ui::keys::{Command, Direction, Key, Keys, PromptKind};
+use crabsim_catalogue::macros::{Author, Macro};
 use crabsim_ui::paths::{Paths, Strategy, Weigh};
 use crabsim_ui::attributes::{Form, RepairKind};
 use crabsim_ui::editing::{ActRefusal, Claim, EditAction, Editors};
@@ -182,6 +183,12 @@ fn main() {
             keys_help: false,
             cursor: None,
             confirm_line: None,
+            macros: Vec::new(),
+            macros_stamp: None,
+            recording: None,
+            seen_macros: std::collections::HashSet::new(),
+            confirm_macro: None,
+            pending_lines: std::collections::VecDeque::new(),
         })
         .insert_resource(Session(Mutex::new(session)))
         .insert_resource(WatchedFile(Arc::new(Mutex::new(Vec::new()))))
@@ -345,6 +352,17 @@ struct Ui {
     cursor: Option<u32>,
     /// A command line that removes something, waiting for the user to confirm it.
     confirm_line: Option<(Building, Vec<String>)>,
+    /// The macros in the models folder, and the macros file's size and time when they were read.
+    macros: Vec<Macro>,
+    macros_stamp: Option<(u64, Option<std::time::SystemTime>)>,
+    /// The macro `q` is recording into, and the command lines given since.
+    recording: Option<(String, Vec<String>)>,
+    /// Agents' macros the user has seen the commands of, so they run without asking again.
+    seen_macros: std::collections::HashSet<String>,
+    /// A line running agents' macros not seen yet, waiting for the user, with their commands.
+    confirm_macro: Option<(String, Vec<Unseen>)>,
+    /// Lines of a macro still to carry out, one a frame, as a macro holding window commands runs.
+    pending_lines: std::collections::VecDeque<String>,
 }
 
 /// What the Paths tab's weights and strategies were worked out for: the model, by generation, the
@@ -1156,6 +1174,7 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
     // zoom the canvas.
     ctx.options_mut(|options| options.zoom_with_keyboard = false);
     let dialog_open = ui.asking.is_some()
+        || ui.confirm_macro.is_some()
         || ui.confirm_removal.is_some()
         || ui.confirm_building.is_some()
         || ui.new_model.is_some()
@@ -1181,6 +1200,23 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
     };
     // Steps asked for with a count go one a frame, each once the one before allows it.
     let key_request = key_request.or_else(|| pending_step(ui));
+    // The next line of a macro that holds window commands.
+    let key_request = match key_request {
+        Some(request) => Some(request),
+        None if ui.confirm_line.is_none() && ui.confirm_macro.is_none() => match ui.pending_lines.pop_front() {
+            Some(line) => run_line(ui, &session, &line, wall),
+            None => None,
+        },
+        None => None,
+    };
+    // The macros, read again when their file changes.
+    if let Some(file) = ui.workspace.macros_file() {
+        let stamp = stamp_of(&file);
+        if ui.macros_stamp.is_none() || stamp != ui.macros_stamp {
+            ui.macros = ui.workspace.macros().unwrap_or_default();
+            ui.macros_stamp = stamp.or(Some((0, None)));
+        }
+    }
     // Who holds each model, for the marker and the Editing tab, read whenever the edit state
     // changes and when a tab opens. A claim also ends without the file changing, when its agent's
     // process ends or it times out, which only reading finds out. So while a claim is shown it's
@@ -1482,6 +1518,7 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
     let mut panel_error = None;
     let mut models_asked = None;
     let mut class_asked = None;
+    let mut macros_asked = None;
     let mut left_edge = ctx.viewport_rect().left();
     let building = ui.view.allows_building();
     if ui.workspace.has_folder() {
@@ -1492,9 +1529,24 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
                     let selected_class = ui.class_selected.as_ref().map(|(class, _)| class.as_str());
                     class_asked = classes_panel(panel, &ui.workspace.classes(), selected_class, building);
                 }
+                macros_asked = macros_panel(panel, &ui.macros);
             });
         });
         left_edge = left.response.rect.right();
+    }
+    match macros_asked {
+        Some(MacroAsk::Run(name)) => {
+            ui.keys.open_prompt(PromptKind::Command, format!("@{name} "));
+        }
+        Some(MacroAsk::Remove(name)) => match ui.workspace.macro_operation("remove_macro", serde_json::json!({ "name": name })) {
+            Ok(()) => ui.macros_stamp = None,
+            Err(why) => ui.view.show_error(why),
+        },
+        Some(MacroAsk::Keep(name)) => match ui.workspace.macro_operation("keep_macro", serde_json::json!({ "name": name })) {
+            Ok(()) => ui.macros_stamp = None,
+            Err(why) => ui.view.show_error(why),
+        },
+        None => {}
     }
     match models_asked {
         Some(ModelsAsk::New) => ui.new_model = Some(String::new()),
@@ -1581,6 +1633,20 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
     hover_tooltip(&ctx, ui, canvas);
     help_window(&ctx, ui, canvas);
     canvas_menu(&ctx, ui);
+    if let Some((line, unseen)) = ui.confirm_macro.clone()
+        && let Some(run) = confirm_macro(&ctx, &unseen)
+    {
+        ui.confirm_macro = None;
+        if run {
+            ui.seen_macros.extend(unseen.into_iter().map(|(name, _, _)| name));
+            let asked = run_line(ui, &session, &line, wall);
+            // A window command it holds goes next frame, with the others.
+            if let Some(Request::GoTo(_) | Request::Speed(_) | Request::Seed(_)) = asked {
+                ui.pending_lines.push_front(line);
+            }
+        }
+        ui.view.commanded(wall);
+    }
     if let Some((building, removing)) = ui.confirm_line.clone()
         && let Some(run) = confirm_line(&ctx, &removing)
     {
@@ -3704,7 +3770,10 @@ fn prompt_candidates(ui: &Ui, kind: PromptKind, text: &str) -> Vec<String> {
     let names: Vec<&str> = names.iter().map(String::as_str).collect();
     match kind {
         PromptKind::Search => crabsim_ui::keys::matches(&names, text).into_iter().map(|index| names[index].to_string()).collect(),
-        PromptKind::Command => crabsim_catalogue::commands::complete(text, ui.workspace.model()),
+        PromptKind::Command => {
+            let names: Vec<String> = ui.macros.iter().map(|r#macro| r#macro.name.clone()).collect();
+            crabsim_catalogue::commands::complete(text, ui.workspace.model(), &names)
+        }
         PromptKind::Open => {
             let paths: Vec<&str> = ui.workspace.models().iter().map(|entry| entry.path.as_str()).collect();
             crabsim_ui::keys::matches(&paths, text).into_iter().map(|index| paths[index].to_string()).collect()
@@ -3938,7 +4007,27 @@ fn run_key(ctx: &egui::Context, ui: &mut Ui, session: &Session, command: Command
             }
         }
         Command::Answered(PromptKind::Edit, text) => answer_edit(ctx, ui, &text),
-        Command::Answered(PromptKind::Command, text) => return run_line(ui, session, &text, wall),
+        Command::Answered(PromptKind::Command, text) => {
+            if let Some((_, lines)) = ui.recording.as_mut().filter(|_| !text.trim_start().starts_with("macro ")) {
+                lines.push(text.clone());
+            }
+            return run_line(ui, session, &text, wall);
+        }
+        Command::RunMacro(name, times) => {
+            let line = vec![format!("@{name}"); times.min(1_000) as usize].join("; ");
+            return run_line(ui, session, &line, wall);
+        }
+        Command::Record(Some(name)) => {
+            ui.key_note = Some(format!("Recording @{name}: the command lines you give are kept. q stops."));
+            ui.recording = Some((name, Vec::new()));
+        }
+        Command::Record(None) => match ui.recording.take() {
+            Some((name, lines)) if !lines.is_empty() => {
+                // Shown to name and check before it's saved.
+                ui.keys.open_prompt(PromptKind::Command, format!("macro {name} = {}", lines.join("; ")));
+            }
+            _ => ui.key_note = Some("Nothing was recorded: only command lines are kept".to_string()),
+        },
         Command::Prefill(prefill) => {
             let selected = ui.view.selected().map(|id| ui.view.objects()[id as usize].name.clone());
             let text = match (prefill, selected) {
@@ -3962,6 +4051,9 @@ fn run_key(ctx: &egui::Context, ui: &mut Ui, session: &Session, command: Command
                 return needs_object(ui);
             }
             let line = names.iter().map(|name| format!("move {name} by {dx} {dy}")).collect::<Vec<_>>().join("; ");
+            if let Some((_, lines)) = ui.recording.as_mut() {
+                lines.push(line.clone());
+            }
             return run_line(ui, session, &line, wall);
         }
         Command::Answered(PromptKind::Open, text) => match prompt_candidates(ui, PromptKind::Open, &text).into_iter().next() {
@@ -3993,7 +4085,22 @@ fn run_line(ui: &mut Ui, session: &Session, line: &str, wall: Duration) -> Optio
     use crabsim_catalogue::commands::{parse, Context, Parsed, WindowCommand};
     let selected = ui.view.selected().map(|id| ui.view.objects()[id as usize].name.clone());
     let at = ui.camera.map_or((0.0, 0.0), |camera| (camera.centre.x, camera.centre.y));
-    let context = Context { selected: selected.clone(), at: Some(at) };
+    // An agent's macro shows its commands the first time it runs.
+    let unseen: Vec<Unseen> = crabsim_catalogue::commands::macros_run(line)
+        .into_iter()
+        .filter(|name| !ui.seen_macros.contains(name))
+        .filter_map(|name| ui.macros.iter().find(|r#macro| r#macro.name == name))
+        .filter_map(|r#macro| match &r#macro.author {
+            Author::Agent { agent, .. } => Some((r#macro.name.clone(), agent.clone(), r#macro.commands.clone())),
+            Author::User => None,
+        })
+        .collect();
+    if !unseen.is_empty() {
+        ui.confirm_macro = Some((line.to_string(), unseen));
+        return None;
+    }
+    let macros = ui.macros.iter().map(|r#macro| (r#macro.name.clone(), r#macro.commands.clone())).collect();
+    let context = Context { selected: selected.clone(), at: Some(at), macros };
     let planned = match parse(line, ui.workspace.model(), &context) {
         Err(why) => {
             ui.view.show_error(why);
@@ -4023,6 +4130,24 @@ fn run_line(ui: &mut Ui, session: &Session, line: &str, wall: Duration) -> Optio
             };
         }
         Ok(Parsed::Changes(planned)) => planned,
+        Ok(Parsed::Sequence(lines)) => {
+            // One a frame, so each window command gets its turn.
+            ui.pending_lines.extend(lines);
+            return None;
+        }
+        Ok(Parsed::Macro(command)) => {
+            use crabsim_catalogue::commands::MacroCommand;
+            let done = match command {
+                MacroCommand::Save { name, commands } => ui.workspace.macro_operation("save_macro", serde_json::json!({ "name": name, "commands": commands })),
+                MacroCommand::Remove { name } => ui.workspace.macro_operation("remove_macro", serde_json::json!({ "name": name })),
+                MacroCommand::Keep { name } => ui.workspace.macro_operation("keep_macro", serde_json::json!({ "name": name })),
+            };
+            match done {
+                Ok(()) => ui.macros_stamp = None,
+                Err(why) => ui.view.show_error(why),
+            }
+            return None;
+        }
     };
     if !ui.view.allows_building() {
         // During a run a process time changes as an intervention, and nothing else changes.
@@ -4056,6 +4181,79 @@ fn run_line(ui: &mut Ui, session: &Session, line: &str, wall: Duration) -> Optio
         ui.confirm_line = Some((building, removing));
     }
     None
+}
+
+/// An agent's macro not run in the window yet: its name, its agent and its commands.
+type Unseen = (String, String, Vec<String>);
+
+/// What the Macros list asks for.
+enum MacroAsk {
+    /// Open the command line to run it, for its arguments.
+    Run(String),
+    Remove(String),
+    /// Keep an agent's macro as the user's own.
+    Keep(String),
+}
+
+/// The macros, under the classes: each name with its author, its commands on hover, clicked to run
+/// it from the command line, and right-clicked to remove it or keep an agent's.
+fn macros_panel(ui: &mut egui::Ui, macros: &[Macro]) -> Option<MacroAsk> {
+    let mut asked = None;
+    ui.add_space(8.0);
+    ui.separator();
+    ui.heading("Macros").on_hover_text("Named lists of commands for the : line. Record one with q and a letter, or write one with :macro name = …");
+    if macros.is_empty() {
+        ui.label(egui::RichText::new("None yet: qa records one, q stops").weak().small());
+    }
+    for r#macro in macros {
+        ui.horizontal(|row| {
+            let label = row
+                .add(egui::Label::new(egui::RichText::new(format!("@{}", r#macro.name)).monospace()).selectable(false).sense(egui::Sense::click()))
+                .on_hover_text(format!("{}\n\nClick to run it from the : line, right-click for more", r#macro.commands.join("\n")));
+            let by = match &r#macro.author {
+                Author::User => "yours".to_string(),
+                Author::Agent { agent, .. } => format!("{agent}, while it works"),
+            };
+            row.label(egui::RichText::new(by).weak().small());
+            if label.clicked() {
+                asked = Some(MacroAsk::Run(r#macro.name.clone()));
+            }
+            label.context_menu(|menu| {
+                if menu.button("Remove").clicked() {
+                    asked = Some(MacroAsk::Remove(r#macro.name.clone()));
+                    menu.close();
+                }
+                if matches!(r#macro.author, Author::Agent { .. }) && menu.button("Keep as yours").on_hover_text("It stays after the agent's work ends").clicked() {
+                    asked = Some(MacroAsk::Keep(r#macro.name.clone()));
+                    menu.close();
+                }
+            });
+        });
+    }
+    asked
+}
+
+/// Asks before running agents' macros the user hasn't seen, showing their commands. `Some(true)`
+/// to run them.
+fn confirm_macro(ctx: &egui::Context, unseen: &[Unseen]) -> Option<bool> {
+    let mut answer = None;
+    let modal = egui::Modal::new(egui::Id::new("confirm macro")).show(ctx, |modal| {
+        modal.set_max_width(460.0);
+        modal.heading("Run an agent's macro?");
+        for (name, agent, commands) in unseen {
+            modal.label(egui::RichText::new(format!("@{name}, made by {agent}:")).strong());
+            for command in commands {
+                modal.label(egui::RichText::new(format!("  {command}")).monospace());
+            }
+        }
+        if let Some(chosen) = answers(modal, &["Run it", "Cancel"]) {
+            answer = Some(chosen == 0);
+        }
+    });
+    if modal.should_close() && answer.is_none() {
+        answer = Some(false);
+    }
+    answer
 }
 
 /// Asks before a command line that removes something. `Some(true)` to run it.
@@ -4098,6 +4296,7 @@ fn pending_step(ui: &mut Ui) -> Option<Request> {
 /// The line at the foot of the canvas: an open prompt with what it could become, the visual
 /// selection, a count being typed, or what the last key did.
 fn key_line(ctx: &egui::Context, ui: &Ui, canvas: egui::Rect) {
+    let recording = ui.recording.as_ref().map_or(String::new(), |(name, lines)| format!("recording @{name} ({} line{})   ", lines.len(), plural(lines.len())));
     let line = if let Some((kind, text)) = ui.keys.prompt() {
         let candidates = prompt_candidates(ui, kind, text);
         let shown: Vec<&str> = candidates.iter().take(6).map(String::as_str).collect();
@@ -4114,9 +4313,12 @@ fn key_line(ctx: &egui::Context, ui: &Ui, canvas: egui::Rect) {
         count.to_string()
     } else if let Some(note) = &ui.key_note {
         note.clone()
+    } else if !recording.is_empty() {
+        String::new()
     } else {
         return;
     };
+    let line = format!("{recording}{line}");
     egui::Area::new(egui::Id::new("key line"))
         .fixed_pos(egui::pos2(canvas.min.x + 8.0, canvas.max.y - 30.0))
         .order(egui::Order::Foreground)
@@ -4162,6 +4364,8 @@ fn keys_help(ctx: &egui::Context, ui: &mut Ui) {
             "Build",
             &[
                 (":", "a line of commands, such as add Mill; connect Split > Mill 3. Up and Down for earlier lines"),
+                ("qa  q", "record the command lines you give into macro a, then stop and name it"),
+                ("@a  5@a", "run macro a, or five times; :@name args runs one with arguments"),
                 ("p c r", "add, connect from the selection, rename the selection"),
                 ("H J K L", "move the selection 1 m left, down, up, right"),
             ],

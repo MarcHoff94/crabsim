@@ -85,6 +85,10 @@ pub enum Command {
     Prefill(Prefill),
     /// `H` `J` `K` `L`: the selected objects move this many metres this way.
     MoveObjects(Direction, u32),
+    /// `@a`, or `5@a`: runs the macro called `a` this many times.
+    RunMacro(String, u32),
+    /// `qa` starts recording the command lines given into macro `a`, and `q` stops.
+    Record(Option<String>),
     /// Tab and Shift+Tab: the next or previous object in model order.
     Step { backwards: bool },
     Unselect,
@@ -127,7 +131,9 @@ pub enum Command {
 #[derive(Debug, Default, Clone)]
 pub struct Keys {
     count: Option<u32>,
-    /// The first key of a two-key sequence: `g`, `z` or `t`.
+    /// Recording command lines into a macro, after `q` and its name.
+    recording: bool,
+    /// The first key of a two-key sequence: `g`, `z`, `t`, `@` or `q`.
     pending: Option<char>,
     prompt: Option<(PromptKind, String)>,
     visual: bool,
@@ -148,6 +154,11 @@ impl Keys {
         if let Some((_, typed)) = self.prompt.as_mut() {
             *typed = text.into();
         }
+    }
+
+    /// Whether `q` is recording command lines into a macro.
+    pub fn recording(&self) -> bool {
+        self.recording
     }
 
     /// Whether motions add to the selection.
@@ -213,6 +224,11 @@ impl Keys {
                 ('z', Key::Char('z')) => vec![Command::Centre],
                 // A digit alone begins a count, so a tab is `t` and its place.
                 ('t', Key::Char(tab @ '1'..='4')) => vec![Command::Tab(tab.to_digit(10).expect("a digit") as usize)],
+                ('@', Key::Char(name)) if name.is_alphanumeric() => vec![Command::RunMacro(name.to_string(), count.unwrap_or(1).max(1))],
+                ('q', Key::Char(name)) if name.is_alphanumeric() => {
+                    self.recording = true;
+                    vec![Command::Record(Some(name.to_string()))]
+                }
                 _ => {
                     // Not a sequence: the key counts on its own.
                     self.count = count;
@@ -243,7 +259,12 @@ impl Keys {
             Key::Char('>') => vec![Command::Successor(place)],
             Key::Char('<') => vec![Command::Predecessor(place)],
             Key::Char('G') => vec![Command::Last],
-            Key::Char(first @ ('g' | 'z' | 't')) => {
+            // q stops a recording at once.
+            Key::Char('q') if self.recording => {
+                self.recording = false;
+                vec![Command::Record(None)]
+            }
+            Key::Char(first @ ('g' | 'z' | 't' | '@' | 'q')) => {
                 self.pending = Some(first);
                 self.count = count;
                 Vec::new()

@@ -606,6 +606,24 @@ impl Workspace {
         Ok(found)
     }
 
+    /// The macros in the models folder, through `list_macros`.
+    pub fn macros(&self) -> Result<Vec<crabsim_catalogue::macros::Macro>, String> {
+        let catalogue = self.catalogue.as_ref().ok_or("no models folder is open")?;
+        let listed = catalogue.call("list_macros", json!({})).map_err(|error| error.to_string())?;
+        serde_json::from_value(listed["macros"].clone()).map_err(|error| error.to_string())
+    }
+
+    /// Does one of the macro operations, such as `remove_macro`, as the user.
+    pub fn macro_operation(&self, operation: &str, input: Value) -> Result<(), String> {
+        let catalogue = self.catalogue.as_ref().ok_or("no models folder is open")?;
+        catalogue.call(operation, input).map(|_| ()).map_err(|error| error.to_string())
+    }
+
+    /// The models folder's macros file, to notice when it changes.
+    pub fn macros_file(&self) -> Option<std::path::PathBuf> {
+        Some(self.catalogue.as_ref()?.folder().root().join(crabsim_catalogue::macros::MACROS_FILE))
+    }
+
     /// The open model as its file gives it.
     pub fn model(&self) -> &Model {
         &self.model

@@ -432,6 +432,19 @@ fn weighted_paths_come_by_their_total_the_critical_path_first_when_largest() {
 }
 
 #[test]
+fn paths_are_weighed_by_values_given_by_name() {
+    let setup = setup("paths-values");
+    setup.folder.write("plan.json", PLAN);
+    let answer = query(&setup, "plan.json", json!({ "kind": "paths", "from": "In", "to": "Out", "weight": { "values": { "A": 0.9, "C": 0.2, "B": 0.1, "D": 0.4 } }, "order": "largest" }));
+    let routes = weighted(&answer);
+    assert_eq!(routes[0], (vec!["In", "A", "C", "Out"], 1.1));
+    assert_eq!(answer["weighted"]["by"], "the values given");
+    assert_eq!(strings(&answer["weighted"]["weightless"]), ["In", "Out"], "left out, so 0");
+    let refused = setup.err("query_model", json!({ "path": "plan.json", "query": { "kind": "paths", "from": "In", "to": "Out", "weight": { "values": { "A": -1.0 } } } }));
+    assert!(refused["message"].as_str().unwrap().contains("0 or more"), "{refused}");
+}
+
+#[test]
 fn the_heaviest_routes_through_a_loop_pass_no_object_twice() {
     let setup = setup("paths-weighted-loop");
     // Two ways through a diamond whose end leads back to its start, the way through C heavier.

@@ -6,7 +6,7 @@
 use crabsim::{Position, SimTime};
 use crabsim_catalogue::{Catalogue, Settings, Source};
 use crabsim_model::State;
-use crabsim_ui::attributes::{Form, RepairKind};
+use crabsim_ui::attributes::{summary, Form, RepairKind};
 use crabsim_ui::view::Change;
 use crabsim_ui::workspace::{ModelChange, Refusal, ValueFrom, Workspace};
 use serde_json::{json, Value};
@@ -66,7 +66,7 @@ fn every_attribute_comes_with_its_value_and_where_it_comes_from() {
     let folder = Folder::new("read");
     let workspace = open(&folder);
     let names: Vec<String> = workspace.attributes("P1").unwrap().into_iter().map(|view| view.attribute).collect();
-    assert_eq!(names, ["process_time", "failures", "starting_mus", "dimensions", "description", "state_notes"], "a Station's attributes, in a fixed order");
+    assert_eq!(names, ["process_time", "failures", "starting_mus", "dimensions", "description", "state_notes", "distribution"], "a Station's attributes, in a fixed order");
     assert_eq!(of(&workspace, "P1", "process_time"), (Some(json!("00:00:05")), ValueFrom::Class("Press".into())));
     assert_eq!(of(&workspace, "P2", "process_time"), (Some(json!("00:00:07")), ValueFrom::Instance));
     assert_eq!(of(&workspace, "P1", "starting_mus"), (Some(json!(0)), ValueFrom::BuiltIn));
@@ -337,4 +337,56 @@ fn unset_failures_start_at_100_percent_with_a_constant_repair_which_means_never_
     assert_eq!(form.value(), Ok(json!({ "availability": 0.9, "repair_time": { "constant": "00:01:00" } })));
     form.parts[0].text = "0".into();
     assert!(form.value().is_err());
+}
+
+// ---------- Distribution ----------
+
+fn drains(names: &[&str]) -> Vec<String> {
+    names.iter().map(|name| name.to_string()).collect()
+}
+
+#[test]
+fn a_distribution_starts_as_round_robin_and_set_nowhere_matches_it() {
+    let form = Form::for_attribute("distribution", None, &[], &drains(&["Out"]));
+    let choice = form.distribution.clone().unwrap();
+    assert!(!choice.weighted);
+    assert_eq!(form.value(), Ok(json!("round_robin")));
+    assert!(form.matches(None), "nothing waits to be applied");
+    assert!(form.matches(Some(&json!("round_robin"))));
+}
+
+#[test]
+fn a_weighted_distribution_reads_back_what_it_was_given_whatever_the_order_of_its_drains() {
+    let given = json!({ "weighted": { "by": "interval", "order": "largest", "rank": "route", "drains": ["B", "A"] } });
+    let form = Form::for_attribute("distribution", Some(&given), &[], &drains(&["A", "B", "C"]));
+    let choice = form.distribution.clone().unwrap();
+    assert!(choice.weighted && choice.largest && !choice.successor);
+    assert_eq!(choice.by, "interval");
+    assert_eq!(choice.drains, vec![("A".into(), true), ("B".into(), true), ("C".into(), false)]);
+    assert!(form.matches(Some(&given)));
+    assert_eq!(form.value(), Ok(json!({ "weighted": { "by": "interval", "order": "largest", "rank": "route", "drains": ["A", "B"] } })));
+}
+
+#[test]
+fn choosing_weighted_waits_to_be_applied_with_every_drain_counted_by_default() {
+    let mut form = Form::for_attribute("distribution", None, &[], &drains(&["Out"]));
+    form.distribution.as_mut().unwrap().weighted = true;
+    assert!(!form.matches(None));
+    assert_eq!(form.value(), Ok(json!({ "weighted": { "by": "process_time", "order": "smallest", "rank": "route" } })), "none ticked counts every Drain");
+}
+
+#[test]
+fn a_counted_name_that_isnt_a_drain_stays_ticked_so_saving_never_drops_it() {
+    let given = json!({ "weighted": { "by": "process_time", "drains": ["Gone"] } });
+    let form = Form::for_attribute("distribution", Some(&given), &[], &drains(&["Out"]));
+    assert_eq!(form.distribution.unwrap().drains, vec![("Out".into(), false), ("Gone".into(), true)]);
+}
+
+#[test]
+fn a_distribution_reads_as_one_line() {
+    assert_eq!(summary(&json!("round_robin")), "round robin");
+    assert_eq!(
+        summary(&json!({ "weighted": { "by": "process_time", "order": "largest", "rank": "successor", "drains": ["Out"] } })),
+        "weighted: successor by process time, largest first, to Out"
+    );
 }

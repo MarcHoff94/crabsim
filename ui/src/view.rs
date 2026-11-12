@@ -1163,6 +1163,32 @@ impl ViewState {
             && self.last_request.is_none_or(|last| wall >= last + DETAILS_INTERVAL)
     }
 
+    /// A figure of the run at its last full state, by object id, as the results store names it,
+    /// such as `working_share` or `mus_in`. `None` until a full state arrives after Init, and
+    /// `None` for an object without it, such as a share before any time was measured.
+    pub fn live_figure(&self, figure: &str) -> Option<Vec<Option<f64>>> {
+        let state = self.details.as_ref().filter(|state| state.initialised)?;
+        let mut values = vec![None; self.objects.len()];
+        for object in &state.objects {
+            let statistics = &object.statistics;
+            let measured = statistics.measured_time().as_millis() as f64;
+            let share = |time: SimTime| (measured > 0.0).then(|| time.as_millis() as f64 / measured);
+            let value = match figure {
+                "working_share" => share(statistics.time_busy),
+                "blocked_share" => share(statistics.time_blocked),
+                "idle_share" => share(statistics.time_idle),
+                "failed_share" => share(statistics.time_failed),
+                "mus_in" => Some(statistics.mus_in as f64),
+                "mus_out" => Some(statistics.mus_out as f64),
+                _ => None,
+            };
+            if let Some(slot) = values.get_mut(object.id as usize) {
+                *slot = value;
+            }
+        }
+        Some(values)
+    }
+
     /// Notes whether the Results tab is open, so full states are asked for while it is.
     pub fn set_results_open(&mut self, open: bool) {
         self.results_open = open;

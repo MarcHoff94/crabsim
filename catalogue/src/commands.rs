@@ -30,6 +30,22 @@ pub const VERBS: [&str; 17] = [
 pub enum Parsed {
     Changes(Vec<Planned>),
     Window(WindowCommand),
+    /// A macro run alone that holds commands for the window too: lines to carry out in order,
+    /// each model changes or one window command.
+    Sequence(Vec<String>),
+    /// Saving, removing or keeping a macro.
+    Macro(MacroCommand),
+}
+
+/// A command about macros.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MacroCommand {
+    /// `macro name = command; command`.
+    Save { name: String, commands: Vec<String> },
+    /// `macro remove name`.
+    Remove { name: String },
+    /// `macro keep name`: the user keeps an agent's macro.
+    Keep { name: String },
 }
 
 /// One command of a line and the `edit_model` changes it makes.
@@ -60,6 +76,8 @@ pub enum WindowCommand {
 pub struct Context {
     pub selected: Option<String>,
     pub at: Option<(f64, f64)>,
+    /// The macros `@name` can run, by name with their commands.
+    pub macros: Vec<(String, Vec<String>)>,
 }
 
 /// The model as the line has changed it so far: its instances, with class, position and length,
@@ -231,10 +249,18 @@ fn two_numbers(text: &str) -> Option<(f64, f64)> {
 /// Reads a line: commands separated by `;`. A line is either changes to the model, each command
 /// giving one or more `edit_model` changes, or one command for the window.
 pub fn parse(line: &str, model: &Model, context: &Context) -> Result<Parsed, String> {
-    let commands: Vec<&str> = line.split(';').map(str::trim).filter(|command| !command.is_empty()).collect();
-    if commands.is_empty() {
+    if let Some(rest) = line.trim().strip_prefix("macro ") {
+        return macro_command(rest.trim()).map(Parsed::Macro);
+    }
+    let typed: Vec<&str> = line.split(';').map(str::trim).filter(|command| !command.is_empty()).collect();
+    if typed.is_empty() {
         return Err("type a command, such as add Station".to_string());
     }
+    let mut expanded = Vec::new();
+    for (place, command) in typed.iter().enumerate() {
+        expand(command, context, 0, &mut expanded).map_err(|why| format!("{} command ({}): {why}", ordinal(place + 1), shown(command)))?;
+    }
+    let commands: Vec<&str> = expanded.iter().map(String::as_str).collect();
     let window = |command: &str| -> Option<Result<WindowCommand, String>> {
         let (verb, rest) = command.split_once(' ').map_or((command, ""), |(verb, rest)| (verb, rest.trim()));
         Some(match verb {
@@ -252,6 +278,27 @@ pub fn parse(line: &str, model: &Model, context: &Context) -> Result<Parsed, Str
     {
         return command.map(Parsed::Window);
     }
+    // A macro run alone may mix the two: its lines run in order, model changes side by side as
+    // one batch.
+    if typed.len() == 1 && typed[0].starts_with('@') && commands.iter().any(|command| window(command).is_some()) {
+        let mut lines: Vec<String> = Vec::new();
+        let mut batch: Vec<&str> = Vec::new();
+        for command in &commands {
+            if window(command).is_some() {
+                if !batch.is_empty() {
+                    lines.push(batch.join("; "));
+                    batch.clear();
+                }
+                lines.push(command.to_string());
+            } else {
+                batch.push(command);
+            }
+        }
+        if !batch.is_empty() {
+            lines.push(batch.join("; "));
+        }
+        return Ok(Parsed::Sequence(lines));
+    }
     if let Some(command) = commands.iter().find(|command| window(command).is_some()) {
         return Err(format!(
             "`{}` is for the window, and a line is either changes to the model or one of goto, speed, seed, open and validate: give it a line of its own",
@@ -262,11 +309,87 @@ pub fn parse(line: &str, model: &Model, context: &Context) -> Result<Parsed, Str
     let mut last_placed: Option<String> = None;
     let mut planned = Vec::new();
     for (place, command) in commands.iter().enumerate() {
+        // `$last` is the instance the last `add` placed, so far in this line.
+        let command = &if command.contains("$last") {
+            match &last_placed {
+                Some(last) => command.replace("$last", last),
+                None => return Err(format!("{} command ({}): $last is the instance the last add placed, and none has yet", ordinal(place + 1), shown(command))),
+            }
+        } else {
+            command.to_string()
+        };
         let read = read_command(command, model, context, &mut names, &mut last_placed)
             .map_err(|why| format!("{} command ({}): {why}", ordinal(place + 1), shown(command)))?;
         planned.push(read);
     }
     Ok(Parsed::Changes(planned))
+}
+
+/// `macro name = …`, `macro remove name` or `macro keep name`.
+fn macro_command(rest: &str) -> Result<MacroCommand, String> {
+    if let Some((name, commands)) = rest.split_once('=') {
+        let commands: Vec<String> = commands.split(';').map(str::trim).filter(|command| !command.is_empty()).map(str::to_string).collect();
+        if commands.is_empty() {
+            return Err("a macro needs at least one command, such as macro line = add Station; connect $selected > $last".to_string());
+        }
+        return Ok(MacroCommand::Save { name: name.trim().to_string(), commands });
+    }
+    match rest.split_once(' ') {
+        Some(("remove", name)) => Ok(MacroCommand::Remove { name: name.trim().to_string() }),
+        Some(("keep", name)) => Ok(MacroCommand::Keep { name: name.trim().to_string() }),
+        _ => Err("write it as macro name = command; command, macro remove name, or macro keep name".to_string()),
+    }
+}
+
+/// How deep macros may run macros, so one that runs itself stops.
+const MACRO_DEPTH: usize = 8;
+
+/// `command`, or the commands of the macro `@name` runs, its arguments and `$selected` filled in,
+/// macros within it run in turn.
+fn expand(command: &str, context: &Context, depth: usize, into: &mut Vec<String>) -> Result<(), String> {
+    let Some(call) = command.strip_prefix('@') else {
+        into.push(command.to_string());
+        return Ok(());
+    };
+    if depth >= MACRO_DEPTH {
+        return Err(format!("macros run each other more than {MACRO_DEPTH} deep, as one that runs itself does"));
+    }
+    let (name, rest) = call.split_once(char::is_whitespace).map_or((call, ""), |(name, rest)| (name, rest.trim()));
+    let (_, commands) = context
+        .macros
+        .iter()
+        .find(|(known, _)| known == name)
+        .ok_or_else(|| format!("there is no macro `{name}`: list_macros lists them"))?;
+    // Arguments are split at commas if there are any, so a name may hold spaces, and otherwise
+    // at spaces.
+    let arguments: Vec<&str> = if rest.contains(',') { rest.split(',').map(str::trim).collect() } else { rest.split_whitespace().collect() };
+    for line in commands {
+        let mut filled = line.clone();
+        // From the highest, so $1 doesn't eat the start of $12.
+        for place in (1..=9).rev() {
+            let marker = format!("${place}");
+            if filled.contains(&marker) {
+                let argument = arguments.get(place - 1).ok_or_else(|| format!("@{name} needs at least {place} argument{}", if place == 1 { "" } else { "s" }))?;
+                filled = filled.replace(&marker, argument);
+            }
+        }
+        if filled.contains("$selected") {
+            let selected = context.selected.as_deref().ok_or_else(|| format!("@{name} uses $selected: select an instance first"))?;
+            filled = filled.replace("$selected", selected);
+        }
+        for inner in filled.split(';').map(str::trim).filter(|inner| !inner.is_empty()) {
+            expand(inner, context, depth + 1, into)?;
+        }
+    }
+    Ok(())
+}
+
+/// The macros a line runs by name, at its top level, for counting their runs.
+pub fn macros_run(line: &str) -> Vec<String> {
+    line.split(';')
+        .filter_map(|command| command.trim().strip_prefix('@'))
+        .map(|call| call.split_whitespace().next().unwrap_or_default().to_string())
+        .collect()
 }
 
 fn read_command(command: &str, model: &Model, context: &Context, names: &mut Names, last_placed: &mut Option<String>) -> Result<Planned, String> {
@@ -440,13 +563,18 @@ fn next_name(class: &str, names: &Names) -> String {
     format!("{class} {}", highest + 1)
 }
 
-/// What the last command of a line could become, as whole lines: its first words, an instance
-/// or class name after them or after `>`, `to`, `as` or `from`, or an attribute after a dot.
-pub fn complete(line: &str, model: &Model) -> Vec<String> {
+/// What the last command of a line could become, as whole lines: its first words, a macro's name
+/// after `@` from `macros`, an instance or class name after the first words or after `>`, `to`,
+/// `as` or `from`, or an attribute after a dot.
+pub fn complete(line: &str, model: &Model, macros: &[String]) -> Vec<String> {
     let (done, last) = line.rsplit_once(';').map_or(("", line), |(done, last)| (done, last));
     let lead = if done.is_empty() { String::new() } else { format!("{done}; ") };
     let command = last.trim_start();
     let words = |text: &str| -> Vec<String> { VERBS.iter().filter(|verb| verb.starts_with(text) && **verb != text).map(|verb| format!("{lead}{verb} ")).collect() };
+    // A macro's name after @.
+    if let Some(typed) = command.strip_prefix('@').filter(|typed| !typed.contains(' ')) {
+        return macros.iter().filter(|name| name.starts_with(typed) && name.as_str() != typed).map(|name| format!("{lead}@{name} ")).collect();
+    }
     let Some(verb) = VERBS.iter().filter(|verb| command.starts_with(&format!("{verb} "))).max_by_key(|verb| verb.len()) else {
         return words(command);
     };
@@ -534,9 +662,26 @@ impl Operation for RunCommands {
     fn run(catalogue: &Catalogue, input: RunCommandsInput) -> Result<RunCommandsOutput, OperationError> {
         let (_, text) = read_file(catalogue, &input.path)?;
         let model = crabsim_model::load(&text).map_err(|problems| OperationError::invalid_model(&format!("`{}`", input.path), &problems))?;
-        let context = Context { selected: input.selected, at: input.at.map(|[x, y]| (x, y)) };
+        let macros = crate::macros::Held::open(catalogue)?.macros.iter().map(|r#macro| (r#macro.name.clone(), r#macro.commands.clone())).collect();
+        let context = Context { selected: input.selected, at: input.at.map(|[x, y]| (x, y)), macros };
         let planned = match parse(&input.commands, &model, &context).map_err(OperationError::invalid_input)? {
             Parsed::Changes(planned) => planned,
+            Parsed::Macro(command) => {
+                match command {
+                    MacroCommand::Save { name, commands } => {
+                        crate::macros::save(catalogue, &name, commands, None)?;
+                    }
+                    MacroCommand::Remove { name } => crate::macros::remove(catalogue, &name)?,
+                    MacroCommand::Keep { name } if catalogue.source().is_user() => {
+                        crate::macros::keep(catalogue, Some(&name), None, None)?;
+                    }
+                    MacroCommand::Keep { .. } => return Err(OperationError::invalid_input("keeping a macro is the user's own: ask the user to keep it")),
+                }
+                return Ok(RunCommandsOutput { path: input.path, file_hash: crate::edit::hash(&text), commands: 1, placed: Vec::new(), also_removed: Default::default() });
+            }
+            Parsed::Sequence(_) => {
+                return Err(OperationError::invalid_input("that macro also holds commands for the window, such as goto: run its model changes alone, or the macro in the window"));
+            }
             Parsed::Window(command) => {
                 let instead = match command {
                     WindowCommand::GoTo(_) | WindowCommand::Speed(_) | WindowCommand::Seed(_) => "start_run, which runs a model to a length with a seed",
@@ -559,6 +704,10 @@ impl Operation for RunCommands {
             error.message = name_commands(&error.message, &from_command, &planned);
             error
         })?;
+        let run = macros_run(&input.commands);
+        if !run.is_empty() {
+            crate::macros::Held::open(catalogue)?.ran(&run);
+        }
         Ok(RunCommandsOutput {
             path: edited.path,
             file_hash: edited.file_hash,

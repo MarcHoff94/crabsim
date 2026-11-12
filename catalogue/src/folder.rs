@@ -58,6 +58,10 @@ impl ModelsFolder {
     /// `.crabsim`.
     pub fn model_file(&self, path: &str) -> Result<PathBuf, OperationError> {
         let relative = relative_path(path)?;
+        // The macros live beside the models, but aren't one.
+        if relative == std::path::Path::new(crate::macros::MACROS_FILE) {
+            return Err(OperationError::invalid_input(format!("`{path}` holds the macros, which list_macros, save_macro and remove_macro change: it isn't a model file")));
+        }
         if !relative.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("json")) {
             return Err(OperationError::invalid_input(format!("`{path}` isn't a model file: model files end in .json")));
         }

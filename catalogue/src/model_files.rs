@@ -20,6 +20,7 @@ pub(crate) fn entries() -> Vec<Entry> {
     ];
     entries.extend(crate::edit::entries());
     entries.extend(crate::commands::entries());
+    entries.extend(crate::macros::entries());
     entries.extend(crate::editing::entries());
     entries.extend(crate::jobs::entries());
     entries.extend(crate::bottleneck::entries());

@@ -198,6 +198,9 @@ The rule for which MU leaves an object next. By default, the earliest finished M
 **Distribution strategy**:
 The rule for which successor receives the MU that is leaving, set per Source or Station as its `distribution` (ADR 0016). **Round robin**, the default, offers each MU to the successors in turn. **Weighted** ranks the successors by a weight, such as each one's best route onward to a Drain by process time, and offers the MU to the best one that can take it, those ranking equal taking turns.
 
+**Macro**:
+A named list of commands in the command line's language, run as `@name` with arguments for its `$1`, `$2` and so on. Macros live in `macros.json` beside the models, each with its author. An agent's macros last for its work and are then archived, unless the user keeps one.
+
 **Warning**:
 Something in a model that can run but is probably a mistake, such as an object no Source reaches. `validate_model` and the window's Validate button list warnings beside problems. Unlike a problem, a warning never stops a run.
 

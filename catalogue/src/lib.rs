@@ -20,6 +20,7 @@
 
 pub mod bottleneck;
 pub mod commands;
+pub mod macros;
 mod compare;
 mod edit;
 mod editing;

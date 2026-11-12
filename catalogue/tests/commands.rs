@@ -64,7 +64,7 @@ fn each_command_becomes_edit_model_changes() {
 
 #[test]
 fn add_places_beside_the_selection_or_the_last_placed_or_where_it_is_told() {
-    let beside_mill = Context { selected: Some("Mill 1".into()), at: None };
+    let beside_mill = Context { selected: Some("Mill 1".into()), at: None, macros: Vec::new() };
     // A Mill is 2 m long: 4 + 1 + 2 + 1.
     assert_eq!(
         changes("add Mill", &beside_mill),
@@ -72,7 +72,7 @@ fn add_places_beside_the_selection_or_the_last_placed_or_where_it_is_told() {
     );
     let line = changes("add Mill as A; add Mill as B", &beside_mill);
     assert_eq!(line[1]["position"], json!({ "x": 12.0, "y": 2.0 }), "beside the one placed before it");
-    let nothing = Context { selected: None, at: Some((20.0, 5.0)) };
+    let nothing = Context { selected: None, at: Some((20.0, 5.0)), macros: Vec::new() };
     assert_eq!(changes("add Drain", &nothing)[0]["position"], json!({ "x": 20.0, "y": 5.0 }));
     assert_eq!(changes("add Drain at 1 2", &beside_mill)[0]["position"], json!({ "x": 1.0, "y": 2.0 }));
     // Stations are already in use, so a new one gets 10 s on itself, as in the window.
@@ -122,12 +122,12 @@ fn names_are_found_exactly_first_then_by_a_part_only_one_holds() {
 #[test]
 fn completion_offers_commands_names_and_attributes() {
     let model = model();
-    assert_eq!(complete("con", &model), vec!["connect ".to_string()]);
-    assert!(complete("connect In > O", &model).contains(&"connect In > Out".to_string()));
-    assert!(complete("connect In>O", &model).contains(&"connect In>Out".to_string()), "without spaces too");
-    assert!(complete("add M", &model).contains(&"add Mill".to_string()), "classes for add");
-    assert!(complete("set Mill 1.pro", &model).contains(&"set Mill 1.process_time ".to_string()));
-    assert!(complete("add Mill; con", &model).contains(&"add Mill; connect ".to_string()), "the last command of a line");
+    assert_eq!(complete("con", &model, &[]), vec!["connect ".to_string()]);
+    assert!(complete("connect In > O", &model, &[]).contains(&"connect In > Out".to_string()));
+    assert!(complete("connect In>O", &model, &[]).contains(&"connect In>Out".to_string()), "without spaces too");
+    assert!(complete("add M", &model, &[]).contains(&"add Mill".to_string()), "classes for add");
+    assert!(complete("set Mill 1.pro", &model, &[]).contains(&"set Mill 1.process_time ".to_string()));
+    assert!(complete("add Mill; con", &model, &[]).contains(&"add Mill; connect ".to_string()), "the last command of a line");
 }
 
 // ---------- run_commands ----------
@@ -169,4 +169,151 @@ fn an_agent_needs_its_claim_to_run_commands() {
     assert_eq!(refused["kind"], "not_editor", "{refused}");
     setup.ok("claim_model", json!({ "path": "line.json", "goal": "tidy up", "doing": "removing Out" }));
     setup.ok("run_commands", json!({ "path": "line.json", "commands": "remove Out" }));
+}
+
+// ---------- macros ----------
+
+fn with_macros(macros: &[(&str, &[&str])], selected: Option<&str>) -> Context {
+    Context {
+        selected: selected.map(str::to_string),
+        at: Some((20.0, 0.0)),
+        macros: macros.iter().map(|(name, commands)| (name.to_string(), commands.iter().map(|command| command.to_string()).collect())).collect(),
+    }
+}
+
+#[test]
+fn a_macro_runs_its_commands_with_its_arguments_selected_and_last_filled_in() {
+    let context = with_macros(&[("feed", &["add $1", "connect $selected > $last"])], Some("Mill 1"));
+    let line = match parse("@feed Drain", &model(), &context) {
+        Ok(Parsed::Changes(planned)) => planned,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(line[0].placed.as_deref(), Some("Drain 1"));
+    assert_eq!(line[1].changes[0], json!({ "change": "connect", "from": "Mill 1", "to": "Drain 1" }));
+
+    // Repeated in one line, $last follows each add, so a line builds on.
+    let context = with_macros(&[("next", &["add Mill", "connect $selected > $last"])], Some("Mill 1"));
+    let line = match parse("@next; @next", &model(), &context) {
+        Ok(Parsed::Changes(planned)) => planned,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(line[3].changes[0], json!({ "change": "connect", "from": "Mill 1", "to": "Mill 4" }));
+
+    // Arguments with spaces are split at commas.
+    let context = with_macros(&[("join", &["connect $1 > $2"])], None);
+    match parse("@join Mill 1, Out", &model(), &context) {
+        Ok(Parsed::Changes(planned)) => assert_eq!(planned[0].changes[0], json!({ "change": "connect", "from": "Mill 1", "to": "Out" })),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn a_macro_is_refused_without_its_arguments_or_selection_and_when_it_runs_itself() {
+    let context = with_macros(&[("feed", &["add $1", "connect $selected > $last"]), ("loop", &["@loop"])], None);
+    assert!(parse("@feed", &model(), &context).unwrap_err().contains("@feed needs at least 1 argument"));
+    assert!(parse("@feed Drain", &model(), &context).unwrap_err().contains("select an instance first"));
+    assert!(parse("@loop", &model(), &context).unwrap_err().contains("more than 8 deep"));
+    assert!(parse("@nothing", &model(), &context).unwrap_err().contains("there is no macro `nothing`"));
+    assert!(parse("connect In > $last", &model(), &context).unwrap_err().contains("none has yet"));
+}
+
+#[test]
+fn a_macro_run_alone_may_hold_window_commands_which_run_in_order() {
+    let context = with_macros(&[("tour", &["add Mill as A", "add Mill as B", "goto 1d", "remove A"])], None);
+    assert_eq!(
+        parse("@tour", &model(), &context),
+        Ok(Parsed::Sequence(vec!["add Mill as A; add Mill as B".into(), "goto 1d".into(), "remove A".into()]))
+    );
+    assert!(parse("remove Out; @tour", &model(), &context).unwrap_err().contains("give it a line of its own"));
+}
+
+#[test]
+fn macro_commands_save_remove_and_keep() {
+    use crabsim_catalogue::commands::MacroCommand;
+    let none = Context::default();
+    assert_eq!(
+        parse("macro line = add Station; connect $selected > $last", &model(), &none),
+        Ok(Parsed::Macro(MacroCommand::Save { name: "line".into(), commands: vec!["add Station".into(), "connect $selected > $last".into()] }))
+    );
+    assert_eq!(parse("macro remove line", &model(), &none), Ok(Parsed::Macro(MacroCommand::Remove { name: "line".into() })));
+    assert_eq!(parse("macro keep line", &model(), &none), Ok(Parsed::Macro(MacroCommand::Keep { name: "line".into() })));
+    assert!(complete("@li", &model(), &["line".to_string(), "loop".to_string()]).contains(&"@line ".to_string()));
+}
+
+#[test]
+fn macros_are_saved_listed_run_and_counted_through_operations() {
+    let setup = setup("macros");
+    let saved = setup.ok("save_macro", json!({ "name": "feed", "commands": ["add Mill", "connect $selected > $last"] }));
+    common::assert_fits_its_schema(&setup.catalogue, "save_macro", &saved);
+    assert_eq!(saved["author"], json!({ "kind": "user" }));
+    setup.ok("run_commands", json!({ "path": "line.json", "commands": "@feed; @feed", "selected": "Mill 1" }));
+    let listed = setup.ok("list_macros", json!({}));
+    common::assert_fits_its_schema(&setup.catalogue, "list_macros", &listed);
+    assert_eq!(listed["macros"][0]["runs"], 2, "two runs in one line");
+    let model = crabsim_model::load(&setup.folder.read("line.json")).unwrap();
+    assert_eq!(model.successors("Mill 1"), ["Out", "Mill 3", "Mill 4"]);
+
+    // The file sits beside the models, readable, and is never taken for one.
+    assert!(setup.folder.read("macros.json").contains("\"macros_version\""));
+    let models = setup.ok("list_models", json!({}));
+    assert_eq!(models["models"], json!(["line.json"]));
+    let refused = setup.err("write_model", json!({ "path": "macros.json", "text": "{}" }));
+    assert!(refused["message"].as_str().unwrap().contains("holds the macros"), "{refused}");
+
+    // Through the command line too.
+    setup.ok("run_commands", json!({ "path": "line.json", "commands": "macro twice = add Drain; add Drain" }));
+    setup.ok("run_commands", json!({ "path": "line.json", "commands": "macro remove feed" }));
+    let names: Vec<String> = setup.ok("list_macros", json!({}))["macros"].as_array().unwrap().iter().map(|m| m["name"].as_str().unwrap().to_string()).collect();
+    assert_eq!(names, ["twice"]);
+    let refused = setup.err("save_macro", json!({ "name": "two words", "commands": ["add Mill"] }));
+    assert!(refused["message"].as_str().unwrap().contains("be a macro"), "{refused}");
+}
+
+#[test]
+fn an_agent_keeps_its_own_macros_for_its_work_and_cant_touch_the_users() {
+    let user = setup("macros-agents");
+    user.ok("save_macro", json!({ "name": "mine", "commands": ["add Mill"] }));
+    {
+        let agent = Agent(crabsim_catalogue::Catalogue::open(crabsim_catalogue::Settings::new(&user.folder.path, crabsim_catalogue::Source::Mcp)).unwrap());
+        agent.ok("claim_model", json!({ "path": "line.json", "goal": "a longer line", "doing": "adding mills" }));
+        let saved = agent.ok("save_macro", json!({ "name": "theirs", "commands": ["add Station"] }));
+        assert_eq!(saved["author"]["kind"], "agent");
+        assert_eq!(saved["author"]["goals"], json!(["a longer line"]));
+        let refused = agent.err("save_macro", json!({ "name": "mine", "commands": ["remove Out"] }));
+        assert!(refused["message"].as_str().unwrap().contains("the user"), "{refused}");
+        let refused = agent.err("remove_macro", json!({ "name": "mine" }));
+        assert!(refused["message"].as_str().unwrap().contains("the user"), "{refused}");
+        let refused = agent.err("run_commands", json!({ "path": "line.json", "commands": "macro keep theirs" }));
+        assert!(refused["message"].as_str().unwrap().contains("ask the user"), "{refused}");
+        // While the agent works, everyone sees and can run its macro.
+        let names: Vec<String> = user.ok("list_macros", json!({}))["macros"].as_array().unwrap().iter().map(|m| m["name"].as_str().unwrap().to_string()).collect();
+        assert_eq!(names, ["mine", "theirs"]);
+    }
+    // The agent's process ended: its macro left the list for the archive.
+    let listed = user.ok("list_macros", json!({ "archived": true }));
+    let names: Vec<&str> = listed["macros"].as_array().unwrap().iter().map(|m| m["name"].as_str().unwrap()).collect();
+    assert_eq!(names, ["mine"]);
+    let archived = listed["archived"].as_array().unwrap();
+    assert_eq!(archived.len(), 1);
+    assert_eq!(archived[0]["name"], "theirs");
+    assert!(user.folder.read(".crabsim/agent-macros.jsonl").contains("\"theirs\""));
+    // The user keeps it.
+    let kept = user.ok("keep_macro", json!({ "archived": archived[0]["id"] }));
+    assert_eq!(kept["author"], json!({ "kind": "user" }));
+    let names: Vec<String> = user.ok("list_macros", json!({}))["macros"].as_array().unwrap().iter().map(|m| m["name"].as_str().unwrap().to_string()).collect();
+    assert_eq!(names, ["mine", "theirs"]);
+}
+
+/// A second catalogue on the same folder, as an agent's MCP server opens it, ending with its
+/// process when dropped.
+struct Agent(crabsim_catalogue::Catalogue);
+
+impl Agent {
+    fn ok(&self, name: &str, input: Value) -> Value {
+        self.0.call(name, input.clone()).unwrap_or_else(|error| panic!("{name} {input} failed: {error}"))
+    }
+
+    fn err(&self, name: &str, input: Value) -> Value {
+        self.0.call(name, input).expect_err("should fail").to_json()
+    }
 }

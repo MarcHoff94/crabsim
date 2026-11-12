@@ -170,3 +170,16 @@ fn the_command_line_opens_with_colon_or_already_begun_and_remembers_its_lines() 
     assert_eq!(keys.press(Key::Down), vec![Command::Prompted(PromptKind::Command, "connect In > ".into())]);
     assert_eq!(keys.press(Key::Down), vec![Command::Prompted(PromptKind::Command, String::new())], "and back to an empty line");
 }
+
+#[test]
+fn at_runs_a_macro_and_q_records_one() {
+    let mut keys = Keys::default();
+    assert_eq!(typed(&mut keys, "@a"), vec![Command::RunMacro("a".into(), 1)]);
+    assert_eq!(typed(&mut keys, "5@b"), vec![Command::RunMacro("b".into(), 5)], "a count runs it that many times");
+    assert!(!keys.recording());
+    assert_eq!(typed(&mut keys, "qa"), vec![Command::Record(Some("a".into()))]);
+    assert!(keys.recording());
+    assert_eq!(typed(&mut keys, "l"), vec![Command::Move(Direction::Right, 1)], "other keys work while recording");
+    assert_eq!(typed(&mut keys, "q"), vec![Command::Record(None)], "q alone stops");
+    assert!(!keys.recording());
+}

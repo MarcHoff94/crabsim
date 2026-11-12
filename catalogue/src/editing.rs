@@ -432,7 +432,34 @@ impl Editing {
     }
 }
 
+/// Who is asking, as a macro records it.
+pub(crate) enum AskerView {
+    User,
+    /// An agent by its id, its harness and its process lock id, with the goals of the claims it
+    /// holds now.
+    Agent { id: String, client: String, process: String, goals: Vec<String> },
+}
+
 impl Catalogue {
+    /// Who is asking, with an agent's goals now.
+    pub(crate) fn asker(&self) -> Result<AskerView, OperationError> {
+        let editing = self.editing()?;
+        Ok(match &editing.asker {
+            Asker::User(_) => AskerView::User,
+            Asker::Agent(process) => {
+                let (id, client) = editing.agent(process).map_or_else(|| ("an agent".to_string(), String::new()), |agent| (agent.id.clone(), agent.client.clone()));
+                let goals = editing
+                    .held
+                    .state
+                    .files
+                    .values()
+                    .filter_map(|file| file.claim.as_ref().filter(|claim| claim.process == *process).map(|claim| claim.goal.clone()))
+                    .collect();
+                AskerView::Agent { id, client, process: process.clone(), goals }
+            }
+        })
+    }
+
     /// Who is using this catalogue, as runs record it: such as `agent-3 (claude-code)`, or the user.
     pub(crate) fn who(&self) -> Result<String, OperationError> {
         let editing = self.editing()?;

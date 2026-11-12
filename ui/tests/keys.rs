@@ -1,7 +1,7 @@
 //! The window's keys (spec issue 99): what each typed key asks for, counts, two-key sequences,
 //! the prompts, and the helpers they need. No window.
 
-use crabsim_ui::keys::{address, attribute_matches, matches, nearest, Address, Command, Direction, Key, Keys, PromptKind};
+use crabsim_ui::keys::{address, attribute_matches, matches, nearest, Address, Command, Direction, Key, Keys, Prefill, PromptKind};
 use crabsim_ui::view::Point;
 
 fn typed(keys: &mut Keys, text: &str) -> Vec<Command> {
@@ -146,4 +146,27 @@ fn x_takes_one_out_while_selecting_visually_and_steps_otherwise() {
     assert_eq!(typed(&mut keys, "lx"), vec![Command::Move(Direction::Right, 1), Command::TakeOut]);
     keys.press(Key::Escape);
     assert_eq!(typed(&mut keys, "x"), vec![Command::StepForward(1)], "steps again once visual mode ends");
+}
+
+#[test]
+fn the_command_line_opens_with_colon_or_already_begun_and_remembers_its_lines() {
+    let mut keys = Keys::default();
+    assert_eq!(typed(&mut keys, "p"), vec![Command::Prefill(Prefill::Add)]);
+    assert_eq!(typed(&mut keys, "c"), vec![Command::Prefill(Prefill::Connect)]);
+    assert_eq!(typed(&mut keys, "r"), vec![Command::Prefill(Prefill::Rename)]);
+    assert_eq!(typed(&mut keys, "3L"), vec![Command::MoveObjects(Direction::Right, 3)]);
+    assert_eq!(typed(&mut keys, "H"), vec![Command::MoveObjects(Direction::Left, 1)]);
+
+    assert_eq!(typed(&mut keys, ":"), vec![Command::Prompted(PromptKind::Command, String::new())]);
+    typed(&mut keys, "add Mill");
+    assert_eq!(keys.press(Key::Enter), vec![Command::Answered(PromptKind::Command, "add Mill".into())]);
+    keys.open_prompt(PromptKind::Command, "connect In > ");
+    assert_eq!(keys.prompt(), Some((PromptKind::Command, "connect In > ")), "p, c and r open it begun");
+    keys.press(Key::Enter);
+    typed(&mut keys, ":");
+    assert_eq!(keys.press(Key::Up), vec![Command::Prompted(PromptKind::Command, "connect In > ".into())], "the last line first");
+    assert_eq!(keys.press(Key::Up), vec![Command::Prompted(PromptKind::Command, "add Mill".into())]);
+    assert_eq!(keys.press(Key::Up), vec![Command::Prompted(PromptKind::Command, "add Mill".into())], "it stops at the first");
+    assert_eq!(keys.press(Key::Down), vec![Command::Prompted(PromptKind::Command, "connect In > ".into())]);
+    assert_eq!(keys.press(Key::Down), vec![Command::Prompted(PromptKind::Command, String::new())], "and back to an empty line");
 }

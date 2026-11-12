@@ -43,6 +43,19 @@ pub enum PromptKind {
     Edit,
     /// `o`: open a model file by part of its path.
     Open,
+    /// `:`: a line of commands.
+    Command,
+}
+
+/// What `p`, `c` and `r` open the command line with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Prefill {
+    /// `:add `.
+    Add,
+    /// `:connect <selected> > `.
+    Connect,
+    /// `:rename <selected> to `.
+    Rename,
 }
 
 impl PromptKind {
@@ -52,6 +65,7 @@ impl PromptKind {
             PromptKind::Search => "/",
             PromptKind::Edit => "e ",
             PromptKind::Open => "open ",
+            PromptKind::Command => ":",
         }
     }
 }
@@ -67,6 +81,10 @@ pub enum Command {
     Predecessor(usize),
     First,
     Last,
+    /// `p`, `c`, `r`: the command line, already begun.
+    Prefill(Prefill),
+    /// `H` `J` `K` `L`: the selected objects move this many metres this way.
+    MoveObjects(Direction, u32),
     /// Tab and Shift+Tab: the next or previous object in model order.
     Step { backwards: bool },
     Unselect,
@@ -113,6 +131,10 @@ pub struct Keys {
     pending: Option<char>,
     prompt: Option<(PromptKind, String)>,
     visual: bool,
+    /// The command lines given, oldest first, for Up and Down.
+    history: Vec<String>,
+    /// Where Up and Down are in the history, while going through it.
+    history_at: Option<usize>,
 }
 
 impl Keys {
@@ -153,9 +175,26 @@ impl Keys {
                     vec![Command::Prompted(kind, text.clone())]
                 }
                 Key::Tab => vec![Command::Complete(kind, text.clone())],
+                // The command line goes back through the lines given before.
+                Key::Up | Key::Down if kind == PromptKind::Command && !self.history.is_empty() => {
+                    let last = self.history.len() - 1;
+                    let at = match (key, self.history_at) {
+                        (Key::Up, None) => Some(last),
+                        (Key::Up, Some(at)) => Some(at.saturating_sub(1)),
+                        (_, Some(at)) if at < last => Some(at + 1),
+                        _ => None,
+                    };
+                    self.history_at = at;
+                    *text = at.map_or_else(String::new, |at| self.history[at].clone());
+                    vec![Command::Prompted(kind, text.clone())]
+                }
                 Key::Enter => {
                     let text = std::mem::take(text);
                     self.prompt = None;
+                    self.history_at = None;
+                    if kind == PromptKind::Command && !text.trim().is_empty() && self.history.last() != Some(&text) {
+                        self.history.push(text.clone());
+                    }
                     vec![Command::Answered(kind, text)]
                 }
                 Key::Escape => {
@@ -227,6 +266,14 @@ impl Keys {
             Key::Char('/') => open(self, PromptKind::Search),
             Key::Char('e') => open(self, PromptKind::Edit),
             Key::Char('o') => open(self, PromptKind::Open),
+            Key::Char(':') => open(self, PromptKind::Command),
+            Key::Char('p') => vec![Command::Prefill(Prefill::Add)],
+            Key::Char('c') => vec![Command::Prefill(Prefill::Connect)],
+            Key::Char('r') => vec![Command::Prefill(Prefill::Rename)],
+            Key::Char('H') => vec![Command::MoveObjects(Direction::Left, times)],
+            Key::Char('J') => vec![Command::MoveObjects(Direction::Down, times)],
+            Key::Char('K') => vec![Command::MoveObjects(Direction::Up, times)],
+            Key::Char('L') => vec![Command::MoveObjects(Direction::Right, times)],
             Key::Char('n') => vec![Command::NextMatch { backwards: false }],
             Key::Char('N') => vec![Command::NextMatch { backwards: true }],
             Key::Char('?') => vec![Command::Help],
@@ -246,6 +293,14 @@ impl Keys {
             Key::ZoomOut => vec![Command::Zoom { closer: false }],
             _ => Vec::new(),
         }
+    }
+
+    /// Opens a prompt with `text` already typed, as `p`, `c` and `r` open the command line.
+    pub fn open_prompt(&mut self, kind: PromptKind, text: impl Into<String>) -> Vec<Command> {
+        let text = text.into();
+        self.prompt = Some((kind, text.clone()));
+        self.history_at = None;
+        vec![Command::Prompted(kind, text)]
     }
 
     /// Ends the visual selection, as when the selection is cleared some other way.

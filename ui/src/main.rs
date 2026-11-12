@@ -181,6 +181,7 @@ fn main() {
             steps_pending: (0, 0),
             keys_help: false,
             cursor: None,
+            confirm_line: None,
         })
         .insert_resource(Session(Mutex::new(session)))
         .insert_resource(WatchedFile(Arc::new(Mutex::new(Vec::new()))))
@@ -342,6 +343,8 @@ struct Ui {
     keys_help: bool,
     /// The object the last key move landed on: in visual mode moves go from it.
     cursor: Option<u32>,
+    /// A command line that removes something, waiting for the user to confirm it.
+    confirm_line: Option<(Building, Vec<String>)>,
 }
 
 /// What the Paths tab's weights and strategies were worked out for: the model, by generation, the
@@ -442,6 +445,9 @@ enum Building {
     MakeClass { instance: String, name: String },
     SetClassAttribute { class: String, attribute: String, value: serde_json::Value },
     RestoreClassAttribute { class: String, attribute: String },
+    /// A line of commands from the `:` line, read with the selection and where to place with
+    /// nothing selected.
+    Line { text: String, selected: Option<String>, at: (f64, f64) },
 }
 
 impl Building {
@@ -465,6 +471,7 @@ impl Building {
             Building::MakeClass { name, .. } => format!("Making the class {name}"),
             Building::SetClassAttribute { class, attribute, .. } => format!("Setting {class}'s {}", attribute_label(attribute).to_lowercase()),
             Building::RestoreClassAttribute { class, attribute } => format!("Restoring {class}'s {}", attribute_label(attribute).to_lowercase()),
+            Building::Line { .. } => "The command line".to_string(),
         }
     }
 
@@ -490,6 +497,8 @@ impl Building {
             Building::MakeClass { instance, name } => workspace.make_class(instance, name, take_over).map(|()| Some(instance.clone())),
             Building::SetClassAttribute { class, attribute, value } => workspace.set_class_attribute(class, attribute, value.clone(), take_over).map(|()| None),
             Building::RestoreClassAttribute { class, attribute } => workspace.restore_class_attribute(class, attribute, take_over).map(|()| None),
+            // The last instance placed is selected, so `p` again places beside it.
+            Building::Line { text, selected, at } => workspace.run_commands(text, selected.as_deref(), *at, take_over).map(|placed| placed.last().cloned()),
         }
     }
 }
@@ -1146,10 +1155,18 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
     // Space or Enter never sees them, and its Ctrl zoom of the whole window is off: Ctrl + and -
     // zoom the canvas.
     ctx.options_mut(|options| options.zoom_with_keyboard = false);
-    let dialog_open = ui.asking.is_some() || ui.confirm_removal.is_some() || ui.confirm_building.is_some() || ui.new_model.is_some() || ui.duplicating.is_some();
+    let dialog_open = ui.asking.is_some()
+        || ui.confirm_removal.is_some()
+        || ui.confirm_building.is_some()
+        || ui.new_model.is_some()
+        || ui.duplicating.is_some()
+        || ui.confirm_line.is_some();
     let keyboard_free = !dialog_open && ctx.memory(|memory| memory.focused().is_none());
     let key_request = if keyboard_free {
         let typed = read_keys(&ctx);
+        // egui has already read Tab and the arrows as moves of the keyboard to another widget,
+        // which happen as the widgets are drawn: they're the canvas's keys, so that's called off.
+        ctx.memory_mut(|memory| memory.move_focus(egui::FocusDirection::None));
         let commands: Vec<Command> = typed.into_iter().flat_map(|key| ui.keys.press(key)).collect();
         if !commands.is_empty() {
             ui.key_note = None;
@@ -1564,6 +1581,15 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
     hover_tooltip(&ctx, ui, canvas);
     help_window(&ctx, ui, canvas);
     canvas_menu(&ctx, ui);
+    if let Some((building, removing)) = ui.confirm_line.clone()
+        && let Some(run) = confirm_line(&ctx, &removing)
+    {
+        ui.confirm_line = None;
+        if run {
+            build(ui, building, false);
+        }
+        ui.view.commanded(wall);
+    }
     key_line(&ctx, ui, canvas);
     keys_help(&ctx, ui);
     ui.over_egui = ctx.is_pointer_over_egui();
@@ -3678,6 +3704,7 @@ fn prompt_candidates(ui: &Ui, kind: PromptKind, text: &str) -> Vec<String> {
     let names: Vec<&str> = names.iter().map(String::as_str).collect();
     match kind {
         PromptKind::Search => crabsim_ui::keys::matches(&names, text).into_iter().map(|index| names[index].to_string()).collect(),
+        PromptKind::Command => crabsim_catalogue::commands::complete(text, ui.workspace.model()),
         PromptKind::Open => {
             let paths: Vec<&str> = ui.workspace.models().iter().map(|entry| entry.path.as_str()).collect();
             crabsim_ui::keys::matches(&paths, text).into_iter().map(|index| paths[index].to_string()).collect()
@@ -3911,6 +3938,32 @@ fn run_key(ctx: &egui::Context, ui: &mut Ui, session: &Session, command: Command
             }
         }
         Command::Answered(PromptKind::Edit, text) => answer_edit(ctx, ui, &text),
+        Command::Answered(PromptKind::Command, text) => return run_line(ui, session, &text, wall),
+        Command::Prefill(prefill) => {
+            let selected = ui.view.selected().map(|id| ui.view.objects()[id as usize].name.clone());
+            let text = match (prefill, selected) {
+                (crabsim_ui::keys::Prefill::Add, _) => "add ".to_string(),
+                (crabsim_ui::keys::Prefill::Connect, Some(name)) => format!("connect {name} > "),
+                (crabsim_ui::keys::Prefill::Rename, Some(name)) => format!("rename {name} to "),
+                (crabsim_ui::keys::Prefill::Connect, None) => "connect ".to_string(),
+                (crabsim_ui::keys::Prefill::Rename, None) => "rename ".to_string(),
+            };
+            ui.keys.open_prompt(PromptKind::Command, text);
+        }
+        Command::MoveObjects(direction, metres) => {
+            let (dx, dy) = match direction {
+                Direction::Left => (-(metres as f64), 0.0),
+                Direction::Right => (metres as f64, 0.0),
+                Direction::Up => (0.0, metres as f64),
+                Direction::Down => (0.0, -(metres as f64)),
+            };
+            let names: Vec<String> = ui.view.selection().iter().map(|&id| ui.view.objects()[id as usize].name.clone()).collect();
+            if names.is_empty() {
+                return needs_object(ui);
+            }
+            let line = names.iter().map(|name| format!("move {name} by {dx} {dy}")).collect::<Vec<_>>().join("; ");
+            return run_line(ui, session, &line, wall);
+        }
         Command::Answered(PromptKind::Open, text) => match prompt_candidates(ui, PromptKind::Open, &text).into_iter().next() {
             Some(path) => open_model(ui, session, &path, wall),
             None => ui.key_note = Some(format!("No model file is called anything like {text}")),
@@ -3931,6 +3984,98 @@ fn run_key(ctx: &egui::Context, ui: &mut Ui, session: &Session, command: Command
         Command::Help => ui.keys_help = !ui.keys_help,
     }
     None
+}
+
+/// Carries out a `:` line. A command for the window happens here. Model changes go through
+/// `run_commands` as one batch with no run in progress, asking first when they remove something.
+/// During a run only process times can change, as interventions.
+fn run_line(ui: &mut Ui, session: &Session, line: &str, wall: Duration) -> Option<Request> {
+    use crabsim_catalogue::commands::{parse, Context, Parsed, WindowCommand};
+    let selected = ui.view.selected().map(|id| ui.view.objects()[id as usize].name.clone());
+    let at = ui.camera.map_or((0.0, 0.0), |camera| (camera.centre.x, camera.centre.y));
+    let context = Context { selected: selected.clone(), at: Some(at) };
+    let planned = match parse(line, ui.workspace.model(), &context) {
+        Err(why) => {
+            ui.view.show_error(why);
+            return None;
+        }
+        Ok(Parsed::Window(command)) => {
+            return match command {
+                WindowCommand::GoTo(to) => Some(Request::GoTo(to)),
+                WindowCommand::Speed(speed) => Some(Request::Speed(speed)),
+                WindowCommand::Seed(seed) if ui.view.allows_seed() => Some(Request::Seed(seed)),
+                WindowCommand::Seed(_) => {
+                    ui.key_note = Some("The seed changes only before Init or after Reset".to_string());
+                    None
+                }
+                WindowCommand::Open(path) => {
+                    let paths: Vec<&str> = ui.workspace.models().iter().map(|entry| entry.path.as_str()).collect();
+                    match crabsim_catalogue::commands::find(&paths, &path, "model file") {
+                        Ok(path) => open_model(ui, session, &path, wall),
+                        Err(why) => ui.view.show_error(why),
+                    }
+                    None
+                }
+                WindowCommand::Validate => {
+                    ui.validation = Some(ui.workspace.validate());
+                    None
+                }
+            };
+        }
+        Ok(Parsed::Changes(planned)) => planned,
+    };
+    if !ui.view.allows_building() {
+        // During a run a process time changes as an intervention, and nothing else changes.
+        let mut changes = Vec::new();
+        for change in planned.iter().flat_map(|command| &command.changes) {
+            let name = change["target"]["instance"].as_str();
+            let id = name.and_then(|name| ui.view.objects().iter().find(|object| object.name == name).filter(|object| object.kind == crabsim::ObjectKind::Station).map(|object| object.id));
+            let time = change["value"].as_str().and_then(parse_time).filter(|&time| time > SimTime::ZERO);
+            match (change["change"].as_str(), change["attribute"].as_str(), id, time) {
+                (Some("set_attribute"), Some("process_time"), Some(id), Some(time)) => changes.push((id, time)),
+                _ => {
+                    ui.view.show_error(format!("{RESET_FIRST}: during a run a line can only set a Station's process_time"));
+                    return None;
+                }
+            }
+        }
+        let session = session.0.lock().expect("the session lock is never poisoned");
+        for (id, time) in changes {
+            match session.set_process_time(id, time) {
+                Ok(()) => ui.view.intervened(id, Intervention::SetProcessTime(time), wall),
+                Err(error) => ui.view.observe(&crabsim::SessionOutput::Error(error), wall),
+            }
+        }
+        return None;
+    }
+    let building = Building::Line { text: line.to_string(), selected, at };
+    let removing: Vec<String> = planned.iter().filter(|command| command.removes).map(|command| command.command.clone()).collect();
+    if removing.is_empty() {
+        build(ui, building, false);
+    } else {
+        ui.confirm_line = Some((building, removing));
+    }
+    None
+}
+
+/// Asks before a command line that removes something. `Some(true)` to run it.
+fn confirm_line(ctx: &egui::Context, removing: &[String]) -> Option<bool> {
+    let mut answer = None;
+    let modal = egui::Modal::new(egui::Id::new("confirm line")).show(ctx, |modal| {
+        modal.set_max_width(420.0);
+        modal.heading("Run this line?");
+        modal.label("It removes, with their connections or what depends on them:");
+        for command in removing {
+            modal.label(format!("  {command}"));
+        }
+        if let Some(chosen) = answers(modal, &["Run it", "Cancel"]) {
+            answer = Some(chosen == 0);
+        }
+    });
+    if modal.should_close() && answer.is_none() {
+        answer = Some(false);
+    }
+    answer
 }
 
 /// The next step asked for with a count, once the step before allows it. A step that isn't
@@ -3988,7 +4133,7 @@ fn keys_help(ctx: &egui::Context, ui: &mut Ui) {
     if !ui.keys_help {
         return;
     }
-    const KEYS: [(&str, &[(&str, &str)]); 6] = [
+    const KEYS: [(&str, &[(&str, &str)]); 7] = [
         (
             "Select",
             &[
@@ -4011,6 +4156,14 @@ fn keys_help(ctx: &egui::Context, ui: &mut Ui) {
                 ("+ -", "faster, slower"),
                 ("a", "animate on or off"),
                 ("gt", "go to a time"),
+            ],
+        ),
+        (
+            "Build",
+            &[
+                (":", "a line of commands, such as add Mill; connect Split > Mill 3. Up and Down for earlier lines"),
+                ("p c r", "add, connect from the selection, rename the selection"),
+                ("H J K L", "move the selection 1 m left, down, up, right"),
             ],
         ),
         ("Panels", &[("t1 to t4", "Inspector, Results, Paths, Agents"), ("Enter", "into the selection's first field, or the open tab's first control, then Tab on"), ("o", "open a model file")]),

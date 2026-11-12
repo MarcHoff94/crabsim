@@ -456,6 +456,24 @@ pub fn answer(answer: &Value) -> String {
             if answer["shortest"].is_null() {
                 return format!("No route from {from} to {to}\n");
             }
+            let count = answer["count"].as_u64().unwrap_or_default();
+            let more = if answer["more"] == true { "More than " } else { "" };
+            if let Some(weighted) = answer.get("weighted") {
+                let first = if weighted["order"] == "largest" { "largest" } else { "smallest" };
+                let mut text = format!("By {}, {first} total first:\n", cell(&weighted["by"]));
+                for route in weighted["routes"].as_array().into_iter().flatten() {
+                    text += &format!("  {:>10}  {}\n", cell(&route["total"]), path(&route["instances"]));
+                }
+                let weightless: Vec<String> = weighted["weightless"].as_array().into_iter().flatten().map(cell).collect();
+                if !weightless.is_empty() {
+                    text += &format!("Weighing 0, without the value: {}\n", weightless.join(", "));
+                }
+                if weighted["exact"] == false {
+                    text += "Loops on the way stopped the search before every route was tried, so a heavier route may exist\n";
+                }
+                text += &format!("{more}{} from {from} to {to}\n", counted(count, "path"));
+                return text;
+            }
             let mut text = format!("Shortest: {}\n", path(&answer["shortest"]));
             let others = answer["others"].as_array().map_or(&[][..], Vec::as_slice);
             if !others.is_empty() {
@@ -464,8 +482,6 @@ pub fn answer(answer: &Value) -> String {
                     text += &format!("  {}\n", path(other));
                 }
             }
-            let count = answer["count"].as_u64().unwrap_or_default();
-            let more = if answer["more"] == true { "More than " } else { "" };
             text += &format!("{more}{} from {from} to {to}\n", counted(count, "path"));
             text
         }

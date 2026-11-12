@@ -230,12 +230,24 @@ enum GraphKind {
         #[arg(long)]
         steps: Option<usize>,
     },
-    /// The routes from one instance to another, shortest first, and how many there are.
+    /// The routes from one instance to another, shortest first, and how many there are, or with
+    /// --weight or --figure, by the total of what their objects weigh.
     Paths {
         #[command(flatten)]
         on: WhichModel,
         from: String,
         to: String,
+        /// Weigh each object by an attribute, resolved through inheritance, times in seconds:
+        /// process_time, interval, starting_mus or capacity.
+        #[arg(long, conflicts_with = "figure")]
+        weight: Option<String>,
+        /// Weigh each object by a figure of the run given with --run, the mean over its
+        /// observations, such as working_share.
+        #[arg(long)]
+        figure: Option<String>,
+        /// The largest totals first, as for a critical path, rather than the smallest.
+        #[arg(long)]
+        largest: bool,
     },
     /// The instances within some connections of one, either way, and the connections between them.
     SubgraphAround {
@@ -488,7 +500,15 @@ fn graph(kind: GraphKind) -> Result<bool, OperationError> {
         GraphKind::Neighbours { on, name } => (on, json!({ "kind": "neighbours", "name": name })),
         GraphKind::Upstream { on, name, steps } => (on, json!({ "kind": "upstream", "name": name, "steps": steps })),
         GraphKind::Downstream { on, name, steps } => (on, json!({ "kind": "downstream", "name": name, "steps": steps })),
-        GraphKind::Paths { on, from, to } => (on, json!({ "kind": "paths", "from": from, "to": to })),
+        GraphKind::Paths { on, from, to, weight, figure, largest } => {
+            let weight = match (weight, figure) {
+                (Some(attribute), _) => json!({ "attribute": attribute }),
+                (None, Some(figure)) => json!({ "figure": figure }),
+                (None, None) => Value::Null,
+            };
+            let order = if largest { json!("largest") } else { Value::Null };
+            (on, json!({ "kind": "paths", "from": from, "to": to, "weight": weight, "order": order }))
+        }
         GraphKind::SubgraphAround { on, name, steps } => (on, json!({ "kind": "subgraph_around", "name": name, "steps": steps })),
         GraphKind::FindInstances { on, name_contains, class, description_contains, conditions, set_on_instance } => {
             let conditions = conditions.iter().map(|typed| condition(typed)).collect::<Result<Vec<_>, _>>()?;

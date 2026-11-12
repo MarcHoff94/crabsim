@@ -19,6 +19,7 @@
 //! and the CLI may only read and run meanwhile (ADR 0011).
 
 pub mod bottleneck;
+pub mod commands;
 mod compare;
 mod edit;
 mod editing;

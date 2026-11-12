@@ -141,7 +141,7 @@ fn an_agent_lists_the_tools_validates_runs_and_reads_results_over_stdio() {
     let listed = server.request("tools/list", json!({}));
     let tools = listed["tools"].as_array().unwrap();
     let tool = |name: &str| tools.iter().find(|tool| tool["name"] == name).unwrap_or_else(|| panic!("no tool {name}: {listed}")).clone();
-    assert_eq!(tools.len(), 25, "{listed}");
+    assert_eq!(tools.len(), 26, "{listed}");
     for users_own in ["take_model", "revoke_claim", "block_agent", "unblock_agent"] {
         assert!(!tools.iter().any(|tool| tool["name"] == users_own), "{users_own} is the user's own");
     }

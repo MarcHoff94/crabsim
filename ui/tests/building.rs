@@ -397,3 +397,20 @@ fn a_value_is_set_on_several_in_one_change_and_they_can_share_a_new_class() {
     };
     assert!(why.contains("one class"), "{why}");
 }
+
+#[test]
+fn a_command_line_is_one_batch_placing_beside_the_selection() {
+    let folder = Folder::new("command-line");
+    let mut workspace = open(&folder);
+    let placed = workspace.run_commands("add Mill as Drill; connect Station 1 > Drill; set Drill.proc 0:20", Some("Station 1"), (0.0, 0.0), false).unwrap();
+    assert_eq!(placed, ["Drill"]);
+    let model = folder.model();
+    let drill = model.instances.iter().find(|instance| instance.name == "Drill").unwrap();
+    assert_eq!(drill.position, Some(Position { x: 9.0, y: 2.0, z: 0.0 }), "a Station 2 m long, 2 m to the right of Station 1");
+    assert_eq!(drill.attributes.process_time, Some(crabsim::SimTime::from_secs(20)));
+    assert!(model.successors("Station 1").contains(&"Drill"));
+
+    let refused = workspace.run_commands("remove Drill; remove Nobody", None, (0.0, 0.0), false).unwrap_err();
+    assert!(refused.to_string().contains("2nd command (remove Nobody)"), "{refused}");
+    assert!(folder.model().instances.iter().any(|instance| instance.name == "Drill"), "nothing changed");
+}

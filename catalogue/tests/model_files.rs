@@ -135,6 +135,7 @@ fn the_shortest_inputs_an_operation_accepts_pass_its_input_schema() {
         ("edit_model", json!({ "path": "line.json", "changes": [{ "change": "remove_instance", "name": "Mill" }] })),
         ("edit_model", json!({ "path": "line.json", "changes": [{ "change": "set_attribute", "target": { "class": "Mill" }, "attribute": "process_time", "value": "1:00" }] })),
         ("get_attributes", json!({ "path": "line.json", "target": { "instance": "Mill" } })),
+        ("run_commands", json!({ "path": "line.json", "commands": "remove Mill" })),
         ("adopt_model", json!({ "path": "line.json" })),
         ("describe_model", json!({ "path": "line.json" })),
         ("describe_model", json!({ "run": "run-1" })),

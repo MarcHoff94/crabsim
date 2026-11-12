@@ -666,24 +666,28 @@ impl Workspace {
     /// later inherits it and changing it there changes them all. A model that already has
     /// Stations without it keeps their values, and what is built gets it set on itself.
     fn starting_values(&self, class: &str) -> (Vec<Value>, Option<Value>) {
-        let Some(built_in) = self.built_in_of(class) else { return (Vec::new(), None) };
-        let Some(values) = template(built_in) else { return (Vec::new(), None) };
-        if self.model.class(built_in).is_some() {
-            return (Vec::new(), None);
+        crabsim_catalogue::commands::starting_values(&self.model, class)
+    }
+
+    /// Carries out a line of model changes through `run_commands`, as one batch: `selected` is
+    /// what `add` places beside, and `at` where it places with nothing to place beside. Gives the
+    /// instances placed.
+    pub fn run_commands(&mut self, line: &str, selected: Option<&str>, at: (f64, f64), take_over: bool) -> Result<Vec<String>, Refusal> {
+        let path = self.opened.clone().ok_or(Refusal::NoModel)?;
+        let catalogue = self.catalogue.as_ref().ok_or(Refusal::NoModel)?;
+        let input = json!({ "path": path, "commands": line, "selected": selected, "at": [at.0, at.1] });
+        catalogue.set_take_over(take_over);
+        let ran = catalogue.call("run_commands", input);
+        catalogue.set_take_over(false);
+        match ran {
+            Ok(ran) => Ok(strings(&ran["placed"])),
+            Err(error) => Err(match error.kind {
+                ErrorKind::NotEditor => Refusal::NotEditor(error.message.clone()),
+                ErrorKind::ChangedOutside => Refusal::ChangedOutside(error.message.clone()),
+                // The window's font has no arrow, so a connection's name reads "In to Mill" there.
+                _ => Refusal::Invalid(error.to_string().replace(" \u{2192} ", " to ")),
+            }),
         }
-        let built_on = |name: &str| self.built_in_of(name) == Some(built_in);
-        let in_use = self.model.instances.iter().any(|instance| built_on(&instance.class))
-            || self.model.classes.iter().any(|class| built_on(&class.name));
-        if in_use {
-            return (Vec::new(), (class == built_in).then_some(values));
-        }
-        let changes = values
-            .as_object()
-            .into_iter()
-            .flatten()
-            .map(|(attribute, value)| json!({ "change": "set_attribute", "target": { "class": built_in }, "attribute": attribute, "value": value }))
-            .collect();
-        (changes, None)
     }
 
     /// Connects `from` to `to`, as `from`'s last exit and `to`'s last entrance. One the file's
@@ -1015,12 +1019,10 @@ impl Workspace {
 const NEW_MODEL: &str = r#"{"format_version": 2, "classes": [{"name": "Station", "attributes": {"process_time": "00:00:10"}}], "instances": []}"#;
 
 /// The values building on a built-in class starts with: a Station works 10 s on each MU, where
-/// the built-in Station's default is 0. See `Workspace::starting_values` for where they go.
+/// the built-in Station's default is 0. The catalogue holds the rule, so commands and agents
+/// follow it too.
 pub fn template(class: &str) -> Option<Value> {
-    match class {
-        "Station" => Some(json!({ "process_time": "00:00:10" })),
-        _ => None,
-    }
+    crabsim_catalogue::commands::template(class)
 }
 
 /// A position as a model file writes it, to the centimetre so the file stays readable.

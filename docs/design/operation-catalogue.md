@@ -27,6 +27,7 @@ Slice 1's operations, with `model_file_format`, `edit_model` and `get_attributes
 
 | Operation | Does |
 |---|---|
+| `run_commands { path, commands, selected?, at?, expected_hash? }` | A line of commands in people's words, the window's `:` language (spec issue 102), applied as one `edit_model` batch, a refusal naming its command by place |
 | `validate_model { path? , text? }` | Every problem in a model, by path or by text, and for one without problems its warnings: what can run but is probably a mistake (`Model::warnings`) |
 | `list_models { folder? }` | The model files in the folder or a subfolder, and below: `.json` files with `format_version` at their top level, or, when they aren't JSON any more, naming it at all, so a file with problems is still listed and other JSON, such as a schema, isn't |
 | `read_model { path }` | A file's text, exactly |

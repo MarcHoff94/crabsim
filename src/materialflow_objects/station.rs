@@ -6,7 +6,7 @@ use crate::time::SimTime;
 use super::flows::BaseObject;
 use crate::materialflow_objects::OtherObjects;
 use crate::flows::{
-	EventInterface, StopCtrl, FailureProfile, InterruptionState, MaterialFlow, MoveableUnit, ProcessState, SuccessorContainer, list_blocked, retries_for_blocked, retry_move_to_successor, try_to_move_to_successor
+	EventInterface, StopCtrl, FailureProfile, InterruptionState, MaterialFlow, MoveableUnit, ProcessState, SuccessorContainer, Distributing, list_blocked, retries_for_blocked, retry_move_to_successor, try_to_move_to_successor
 };
 
 #[derive(Clone)]
@@ -23,6 +23,8 @@ pub struct SingleStation {
 	pub content: Option<MoveableUnit>,
 	pub succ: Vec<u32>,
 	pub succ_pointer: usize,
+	/// How it picks the successor for its MU. Set by the run, which ranks the successors.
+	pub distribution: Distributing,
 	pub blockedlist: Vec<u32>,
 	pub entrancelocked: bool,
 	pub exitlocked: bool,
@@ -59,6 +61,7 @@ impl SingleStation {
 			content,
 			succ,
 			succ_pointer: 0,
+			distribution: Distributing::RoundRobin,
 			blockedlist: Vec::new(),
 			entrancelocked: false,
 			exitlocked: false,
@@ -497,6 +500,9 @@ impl StopCtrl for SingleStation{
 	}
 }
 impl SuccessorContainer for SingleStation {
+	fn distribution_mut(&mut self) -> &mut Distributing {
+		&mut self.distribution
+	}
 	fn successors(&self) -> &[u32] {
 		&self.succ
 	}

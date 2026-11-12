@@ -263,6 +263,11 @@ impl<'m> Checker<'m> {
         if let Some(dimensions) = attributes.dimensions {
             self.dimensions(owner, dimensions);
         }
+        if let Some(crate::DistributionStrategy::Weighted(weighted)) = &attributes.distribution
+            && !crate::WEIGHABLE.contains(&weighted.by)
+        {
+            self.problem(owner, "/attributes/distribution/weighted/by", "weigh by process_time, interval, starting_mus or capacity");
+        }
         for (state, note) in attributes.state_notes.iter().flatten() {
             let at = format!("/attributes/state_notes/{}", state.name());
             if !crate::State::of(built_in).contains(state) {

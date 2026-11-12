@@ -94,6 +94,7 @@ Which attributes an instance has depends on its built-in class at the root of it
 | `dimensions` | all | by type: Station 2 × 1.5 × 1.5 m, Buffer 2 × 1 × 1 m, Source and Drain 1 m each way | `length`, `width`, `height` above 0, `rotation_degrees` optional, 0 by default |
 | `description` | all | none | Free text |
 | `state_notes` | all | none | A note per state, see below |
+| `distribution` | Source, Station | `"round_robin"` | `"round_robin"` or weighted, see below (ADR 0016) |
 
 - **Times** are strings in the UI's syntax, read by the same `parse_time` as the UI and the CLI: `"10"`, `"1:30"`, `"2:00:00"`, `"2d 06:00:00"`, `"0:00:12.5"`. Exact to the millisecond.
 - **A dummy Station** has a process time of 0. It takes no time, and exists so that something can happen as an MU passes, such as user code at a hook later. It can still fail, like any Station.
@@ -108,6 +109,11 @@ Which attributes an instance has depends on its built-in class at the root of it
   "state_notes": { "blocked": "waits for the conveyor to clear", "failed": "the gripper needs changing" }
   ```
   The states are `busy`, `blocked`, `idle`, `failed`, `forced_failure` and `paused`, and a note may name only states its built-in class can be in: a Source is busy or blocked, a Station any of them, a Buffer busy, blocked or idle, and a Drain only idle. A note can't be empty. Like every attribute, the notes are inherited as a whole, so an instance that sets its own replaces its class's. A note never changes what is measured or a state's colour.
+- **Distribution** says which successor receives the MU an object passes on (ADR 0016): `"round_robin"`, each successor in turn, or weighted:
+  ```json
+  "distribution": { "weighted": { "by": "process_time", "order": "smallest", "rank": "route", "drains": ["Out"] } }
+  ```
+  A weighted object ranks its successors and offers the MU to the best one that can take it, those ranking equal taking turns, and waits only when all are blocked. `by` is `process_time`, `interval`, `starting_mus` or `capacity`, resolved through inheritance on each object weighed, which weighs 0 without it. `order` is `smallest`, the default, or `largest`. `rank` is `route`, the default, a successor's best route onward to a Drain with itself included, or `successor`, its own weight only. `drains`, optional and not empty, names the Drains a route counts: left out, every Drain. A name that isn't a Drain is ignored, and `validate_model` warns about it. A successor with no route to a counted Drain ranks last. Inherited as a whole. Saving writes `order` and `rank` out.
 - **Starting MUs** are a count. MU ids belong to a run, and are handed out when a run is built, in file order.
 - **Visual only:** `position`, `dimensions`, `description` and `state_notes` never reach a run, so they can't change a result. The 3D model path will be one more inheritable attribute when there is a 3D view, a path and never embedded.
 

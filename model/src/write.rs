@@ -117,7 +117,29 @@ pub(crate) fn attributes(attributes: &Attributes) -> Value {
         let notes: Map<String, Value> = notes.iter().map(|(state, note)| (state.name().to_string(), json!(note))).collect();
         fields.insert("state_notes".into(), Value::Object(notes));
     }
+    if let Some(strategy) = &attributes.distribution {
+        fields.insert("distribution".into(), distribution(strategy));
+    }
     Value::Object(fields)
+}
+
+/// A distribution strategy, with every field of a weighted one written out but `drains` when it
+/// counts every Drain.
+pub(crate) fn distribution(strategy: &crate::DistributionStrategy) -> Value {
+    use crabsim::distribution::{Order, Rank};
+    match strategy {
+        crate::DistributionStrategy::RoundRobin => json!("round_robin"),
+        crate::DistributionStrategy::Weighted(weighted) => {
+            let mut fields = Map::new();
+            fields.insert("by".into(), json!(weighted.by.name()));
+            fields.insert("order".into(), json!(match weighted.order { Order::Smallest => "smallest", Order::Largest => "largest" }));
+            fields.insert("rank".into(), json!(match weighted.rank { Rank::Route => "route", Rank::Successor => "successor" }));
+            if let Some(drains) = &weighted.drains {
+                fields.insert("drains".into(), json!(drains));
+            }
+            json!({ "weighted": fields })
+        }
+    }
 }
 
 fn failures(failures: &Failures) -> Value {

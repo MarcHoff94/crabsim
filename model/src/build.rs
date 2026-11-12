@@ -2,6 +2,7 @@
 //! worked out from its chain of classes, so a run never sees classes or files.
 
 use crate::{Attribute, Failures, Model, Origin, RepairTime};
+use crabsim::distribution::{DistributionRule, WeighBy, WeightedRule};
 use crabsim::random_numbers::Distribution;
 use crabsim::{FailureProfile, ModelDescription, SimTime};
 use std::collections::HashMap;
@@ -43,6 +44,22 @@ pub(crate) fn build(model: &Model) -> ModelDescription {
         }
     }
     let ids: HashMap<&str, u32> = model.instances.iter().enumerate().map(|(id, instance)| (instance.name.as_str(), id as u32)).collect();
+    // Each Source and Station's distribution strategy, its Drains by id. A name that isn't an
+    // instance is left out, and the engine ignores ids that aren't Drains.
+    for (index, _) in model.instances.iter().enumerate() {
+        let resolved = model.resolve(index).expect("checked: every instance's chain of classes is sound");
+        if let Some(crate::DistributionStrategy::Weighted(weighted)) = &resolved.attributes.distribution {
+            let by = match weighted.by {
+                Attribute::Interval => WeighBy::Interval,
+                Attribute::StartingMus => WeighBy::StartingMus,
+                Attribute::Capacity => WeighBy::Capacity,
+                _ => WeighBy::ProcessTime,
+            };
+            let drains = weighted.drains.as_ref().map(|names| names.iter().filter_map(|name| ids.get(name.as_str()).copied()).collect());
+            let rule = WeightedRule { by, order: weighted.order, rank: weighted.rank, drains };
+            description.set_distribution(index as u32, DistributionRule::Weighted(rule));
+        }
+    }
     // Each object offers MUs to its successors in the order of its exits.
     for (from, instance) in model.instances.iter().enumerate() {
         for successor in model.successors(&instance.name) {

@@ -166,6 +166,9 @@ pub fn retries_for_blocked(blockedlist: &mut Vec<u32>, from: u32) -> Option<Vec<
 
 pub trait SuccessorContainer {
 	fn successors(&self) -> &[u32];
+	/// How the object picks a successor, kept with it so a weighted object remembers whose turn
+	/// it is among successors that rank equal.
+	fn distribution_mut(&mut self) -> &mut Distributing;
 	fn succ_pointer(&self) -> usize;
 	fn succ_pointer_mut(&mut self) -> &mut usize;
 	fn clear_content_and_idle(&mut self);
@@ -184,6 +187,56 @@ pub trait DistributionStrategy {
 	/// successors `n` and a starting pointer `start`. This runs on every move
 	/// attempt, so it returns an iterator to avoid allocating.
 	fn order(&self, n: usize, start: usize) -> impl Iterator<Item = usize>;
+	/// Notes that the MU went to the successor at `idx`, so the next one starts after it.
+	fn moved(&mut self, idx: usize, n: usize, pointer: &mut usize) {
+		*pointer = (idx + 1) % n;
+	}
+}
+
+/// How an object picks the successor that receives its MU, at run time (ADR 0016).
+#[derive(Debug, Clone, Default)]
+pub enum Distributing {
+	/// Each successor in turn, from the one after the last that received an MU.
+	#[default]
+	RoundRobin,
+	/// By a ranking worked out when the run was built or a weight changed.
+	Weighted(Ranked),
+}
+
+/// A weighted object's successors, best first, those that rank equal taking turns.
+#[derive(Debug, Clone)]
+pub struct Ranked {
+	/// Places among the exits, in groups that rank equal, the best group first.
+	groups: Vec<Vec<usize>>,
+	/// Within each group, the place in it to offer first.
+	pointers: Vec<usize>,
+	/// Each exit's group and place in it.
+	place: Vec<(usize, usize)>,
+}
+
+impl Ranked {
+	/// From groups of exit places, best first, that between them name every exit once.
+	pub fn new(groups: Vec<Vec<usize>>) -> Ranked {
+		let exits = groups.iter().map(Vec::len).sum();
+		let mut place = vec![(0, 0); exits];
+		for (group, members) in groups.iter().enumerate() {
+			for (at, &exit) in members.iter().enumerate() {
+				place[exit] = (group, at);
+			}
+		}
+		let pointers = vec![0; groups.len()];
+		Ranked { groups, pointers, place }
+	}
+}
+
+impl DistributionStrategy for Ranked {
+	fn order(&self, _n: usize, _start: usize) -> impl Iterator<Item = usize> {
+		self.groups.iter().zip(&self.pointers).flat_map(|(group, &first)| (0..group.len()).map(move |i| group[(first + i) % group.len()]))
+	}
+	fn moved(&mut self, idx: usize, _n: usize, _pointer: &mut usize) {
+		let (group, at) = self.place[idx];
+		self.pointers[group] = (at + 1) % self.groups[group].len();
+	}
 }
 
 pub struct RoundRobinStrategy;
@@ -204,12 +257,13 @@ impl DistributionStrategy for LowestIndexStrategy {
 pub fn try_to_move_to_successor_with_strategy<
 	T: SuccessorContainer + EventInterface,
 	S: DistributionStrategy,
->(obj: &mut T, context: &mut EventContext, others: &mut OtherObjects<'_>, strategy: &S) -> Result<Option<EventTemplate>, MaterialflowError> {
+>(obj: &mut T, context: &mut EventContext, others: &mut OtherObjects<'_>, strategy: &mut S) -> Result<Option<EventTemplate>, MaterialflowError> {
 	let n = obj.successors().len();
 	if n == 0 {
 		return Ok(None);
 	}
 	let pred_id = *obj.get_object_id();
+	let mut chosen = None;
 	for idx in strategy.order(n, obj.succ_pointer()) {
 		let succ_id = obj.successors()[idx];
 		if others.get(succ_id).is_entrance_allowed() {
@@ -226,14 +280,9 @@ pub fn try_to_move_to_successor_with_strategy<
 				context.record(OccurrenceKind::MuMoved { mu_id, from: pred_id, to: succ_id });
 				log::info!("seq={} MU {} moved from {} to {}", seq, mu_id, pred_id, succ_id);
 				match others.get_mut(succ_id).process_mu_entrance(mu, context) {
-					Ok(Some(event_template)) => {
-						// advance pointer to next after chosen index on success
-						*obj.succ_pointer_mut() = (idx + 1) % n;
-						return Ok(Some(event_template));
-					}
-					Ok(None) => {
-						*obj.succ_pointer_mut() = (idx + 1) % n;
-						return Ok(None);
+					Ok(entered) => {
+						chosen = Some((idx, entered));
+						break;
 					}
 					Err(_) => {
 						// According to the requested semantics, process_mu_entrance
@@ -258,14 +307,25 @@ pub fn try_to_move_to_successor_with_strategy<
 			others.get_mut(succ_id).add_blocked(pred_id);
 		}
 	}
-	Ok(None)
+	match chosen {
+		Some((idx, entered)) => {
+			// The next MU starts after the chosen successor.
+			strategy.moved(idx, n, obj.succ_pointer_mut());
+			Ok(entered)
+		}
+		None => Ok(None),
+	}
 }
 
-/// Tries only one successor, whichever the other rules would have picked.
-struct OnlySuccessor(usize);
-impl DistributionStrategy for OnlySuccessor {
+/// Tries only one successor, whichever the other rules would have picked, and tells the object's
+/// own rule where the MU went.
+struct OnlySuccessor<'s, S>(usize, &'s mut S);
+impl<S: DistributionStrategy> DistributionStrategy for OnlySuccessor<'_, S> {
 	fn order(&self, _n: usize, _start: usize) -> impl Iterator<Item = usize> {
 		std::iter::once(self.0)
+	}
+	fn moved(&mut self, idx: usize, n: usize, pointer: &mut usize) {
+		self.1.moved(idx, n, pointer);
 	}
 }
 
@@ -277,11 +337,25 @@ pub fn retry_move_to_successor<T: SuccessorContainer + EventInterface>(
 	others: &mut OtherObjects<'_>,
 	from: u32,
 ) -> Result<Option<EventTemplate>, MaterialflowError> {
-	let sender = obj.successors().iter().position(|&succ| succ == from);
-	match sender {
-		Some(index) => try_to_move_to_successor_with_strategy(obj, context, others, &OnlySuccessor(index)),
-		None => Ok(None),
+	let Some(index) = obj.successors().iter().position(|&succ| succ == from) else {
+		return Ok(None);
+	};
+	if let Distributing::RoundRobin = obj.distribution_mut() {
+		return try_to_move_to_successor_with_strategy(obj, context, others, &mut OnlySuccessor(index, &mut RoundRobinStrategy));
 	}
+	with_ranked(obj, |obj, ranked| try_to_move_to_successor_with_strategy(obj, context, others, &mut OnlySuccessor(index, ranked)))
+}
+
+/// Runs `move_it` with the object's ranking taken out of it for the while, so both can be
+/// borrowed at once. Taking it out moves no memory.
+fn with_ranked<T: SuccessorContainer, R>(obj: &mut T, move_it: impl FnOnce(&mut T, &mut Ranked) -> R) -> R {
+	let mut distribution = std::mem::take(obj.distribution_mut());
+	let Distributing::Weighted(ranked) = &mut distribution else {
+		unreachable!("only a weighted object is moved by its ranking")
+	};
+	let result = move_it(obj, ranked);
+	*obj.distribution_mut() = distribution;
+	result
 }
 
 /// Backwards-compatible default that uses round-robin ordering.
@@ -290,7 +364,9 @@ pub fn try_to_move_to_successor<T: SuccessorContainer + EventInterface>(
 	context: &mut EventContext,
 	others: &mut OtherObjects<'_>,
 ) -> Result<Option<EventTemplate>, MaterialflowError> {
-	let strategy = RoundRobinStrategy;
-	try_to_move_to_successor_with_strategy(obj, context, others, &strategy)
+	if let Distributing::RoundRobin = obj.distribution_mut() {
+		return try_to_move_to_successor_with_strategy(obj, context, others, &mut RoundRobinStrategy);
+	}
+	with_ranked(obj, |obj, ranked| try_to_move_to_successor_with_strategy(obj, context, others, ranked))
 }
 

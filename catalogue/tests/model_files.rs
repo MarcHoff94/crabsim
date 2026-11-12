@@ -200,10 +200,55 @@ fn validate_model_reports_every_problem_by_path_or_by_text() {
     assert_eq!(by_path["problems"].as_array().unwrap().len(), 3);
 
     let valid = setup.ok("validate_model", json!({ "path": "plant/small.json" }));
-    assert_eq!(valid, json!({ "valid": true, "problems": [], "changed_outside": true }));
+    assert_eq!(valid, json!({ "valid": true, "problems": [], "warnings": [], "changed_outside": true }));
 
     let missing = setup.err("validate_model", json!({ "path": "nothing.json" }));
     assert_eq!(missing["kind"], "not_found");
+}
+
+/// A model that runs, with one of each warning: Orphan no Source reaches, Stuck with no route to
+/// a Drain, Split naming a Drain that isn't there, and Even weighing by an interval, which no
+/// Station has, so its successors all rank the same.
+const WARNED: &str = r#"{"format_version":2,"instances":[
+  {"name":"In","class":"Source","attributes":{"interval":"10"}},
+  {"name":"Split","class":"Station","attributes":{"distribution":{"weighted":{"by":"process_time","drains":["Out","Gone"]}}}},
+  {"name":"Even","class":"Station","attributes":{"distribution":{"weighted":{"by":"interval"}}}},
+  {"name":"A","class":"Station","attributes":{"process_time":"5"}},
+  {"name":"B","class":"Station","attributes":{"process_time":"7"}},
+  {"name":"Stuck","class":"Station"},
+  {"name":"Orphan","class":"Station"},
+  {"name":"Out","class":"Drain"}],"connections":[
+  {"from":"In","to":"Split","exit":1,"entrance":1},
+  {"from":"Split","to":"Even","exit":1,"entrance":1},
+  {"from":"Split","to":"Stuck","exit":2,"entrance":1},
+  {"from":"Even","to":"A","exit":1,"entrance":1},
+  {"from":"Even","to":"B","exit":2,"entrance":1},
+  {"from":"A","to":"Out","exit":1,"entrance":1},
+  {"from":"B","to":"Out","exit":1,"entrance":2},
+  {"from":"Orphan","to":"Out","exit":1,"entrance":3}]}"#;
+
+#[test]
+fn validate_model_warns_about_what_can_run_but_is_probably_a_mistake() {
+    let setup = Setup::new("validate-warnings");
+    let validated = setup.ok("validate_model", json!({ "text": WARNED }));
+    common::assert_fits_its_schema(&setup.catalogue, "validate_model", &validated);
+    assert_eq!(validated["valid"], true, "warnings never stop a run: {validated:#}");
+    let warnings: Vec<(&str, &str, &str)> = validated["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|warning| (warning["pointer"].as_str().unwrap(), warning["name"].as_str().unwrap(), warning["message"].as_str().unwrap()))
+        .collect();
+    let has = |pointer: &str, name: &str, part: &str| warnings.iter().any(|(p, n, m)| *p == pointer && *n == name && m.contains(part));
+    assert!(has("/instances/1/attributes/distribution/weighted/drains/1", "Split", "`Gone` isn't a Drain"), "{warnings:#?}");
+    assert!(has("/instances/2/attributes/distribution/weighted", "Even", "interval weighs nothing"), "{warnings:#?}");
+    assert!(has("/instances/5", "Stuck", "no route to a Drain"), "{warnings:#?}");
+    assert!(has("/instances/6", "Orphan", "no Source reaches it"), "{warnings:#?}");
+    assert_eq!(warnings.len(), 4, "{warnings:#?}");
+
+    // A model with problems gives those, and no warnings.
+    let broken = setup.ok("validate_model", json!({ "text": BROKEN }));
+    assert_eq!(broken["warnings"], json!([]));
 }
 
 #[test]

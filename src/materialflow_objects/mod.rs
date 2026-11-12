@@ -8,7 +8,7 @@ pub mod station;
 pub mod buffer;
 
 pub use drain::Drain;
-pub use flows::{DistributionStrategy, LowestIndexStrategy, MoveableUnit, RoundRobinStrategy, ProcessState};
+pub use flows::{Distributing, DistributionStrategy, LowestIndexStrategy, MoveableUnit, Ranked, RoundRobinStrategy, ProcessState};
 pub use self::flows::BaseObject;
 pub use model_object::{ModelObject, OtherObjects};
 pub use station::SingleStation;

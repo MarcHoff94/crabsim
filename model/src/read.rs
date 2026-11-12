@@ -2,7 +2,7 @@
 //! stopping at the first. What can't be read is left at its default, and noted in `Broken`, so the
 //! checks that follow don't report it a second time.
 
-use crate::{Attributes, BUILT_IN_CLASSES, Class, Connection, Failures, Instance, Model, Problem, RepairTime, State, StateNotes, FORMAT_VERSION, escape};
+use crate::{Attributes, DistributionStrategy, WeightedStrategy, WEIGHABLE, BUILT_IN_CLASSES, Class, Connection, Failures, Instance, Model, Problem, RepairTime, State, StateNotes, FORMAT_VERSION, escape};
 use crabsim::time::parse_time;
 use crabsim::{Dimensions, Position, SimTime};
 use serde_json::{Map, Value};
@@ -37,7 +37,7 @@ const TOP_LEVEL: [&str; 6] = ["$schema", "format_version", "description", "class
 const INSTANCE: [&str; 5] = ["name", "class", "stream", "position", "attributes"];
 const CONNECTION: [&str; 5] = ["from", "to", "exit", "entrance", "description"];
 const CLASS: [&str; 3] = ["name", "parent", "attributes"];
-const ATTRIBUTES: [&str; 8] = ["interval", "process_time", "failures", "starting_mus", "capacity", "dimensions", "description", "state_notes"];
+const ATTRIBUTES: [&str; 9] = ["interval", "process_time", "failures", "starting_mus", "capacity", "dimensions", "description", "state_notes", "distribution"];
 
 pub(crate) fn read(text: &str) -> (Model, Vec<Problem>, Broken) {
     let mut reader = Reader::default();
@@ -300,6 +300,7 @@ impl Reader {
                 "dimensions" => self.dimensions(value, &at, name).map(|dimensions| attributes.dimensions = Some(dimensions)),
                 "description" => self.text(value, &at, name).map(|text| attributes.description = Some(text)),
                 "state_notes" => self.state_notes(value, &at, name).map(|notes| attributes.state_notes = Some(notes)),
+                "distribution" => self.distribution(value, &at, name).map(|strategy| attributes.distribution = Some(strategy)),
                 _ => unreachable!("every attribute is read"),
             };
             if read.is_none() {
@@ -362,6 +363,74 @@ impl Reader {
         let y = self.number(fields, "y", pointer, name);
         let z = if fields.contains_key("z") { self.number(fields, "z", pointer, name) } else { Some(0.0) };
         Some(Position { x: x?, y: y?, z: z? })
+    }
+
+    /// `"round_robin"`, or `{"weighted": {"by": ..., "order": ..., "rank": ..., "drains": [...]}}`
+    /// with all but `by` optional.
+    fn distribution(&mut self, value: &Value, pointer: &str, name: Option<&str>) -> Option<DistributionStrategy> {
+        const SAY: &str = r#"a distribution is "round_robin" or {"weighted": {"by": "process_time"}}, with "order", "rank" and "drains" optional"#;
+        if value.as_str() == Some("round_robin") {
+            return Some(DistributionStrategy::RoundRobin);
+        }
+        if let Some(text) = value.as_str() {
+            self.problem(pointer.to_owned(), name, format!("unknown distribution `{text}`: {SAY}"));
+            return None;
+        }
+        let fields = self.object(value, pointer, name, "a distribution", &["weighted"])?;
+        let Some(weighted) = fields.get("weighted") else {
+            self.problem(pointer.to_owned(), name, SAY.to_string());
+            return None;
+        };
+        let at = format!("{pointer}/weighted");
+        let fields = self.object(weighted, &at, name, "a weighted distribution", &["by", "order", "rank", "drains"])?;
+        let by = match fields.get("by").map(|by| by.as_str()) {
+            None => {
+                self.problem(at.clone(), name, "`by` is missing: weigh by process_time, interval, starting_mus or capacity");
+                None
+            }
+            Some(by) => {
+                let found = by.and_then(|by| WEIGHABLE.into_iter().find(|attribute| attribute.name() == by));
+                if found.is_none() {
+                    let guess = by.map_or(String::new(), |by| crate::suggest::did_you_mean(by, WEIGHABLE.iter().map(|attribute| attribute.name())));
+                    self.problem(format!("{at}/by"), name, format!("weigh by process_time, interval, starting_mus or capacity{guess}"));
+                }
+                found
+            }
+        };
+        let mut choice = |key: &str, options: [&str; 2]| match fields.get(key) {
+            None => Some(0),
+            Some(value) => {
+                let found = value.as_str().and_then(|text| options.iter().position(|option| *option == text));
+                if found.is_none() {
+                    self.problem(format!("{at}/{key}"), name, format!("`{key}` is `{}` or `{}`", options[0], options[1]));
+                }
+                found
+            }
+        };
+        let order = choice("order", ["smallest", "largest"]);
+        let rank = choice("rank", ["route", "successor"]);
+        let drains = match fields.get("drains") {
+            None => Some(None),
+            Some(Value::Array(names)) if names.iter().all(Value::is_string) => {
+                if names.is_empty() {
+                    self.problem(format!("{at}/drains"), name, "a list of drains can't be empty: leave `drains` out to count every Drain");
+                    None
+                } else {
+                    Some(Some(names.iter().filter_map(|drain| drain.as_str().map(str::to_owned)).collect()))
+                }
+            }
+            Some(_) => {
+                self.problem(format!("{at}/drains"), name, "`drains` is a list of Drain names, such as [\"Out\"]");
+                None
+            }
+        };
+        use crabsim::distribution::{Order, Rank};
+        Some(DistributionStrategy::Weighted(WeightedStrategy {
+            by: by?,
+            order: if order? == 0 { Order::Smallest } else { Order::Largest },
+            rank: if rank? == 0 { Rank::Route } else { Rank::Successor },
+            drains: drains?,
+        }))
     }
 
     /// Notes by state. A key that isn't a state, or a note that isn't text, is a problem, and the

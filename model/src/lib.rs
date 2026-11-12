@@ -14,6 +14,7 @@ mod check;
 mod read;
 pub mod schema;
 mod suggest;
+mod warn;
 mod write;
 
 use crabsim::{Dimensions, ObjectKind, Position, SimTime};
@@ -143,7 +144,39 @@ pub struct Attributes {
     /// The model's own note on what each state means for this object, such as Blocked meaning
     /// "waits for the conveyor". Inherited as a whole. Visual only.
     pub state_notes: Option<StateNotes>,
+    /// How a Source or Station picks the successor for its MU (ADR 0016). Round robin by default.
+    /// Inherited as a whole.
+    pub distribution: Option<DistributionStrategy>,
 }
+
+/// How an object picks the successor that receives its MU (ADR 0016).
+#[derive(Debug, Clone, PartialEq)]
+pub enum DistributionStrategy {
+    /// Each successor in turn.
+    RoundRobin,
+    /// The best-ranked successor that can take the MU, those ranking equal taking turns.
+    Weighted(WeightedStrategy),
+}
+
+/// How a weighted object ranks its successors.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WeightedStrategy {
+    /// One of `WEIGHABLE`, resolved through inheritance on each object weighed.
+    pub by: Attribute,
+    pub order: crabsim::distribution::Order,
+    pub rank: crabsim::distribution::Rank,
+    /// The Drains a route may end in, by name. `None` counts every Drain. A name that isn't a
+    /// Drain in the model is ignored, and `validate_model` warns about it.
+    pub drains: Option<Vec<String>>,
+}
+
+/// A distribution strategy as a model file writes it.
+pub fn write_distribution(strategy: &DistributionStrategy) -> serde_json::Value {
+    write::distribution(strategy)
+}
+
+/// The attributes an object can be weighed by: numbers and times.
+pub const WEIGHABLE: [Attribute; 4] = [Attribute::ProcessTime, Attribute::Interval, Attribute::StartingMus, Attribute::Capacity];
 
 impl Attributes {
     /// The attributes set here, as a file writes them, such as `{"process_time": "00:00:45"}`.
@@ -167,6 +200,7 @@ impl Attributes {
             Attribute::Dimensions => self.dimensions.is_some(),
             Attribute::Description => self.description.is_some(),
             Attribute::StateNotes => self.state_notes.is_some(),
+            Attribute::Distribution => self.distribution.is_some(),
         }
     }
 
@@ -181,6 +215,7 @@ impl Attributes {
             Attribute::Dimensions => self.dimensions = from.dimensions,
             Attribute::Description => self.description = from.description.clone(),
             Attribute::StateNotes => self.state_notes = from.state_notes.clone(),
+            Attribute::Distribution => self.distribution = from.distribution.clone(),
         }
     }
 }
@@ -196,10 +231,11 @@ pub enum Attribute {
     Dimensions,
     Description,
     StateNotes,
+    Distribution,
 }
 
 impl Attribute {
-    pub const ALL: [Attribute; 8] = [
+    pub const ALL: [Attribute; 9] = [
         Attribute::Interval,
         Attribute::ProcessTime,
         Attribute::Failures,
@@ -208,6 +244,7 @@ impl Attribute {
         Attribute::Dimensions,
         Attribute::Description,
         Attribute::StateNotes,
+        Attribute::Distribution,
     ];
 
     /// Its name in a file.
@@ -221,6 +258,7 @@ impl Attribute {
             Attribute::Dimensions => "dimensions",
             Attribute::Description => "description",
             Attribute::StateNotes => "state_notes",
+            Attribute::Distribution => "distribution",
         }
     }
 
@@ -229,8 +267,8 @@ impl Attribute {
         matches!(
             (built_in, self),
             (_, Attribute::Dimensions | Attribute::Description | Attribute::StateNotes)
-                | ("Source", Attribute::Interval)
-                | ("Station", Attribute::ProcessTime | Attribute::Failures | Attribute::StartingMus)
+                | ("Source", Attribute::Interval | Attribute::Distribution)
+                | ("Station", Attribute::ProcessTime | Attribute::Failures | Attribute::StartingMus | Attribute::Distribution)
                 | ("Buffer", Attribute::Capacity)
         )
     }

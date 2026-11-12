@@ -138,6 +138,14 @@ enum Command {
         #[arg(long)]
         class: bool,
     },
+    /// Checks a model file: every problem, which stops it running, and every warning, what can
+    /// run but is probably a mistake. Fails if it has problems.
+    Validate {
+        #[arg(long)]
+        models: PathBuf,
+        /// The model file, such as `line.json`.
+        path: String,
+    },
     /// Accepts a model file changed outside crabsim, such as by a text editor or git, as it is,
     /// so crabsim may change it again.
     Adopt {
@@ -279,6 +287,13 @@ enum GraphKind {
         #[arg(long)]
         set_on_instance: Option<String>,
     },
+    /// How a Source or Station picks the successor for its MU, with its successors in the order
+    /// it ranks them.
+    Distribution {
+        #[command(flatten)]
+        on: WhichModel,
+        name: String,
+    },
     /// The classes from the built-in classes down, or below one class.
     ClassTree {
         #[command(flatten)]
@@ -389,6 +404,11 @@ fn main() -> ExitCode {
             let got = catalogue.call("get_attributes", json!({ "path": path, "target": target }))?;
             print!("{}", tables::attributes(&name, &got));
             Ok(true)
+        }),
+        Some(Command::Validate { models, path }) => catalogue(&models).and_then(|catalogue| {
+            let validated = catalogue.call("validate_model", json!({ "path": path }))?;
+            print!("{}", tables::validated(&validated));
+            Ok(validated["valid"] == true)
         }),
         Some(Command::Adopt { models, path }) => catalogue(&models).and_then(|catalogue| {
             let adopted = catalogue.call("adopt_model", json!({ "path": path }))?;
@@ -522,6 +542,7 @@ fn graph(kind: GraphKind) -> Result<bool, OperationError> {
             });
             (on, query)
         }
+        GraphKind::Distribution { on, name } => (on, json!({ "kind": "distribution", "name": name })),
         GraphKind::ClassTree { on, class, instances } => (on, json!({ "kind": "class_tree", "class": class, "instances": instances })),
     };
     // Options not given are left out, as the operation's schema wants, rather than null.

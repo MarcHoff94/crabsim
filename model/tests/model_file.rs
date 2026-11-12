@@ -722,6 +722,81 @@ fn a_class_named_like_a_built_in_is_the_models_own_values_for_it() {
 }
 
 #[test]
+fn a_distribution_strategy_is_read_inherited_as_a_whole_and_saved() {
+    use crabsim_model::{DistributionStrategy, WeightedStrategy};
+    use crabsim::distribution::{Order, Rank};
+    let text = with_classes(
+        json!([
+            { "name": "Router", "parent": "Station", "attributes": { "distribution": { "weighted": { "by": "process_time", "order": "largest", "drains": ["Out"] } } } },
+        ]),
+        json!([
+            { "name": "R", "class": "Router" },
+            { "name": "Plain", "class": "Router", "attributes": { "distribution": "round_robin" } },
+            { "name": "S", "class": "Station" },
+        ]),
+    );
+    let model = load(&text).unwrap();
+    let router = DistributionStrategy::Weighted(WeightedStrategy {
+        by: Attribute::ProcessTime,
+        order: Order::Largest,
+        rank: Rank::Route,
+        drains: Some(vec!["Out".into()]),
+    });
+    assert_eq!(model.resolve(0).unwrap().attributes.distribution, Some(router));
+    assert_eq!(model.resolve(0).unwrap().origin(Attribute::Distribution), &Origin::Class("Router".into()));
+    assert_eq!(model.resolve(1).unwrap().attributes.distribution, Some(DistributionStrategy::RoundRobin), "replaced as a whole");
+    assert_eq!(model.resolve(2).unwrap().attributes.distribution, None, "round robin by default");
+    // Saved with its defaults written out, and read back the same.
+    let saved = model.save();
+    assert!(saved.contains(r#""rank": "route""#), "{saved}");
+    assert_eq!(load(&saved).unwrap(), model);
+}
+
+#[test]
+fn a_distribution_is_checked_where_it_is_set() {
+    let text = with_classes(
+        json!([]),
+        json!([
+            { "name": "A", "class": "Station", "attributes": { "distribution": "random" } },
+            { "name": "B", "class": "Station", "attributes": { "distribution": { "weighted": { "by": "proces_time" } } } },
+            { "name": "C", "class": "Station", "attributes": { "distribution": { "weighted": { "by": "process_time", "order": "most", "drains": [] } } } },
+            { "name": "D", "class": "Drain", "attributes": { "distribution": "round_robin" } },
+            { "name": "E", "class": "Station", "attributes": { "distribution": { "weighted": { "by": "interval", "drains": ["Nowhere"] } } } },
+        ]),
+    );
+    let found = found(&text);
+    assert!(found[0].starts_with("/instances/0/attributes/distribution: unknown distribution `random`"), "{found:#?}");
+    assert!(found[1].contains("/instances/1/attributes/distribution/weighted/by") && found[1].contains("did you mean `process_time`"), "{found:#?}");
+    assert!(found.iter().any(|problem| problem.contains("/instances/2/attributes/distribution/weighted/order: `order` is `smallest` or `largest`")), "{found:#?}");
+    assert!(found.iter().any(|problem| problem.contains("/instances/2/attributes/distribution/weighted/drains: a list of drains can't be empty")), "{found:#?}");
+    assert!(found.iter().any(|problem| problem == "/instances/3/attributes/distribution: a Drain has no attribute `distribution`"), "{found:#?}");
+    assert!(!found.iter().any(|problem| problem.starts_with("/instances/4")), "a Drain list naming one that isn't there is only a warning: {found:#?}");
+}
+
+#[test]
+fn a_weighted_distribution_reaches_the_run() {
+    // In into Split, which sends to Fast (2 s) then Slow (30 s) then Out, or to Mid (10 s) then
+    // Out: the lightest route is through Mid.
+    let text = file(json!([
+        { "name": "In", "class": "Source", "attributes": { "interval": "20" } },
+        { "name": "Split", "class": "Station", "attributes": { "distribution": { "weighted": { "by": "process_time" } } } },
+        { "name": "Fast", "class": "Station", "attributes": { "process_time": "2" } },
+        { "name": "Slow", "class": "Station", "attributes": { "process_time": "30" } },
+        { "name": "Mid", "class": "Station", "attributes": { "process_time": "10" } },
+        { "name": "Out", "class": "Drain" },
+    ]));
+    let mut model = load(&text).unwrap();
+    for (from, to) in [("In", "Split"), ("Split", "Fast"), ("Split", "Mid"), ("Fast", "Slow"), ("Slow", "Out"), ("Mid", "Out")] {
+        model.connect(from, to);
+    }
+    let description = model.to_description();
+    assert_eq!(description.ranking(1).unwrap().groups, vec![vec![1], vec![0]], "Mid, the second exit, first");
+    let (_, state) = run_for(&description, 0, secs(3600));
+    assert_eq!(state.objects[2].statistics.mus_in, 0, "nothing to Fast");
+    assert_eq!(state.objects[4].statistics.mus_in, 180);
+}
+
+#[test]
 fn classes_and_instances_are_separate_namespaces() {
     let text = with_classes(json!([{ "name": "Out", "parent": "Drain" }]), json!([{ "name": "Out", "class": "Out" }]));
     assert!(load(&text).is_ok());

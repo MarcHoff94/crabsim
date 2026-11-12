@@ -54,6 +54,28 @@ impl ModelObject {
     pub fn base(&self) -> &BaseObject {
         on_the_object!(self, object => &object.base)
     }
+
+    /// Its successors' ids, in exit order. Empty for a Drain.
+    pub fn successor_ids(&self) -> &[u32] {
+        match self {
+            ModelObject::Source(source) => &source.succ,
+            ModelObject::Station(station) => &station.succ,
+            ModelObject::Buffer(buffer) => &buffer.succ,
+            ModelObject::Drain(_) => &[],
+            #[cfg(test)]
+            ModelObject::RecordsThenFails(_) => &[],
+        }
+    }
+
+    /// How it picks a successor, if it has successors to pick from.
+    pub fn distribution_mut(&mut self) -> Option<&mut crate::materialflow_objects::Distributing> {
+        match self {
+            ModelObject::Source(source) => Some(&mut source.distribution),
+            ModelObject::Station(station) => Some(&mut station.distribution),
+            ModelObject::Buffer(buffer) => Some(&mut buffer.distribution),
+            _ => None,
+        }
+    }
 }
 
 impl EventInterface for ModelObject {

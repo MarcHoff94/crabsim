@@ -530,3 +530,41 @@ fn while_a_window_has_the_folder_the_cli_reads_and_runs_but_changes_nothing() {
     drop(window);
     ok(&["edit", "--models", models.arg(), "demo.json", changes.to_str().unwrap()]);
 }
+
+#[test]
+fn validate_lists_problems_and_warnings_and_graph_distribution_gives_a_ranking() {
+    let models = Models::new("distribution");
+    // Split sends to Quick (5 s) or Slow (40 s), both into Out, and Lost into nothing.
+    std::fs::write(
+        models.0.join("weighted.json"),
+        r#"{"format_version":2,"instances":[
+  {"name":"In","class":"Source","attributes":{"interval":"10"}},
+  {"name":"Split","class":"Station","attributes":{"distribution":{"weighted":{"by":"process_time"}}}},
+  {"name":"Quick","class":"Station","attributes":{"process_time":"5"}},
+  {"name":"Slow","class":"Station","attributes":{"process_time":"40"}},
+  {"name":"Lost","class":"Station"},
+  {"name":"Out","class":"Drain"}],"connections":[
+  {"from":"In","to":"Split","exit":1,"entrance":1},
+  {"from":"Split","to":"Slow","exit":1,"entrance":1},
+  {"from":"Split","to":"Quick","exit":2,"entrance":1},
+  {"from":"Quick","to":"Out","exit":1,"entrance":1},
+  {"from":"Slow","to":"Out","exit":1,"entrance":2}]}"#,
+    )
+    .unwrap();
+    let validated = ok(&["validate", "--models", models.arg(), "weighted.json"]);
+    assert!(validated.contains("No problems"), "{validated}");
+    assert!(validated.contains("2 warnings:") && validated.contains("/instances/4 \"Lost\": no Source reaches it"), "{validated}");
+
+    let ranked = ok(&["graph", "distribution", "--models", models.arg(), "--model", "weighted.json", "Split"]);
+    assert!(ranked.contains("Split ranks its successors by its best route onward to a Drain, process_time smallest first:"), "{ranked}");
+    let quick = ranked.lines().position(|line| line.contains("Quick")).expect("Quick listed");
+    let slow = ranked.lines().position(|line| line.contains("Slow")).expect("Slow listed");
+    assert!(quick < slow, "Quick's route is the lighter: {ranked}");
+    let round_robin = ok(&["graph", "distribution", "--models", models.arg(), "--model", "weighted.json", "In"]);
+    assert_eq!(round_robin, "In takes its successors round robin, in turn: Split\n");
+
+    std::fs::write(models.0.join("broken.json"), r#"{"format_version":2,"instances":[{"name":"x","class":"Nothing"}]}"#).unwrap();
+    let broken = crabsim(&["validate", "--models", models.arg(), "broken.json"]);
+    assert!(!broken.status.success(), "a model with problems fails");
+    assert!(stdout(&broken).contains("1 problem:"), "{}", stdout(&broken));
+}

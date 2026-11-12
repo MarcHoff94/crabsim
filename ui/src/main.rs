@@ -29,6 +29,7 @@ use crabsim_ui::view::{
     MIN_PERIODS, MIN_SPEED, Mark, PERIOD_FAILURE_FACTOR, Point, MU_METRES, Shade, StepBack, ViewState, format_time, format_time_exact, label_size, parse_time, rgb,
     wall_time_roughly,
 };
+use crabsim_ui::paths::{Paths, Strategy, Weigh};
 use crabsim_ui::attributes::{Form, RepairKind};
 use crabsim_ui::editing::{ActRefusal, Claim, EditAction, Editors};
 use crabsim_ui::help;
@@ -166,6 +167,13 @@ fn main() {
             several: (Vec::new(), Vec::new()),
             build_error: None,
             several_forms: HashMap::new(),
+            validation: None,
+            paths: Paths::default(),
+            model_generation: 0,
+            overlay: None,
+            right_press: None,
+            canvas_menu: None,
+            over_egui: false,
         })
         .insert_resource(Session(Mutex::new(session)))
         .insert_resource(WatchedFile(Arc::new(Mutex::new(Vec::new()))))
@@ -298,6 +306,34 @@ struct Ui {
     several: (Vec<u32>, Vec<AttributeView>),
     /// The fields for the values several selected objects share.
     several_forms: HashMap<String, Form>,
+    /// What Validate found in the open model, shown until closed.
+    validation: Option<Result<Vec<crabsim_ui::workspace::Issue>, String>>,
+    /// The Paths tab's views and routes.
+    paths: Paths,
+    /// Counts the models the window has used, so what was worked out for an earlier one is
+    /// worked out again.
+    model_generation: u64,
+    /// The Paths tab's weights and strategies on the canvas, and what they were worked out for:
+    /// the model, the weight, and a live figure's values.
+    overlay: Option<Overlay>,
+    /// Where the right button went down on the canvas and how far it has moved, so letting go
+    /// where it went down opens the object's menu rather than ending a pan.
+    right_press: Option<(Vec2, f32)>,
+    /// The menu of the object right-clicked, and where.
+    canvas_menu: Option<(u32, egui::Pos2)>,
+    /// The pointer was over a panel or window last frame, so a scroll there isn't the canvas's.
+    over_egui: bool,
+}
+
+/// What the Paths tab's weights and strategies were worked out for: the model, by generation, the
+/// weight, and a live figure's values.
+type OverlayKey = (u64, Weigh, Option<Vec<Option<f64>>>);
+
+/// The Paths tab's weights and strategies, by object id, and what they were worked out for.
+struct Overlay {
+    made_for: OverlayKey,
+    weights: Vec<Option<f64>>,
+    strategies: Vec<Option<Strategy>>,
 }
 
 /// A dialog asking for a name, and what the name is for.
@@ -475,6 +511,7 @@ impl Moving {
 enum Tab {
     Inspector,
     Results,
+    Paths,
     Agents,
 }
 
@@ -516,6 +553,10 @@ const HANDLE_PIXELS: f64 = 9.0;
 /// How close to a connection's line a click must be to select it, in logical pixels.
 const CLICK_PIXELS: f64 = 6.0;
 const HANDLE_COLOUR: Color = Color::srgb(0.45, 0.75, 1.0);
+/// The highlighted route in the Paths tab.
+const ROUTE: Color = Color::srgb(1.0, 0.62, 0.2);
+/// A weighted object's preferred successors in the Paths tab's Strategies view.
+const PREFERRED: Color = Color::srgb(0.55, 0.9, 0.55);
 
 /// A press that moves less than this, in logical pixels, is a click rather than a drag.
 const CLICK_SLOP: f32 = 4.0;
@@ -729,6 +770,18 @@ fn canvas_input(
     // Ctrl held, or pressed or let go this frame, as a quick Ctrl+click can be.
     let control = [KeyCode::ControlLeft, KeyCode::ControlRight];
     let ctrl = keys.any_pressed(control) || keys.any_just_pressed(control) || keys.any_just_released(control);
+    // Right-clicking an object, without moving, opens its menu. Moving pans instead.
+    if buttons.just_pressed(MouseButton::Right) {
+        ui.right_press = window.cursor_position().filter(|at| canvas.contains(egui::pos2(at.x, at.y))).map(|at| (at, 0.0));
+    }
+    if let Some((_, travelled)) = ui.right_press.as_mut() {
+        *travelled += motion.delta.length();
+    }
+    if buttons.just_released(MouseButton::Right)
+        && let Some((at, travelled)) = ui.right_press.take()
+    {
+        ui.canvas_menu = (travelled < CLICK_SLOP).then(|| ui.view.object_at(floor(at))).flatten().map(|id| (id, egui::pos2(at.x, at.y)));
+    }
     if buttons.just_pressed(MouseButton::Left) && ui.confirm_move.is_none() {
         // Only a press on the canvas is the canvas's: one on a panel, which egui may not have
         // claimed yet when the pointer arrived and pressed within one frame, leaves it alone.
@@ -836,12 +889,14 @@ fn canvas_input(
         MouseScrollUnit::Line => scroll.delta.y,
         MouseScrollUnit::Pixel => scroll.delta.y / 40.0,
     };
-    if notches != 0.0 {
-        if let Some(cursor) = window.cursor_position() {
-            let pointer = Point { x: (cursor.x - canvas.min.x) as f64, y: (cursor.y - canvas.min.y) as f64 };
-            camera.zoom_at(1.15f64.powf(notches as f64), pointer, size);
-            ui.camera_moved = true;
-        }
+    // Only a scroll over the canvas zooms it: one over a panel or a window on top scrolls that.
+    if notches != 0.0
+        && !ui.over_egui
+        && let Some(cursor) = window.cursor_position().filter(|at| canvas.contains(egui::pos2(at.x, at.y)))
+    {
+        let pointer = Point { x: (cursor.x - canvas.min.x) as f64, y: (cursor.y - canvas.min.y) as f64 };
+        camera.zoom_at(1.15f64.powf(notches as f64), pointer, size);
+        ui.camera_moved = true;
     }
 }
 
@@ -996,6 +1051,35 @@ fn draw_connections(mut gizmos: Gizmos, ui: Res<Ui>) {
     {
         gizmos.arrow(at(connection.start, 0.1), at(connection.end, 0.1), SELECTION).with_tip_length(0.5);
     }
+    // The Paths tab's highlighted route, and each weighted object's preferred successors.
+    let between = |from: u32, to: u32| ui.view.connections().iter().find(|connection| connection.from == from && connection.to == to).copied();
+    if let Some(route) = ui.paths.highlighted() {
+        for pair in route.windows(2) {
+            if let Some(connection) = between(pair[0], pair[1]) {
+                gizmos.arrow(at(connection.start, 0.15), at(connection.end, 0.15), ROUTE).with_tip_length(0.5);
+            }
+        }
+        for &id in route {
+            let outline = ui.view.objects()[id as usize].outline(0.25);
+            gizmos.linestrip(outline.iter().chain(outline.first()).map(|&point| at(point, 0.15)), ROUTE);
+        }
+    }
+    if ui.paths.strategies_on
+        && let Some(Overlay { strategies, .. }) = &ui.overlay
+    {
+        for (from, strategy) in strategies.iter().enumerate() {
+            let Some(strategy) = strategy.as_ref().filter(|strategy| strategy.weighted) else { continue };
+            for &(to, place) in &strategy.places {
+                if let (1, Some(connection)) = (place, between(from as u32, to)) {
+                    // Three lines side by side read as one thick arrow.
+                    for offset in [-0.04, 0.0, 0.04] {
+                        let shift = |point: Point| Point { x: point.x + offset, y: point.y + offset };
+                        gizmos.arrow(at(shift(connection.start), 0.12), at(shift(connection.end), 0.12), PREFERRED).with_tip_length(0.45);
+                    }
+                }
+            }
+        }
+    }
     let Some(camera) = ui.camera else { return };
     let radius = (HANDLE_PIXELS / camera.pixels_per_metre) as f32 * 0.6;
     // The handle of the object under the pointer, or of the one a connection is dragged from.
@@ -1115,15 +1199,10 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
         let read = if ui.workspace.opened().is_some() { ui.workspace.attributes(&name) } else { Err("No model file is open".to_string()) };
         if let Ok(attributes) = &read {
             let states = crabsim_model::State::of(help::built_in(ui.view.objects()[id as usize].kind));
+            let drains = ui.workspace.drains();
             ui.forms = attributes
                 .iter()
-                .map(|view| {
-                    let form = match view.attribute.as_str() {
-                        "state_notes" => Form::state_notes(states, view.value.as_ref()),
-                        attribute => Form::new(attribute, view.value.as_ref()),
-                    };
-                    (view.attribute.clone(), form)
-                })
+                .map(|view| (view.attribute.clone(), Form::for_attribute(&view.attribute, view.value.as_ref(), states, &drains)))
                 .collect();
         }
         ui.attributes = Some((id, read));
@@ -1141,7 +1220,8 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
     if several.len() > 1 && ui.several.0 != several {
         let names: Vec<String> = several.iter().map(|&id| ui.view.objects()[id as usize].name.clone()).collect();
         let shared = shared_values(&ui.workspace, &names);
-        ui.several_forms = shared.iter().map(|view| (view.attribute.clone(), Form::new(&view.attribute, view.value.as_ref()))).collect();
+        let drains = ui.workspace.drains();
+        ui.several_forms = shared.iter().map(|view| (view.attribute.clone(), Form::for_attribute(&view.attribute, view.value.as_ref(), &[], &drains))).collect();
         ui.several = (several.clone(), shared);
     }
     let mut class_asked_change = None;
@@ -1150,15 +1230,10 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
         && ui.class_forms.0.as_deref() != Some(class.as_str())
     {
         let states = crabsim_model::State::of(ui.workspace.built_in_of(class).unwrap_or("Station"));
+        let drains = ui.workspace.drains();
         ui.class_forms.1 = values
             .iter()
-            .map(|view| {
-                let form = match view.attribute.as_str() {
-                    "state_notes" => Form::state_notes(states, view.value.as_ref()),
-                    attribute => Form::new(attribute, view.value.as_ref()),
-                };
-                (view.attribute.clone(), form)
-            })
+            .map(|view| (view.attribute.clone(), Form::for_attribute(&view.attribute, view.value.as_ref(), states, &drains)))
             .collect();
         ui.class_forms.0 = Some(class.clone());
     }
@@ -1191,6 +1266,7 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
             for (tab, label, hint) in [
                 (Tab::Inspector, "Inspector", "The object clicked on the canvas: its state, statistics and attributes"),
                 (Tab::Results, "Results", "The run so far: each Drain's throughput, every Station's shares of time, and the likely bottleneck"),
+                (Tab::Paths, "Paths", "See the model's routes, weights and distribution strategies on the canvas. Values change in the inspector"),
                 (Tab::Agents, "Agents", "The AI agents changing this folder's models, what they're doing, and your control of them"),
             ] {
                 if row.selectable_label(ui.tab == tab, label).on_hover_text(hint).clicked() && ui.tab != tab {
@@ -1235,10 +1311,14 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
                 let results = ui.view.results().map(|results| (ui.view.results_time(&results), results));
                 results_chosen = results_tab(panel, results.as_ref().map(|(at, results)| (at.as_str(), results)), &mut ui.results_sort);
             }
+            Tab::Paths => paths_tab(panel, &mut ui.paths, ui.view.objects(), ui.view.live_figure("mus_in").is_some()),
             Tab::Agents => editors_action = agents_tab(panel, ui.workspace.opened(), ui.editors.as_ref(), ui.editors_note.as_deref()),
         });
     });
-    ui.view.set_results_open(ui.tab == Tab::Results);
+    // Full states are asked for while results are shown, or the Paths tab weighs the live run.
+    let live_paths = ui.tab == Tab::Paths && matches!(ui.paths.weigh, Weigh::Figure(_));
+    ui.view.set_results_open(ui.tab == Tab::Results || live_paths);
+    find_paths(ui);
     if let Some(id) = results_chosen {
         ui.view.select(Some(id));
         ui.view.commanded(wall);
@@ -1476,6 +1556,23 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
     }
     hover_tooltip(&ctx, ui, canvas);
     help_window(&ctx, ui, canvas);
+    canvas_menu(&ctx, ui);
+    ui.over_egui = ctx.is_pointer_over_egui();
+    if let Some(issue) = validation_window(&ctx, ui) {
+        // Clicking a problem or warning selects what it's about.
+        if let Some(id) = issue.instance.filter(|&id| (id as usize) < ui.view.objects().len()) {
+            ui.view.select(Some(id));
+            ui.class_selected = None;
+            ui.tab = Tab::Inspector;
+        } else if let Some(class) = issue.class {
+            let values = ui.workspace.class_attributes(&class);
+            ui.class_selected = Some((class, values));
+            ui.class_forms.0 = None;
+            ui.view.select(None);
+            ui.tab = Tab::Inspector;
+        }
+        ui.view.commanded(wall);
+    }
 
     if let (Some(intervention), Some(id)) = (intervention, ui.view.selected()) {
         let session = session.0.lock().expect("the session lock is never poisoned");
@@ -1555,6 +1652,10 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
             replace_session(ui, &session, false, wall);
             None
         }
+        Some(Request::Validate) => {
+            ui.validation = Some(ui.workspace.validate());
+            None
+        }
         // Reset uses a model that changed during the run, such as by keeping its changes: a new
         // session is at its default state.
         Some(Request::Control(Control::Reset)) if ui.workspace.has_pending() => {
@@ -1596,7 +1697,7 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
                 ui.view.set_end_time(end);
                 session.set_end_time(end)
             }
-            Request::Seed(_) | Request::MeasuringPeriod(_) => unreachable!("handled above"),
+            Request::Seed(_) | Request::MeasuringPeriod(_) | Request::Validate => unreachable!("handled above"),
         };
         ui.view.commanded(wall);
         match sent {
@@ -1622,6 +1723,7 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
     }
     if let Some((camera, size)) = ui.camera.and_then(|camera| Some((camera, label_size(&camera)?))) {
         labels(&ctx, &ui.view, &camera, canvas, size as f32);
+        paths_labels(&ctx, ui, &camera, canvas, size as f32);
     }
     // A building change refused this frame, or from the canvas before it, says why last of all.
     if let Some(error) = ui.build_error.take() {
@@ -1649,6 +1751,8 @@ enum Request {
     Seed(u64),
     /// Measure in periods this long from now on, which means a new session too.
     MeasuringPeriod(SimTime),
+    /// Check the open model for problems and warnings.
+    Validate,
 }
 
 /// Opens the model at `path` in the folder: a new view and session for it. One with problems
@@ -1663,6 +1767,10 @@ fn open_model(ui: &mut Ui, session: &Session, path: &str, wall: Duration) {
 /// time mode and end time. A new model is fitted into the canvas, and the same one keeps the view
 /// where it was.
 fn replace_session(ui: &mut Ui, session: &Session, new_model: bool, wall: Duration) {
+    ui.model_generation += 1;
+    if new_model {
+        ui.paths = ui.paths.for_another_model();
+    }
     let mut view = ViewState::with_settings_of(ui.workspace.description(), &ui.view);
     // The same model, reloaded or with another seed, keeps the object selected, found by its name.
     if !new_model {
@@ -2448,6 +2556,12 @@ fn top_bar(
         let name = egui::Label::new(egui::RichText::new(workspace.opened().unwrap_or("No model open")).strong()).truncate();
         ui.allocate_ui_with_layout(egui::vec2(NAME_WIDTH, ui.spacing().interact_size.y), egui::Layout::left_to_right(egui::Align::Center), |ui| {
             ui.set_width(NAME_WIDTH);
+            let validate = ui
+                .add_enabled(workspace.opened().is_some(), egui::Button::new("Validate").small())
+                .on_hover_text("Check the model for problems, which stop it running, and warnings: what can run but is probably a mistake");
+            if validate.clicked() {
+                request = Some(Request::Validate);
+            }
             ui.add(name);
         });
         ui.label("seed").on_hover_text(SEED_HINT);
@@ -2691,7 +2805,8 @@ fn control_hint(control: Control) -> &'static str {
 /// The name and state of the object under the pointer on the canvas, beside the pointer.
 fn hover_tooltip(ctx: &egui::Context, ui: &Ui, canvas: egui::Rect) {
     let (Some(pointer), Some(camera)) = (ctx.pointer_hover_pos(), ui.camera) else { return };
-    if !canvas.contains(pointer) || ctx.is_pointer_over_egui() || ui.moving.as_ref().is_some_and(|moving| moving.dragged) {
+    // An object's menu, once open, isn't covered by its name.
+    if !canvas.contains(pointer) || ctx.is_pointer_over_egui() || ui.moving.as_ref().is_some_and(|moving| moving.dragged) || ui.canvas_menu.is_some() {
         return;
     }
     let size = Point { x: canvas.width() as f64, y: canvas.height() as f64 };
@@ -3274,6 +3389,7 @@ fn attribute_label(attribute: &str) -> &str {
         "dimensions" => "Dimensions",
         "description" => "Description",
         "state_notes" => "State notes",
+        "distribution" => "Distribution",
         other => other,
     }
 }
@@ -3327,6 +3443,10 @@ fn attributes_section(
         let Some(form) = forms.get_mut(&view.attribute) else { continue };
         let mut commit = false;
         ui.scope(|fields| {
+            if let Some(choice) = form.distribution.as_mut() {
+                distribution_fields(fields, choice, &view.attribute);
+                return;
+            }
             if let Some(kind) = form.repair {
                 egui::ComboBox::from_id_salt(("repair", &view.attribute)).selected_text(kind.name()).show_ui(fields, |menu| {
                     for choice in RepairKind::ALL {
@@ -3388,6 +3508,284 @@ fn attributes_section(
         }
     }
     asked
+}
+
+/// The Paths tab: switches for its three views, and the route view's choices and routes. It
+/// changes `paths`, and `find_paths` finds the routes once the panels are drawn.
+fn paths_tab(ui: &mut egui::Ui, paths: &mut Paths, objects: &[crabsim_ui::view::ObjectView], live: bool) {
+    ui.label(egui::RichText::new("See the model's routes, weights and strategies on the canvas. Values change in the inspector.").weak());
+    ui.add_space(6.0);
+    // What routes and weights are weighed by, shared by both views.
+    ui.horizontal(|row| {
+        row.label("Weigh by");
+        egui::ComboBox::from_id_salt("paths weigh").selected_text(paths.weigh.label()).show_ui(row, |menu| {
+            menu.selectable_value(&mut paths.weigh, Weigh::Connections, "Connections").on_hover_text("Each connection counts one");
+            menu.separator();
+            for (name, label) in crabsim_ui::paths::ATTRIBUTES {
+                menu.selectable_value(&mut paths.weigh, Weigh::Attribute(name), label).on_hover_text("Each object's value, resolved through inheritance");
+            }
+            menu.separator();
+            for (name, label) in crabsim_ui::paths::FIGURES {
+                menu.add_enabled_ui(live, |menu| {
+                    menu.selectable_value(&mut paths.weigh, Weigh::Figure(name), label);
+                })
+                .response
+                .on_hover_text("The run so far, at shown time")
+                .on_disabled_hover_text("A figure of the run, after Init");
+            }
+        });
+    });
+    if matches!(paths.weigh, Weigh::Figure(_)) && !live {
+        paths.weigh = Weigh::Connections;
+    }
+    ui.add_space(6.0);
+    ui.checkbox(&mut paths.route_on, egui::RichText::new("Route").strong()).on_hover_text("Highlight a route from one object to another");
+    if paths.route_on {
+        let name = |id: Option<u32>| id.and_then(|id| objects.get(id as usize)).map_or("choose…".to_string(), |object| object.name.clone());
+        egui::Grid::new("paths ends").num_columns(2).show(ui, |grid| {
+            for (label, end) in [("From", &mut paths.from), ("To", &mut paths.to)] {
+                grid.label(label);
+                egui::ComboBox::from_id_salt(("paths end", label)).selected_text(name(*end)).width(160.0).show_ui(grid, |menu| {
+                    for object in objects {
+                        menu.selectable_value(end, Some(object.id), &object.name);
+                    }
+                });
+                grid.end_row();
+            }
+        });
+        if paths.weigh != Weigh::Connections {
+            ui.horizontal(|row| {
+                row.selectable_value(&mut paths.largest, false, "Smallest").on_hover_text("The lightest total first");
+                row.selectable_value(&mut paths.largest, true, "Largest").on_hover_text("The heaviest total first, as for a critical path");
+            });
+        }
+        if paths.from.is_some() && paths.from == paths.to {
+            ui.label(egui::RichText::new("Choose two different objects.").weak());
+        }
+        match &paths.found {
+            Some(Ok(found)) if found.routes.is_empty() => {
+                ui.label("No route goes from one to the other.");
+            }
+            Some(Ok(found)) => {
+                let unit = if paths.weigh == Weigh::Connections { "connections".to_string() } else { "total".to_string() };
+                ui.label(egui::RichText::new(format!("Routes, best first, with their {unit}. Click one to highlight it.")).weak().small());
+                let mut chosen = paths.chosen;
+                for (place, route) in found.routes.iter().enumerate() {
+                    let names: Vec<&str> = route.ids.iter().filter_map(|&id| objects.get(id as usize)).map(|object| object.name.as_str()).collect();
+                    let total = if paths.weigh == Weigh::Connections { format!("{}", route.total) } else { paths.weigh.show(route.total) };
+                    if ui.selectable_label(place == chosen, format!("{total}   {}", names.join(" to "))).clicked() {
+                        chosen = place;
+                    }
+                }
+                paths.chosen = chosen;
+                if !found.weightless.is_empty() {
+                    let names: Vec<&str> = found.weightless.iter().filter_map(|&id| objects.get(id as usize)).map(|object| object.name.as_str()).collect();
+                    ui.label(egui::RichText::new(format!("Weighing 0, without the value: {}", names.join(", "))).weak().small());
+                }
+                if !found.exact {
+                    ui.label(egui::RichText::new("Loops on the way stopped the search early, so a heavier route may exist.").weak().small());
+                }
+                let more = if found.more { "more than " } else { "" };
+                ui.label(egui::RichText::new(format!("{more}{} route{} in all", found.count, plural(found.count as usize))).weak().small());
+            }
+            Some(Err(error)) => {
+                ui.colored_label(egui::Color32::from_rgb(240, 120, 120), error);
+            }
+            None => {}
+        }
+    }
+    ui.add_space(6.0);
+    ui.checkbox(&mut paths.weights_on, egui::RichText::new("Weights").strong()).on_hover_text("Each object's weight, written above it");
+    if paths.weights_on && paths.weigh == Weigh::Connections {
+        ui.label(egui::RichText::new("Choose what to weigh by to see each object's weight.").weak());
+    }
+    ui.add_space(6.0);
+    ui.checkbox(&mut paths.strategies_on, egui::RichText::new("Strategies").strong()).on_hover_text("How each object picks the successor for its MU");
+    if paths.strategies_on {
+        ui.label(
+            egui::RichText::new(
+                "RR takes its successors round robin, in turn. W ranks them: the green arrows go to its best-ranked, and each exit shows its place. Those sharing a place take turns.",
+            )
+            .weak(),
+        );
+    }
+}
+
+/// Finds the Paths tab's routes when what they depend on changed, and works out the weights and
+/// strategies its views draw.
+fn find_paths(ui: &mut Ui) {
+    let values = match ui.paths.weigh {
+        Weigh::Figure(figure) => ui.view.live_figure(figure),
+        _ => None,
+    };
+    if ui.paths.needs_finding(ui.model_generation, values.as_deref()) {
+        let answer = ui.paths.query(ui.view.objects(), values.as_deref()).map_or_else(|| Err("The route's ends aren't in the model.".to_string()), |query| ui.workspace.query(query));
+        ui.paths.take_answer(answer, ui.view.objects(), ui.model_generation, values.as_deref());
+    }
+    let key = (ui.model_generation, ui.paths.weigh.clone(), values.clone());
+    let wanted = ui.paths.weights_on || ui.paths.strategies_on;
+    if wanted && ui.overlay.as_ref().is_none_or(|overlay| overlay.made_for != key) && ui.workspace.opened().is_some() {
+        let weights = crabsim_ui::paths::weights(ui.workspace.model(), &ui.paths.weigh, values.as_deref());
+        let strategies = crabsim_ui::paths::strategies(ui.workspace.model(), ui.workspace.description());
+        ui.overlay = Some(Overlay { made_for: key, weights, strategies });
+    }
+}
+
+/// The Paths tab's words on the canvas: each object's weight above it, its strategy beside it,
+/// and each weighted object's ranking on its exits.
+fn paths_labels(ctx: &egui::Context, ui: &Ui, camera: &ViewCamera, canvas: egui::Rect, text_size: f32) {
+    let Some(Overlay { weights, strategies, .. }) = &ui.overlay else { return };
+    let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Background, egui::Id::new("paths labels"))).with_clip_rect(canvas);
+    let size = Point { x: canvas.width() as f64, y: canvas.height() as f64 };
+    let screen = |point: Point| {
+        let at = camera.to_screen(point, size);
+        egui::pos2(canvas.min.x + at.x as f32, canvas.min.y + at.y as f32)
+    };
+    let font = egui::FontId::proportional(text_size);
+    let route = egui::Color32::from_rgb(255, 158, 51);
+    let green = egui::Color32::from_rgb(140, 230, 140);
+    for object in ui.view.objects() {
+        let (sin, cos) = object.rotation_degrees.to_radians().sin_cos();
+        let half_height = (sin.abs() * object.length + cos.abs() * object.width) / 2.0;
+        let half_width = (cos.abs() * object.length + sin.abs() * object.width) / 2.0;
+        if ui.paths.weights_on && ui.paths.weigh != Weigh::Connections {
+            let top = screen(Point { x: object.centre.x, y: object.centre.y + half_height });
+            let text = weights.get(object.id as usize).copied().flatten().map_or("–".to_string(), |weight| ui.paths.weigh.show(weight));
+            painter.text(top - egui::vec2(0.0, 2.0), egui::Align2::CENTER_BOTTOM, text, font.clone(), route);
+        }
+        if ui.paths.strategies_on
+            && let Some(strategy) = strategies.get(object.id as usize).cloned().flatten()
+        {
+            let corner = screen(Point { x: object.centre.x - half_width, y: object.centre.y + half_height });
+            let (mark, colour) = if strategy.weighted { ("W", green) } else { ("RR", egui::Color32::LIGHT_GRAY) };
+            painter.text(corner - egui::vec2(2.0, 2.0), egui::Align2::RIGHT_BOTTOM, mark, font.clone(), colour);
+            for (to, place) in strategy.places {
+                if let Some(connection) = ui.view.connections().iter().find(|connection| connection.from == object.id && connection.to == to) {
+                    let near = Point {
+                        x: connection.start.x + (connection.end.x - connection.start.x) * 0.3,
+                        y: connection.start.y + (connection.end.y - connection.start.y) * 0.3,
+                    };
+                    painter.text(screen(near), egui::Align2::CENTER_BOTTOM, place.to_string(), font.clone(), green);
+                }
+            }
+        }
+    }
+}
+
+/// The menu of an object right-clicked on the canvas: where the Paths tab's route goes from or to.
+fn canvas_menu(ctx: &egui::Context, ui: &mut Ui) {
+    let Some((id, at)) = ui.canvas_menu else { return };
+    let mut close = false;
+    let area = egui::Area::new(egui::Id::new("canvas menu")).fixed_pos(at).order(egui::Order::Foreground).show(ctx, |area| {
+        egui::Frame::popup(area.style()).show(area, |menu| {
+            menu.label(egui::RichText::new(&ui.view.objects()[id as usize].name).strong());
+            for (label, from) in [("Paths from here", true), ("Paths to here", false)] {
+                if menu.button(label).clicked() {
+                    if from {
+                        ui.paths.from = Some(id);
+                    } else {
+                        ui.paths.to = Some(id);
+                    }
+                    ui.paths.route_on = true;
+                    ui.tab = Tab::Paths;
+                    close = true;
+                }
+            }
+        });
+    });
+    // A left click anywhere else closes it. A right click elsewhere opens another object's menu,
+    // or none, from the canvas.
+    if close || (ctx.input(|input| input.pointer.primary_pressed()) && !area.response.contains_pointer()) {
+        ui.canvas_menu = None;
+    }
+}
+
+/// What Validate found, until closed: each problem and warning on a line, which selects its
+/// instance or class when clicked. Returns the one clicked.
+fn validation_window(ctx: &egui::Context, ui: &mut Ui) -> Option<crabsim_ui::workspace::Issue> {
+    let found = ui.validation.as_ref()?;
+    let mut open = true;
+    let mut clicked = None;
+    let title = format!("Validate {}", ui.workspace.opened().unwrap_or("the model"));
+    egui::Window::new(title).id(egui::Id::new("validation")).open(&mut open).collapsible(false).default_width(420.0).show(ctx, |window| match found {
+        Err(error) => {
+            window.colored_label(egui::Color32::from_rgb(240, 120, 120), error);
+        }
+        Ok(issues) if issues.is_empty() => {
+            window.label("No problems and no warnings.");
+        }
+        Ok(issues) => {
+            let problems = issues.iter().filter(|issue| !issue.warning).count();
+            let warnings = issues.len() - problems;
+            window.label(format!(
+                "{problems} problem{}, which stop the model running, and {warnings} warning{}: what can run but is probably a mistake. Click one to select what it's about.",
+                plural(problems),
+                plural(warnings)
+            ));
+            window.separator();
+            egui::ScrollArea::vertical().max_height(320.0).show(window, |list| {
+                for issue in issues {
+                    let (kind, colour) =
+                        if issue.warning { ("Warning", egui::Color32::from_rgb(230, 190, 90)) } else { ("Problem", egui::Color32::from_rgb(240, 120, 120)) };
+                    list.horizontal_wrapped(|row| {
+                        row.label(egui::RichText::new(kind).color(colour).strong());
+                        let what = issue.name.as_deref().map_or(String::new(), |name| format!("{name}: "));
+                        let line = row.add(egui::Label::new(format!("{what}{}", issue.message)).sense(egui::Sense::click())).on_hover_text(&issue.pointer);
+                        if line.clicked() {
+                            clicked = Some(issue.clone());
+                        }
+                    });
+                }
+            });
+        }
+    });
+    if !open {
+        ui.validation = None;
+    }
+    clicked
+}
+
+/// A distribution strategy's choices: Round robin or Weighted, and for Weighted what it weighs,
+/// which totals come first, what it ranks, and the Drains it counts.
+fn distribution_fields(ui: &mut egui::Ui, choice: &mut crabsim_ui::attributes::DistributionChoice, salt: &str) {
+    ui.horizontal(|row| {
+        row.selectable_value(&mut choice.weighted, false, "Round robin").on_hover_text("Each successor in turn");
+        row.selectable_value(&mut choice.weighted, true, "Weighted")
+            .on_hover_text("The best-ranked successor that can take the MU, those ranking equal taking turns");
+    });
+    if !choice.weighted {
+        return;
+    }
+    egui::Grid::new(("distribution", salt)).num_columns(2).spacing([8.0, 2.0]).show(ui, |grid| {
+        grid.label("by");
+        let label = crabsim_ui::attributes::WEIGHABLE.iter().find(|(name, _)| *name == choice.by).map_or("?", |(_, label)| label);
+        egui::ComboBox::from_id_salt(("weigh by", salt)).selected_text(label).show_ui(grid, |menu| {
+            for (name, label) in crabsim_ui::attributes::WEIGHABLE {
+                if menu.selectable_label(choice.by == name, label).clicked() {
+                    choice.by = name.to_string();
+                }
+            }
+        });
+        grid.end_row();
+        grid.label("first");
+        grid.horizontal(|row| {
+            row.selectable_value(&mut choice.largest, false, "Smallest");
+            row.selectable_value(&mut choice.largest, true, "Largest");
+        });
+        grid.end_row();
+        grid.label("rank by");
+        grid.horizontal(|row| {
+            row.selectable_value(&mut choice.successor, false, "Route").on_hover_text("Each successor's best route onward to a Drain, itself included");
+            row.selectable_value(&mut choice.successor, true, "Successor").on_hover_text("Each successor's own weight only");
+        });
+        grid.end_row();
+    });
+    if !choice.successor {
+        ui.label(egui::RichText::new("Drains counted, none ticked for every Drain:").weak().small());
+        for (drain, ticked) in &mut choice.drains {
+            ui.checkbox(ticked, drain.as_str());
+        }
+    }
 }
 
 /// Each object's name under it, and counts of MUs where they aren't drawn, `text_size` pixels

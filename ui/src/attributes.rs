@@ -12,6 +12,18 @@ use serde_json::{json, Map, Value};
 pub fn summary(value: &Value) -> String {
     let number = |value: &Value| value.as_f64().map_or_else(|| value.to_string(), |n| format!("{n}"));
     let text = |value: &Value| value.as_str().map_or_else(|| value.to_string(), str::to_string);
+    if value == "round_robin" {
+        return "round robin".to_string();
+    }
+    if let Some(weighted) = value.get("weighted") {
+        let by = WEIGHABLE.iter().find(|(name, _)| weighted["by"] == *name).map_or("?", |(_, label)| label).to_lowercase();
+        let order = if weighted["order"] == "largest" { "largest" } else { "smallest" };
+        let what = if weighted["rank"] == "successor" { "successor" } else { "route" };
+        let drains = weighted["drains"].as_array().map_or(String::new(), |names| {
+            format!(", to {}", names.iter().map(&text).collect::<Vec<_>>().join(", "))
+        });
+        return format!("weighted: {what} by {by}, {order} first{drains}");
+    }
     let Value::Object(fields) = value else {
         return text(value);
     };
@@ -87,6 +99,26 @@ pub struct Form {
     pub parts: Vec<Part>,
     /// For failures: how the repair time is spread.
     pub repair: Option<RepairKind>,
+    /// For a distribution strategy: its choices, which aren't text.
+    pub distribution: Option<DistributionChoice>,
+}
+
+/// What can be weighed, by name in a model file, with its label in the window.
+pub const WEIGHABLE: [(&str, &str); 4] = [("process_time", "Process time"), ("interval", "Interval"), ("starting_mus", "Starting MUs"), ("capacity", "Capacity")];
+
+/// A distribution strategy's choices (ADR 0016).
+#[derive(Debug, Clone, PartialEq)]
+pub struct DistributionChoice {
+    /// Weighted rather than round robin.
+    pub weighted: bool,
+    /// One of `WEIGHABLE`'s names.
+    pub by: String,
+    pub largest: bool,
+    /// Ranked by the successor's own weight rather than its route onward.
+    pub successor: bool,
+    /// The model's Drains, and any other names the value counts, each ticked if it counts. None
+    /// ticked counts every Drain.
+    pub drains: Vec<(String, bool)>,
 }
 
 fn part(label: &'static str, text: impl Into<String>) -> Part {
@@ -136,7 +168,40 @@ impl Form {
             }
             _ => (vec![part("", text_of(value))], None),
         };
-        Form { attribute: attribute.to_string(), parts, repair }
+        Form { attribute: attribute.to_string(), parts, repair, distribution: None }
+    }
+
+    /// The fields for `attribute`, whatever it is: state notes need the `states` the object can be
+    /// in, and a distribution the model's `drains`.
+    pub fn for_attribute(attribute: &str, value: Option<&Value>, states: &[State], drains: &[String]) -> Form {
+        match attribute {
+            "state_notes" => Form::state_notes(states, value),
+            "distribution" => Form::distribution(value, drains),
+            attribute => Form::new(attribute, value),
+        }
+    }
+
+    /// The choices of a distribution strategy, from its value as a model file writes it: round
+    /// robin without one. The Drains to tick are the model's `drains`, then any other name the
+    /// value counts, so saving again never drops one silently.
+    pub fn distribution(value: Option<&Value>, drains: &[String]) -> Form {
+        let weighted = value.and_then(|value| value.get("weighted"));
+        let named: Vec<String> = weighted
+            .and_then(|weighted| weighted.get("drains"))
+            .and_then(Value::as_array)
+            .map(|names| names.iter().filter_map(|name| name.as_str().map(str::to_owned)).collect())
+            .unwrap_or_default();
+        let mut ticks: Vec<(String, bool)> = drains.iter().map(|drain| (drain.clone(), named.contains(drain))).collect();
+        ticks.extend(named.iter().filter(|name| !drains.contains(name)).map(|name| (name.clone(), true)));
+        let field = |key: &str| weighted.and_then(|weighted| weighted.get(key)).and_then(Value::as_str);
+        let choice = DistributionChoice {
+            weighted: weighted.is_some(),
+            by: field("by").unwrap_or("process_time").to_string(),
+            largest: field("order") == Some("largest"),
+            successor: field("rank") == Some("successor"),
+            drains: ticks,
+        };
+        Form { attribute: "distribution".into(), parts: Vec::new(), repair: None, distribution: Some(choice) }
     }
 
     /// The fields for state notes: one per state the object can be in, labelled with the state and
@@ -146,7 +211,7 @@ impl Form {
             .iter()
             .map(|state| part(state.label(), value.and_then(|notes| notes.get(state.name())).and_then(Value::as_str).unwrap_or_default()))
             .collect();
-        Form { attribute: "state_notes".into(), parts, repair: None }
+        Form { attribute: "state_notes".into(), parts, repair: None, distribution: None }
     }
 
     /// The states a state notes form has a field for.
@@ -197,6 +262,20 @@ impl Form {
                 repair.insert(self.repair.unwrap_or(RepairKind::Constant).name().into(), spread);
                 Ok(json!({ "availability": percent / 100.0, "repair_time": repair }))
             }
+            "distribution" => {
+                let Some(choice) = self.distribution.as_ref().filter(|choice| choice.weighted) else {
+                    return Ok(json!("round_robin"));
+                };
+                let mut weighted = Map::new();
+                weighted.insert("by".into(), json!(choice.by));
+                weighted.insert("order".into(), json!(if choice.largest { "largest" } else { "smallest" }));
+                weighted.insert("rank".into(), json!(if choice.successor { "successor" } else { "route" }));
+                let counted: Vec<&String> = choice.drains.iter().filter(|(_, ticked)| *ticked).map(|(name, _)| name).collect();
+                if !counted.is_empty() {
+                    weighted.insert("drains".into(), json!(counted));
+                }
+                Ok(json!({ "weighted": weighted }))
+            }
             "state_notes" => {
                 let mut notes = Map::new();
                 for (state, part) in self.states().into_iter().zip(&self.parts) {
@@ -225,6 +304,19 @@ impl Form {
     pub fn matches(&self, value: Option<&Value>) -> bool {
         if self.attribute == "state_notes" {
             return *self == Form::state_notes(&self.states(), value);
+        }
+        if self.attribute == "distribution" {
+            // Round robin set nowhere is round robin all the same.
+            // The Drains counted are a set, whatever order the file lists them in.
+            let sorted = |mut value: Value| {
+                if let Some(Value::Array(names)) = value.pointer_mut("/weighted/drains") {
+                    names.sort_by(|a, b| a.as_str().cmp(&b.as_str()));
+                }
+                value
+            };
+            let given = value.cloned().unwrap_or_else(|| json!("round_robin"));
+            let given = Form::distribution(Some(&given), &[]).value().unwrap_or_default();
+            return self.value().ok().map(sorted) == Some(sorted(given));
         }
         *self == Form::new(&self.attribute, value)
     }

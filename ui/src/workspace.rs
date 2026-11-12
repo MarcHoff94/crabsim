@@ -36,6 +36,22 @@ pub struct ClassEntry {
     pub built_in: bool,
 }
 
+/// One thing Validate found: a problem, which stops the model running, or a warning, which can
+/// run but is probably a mistake.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Issue {
+    pub warning: bool,
+    /// Where it is in the file, such as `/instances/3/attributes/process_time`.
+    pub pointer: String,
+    /// The instance or class it's about.
+    pub name: Option<String>,
+    pub message: String,
+    /// The instance it's about, by id in the open model, when it's about one.
+    pub instance: Option<u32>,
+    /// The class it's about, when it's about one.
+    pub class: Option<String>,
+}
+
 /// Which of a connection's two places.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum End {
@@ -549,6 +565,65 @@ impl Workspace {
             below(&self.model, built_in, 1, &mut entries);
         }
         entries
+    }
+
+    /// Checks the open model file through `validate_model`: every problem, then every warning,
+    /// each with the instance or class it points into.
+    pub fn validate(&self) -> Result<Vec<Issue>, String> {
+        let path = self.opened.as_deref().ok_or("no model file is open")?;
+        let catalogue = self.catalogue.as_ref().ok_or("no models folder is open")?;
+        let validated = catalogue.call("validate_model", json!({ "path": path })).map_err(|error| error.to_string())?;
+        let issues = |key: &str, warning: bool| -> Vec<Issue> {
+            validated[key]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|found| {
+                    let pointer = found["pointer"].as_str().unwrap_or_default().to_string();
+                    let mut parts = pointer.split('/').skip(1);
+                    let (list, index) = (parts.next(), parts.next().and_then(|index| index.parse::<usize>().ok()));
+                    let instance = match (list, index) {
+                        (Some("instances"), Some(index)) if index < self.model.instances.len() => Some(index as u32),
+                        _ => None,
+                    };
+                    let class = match (list, index) {
+                        (Some("classes"), Some(index)) => self.model.classes.get(index).map(|class| class.name.clone()),
+                        _ => None,
+                    };
+                    Issue {
+                        warning,
+                        pointer,
+                        name: found["name"].as_str().map(str::to_owned),
+                        message: found["message"].as_str().unwrap_or_default().replace(" \u{2192} ", " to "),
+                        instance,
+                        class,
+                    }
+                })
+                .collect()
+        };
+        let mut found = issues("problems", false);
+        found.extend(issues("warnings", true));
+        Ok(found)
+    }
+
+    /// The open model as its file gives it.
+    pub fn model(&self) -> &Model {
+        &self.model
+    }
+
+    /// Asks `query_model` a question about the open model file, such as `{"kind": "paths", ...}`.
+    pub fn query(&self, query: Value) -> Result<Value, String> {
+        let path = self.opened.as_deref().ok_or("no model file is open")?;
+        let catalogue = self.catalogue.as_ref().ok_or("no models folder is open")?;
+        catalogue.call("query_model", json!({ "path": path, "query": query })).map_err(|error| error.to_string().replace(" → ", " to "))
+    }
+
+    /// The names of the open model's Drains, in file order.
+    pub fn drains(&self) -> Vec<String> {
+        (0..self.model.instances.len())
+            .filter(|&index| self.model.resolve(index).is_some_and(|resolved| resolved.built_in == "Drain"))
+            .map(|index| self.model.instances[index].name.clone())
+            .collect()
     }
 
     /// The built-in class at the root of `class`'s chain, if it has a sound one.

@@ -720,6 +720,9 @@ pub enum Weight {
     /// For the model a run ran (`run`): the object's mean over the run's observations of a figure
     /// the results store keeps, such as `working_share` or `mean_lead_time_s`.
     Figure(String),
+    /// Values given by name, such as `{"Mill": 0.8}`, for weights from elsewhere, such as a live
+    /// run. An object left out weighs 0. None may be negative.
+    Values(std::collections::BTreeMap<String, f64>),
 }
 
 /// Which routes come first by their total weight.
@@ -907,7 +910,7 @@ pub struct ClassNode {
 
 impl Operation for QueryModel {
     const NAME: &'static str = "query_model";
-    const DESCRIPTION: &'static str = "Answers a question about a model's structure, from a file in the models folder (`path`) or the one a run ran (`run`), without reading the whole model. `query` names its kind in `kind`: neighbours {name} gives predecessors and successors; upstream or downstream {name, steps?} every instance that can reach it or that it reaches, with distances; paths {from, to, weight?, order?} the shortest route, up to 20 others shortest first, and how many routes there are, counted up to 10,000, none passing an object twice, and with weight {\"attribute\": \"process_time\"} (also interval, starting_mus or capacity, resolved through inheritance, times in seconds) or, for a run's model, {\"figure\": \"working_share\"} (any statistic the results store keeps, the mean over the run's observations) up to 21 routes by the sum of their objects' weights, smallest first or with order \"largest\" largest first, as for a critical path, each with its total, naming the objects on them that have no value and so weigh 0; subgraph_around {name, steps?} the instances within steps (2 by default) following connections either way, and the connections between them, each with its exit, entrance and description; find_instances {name_contains?, class?, description_contains?, conditions?, set_on_instance?} the instances meeting every criterion, such as conditions [{\"attribute\": \"process_time\", \"op\": \">\", \"value\": \"0:30\"}] with op =, <, >, <= or >=, where class includes derived classes; class_tree {class?, instances?} the classes from the built-ins down with what each sets and how many instances follow it; distribution {name} how a Source or Station picks the successor for its MU, round_robin or weighted (ADR 0016), with its successors in the order it ranks them, each with its place and total, those sharing a place taking MUs in turn. Lists are capped (1,000 instances, 500 in a neighbourhood) and say so. A model with problems is refused with them: describe_model sums it up anyway. Pass the names it gives to run_results or compare_runs as `objects`.";
+    const DESCRIPTION: &'static str = "Answers a question about a model's structure, from a file in the models folder (`path`) or the one a run ran (`run`), without reading the whole model. `query` names its kind in `kind`: neighbours {name} gives predecessors and successors; upstream or downstream {name, steps?} every instance that can reach it or that it reaches, with distances; paths {from, to, weight?, order?} the shortest route, up to 20 others shortest first, and how many routes there are, counted up to 10,000, none passing an object twice, and with weight {\"attribute\": \"process_time\"} (also interval, starting_mus or capacity, resolved through inheritance, times in seconds) or, for a run's model, {\"figure\": \"working_share\"} (any statistic the results store keeps, the mean over the run's observations) or {\"values\": {\"Mill\": 0.8}} (given by name) up to 21 routes by the sum of their objects' weights, smallest first or with order \"largest\" largest first, as for a critical path, each with its total, naming the objects on them that have no value and so weigh 0; subgraph_around {name, steps?} the instances within steps (2 by default) following connections either way, and the connections between them, each with its exit, entrance and description; find_instances {name_contains?, class?, description_contains?, conditions?, set_on_instance?} the instances meeting every criterion, such as conditions [{\"attribute\": \"process_time\", \"op\": \">\", \"value\": \"0:30\"}] with op =, <, >, <= or >=, where class includes derived classes; class_tree {class?, instances?} the classes from the built-ins down with what each sets and how many instances follow it; distribution {name} how a Source or Station picks the successor for its MU, round_robin or weighted (ADR 0016), with its successors in the order it ranks them, each with its place and total, those sharing a place taking MUs in turn. Lists are capped (1,000 instances, 500 in a neighbourhood) and say so. A model with problems is refused with them: describe_model sums it up anyway. Pass the names it gives to run_results or compare_runs as `objects`.";
     const EFFECT: Effect = Effect::ReadOnly;
     type Input = QueryModelInput;
     type Output = QueryModelOutput;
@@ -1160,6 +1163,13 @@ fn weights(catalogue: &Catalogue, graph: &Graph, weight: Weight, run: Option<&st
             }
             let weights = (0..graph.len()).map(|index| means.get(graph.name(index)).copied()).collect();
             Ok((format!("{name}, the mean over the run's observations"), weights))
+        }
+        Weight::Values(values) => {
+            if let Some((name, value)) = values.iter().find(|(_, value)| !value.is_finite() || **value < 0.0) {
+                return Err(OperationError::invalid_input(format!("`{name}` weighs {value}: weights are 0 or more")));
+            }
+            let weights = (0..graph.len()).map(|index| values.get(graph.name(index)).copied()).collect();
+            Ok(("the values given".to_string(), weights))
         }
     }
 }

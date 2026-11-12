@@ -6,5 +6,6 @@ pub mod camera;
 pub mod editing;
 pub mod help;
 pub mod marks;
+pub mod paths;
 pub mod view;
 pub mod workspace;

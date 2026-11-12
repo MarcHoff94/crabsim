@@ -471,6 +471,11 @@ fn graph_answers_each_kind_of_question() {
     let paths = graph(&["paths", "Source", "Drain"]);
     assert!(paths.contains("Shortest: Source -> Station 1 -> Station 2 -> Station 5 -> Station 5a -> Drain"), "{paths}");
     assert!(paths.contains("6 paths"), "{paths}");
+    let critical = graph(&["paths", "Source", "Drain", "--weight", "process_time", "--largest"]);
+    assert!(critical.contains("By process_time, in seconds, largest total first:"), "{critical}");
+    let first = critical.lines().nth(1).unwrap();
+    assert!(first.contains("118") && first.contains("Station 4c -> Station 7 -> Drain"), "the critical path first: {critical}");
+    assert!(critical.contains("Weighing 0, without the value: Source, Drain"), "{critical}");
 
     let around = graph(&["subgraph-around", "Station 2", "--steps", "1"]);
     assert!(around.contains("Station 1 -> Station 2") && around.contains("Station 2 -> Station 5"), "{around}");

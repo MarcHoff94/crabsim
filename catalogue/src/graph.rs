@@ -654,8 +654,18 @@ pub enum Query {
         /// At most this many connections away. Unlimited if left out.
         steps: Option<usize>,
     },
-    /// The routes from one instance to another that pass no object twice.
-    Paths { from: String, to: String },
+    /// The routes from one instance to another that pass no object twice, and with `weight`, the
+    /// routes by their total weight.
+    Paths {
+        from: String,
+        to: String,
+        /// What each object on a route weighs, such as `{"attribute": "process_time"}`, for routes
+        /// ordered by their total. Left out, routes are only ordered by how many connections they
+        /// take.
+        weight: Option<Weight>,
+        /// With `weight`: `smallest` total first, the default, or `largest`, as for a critical path.
+        order: Option<Order>,
+    },
     /// The instances within `steps` connections of this one, following connections either way,
     /// and the connections between them.
     SubgraphAround {
@@ -695,6 +705,27 @@ pub struct Condition {
     pub op: Op,
     /// Written as in a model file, such as "0:30" for a time or 4 for a number.
     pub value: Value,
+}
+
+/// What an object on a route weighs.
+#[derive(Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum Weight {
+    /// A number or time the object has, resolved through inheritance, times in seconds:
+    /// `process_time`, `interval`, `starting_mus` or `capacity`.
+    Attribute(String),
+    /// For the model a run ran (`run`): the object's mean over the run's observations of a figure
+    /// the results store keeps, such as `working_share` or `mean_lead_time_s`.
+    Figure(String),
+}
+
+/// Which routes come first by their total weight.
+#[derive(Deserialize, Serialize, JsonSchema, Clone, Copy, PartialEq, Eq, Default, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum Order {
+    #[default]
+    Smallest,
+    Largest,
 }
 
 #[derive(Deserialize, JsonSchema, Clone, Copy, PartialEq)]
@@ -749,6 +780,9 @@ pub enum QueryModelOutput {
         count: u64,
         /// There are more routes than `count`.
         more: bool,
+        /// With `weight`: the routes by their total weight.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        weighted: Option<Weighted>,
     },
     SubgraphAround {
         name: String,
@@ -788,6 +822,30 @@ pub struct Reachable {
     pub truncated: bool,
 }
 
+/// Routes by their total weight.
+#[derive(Serialize, JsonSchema)]
+pub struct Weighted {
+    /// What each object weighed, such as "process_time, in seconds".
+    pub by: String,
+    pub order: Order,
+    /// Up to 21 routes, the best total first, each passing no object twice.
+    pub routes: Vec<WeightedRoute>,
+    /// The objects on these routes without the value, which weigh 0, such as a Drain for
+    /// `process_time` or an object with no figure in the run.
+    pub weightless: Vec<String>,
+    /// False when loops on the way stopped crabsim trying every route for the largest totals,
+    /// so a heavier route may exist. The smallest totals are always exact.
+    pub exact: bool,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub struct WeightedRoute {
+    /// Both ends included.
+    pub instances: Vec<String>,
+    /// The sum of its objects' weights, both ends included, to 4 significant digits.
+    pub total: f64,
+}
+
 #[derive(Serialize, JsonSchema)]
 pub struct Found {
     pub name: String,
@@ -820,12 +878,13 @@ pub struct ClassNode {
 
 impl Operation for QueryModel {
     const NAME: &'static str = "query_model";
-    const DESCRIPTION: &'static str = "Answers a question about a model's structure, from a file in the models folder (`path`) or the one a run ran (`run`), without reading the whole model. `query` names its kind in `kind`: neighbours {name} gives predecessors and successors; upstream or downstream {name, steps?} every instance that can reach it or that it reaches, with distances; paths {from, to} the shortest route, up to 20 others shortest first, and how many routes there are, counted up to 10,000, none passing an object twice; subgraph_around {name, steps?} the instances within steps (2 by default) following connections either way, and the connections between them, each with its exit, entrance and description; find_instances {name_contains?, class?, description_contains?, conditions?, set_on_instance?} the instances meeting every criterion, such as conditions [{\"attribute\": \"process_time\", \"op\": \">\", \"value\": \"0:30\"}] with op =, <, >, <= or >=, where class includes derived classes; class_tree {class?, instances?} the classes from the built-ins down with what each sets and how many instances follow it. Lists are capped (1,000 instances, 500 in a neighbourhood) and say so. A model with problems is refused with them: describe_model sums it up anyway. Pass the names it gives to run_results or compare_runs as `objects`.";
+    const DESCRIPTION: &'static str = "Answers a question about a model's structure, from a file in the models folder (`path`) or the one a run ran (`run`), without reading the whole model. `query` names its kind in `kind`: neighbours {name} gives predecessors and successors; upstream or downstream {name, steps?} every instance that can reach it or that it reaches, with distances; paths {from, to, weight?, order?} the shortest route, up to 20 others shortest first, and how many routes there are, counted up to 10,000, none passing an object twice, and with weight {\"attribute\": \"process_time\"} (also interval, starting_mus or capacity, resolved through inheritance, times in seconds) or, for a run's model, {\"figure\": \"working_share\"} (any statistic the results store keeps, the mean over the run's observations) up to 21 routes by the sum of their objects' weights, smallest first or with order \"largest\" largest first, as for a critical path, each with its total, naming the objects on them that have no value and so weigh 0; subgraph_around {name, steps?} the instances within steps (2 by default) following connections either way, and the connections between them, each with its exit, entrance and description; find_instances {name_contains?, class?, description_contains?, conditions?, set_on_instance?} the instances meeting every criterion, such as conditions [{\"attribute\": \"process_time\", \"op\": \">\", \"value\": \"0:30\"}] with op =, <, >, <= or >=, where class includes derived classes; class_tree {class?, instances?} the classes from the built-ins down with what each sets and how many instances follow it. Lists are capped (1,000 instances, 500 in a neighbourhood) and say so. A model with problems is refused with them: describe_model sums it up anyway. Pass the names it gives to run_results or compare_runs as `objects`.";
     const EFFECT: Effect = Effect::ReadOnly;
     type Input = QueryModelInput;
     type Output = QueryModelOutput;
 
     fn run(catalogue: &Catalogue, input: QueryModelInput) -> Result<QueryModelOutput, OperationError> {
+        let run = input.run.clone();
         let (what, text) = model_text(catalogue, input.path, input.run)?;
         let model = crabsim_model::load(&text).map_err(|problems| {
             let mut error = OperationError::invalid_model(&what, &problems);
@@ -850,12 +909,20 @@ impl Operation for QueryModel {
                 let at = graph.find(&name, &what)?;
                 Ok(QueryModelOutput::Downstream(reachable(&graph, at, name, steps, graph.downstream_of(&[at], steps))))
             }
-            Query::Paths { from, to } => {
+            Query::Paths { from, to, weight, order } => {
                 let start = graph.find(&from, &what)?;
                 let end = graph.find(&to, &what)?;
                 if start == end {
                     return Err(OperationError::invalid_input("`from` and `to` are the same instance: give two different ones"));
                 }
+                let weighted = match weight {
+                    Some(weight) => {
+                        let (by, weights) = weights(catalogue, &graph, weight, run.as_deref())?;
+                        Some(weighted_paths(&graph, start, end, &weights, by, order.unwrap_or_default()))
+                    }
+                    None if order.is_some() => return Err(OperationError::invalid_input("`order` orders routes by their total weight: give a `weight` too")),
+                    None => None,
+                };
                 let (shortest, others) = shortest_paths(&graph, start, end);
                 let (count, more) = count_paths(&graph, start, end);
                 Ok(QueryModelOutput::Paths {
@@ -865,6 +932,7 @@ impl Operation for QueryModel {
                     others: others.into_iter().map(|path| graph.names(path)).collect(),
                     count,
                     more,
+                    weighted,
                 })
             }
             Query::SubgraphAround { name, steps } => {
@@ -943,12 +1011,28 @@ fn shortest_avoiding(successors: &[Vec<usize>], from: usize, to: usize, blocked:
 /// algorithm, with ties in file order.
 fn shortest_paths(graph: &Graph, from: usize, to: usize) -> (Option<Vec<usize>>, Vec<Vec<usize>>) {
     let successors = graph.sorted_successors();
-    let none_blocked = vec![false; graph.len()];
-    let Some(first) = shortest_avoiding(&successors, from, to, &none_blocked, &HashSet::new()) else {
-        return (None, Vec::new());
+    let found = best_routes(graph.len(), from, to, |from, to, blocked, cut| shortest_avoiding(&successors, from, to, blocked, cut), |path| path.len());
+    let mut found = found.into_iter();
+    let shortest = found.next();
+    (shortest, found.collect())
+}
+
+/// The best route and up to 20 others, best first by `key`, none passing an object twice: Yen's
+/// algorithm, with `best` giving the best route avoiding `blocked` instances and `cut`
+/// connections, and ties in file order.
+fn best_routes<K: Ord>(
+    count: usize,
+    from: usize,
+    to: usize,
+    mut best: impl FnMut(usize, usize, &[bool], &HashSet<(usize, usize)>) -> Option<Vec<usize>>,
+    key: impl Fn(&[usize]) -> K,
+) -> Vec<Vec<usize>> {
+    let none_blocked = vec![false; count];
+    let Some(first) = best(from, to, &none_blocked, &HashSet::new()) else {
+        return Vec::new();
     };
     let mut found = vec![first];
-    let mut candidates: BTreeSet<(usize, Vec<usize>)> = BTreeSet::new();
+    let mut candidates: BTreeSet<(K, Vec<usize>)> = BTreeSet::new();
     while found.len() <= OTHER_PATHS {
         let last = found.last().expect("not empty").clone();
         for spur in 0..last.len() - 1 {
@@ -959,24 +1043,269 @@ fn shortest_paths(graph: &Graph, from: usize, to: usize) -> (Option<Vec<usize>>,
                     cut.insert((path[spur], path[spur + 1]));
                 }
             }
-            let mut blocked = vec![false; graph.len()];
+            let mut blocked = vec![false; count];
             for &i in &root[..spur] {
                 blocked[i] = true;
             }
-            if let Some(tail) = shortest_avoiding(&successors, root[spur], to, &blocked, &cut) {
+            if let Some(tail) = best(root[spur], to, &blocked, &cut) {
                 let mut path = root[..spur].to_vec();
                 path.extend(tail);
                 if !found.contains(&path) {
-                    candidates.insert((path.len(), path));
+                    candidates.insert((key(&path), path));
                 }
             }
         }
         let Some((_, next)) = candidates.pop_first() else { break };
         found.push(next);
     }
-    let mut found = found.into_iter();
-    let shortest = found.next();
-    (shortest, found.collect())
+    found
+}
+
+/// A total weight, ordered so routes can be sorted by it. Weights are never NaN.
+#[derive(Clone, Copy, PartialEq, Debug)]
+struct Total(f64);
+
+impl Eq for Total {}
+
+impl PartialOrd for Total {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Total {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.0.total_cmp(&other.0)
+    }
+}
+
+/// What each instance weighs, `None` where it has no value, and what weighs them.
+fn weights(catalogue: &Catalogue, graph: &Graph, weight: Weight, run: Option<&str>) -> Result<(String, Vec<Option<f64>>), OperationError> {
+    let model = graph.model;
+    match weight {
+        Weight::Attribute(name) => {
+            let numeric = [Attribute::ProcessTime, Attribute::Interval, Attribute::StartingMus, Attribute::Capacity];
+            let attribute = numeric.into_iter().find(|attribute| attribute.name() == name).ok_or_else(|| {
+                OperationError::invalid_input(format!(
+                    "routes can be weighed by process_time, interval, starting_mus or capacity, not `{name}`, or by a run's figure with {{\"figure\": ...}}"
+                ))
+            })?;
+            let weights = (0..graph.len())
+                .map(|index| {
+                    let resolved = model.resolve(index)?;
+                    if !attribute.applies_to(resolved.built_in) {
+                        return None;
+                    }
+                    let has = &resolved.attributes;
+                    match attribute {
+                        Attribute::ProcessTime => has.process_time.map(|time| time.as_millis() as f64 / 1000.0),
+                        Attribute::Interval => has.interval.map(|time| time.as_millis() as f64 / 1000.0),
+                        Attribute::StartingMus => has.starting_mus.map(|number| number as f64),
+                        _ => has.capacity.map(|number| number as f64),
+                    }
+                })
+                .collect();
+            let unit = if matches!(attribute, Attribute::ProcessTime | Attribute::Interval) { ", in seconds" } else { "" };
+            Ok((format!("{name}{unit}"), weights))
+        }
+        Weight::Figure(name) => {
+            let run = run.ok_or_else(|| OperationError::invalid_input("a figure is a run's: give `run` rather than `path` to weigh routes by one"))?;
+            if !crate::results::STATISTICS.contains(&name.as_str()) {
+                return Err(OperationError::invalid_input(format!(
+                    "the results store keeps no figure `{name}`: there are {}",
+                    crate::results::STATISTICS.join(", ")
+                )));
+            }
+            let store = catalogue.store()?;
+            let connection = store.connection();
+            let mut statement = connection.prepare("SELECT object, avg(value) FROM statistics WHERE run = ?1 AND statistic = ?2 GROUP BY object")?;
+            let rows = statement.query_map([run, name.as_str()], |row| Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?)))?;
+            let mut means: HashMap<String, f64> = HashMap::new();
+            for row in rows {
+                let (object, mean) = row?;
+                means.insert(object, mean);
+            }
+            let weights = (0..graph.len()).map(|index| means.get(graph.name(index)).copied()).collect();
+            Ok((format!("{name}, the mean over the run's observations"), weights))
+        }
+    }
+}
+
+/// Up to 21 routes from `from` to `to` by the sum of their instances' weights, those without
+/// one weighing 0, best first as `order` says.
+fn weighted_paths(graph: &Graph, from: usize, to: usize, weights: &[Option<f64>], by: String, order: Order) -> Weighted {
+    let weight: Vec<f64> = weights.iter().map(|weight| weight.unwrap_or(0.0).max(0.0)).collect();
+    let total = |path: &[usize]| path.iter().map(|&i| weight[i]).sum::<f64>();
+    let successors = graph.sorted_successors();
+    let (routes, exact) = match order {
+        Order::Smallest => {
+            let routes = best_routes(
+                graph.len(),
+                from,
+                to,
+                |from, to, blocked, cut| lightest_avoiding(&successors, &weight, from, to, blocked, cut),
+                |path| (Total(total(path)), path.len()),
+            );
+            (routes, true)
+        }
+        Order::Largest => {
+            let after = graph.downstream_of(&[from], None);
+            let before = graph.upstream_of(&[to], None);
+            let between: Vec<bool> = (0..graph.len()).map(|i| after[i].is_some() && before[i].is_some()).collect();
+            match topological(graph, &between) {
+                Some(order) => {
+                    let routes = best_routes(
+                        graph.len(),
+                        from,
+                        to,
+                        |from, to, blocked, cut| heaviest_avoiding(&successors, &order, &weight, from, to, blocked, cut),
+                        |path| (std::cmp::Reverse(Total(total(path))), path.len()),
+                    );
+                    (routes, true)
+                }
+                None => heaviest_through_loops(&successors, &between, &weight, from, to),
+            }
+        }
+    };
+    let mut weightless = Vec::new();
+    for &i in routes.iter().flatten() {
+        if weights[i].is_none() && !weightless.contains(&i) {
+            weightless.push(i);
+        }
+    }
+    weightless.sort_unstable();
+    Weighted {
+        by,
+        order,
+        routes: routes.iter().map(|path| WeightedRoute { instances: graph.names(path.iter().copied()), total: crate::results::shown(total(path)) }).collect(),
+        weightless: graph.names(weightless),
+        exact,
+    }
+}
+
+/// The lightest route through instances not `blocked`, avoiding the connections in `cut`:
+/// Dijkstra's algorithm on the instances' weights, of equal totals the one with fewest
+/// connections.
+fn lightest_avoiding(successors: &[Vec<usize>], weight: &[f64], from: usize, to: usize, blocked: &[bool], cut: &HashSet<(usize, usize)>) -> Option<Vec<usize>> {
+    use std::cmp::Reverse;
+    use std::collections::BinaryHeap;
+    let mut best: Vec<Option<(Total, usize)>> = vec![None; successors.len()];
+    let mut parent = vec![usize::MAX; successors.len()];
+    best[from] = Some((Total(weight[from]), 0));
+    let mut heap = BinaryHeap::from([Reverse((Total(weight[from]), 0usize, from))]);
+    while let Some(Reverse((sum, hops, at))) = heap.pop() {
+        if best[at] != Some((sum, hops)) {
+            continue;
+        }
+        if at == to {
+            return Some(route_back(&parent, from, to));
+        }
+        for &next in &successors[at] {
+            if blocked[next] || cut.contains(&(at, next)) || next == from {
+                continue;
+            }
+            let reached = (Total(sum.0 + weight[next]), hops + 1);
+            if best[next].is_none_or(|known| reached < known) {
+                best[next] = Some(reached);
+                parent[next] = at;
+                heap.push(Reverse((reached.0, reached.1, next)));
+            }
+        }
+    }
+    None
+}
+
+/// The heaviest route through instances not `blocked`, avoiding the connections in `cut`, where
+/// no loop lies between `from` and `to`: instances in `order`, a topological order of those
+/// between, each taking its heaviest way in. Of equal totals, the one with fewest connections.
+fn heaviest_avoiding(
+    successors: &[Vec<usize>],
+    order: &[usize],
+    weight: &[f64],
+    from: usize,
+    to: usize,
+    blocked: &[bool],
+    cut: &HashSet<(usize, usize)>,
+) -> Option<Vec<usize>> {
+    let mut inside = vec![false; successors.len()];
+    for &at in order {
+        inside[at] = true;
+    }
+    let mut best: Vec<Option<(f64, usize)>> = vec![None; successors.len()];
+    let mut parent = vec![usize::MAX; successors.len()];
+    best[from] = Some((weight[from], 0));
+    for &at in order {
+        let Some((sum, hops)) = best[at] else { continue };
+        for &next in &successors[at] {
+            if !inside[next] || blocked[next] || cut.contains(&(at, next)) || next == from {
+                continue;
+            }
+            let reached = (sum + weight[next], hops + 1);
+            let better = best[next].is_none_or(|(known, known_hops)| reached.0 > known || (reached.0 == known && reached.1 < known_hops));
+            if better {
+                best[next] = Some(reached);
+                parent[next] = at;
+            }
+        }
+    }
+    best[to]?;
+    Some(route_back(&parent, from, to))
+}
+
+/// The route to `to` from `from`, following each instance's `parent` back.
+fn route_back(parent: &[usize], from: usize, to: usize) -> Vec<usize> {
+    let mut path = vec![to];
+    while *path.last().expect("not empty") != from {
+        path.push(parent[*path.last().expect("not empty")]);
+    }
+    path.reverse();
+    path
+}
+
+/// The 21 heaviest routes where loops lie between `from` and `to`, none passing an object twice,
+/// found by walking every route, and whether it walked them all before giving up after too many
+/// steps. The heaviest route through loops is hard to find in general, so this is the one answer
+/// that may not be exact.
+fn heaviest_through_loops(successors: &[Vec<usize>], between: &[bool], weight: &[f64], from: usize, to: usize) -> (Vec<Vec<usize>>, bool) {
+    use std::cmp::Reverse;
+    let mut kept: BTreeSet<(Reverse<Total>, usize, Vec<usize>)> = BTreeSet::new();
+    let mut visited = vec![false; successors.len()];
+    let mut path = vec![from];
+    let mut sum = weight[from];
+    let mut work: Vec<usize> = vec![0];
+    visited[from] = true;
+    let mut steps = 0u64;
+    let mut exact = true;
+    while let Some(child) = work.last_mut() {
+        steps += 1;
+        if steps > PATH_COUNT_STEPS {
+            exact = false;
+            break;
+        }
+        let at = *path.last().expect("as deep as the work");
+        if let Some(&next) = successors[at].get(*child) {
+            *child += 1;
+            if next == to {
+                let mut route = path.clone();
+                route.push(to);
+                kept.insert((Reverse(Total(sum + weight[to])), route.len(), route));
+                if kept.len() > OTHER_PATHS + 1 {
+                    kept.pop_last();
+                }
+            } else if between[next] && !visited[next] {
+                visited[next] = true;
+                path.push(next);
+                sum += weight[next];
+                work.push(0);
+            }
+        } else {
+            work.pop();
+            let left = path.pop().expect("as deep as the work");
+            visited[left] = false;
+            sum -= weight[left];
+        }
+    }
+    (kept.into_iter().map(|(_, _, route)| route).collect(), exact)
 }
 
 /// How many routes there are from `from` to `to` that pass no object twice, up to 10,000, and

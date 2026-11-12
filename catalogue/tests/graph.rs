@@ -341,6 +341,122 @@ fn the_other_paths_come_shortest_first() {
     assert_eq!(answer["others"], json!([["In", "Mid", "Out"], ["In", "L1", "L2", "Out"]]));
 }
 
+/// Three routes from In to Out with known totals of process time: In, B, D, Out takes 33 s,
+/// In, A, C, Out 15 s and In, B, C, Out 8 s. In and Out have no process time.
+const PLAN: &str = r#"{"format_version":2,"instances":[
+  {"name":"In","class":"Source","attributes":{"interval":"10"}},
+  {"name":"A","class":"Station","attributes":{"process_time":"10"}},
+  {"name":"B","class":"Station","attributes":{"process_time":"3"}},
+  {"name":"C","class":"Station","attributes":{"process_time":"5"}},
+  {"name":"D","class":"Station","attributes":{"process_time":"30"}},
+  {"name":"Out","class":"Drain"}],"connections":[
+  {"from":"In","to":"A","exit":1,"entrance":1},
+  {"from":"In","to":"B","exit":2,"entrance":1},
+  {"from":"A","to":"C","exit":1,"entrance":1},
+  {"from":"B","to":"C","exit":1,"entrance":2},
+  {"from":"B","to":"D","exit":2,"entrance":1},
+  {"from":"C","to":"Out","exit":1,"entrance":1},
+  {"from":"D","to":"Out","exit":1,"entrance":2}]}"#;
+
+/// The routes and totals of a weighted answer.
+fn weighted(answer: &Value) -> Vec<(Vec<&str>, f64)> {
+    answer["weighted"]["routes"].as_array().unwrap_or_else(|| panic!("no weighted routes: {answer:#}")).iter().map(|route| (strings(&route["instances"]), route["total"].as_f64().unwrap())).collect()
+}
+
+#[test]
+fn weighted_paths_come_by_their_total_the_critical_path_first_when_largest() {
+    let setup = setup("paths-weighted");
+    setup.folder.write("plan.json", PLAN);
+    let largest = query(&setup, "plan.json", json!({ "kind": "paths", "from": "In", "to": "Out", "weight": { "attribute": "process_time" }, "order": "largest" }));
+    common::assert_fits_its_schema(&setup.catalogue, "query_model", &largest);
+    assert_eq!(
+        weighted(&largest),
+        [(vec!["In", "B", "D", "Out"], 33.0), (vec!["In", "A", "C", "Out"], 15.0), (vec!["In", "B", "C", "Out"], 8.0)]
+    );
+    assert_eq!(largest["weighted"]["by"], "process_time, in seconds");
+    assert_eq!(largest["weighted"]["order"], "largest");
+    assert_eq!(strings(&largest["weighted"]["weightless"]), ["In", "Out"], "a Source and a Drain have no process time");
+    assert_eq!(largest["weighted"]["exact"], true);
+    assert_eq!(largest["count"], 3, "the unweighted answer is still there");
+
+    let smallest = query(&setup, "plan.json", json!({ "kind": "paths", "from": "In", "to": "Out", "weight": { "attribute": "process_time" } }));
+    assert_eq!(
+        weighted(&smallest),
+        [(vec!["In", "B", "C", "Out"], 8.0), (vec!["In", "A", "C", "Out"], 15.0), (vec!["In", "B", "D", "Out"], 33.0)],
+        "smallest first by default"
+    );
+
+    // An inherited value weighs as much as one set on the instance.
+    let by_interval = query(&setup, "plan.json", json!({ "kind": "paths", "from": "In", "to": "C", "weight": { "attribute": "interval" } }));
+    assert_eq!(weighted(&by_interval)[0].1, 10.0);
+    assert_eq!(strings(&by_interval["weighted"]["weightless"]), ["A", "B", "C"]);
+
+    for (query, says) in [
+        (json!({ "kind": "paths", "from": "In", "to": "Out", "order": "largest" }), "give a `weight` too"),
+        (json!({ "kind": "paths", "from": "In", "to": "Out", "weight": { "attribute": "description" } }), "not `description`"),
+        (json!({ "kind": "paths", "from": "In", "to": "Out", "weight": { "figure": "working_share" } }), "give `run`"),
+    ] {
+        let refused = setup.err("query_model", json!({ "path": "plan.json", "query": query }));
+        assert_eq!(refused["kind"], "invalid_input");
+        assert!(refused["message"].as_str().unwrap().contains(says), "{refused}");
+    }
+}
+
+#[test]
+fn the_heaviest_routes_through_a_loop_pass_no_object_twice() {
+    let setup = setup("paths-weighted-loop");
+    // Two ways through a diamond whose end leads back to its start, the way through C heavier.
+    let model = common::connected(json!({ "format_version": 1, "instances": [
+        { "name": "In", "class": "Source", "successors": ["A"], "attributes": { "interval": "10" } },
+        { "name": "A", "class": "Station", "successors": ["B", "C"], "attributes": { "process_time": "1" } },
+        { "name": "B", "class": "Station", "successors": ["D"], "attributes": { "process_time": "2" } },
+        { "name": "C", "class": "Station", "successors": ["D"], "attributes": { "process_time": "7" } },
+        { "name": "D", "class": "Station", "successors": ["Out", "A"], "attributes": { "process_time": "1" } },
+        { "name": "Out", "class": "Drain" }
+    ]}));
+    setup.folder.write("diamond-loop.json", &model.to_string());
+    let answer = query(&setup, "diamond-loop.json", json!({ "kind": "paths", "from": "In", "to": "Out", "weight": { "attribute": "process_time" }, "order": "largest" }));
+    assert_eq!(weighted(&answer), [(vec!["In", "A", "C", "D", "Out"], 9.0), (vec!["In", "A", "B", "D", "Out"], 4.0)]);
+    assert_eq!(answer["weighted"]["exact"], true, "two routes are quickly walked");
+
+    // Many diamonds still give 21 routes, the heaviest first, all different.
+    setup.folder.write("diamonds.json", &diamonds(14));
+    let many = query(&setup, "diamonds.json", json!({ "kind": "paths", "from": "In", "to": "Out", "weight": { "attribute": "process_time" }, "order": "largest" }));
+    let routes = weighted(&many);
+    assert_eq!(routes.len(), 21);
+    assert!(routes.iter().all(|(_, total)| *total == 29.0), "every route through 14 diamonds passes 29 Stations of 1 s");
+}
+
+#[test]
+fn paths_are_weighed_by_a_runs_figures_the_mean_over_its_observations() {
+    let setup = setup("paths-figure");
+    setup.folder.write("plan.json", PLAN);
+    let run = setup.start(json!({ "model": "plan.json", "seed": 1, "length": "4:00:00", "observations": 2 }));
+    setup.finished(&run);
+    let mean = |object: &str, statistic: &str| {
+        let stored = setup.stored(&run, object);
+        stored.values().map(|figures| figures[statistic]).sum::<f64>() / stored.len() as f64
+    };
+    let answer = setup.ok("query_model", json!({ "run": run, "query": { "kind": "paths", "from": "In", "to": "Out", "weight": { "figure": "working_share" }, "order": "largest" } }));
+    let routes = weighted(&answer);
+    assert_eq!(routes.len(), 3);
+    for (route, total) in &routes {
+        let expected: f64 = route.iter().map(|object| mean(object, "working_share")).sum();
+        assert!((total - expected).abs() <= expected * 1e-3, "{route:?} totals {total}, its means add up to {expected}");
+    }
+    assert!(routes.windows(2).all(|pair| pair[0].1 >= pair[1].1), "largest first: {routes:?}");
+    assert_eq!(answer["weighted"]["by"], "working_share, the mean over the run's observations");
+
+    // Only a Drain has a lead time, so every other object weighs 0 and is named.
+    let lead = setup.ok("query_model", json!({ "run": run, "query": { "kind": "paths", "from": "In", "to": "Out", "weight": { "figure": "mean_lead_time_s" } } }));
+    assert_eq!(strings(&lead["weighted"]["weightless"]), ["In", "A", "B", "C", "D"]);
+    let out = mean("Out", "mean_lead_time_s");
+    assert!(weighted(&lead).iter().all(|(_, total)| (total - out).abs() <= out * 1e-3), "{lead:#}");
+
+    let unknown = setup.err("query_model", json!({ "run": run, "query": { "kind": "paths", "from": "In", "to": "Out", "weight": { "figure": "speed" } } }));
+    assert!(unknown["message"].as_str().unwrap().contains("working_share"), "the figures there are: {unknown}");
+}
+
 // ---------- query_model: subgraph_around ----------
 
 #[test]
@@ -545,6 +661,8 @@ fn describe_and_query_on_6006_objects() {
         ("upstream", json!({ "kind": "upstream", "name": at(200, &last) })),
         ("downstream", json!({ "kind": "downstream", "name": at(200, &first) })),
         ("paths", json!({ "kind": "paths", "from": at(200, &first), "to": at(200, &last) })),
+        ("paths by process_time, smallest", json!({ "kind": "paths", "from": at(200, &first), "to": at(200, &last), "weight": { "attribute": "process_time" } })),
+        ("paths by process_time, largest", json!({ "kind": "paths", "from": at(200, &first), "to": at(200, &last), "weight": { "attribute": "process_time" }, "order": "largest" })),
         ("subgraph_around", json!({ "kind": "subgraph_around", "name": at(200, &middle), "steps": 3 })),
         ("find_instances", json!({ "kind": "find_instances", "class": "Station", "conditions": [{ "attribute": "process_time", "op": ">", "value": "0:30" }] })),
         ("class_tree", json!({ "kind": "class_tree", "instances": true })),

@@ -23,6 +23,8 @@ pub enum Key {
     ZoomIn,
     /// Ctrl and `-`.
     ZoomOut,
+    /// Ctrl and `r`.
+    Redo,
 }
 
 /// A direction on the canvas: up is north, as the floor is drawn.
@@ -97,6 +99,10 @@ pub enum Command {
     /// `x` in visual mode: takes the object under the cursor out of the selection.
     TakeOut,
     Delete,
+    /// `u`, or `3u`: takes back this many steps of the model file's changes.
+    Undo(u32),
+    /// Ctrl+R: brings back this many steps that were undone.
+    Redo(u32),
     Pan(Direction),
     Zoom { closer: bool },
     Fit,
@@ -274,6 +280,8 @@ impl Keys {
                 vec![Command::Visual(self.visual)]
             }
             Key::Char('d') => vec![Command::Delete],
+            Key::Char('u') => vec![Command::Undo(times)],
+            Key::Redo => vec![Command::Redo(times)],
             Key::Char('0') => vec![Command::Fit],
             Key::Char(' ') => vec![Command::StartOrHalt],
             // Stepping while selecting is rare, so in visual mode x cuts, as in vim.

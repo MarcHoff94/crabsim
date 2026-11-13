@@ -2,9 +2,16 @@
 
 A discrete-event simulator for any material flow, such as a factory line, written in Rust. A model is made of Sources, Stations, Buffers and Drains that create, work on, hold and take out moveable units (MUs). Stations fail at random, can be paused or forced to fail, and keep statistics such as busy, blocked and failed time, lead time and throughput.
 
-crabsim exists to simulate long periods as fast as possible: a year of the demo model takes about 1.2 seconds, at about 13 million events per second, and a run's memory stays flat however long it is. A live session can also play a run at a chosen speed, step forward and back through it, and take interventions while it plays, for a UI to show.
+crabsim exists to simulate long periods as fast as possible: a year of the demo model takes about 1.2 seconds, at about 13 million events per second, and a run's memory stays flat however long it is. A live session can also play a run at a chosen speed, step forward and back through it, and take interventions while it plays, which is what the window shows.
 
-**Status:** the engine and live session work. Models are model files, readable JSON, kept in a models folder. The UI, a Bevy application with egui panels (ADR 0006), lists a models folder's model files and plays the one you choose live in 2D, with the run controls, stepping back and forward, interventions on Stations, an inspector that changes an object's attributes in its file, and moving objects by dragging. Adding and connecting objects in it comes later. The CLI runs model files headless and runs experiments, and an MCP server lets AI agents do the same through the same operations. Buffer's movement is known to be broken, so models don't use it yet. The plan is in `docs/agents/handoff.md`.
+**Status:** the engine, the window, the command line and the server for AI agents all work on the same model files and the same operations.
+
+- **Models** are model files, readable JSON, kept in a models folder. Classes derive from the built-in Source, Station, Buffer and Drain, or from each other, and an instance sets only the values it changes.
+- **The window**, a Bevy application with egui panels (ADR 0006), lists a folder's models and plays the one you choose live in 2D. You build models in it too: place instances from a class, connect them, set values and make classes, with the mouse or from the keyboard.
+- **The command line** runs model files headless, runs experiments of several observations and keeps their results, compares runs and changes models.
+- **The MCP server** gives AI agents the same operations. An agent claims a model before changing it, and you see and manage its claims.
+- **Undo and redo** take back any change to a model file, yours or an agent's, from a change history kept beside the models.
+- **Not yet:** Buffer's movement is known to be broken, so models don't use it, and only Stations fail. The plan is in `docs/agents/handoff.md`.
 
 ## Requirements
 
@@ -20,7 +27,7 @@ Run the tests:
 cargo test
 ```
 
-Open the UI, then click `demo.json` in the list on the left and press Start. The first build takes several minutes. It works on a models folder, `crabsim-models` in your Documents, made the first time with the demo model in it:
+Open the window, then click `demo.json` in the list on the left and press Start. The first build takes several minutes. It works on a models folder, `crabsim-models` in your Documents, made the first time with the demo model in it:
 
 ```powershell
 cargo run -p crabsim-ui --profile ui
@@ -38,7 +45,7 @@ Run the demo model headless for a simulated day, then print each object's statis
 cargo run --release --bin crabsim -- --model models/demo.json
 ```
 
-The same with a seed and a simulated length, written as the UI shows time, such as `1:30`, `8:00:00` or `30d 12:00:00`:
+The same with a seed and a simulated length, written as the window shows time, such as `1:30`, `8:00:00` or `30d 12:00:00`:
 
 ```powershell
 cargo run --release --bin crabsim -- --model models/demo.json --seed 7 --length 365d
@@ -56,67 +63,65 @@ The engine logs every event at `info` level. To see that while running the demo 
 $env:RUST_LOG = 'info'
 ```
 
-## Trying the UI prototype
+## Working in the window
 
-The prototype is throwaway code on the branch `prototype/ui-bevy`, never to be merged. It drew 6,006 objects at hundreds of frames per second and drove a real live session, to settle the UI's technology. Its results are in `docs/design/ui-prototype.md`.
+Hover over any control to see what it does, and press `?` for the list of keys.
 
-It needs a clean working tree, because it switches branches. Commit or stash your changes first.
+- **Run:** Init, Start, Halt and Reset, a speed, stepping back and forward, and going to a time. With Animate off a run goes as fast as it can.
+- **Look:** click an object for the inspector, which shows its state, statistics and every attribute with where its value comes from. The Results tab gives each Drain's throughput, every Station's shares of time and the likely bottleneck. The Paths tab draws routes, weights and distribution strategies on the canvas.
+- **Experiment during a run:** pause a Station, force it to fail or change its process time. Each intervention leaves a mark, and going back past one asks first.
+- **Build**, with no run in progress: drag a class onto the canvas, drag from an object's handle to connect it, drag objects to move them, and change values in the inspector. Right-click a class to derive, duplicate, rename or remove it.
+- **From the keyboard:** `h` `j` `k` `l` move between objects, Space starts and halts, and `:` opens a command line, such as `:add Mill; connect Split > Mill 3`. `qa` records the lines you give into a macro and `@a` runs it.
+- **Undo:** `u` takes back the latest change to the model and Ctrl+R redoes it, with a count such as `3u`. It asks first before taking back an agent's change. The Agents tab lists every change with who made it, and a click on one goes back to it.
+- **Agents:** the Agents tab shows which agent holds which model, its goal and what it's doing, and lets you take the model, revoke the claim or block the agent.
 
-1. Switch to the prototype's branch and go into its folder:
+Undo is for the model file. In a run, going back in time is what takes an intervention away.
 
-   ```powershell
-   git switch prototype/ui-bevy
-   ```
+## The command line on a models folder
 
-   ```powershell
-   cd ui-prototype
-   ```
+With `--models`, `crabsim` works on a models folder as you do in the window. These examples use the repo's `models` folder.
 
-2. Start it. This one runs a real session of 429 copies of the demo line, zoomed in on one copy, at 60 times real time, so you can watch MUs move:
+Run an experiment of 5 observations of 30 simulated days and keep its results:
 
-   ```powershell
-   cargo run --release -- --mode session --render meshes --speed 60 --close
-   ```
+```powershell
+cargo run --release --bin crabsim -- run --models models --model demo.json --length 30d --observations 5
+```
 
-   The first build takes about 5 minutes, unless a build is already on disk.
+List the runs, then print one's results:
 
-3. When you're done, close the window and go back:
+```powershell
+cargo run --release --bin crabsim -- runs --models models
+```
 
-   ```powershell
-   cd ..
-   ```
+```powershell
+cargo run --release --bin crabsim -- results --models models run-1
+```
 
-   ```powershell
-   git switch master
-   ```
+The other subcommands, each with `--help`:
 
-**In the window:**
-- Drag with the right or middle mouse button to pan, and use the wheel to zoom.
-- Click an object to select it and see it in the inspector, or drag it to move it.
-- Drag a button from the palette on the left into the model to add an object.
-- Use Start and Halt in the top bar.
-
-The top bar shows frames per second, shown time and the speed achieved.
-
-**Other ways to run it**, each after `cargo run --release --`:
-
-| Options | What it shows |
+| Subcommand | Does |
 |---|---|
-| `--mode session --render meshes --speed 3600` | The whole model at 1 simulated hour per second, with states as colours |
-| `--mode scale --render sprites` | A stress test with no simulation: 6,006 objects changing colour and 5,000 gliding markers |
-| `--mode scale --render meshes --close` | The same stress test zoomed in, with labels |
-| `--mode windowless --speed 3600 --seconds 10` | The session alone, with no window, printing the speed it reached |
+| `compare` | Compares two runs, each figure's difference with a 95% interval |
+| `query` | Runs one read-only SQL query on the results store |
+| `validate` | Lists a model's problems and warnings |
+| `describe`, `graph`, `export` | Sums up a model, answers questions about its structure, and writes it for graph tools |
+| `attributes` | Shows an object's values and where each comes from |
+| `edit` | Applies a batch of changes from a file or stdin |
+| `history`, `undo`, `redo` | Lists a model's changes and steps through them |
+| `adopt` | Accepts a file changed outside crabsim, such as by a text editor |
+| `editors` | Shows which agents hold which models, and revokes or blocks them |
 
-More options:
-- **`--render sprites` or `--render meshes`:** sprites, or flat meshes under a 3D camera.
-- **`--lines N`:** copies of the demo line.
-- **`--markers N`:** the most MUs drawn at once.
-- **`--seconds N`:** quit after that long and print frame times.
-- **`--halt-after N`:** halt after that long.
-- **`--screenshot path.png`:** save a screenshot, with `--seconds`.
-- **`--vsync`:** ask for vsync.
+While a window has a models folder open, the command line can read and run there but changes nothing.
 
-In this version MUs jump straight to their next object, because a move takes no simulation time. The gliding markers in the stress test stand in for a future conveyor.
+## AI agents
+
+`crabsim-mcp` is an MCP server over stdio that offers every operation as a tool: building and changing models, running experiments, reading and comparing results, and undoing its own changes. Build it once:
+
+```powershell
+cargo build --release -p crabsim-mcp
+```
+
+Then point your harness, such as Claude Code or VS Code with GitHub Copilot, at `target\release\crabsim-mcp.exe` with the arguments `--models <folder>`. The server refuses a folder that holds source code, so give it a folder of models only. What the operations are and what they may touch is in `docs/design/operation-catalogue.md`.
 
 ## Using it as a library
 
@@ -156,8 +161,9 @@ The same seed always gives the same result. For a run to watch, `LiveSession` ta
   - **`picture.rs`:** what a UI shows.
   - **`statistics.rs`:** statistics.
   - **`materialflow_objects/`:** Sources, Stations, Buffers and Drains.
-- `model/` reads, checks and saves model files, `models/` holds example models, and `cli/` is the headless command line.
-- `ui/` is the UI, a Bevy application.
+- `model/` reads, checks and saves model files, and `models/` holds the demo model and the format's schema.
+- `catalogue/` is the operation catalogue: every capability as an operation with typed input and output, which the front-ends below all use.
+- `cli/` is the command line, `mcp/` the MCP server for agents, and `ui/` the window, a Bevy application.
 - `tests/` holds the behaviour tests, and `benches/reference.rs` the benchmark.
 - `docs/` holds the decisions (`adr/`), design notes and measurements (`design/`), and the handoff for whoever works on it next (`agents/handoff.md`).
 - `GLOSSARY.md` defines the terms, such as Halt, Stop, Pause and Interruption, which mean different things here.
@@ -167,3 +173,4 @@ The same seed always gives the same result. For a run to watch, `LiveSession` ta
 - **`CLAUDE.md`:** how the code is built and the conventions to keep.
 - **`docs/agents/handoff.md`:** the agreed design, including what isn't built yet, and the order of work.
 - **`docs/design/first-profile.md`:** the current performance baseline.
+- **`docs/design/ui-prototype.md`:** the throwaway prototype that settled the window's technology, on the branch `prototype/ui-bevy`.

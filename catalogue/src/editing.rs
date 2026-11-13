@@ -49,7 +49,7 @@ fn now_ms() -> u64 {
 }
 
 /// A time as UTC ISO 8601, such as `2026-11-08T09:12:03Z`.
-fn iso(ms: u64) -> String {
+pub(crate) fn iso(ms: u64) -> String {
     let secs = ms / 1000;
     let (days, rest) = ((secs / 86_400) as i64, secs % 86_400);
     // Days since 1970-01-01 to a civil date (Howard Hinnant's algorithm).
@@ -555,6 +555,27 @@ impl Editing {
         self.state().records.insert(key, crate::edit::hash(text));
     }
 
+    /// Who is asking, as the change history names an author, and an agent's process lock id.
+    pub(crate) fn author(&self) -> (String, Option<String>) {
+        match &self.asker {
+            Asker::User(_) => ("the user".to_string(), None),
+            Asker::Agent(process) => {
+                let name = self.agent(process).map_or_else(|| "an agent".to_string(), |agent| format!("{} ({})", agent.id, agent.client));
+                (name, Some(process.clone()))
+            }
+        }
+    }
+
+    /// When this call began, in milliseconds since 1970.
+    pub(crate) fn now(&self) -> u64 {
+        self.now
+    }
+
+    /// The hash of the file at `key` as crabsim last saved or adopted it.
+    pub(crate) fn recorded_hash(&self, key: &str) -> Option<String> {
+        self.held.state.records.get(key).cloned()
+    }
+
     /// Forgets the file the change was about, which was deleted.
     pub(crate) fn forget(&mut self) {
         let key = self.key.clone().expect("a change names its file");
@@ -657,7 +678,16 @@ impl Operation for AdoptModel {
     fn run(catalogue: &Catalogue, input: PathInput) -> Result<AdoptModelOutput, OperationError> {
         let mut editing = before_adopt(catalogue, &input.path)?;
         let (_, text) = crate::model_files::read_file(catalogue, &input.path)?;
+        // What crabsim last saved, which the history ends at, is what an undo goes back to.
+        let saved = editing.recorded_hash(&key(catalogue, &input.path)?);
         editing.record(&text);
+        match &saved {
+            Some(saved) => {
+                let change = crate::history::Change { before: crate::history::Before::Head(saved), after: &text, kind: crate::history::Kind::Adopted, wording: "changed outside crabsim".to_string() };
+                crate::history::keep(catalogue, &editing, &input.path, change);
+            }
+            None => crate::history::forget(catalogue, &input.path),
+        }
         let problems = crabsim_model::load(&text).err().unwrap_or_default().iter().map(crate::ModelProblem::from).collect();
         Ok(AdoptModelOutput { path: input.path, file_hash: crate::edit::hash(&text), model_hash: crate::edit::model_hash(&text), problems })
     }

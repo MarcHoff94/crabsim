@@ -154,6 +154,47 @@ enum Command {
         /// The model file, such as `line.json`.
         path: String,
     },
+    /// Lists a model file's change history, newest first: who changed what, and when.
+    History {
+        #[arg(long)]
+        models: PathBuf,
+        /// The model file, such as `line.json`.
+        path: String,
+        /// The most changes to list, 50 if left out.
+        #[arg(long)]
+        limit: Option<usize>,
+    },
+    /// Undoes the latest change to a model file, which is then exactly as it was before it.
+    Undo {
+        #[arg(long)]
+        models: PathBuf,
+        /// The model file, such as `line.json`.
+        path: String,
+        /// How many steps. A step is one change, or everything one command made.
+        #[arg(long, default_value_t = 1)]
+        steps: usize,
+        /// Undo also an agent's change or a change adopted from outside crabsim, which is
+        /// otherwise only listed.
+        #[arg(long)]
+        yes: bool,
+        /// Undo even while an agent holds the file, which keeps its claim and reads the model
+        /// again before its next change.
+        #[arg(long)]
+        take_over: bool,
+    },
+    /// Brings back the change to a model file that was last undone.
+    Redo {
+        #[arg(long)]
+        models: PathBuf,
+        /// The model file, such as `line.json`.
+        path: String,
+        /// How many steps.
+        #[arg(long, default_value_t = 1)]
+        steps: usize,
+        /// Redo even while an agent holds the file.
+        #[arg(long)]
+        take_over: bool,
+    },
     /// Compares two runs, such as a model and a variant: each figure's difference b minus a with
     /// its 95% interval, paired where the runs drew the same random numbers.
     Compare {
@@ -390,12 +431,7 @@ fn main() -> ExitCode {
                 input["expected_hash"] = json!(expected_hash);
             }
             catalogue.set_take_over(take_over);
-            let edited = catalogue.call("edit_model", input).map_err(|mut error| {
-                if error.kind == crabsim_catalogue::ErrorKind::NotEditor {
-                    error.message += ". Or give --take-over to make this one change while the agent keeps its right";
-                }
-                error
-            })?;
+            let edited = catalogue.call("edit_model", input).map_err(take_over_hint)?;
             print!("{}", tables::edited(&edited));
             Ok(true)
         }),
@@ -413,6 +449,34 @@ fn main() -> ExitCode {
         Some(Command::Adopt { models, path }) => catalogue(&models).and_then(|catalogue| {
             let adopted = catalogue.call("adopt_model", json!({ "path": path }))?;
             print!("{}", tables::adopted(&adopted));
+            Ok(true)
+        }),
+        Some(Command::History { models, path, limit }) => catalogue(&models).and_then(|catalogue| {
+            let mut input = json!({ "path": path });
+            if let Some(limit) = limit {
+                input["limit"] = json!(limit);
+            }
+            print!("{}", tables::history(&catalogue.call("get_history", input)?));
+            Ok(true)
+        }),
+        Some(Command::Undo { models, path, steps, yes, take_over }) => catalogue(&models).and_then(|catalogue| {
+            // An agent's change and a change from outside are only undone when asked for by name.
+            if !yes {
+                let history = catalogue.call("get_history", json!({ "path": path, "limit": 200 }))?;
+                let asks = tables::undo_asks(&history, steps);
+                if !asks.is_empty() {
+                    return Err(OperationError::invalid_input(format!("this would undo what you didn't change yourself:\n{asks}Give --yes to undo it")));
+                }
+            }
+            catalogue.set_take_over(take_over);
+            let undone = catalogue.call("undo_model", json!({ "path": path, "steps": steps })).map_err(take_over_hint)?;
+            print!("{}", tables::stepped(&undone, "undone", "Undone"));
+            Ok(true)
+        }),
+        Some(Command::Redo { models, path, steps, take_over }) => catalogue(&models).and_then(|catalogue| {
+            catalogue.set_take_over(take_over);
+            let redone = catalogue.call("redo_model", json!({ "path": path, "steps": steps })).map_err(take_over_hint)?;
+            print!("{}", tables::stepped(&redone, "redone", "Redone"));
             Ok(true)
         }),
         Some(Command::Compare { models, a, b, objects, classes }) => catalogue(&models).and_then(|catalogue| {
@@ -711,4 +775,12 @@ fn kind(kind: ObjectKind) -> &'static str {
         ObjectKind::Buffer => "Buffer",
         ObjectKind::Drain => "Drain",
     }
+}
+
+/// A refusal because an agent holds the file, with how to change it anyway.
+fn take_over_hint(mut error: OperationError) -> OperationError {
+    if error.kind == crabsim_catalogue::ErrorKind::NotEditor {
+        error.message += ". Or give --take-over to make this one change while the agent keeps its right";
+    }
+    error
 }

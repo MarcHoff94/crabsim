@@ -22,6 +22,7 @@ pub(crate) fn entries() -> Vec<Entry> {
     entries.extend(crate::commands::entries());
     entries.extend(crate::macros::entries());
     entries.extend(crate::editing::entries());
+    entries.extend(crate::history::entries());
     entries.extend(crate::jobs::entries());
     entries.extend(crate::bottleneck::entries());
     entries.extend(crate::results::entries());
@@ -291,8 +292,17 @@ impl Operation for WriteModel {
             Ok(model) => (model.save(), Saved::Canonical, Vec::new()),
             Err(problems) => (input.text, Saved::AsGiven, problems.iter().map(ModelProblem::from).collect()),
         };
+        let before = std::fs::read_to_string(&file).ok();
         write(&file, &text).map_err(|error| OperationError::run_error(format!("`{}` can't be written: {error}", input.path)))?;
         editing.record(&text);
+        match &before {
+            Some(before) => {
+                let change = crate::history::Change { before: crate::history::Before::Text(before), after: &text, kind: crate::history::Kind::Written, wording: "written whole".to_string() };
+                crate::history::keep(catalogue, &editing, &input.path, change);
+            }
+            // A new file starts with no history, whatever was at its path before.
+            None => crate::history::forget(catalogue, &input.path),
+        }
         Ok(WriteModelOutput { path: input.path, saved, problems })
     }
 }
@@ -358,6 +368,7 @@ impl Operation for CopyModel {
         if recorded {
             editing.record_at(crate::editing::key_of(catalogue, &input.to)?, &text);
         }
+        crate::history::forget(catalogue, &input.to);
         Ok(CopyModelOutput { path: input.to, changed_outside: !recorded })
     }
 }
@@ -385,6 +396,7 @@ impl Operation for DeleteModel {
         let mut editing = crate::editing::before_change(catalogue, &input.path, None)?;
         std::fs::remove_file(&file).map_err(|error| OperationError::run_error(format!("`{}` can't be deleted: {error}", input.path)))?;
         editing.forget();
+        crate::history::forget(catalogue, &input.path);
         Ok(DeleteModelOutput { deleted: input.path })
     }
 }

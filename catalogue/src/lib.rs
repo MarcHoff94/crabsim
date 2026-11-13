@@ -28,6 +28,7 @@ mod error;
 mod export;
 mod folder;
 mod graph;
+mod history;
 mod jobs;
 mod model_files;
 mod process;
@@ -36,6 +37,7 @@ mod store;
 
 pub use crate::editing::{EDITING_FILE, EDIT_TIMEOUT};
 pub use crate::error::{ErrorKind, ModelProblem, OperationError};
+pub use crate::history::{HISTORY_BYTES, HISTORY_CHANGES, HISTORY_FILE};
 pub use crate::folder::{ModelsFolder, CRABSIM_FOLDER, EXPORTS_FOLDER};
 pub use crate::jobs::{observation_seed, RunState, MAX_OBSERVATIONS};
 pub use crate::results::STATISTICS;
@@ -220,11 +222,15 @@ pub struct Settings {
     pub threads: Option<usize>,
     /// How long an agent's claim lasts unused.
     pub edit_timeout: std::time::Duration,
+    /// The most changes a model file's history keeps.
+    pub history_changes: usize,
+    /// The most bytes of model text a model file's history keeps.
+    pub history_bytes: u64,
 }
 
 impl Settings {
     pub fn new(models: impl Into<PathBuf>, source: Source) -> Settings {
-        Settings { models: models.into(), source, threads: None, edit_timeout: EDIT_TIMEOUT }
+        Settings { models: models.into(), source, threads: None, edit_timeout: EDIT_TIMEOUT, history_changes: HISTORY_CHANGES, history_bytes: HISTORY_BYTES }
     }
 }
 
@@ -241,6 +247,12 @@ pub struct Catalogue {
     client_name: Mutex<String>,
     /// For the user: changes go through even while an agent holds the right, which keeps it.
     take_over: std::sync::atomic::AtomicBool,
+    /// The change history, opened on first use.
+    history: Mutex<Option<history::History>>,
+    /// How many changes and bytes of text a file's history keeps.
+    history_limits: (usize, u64),
+    /// While a group is open, the group its changes join: none yet until the first is kept.
+    group: Mutex<Option<Option<i64>>>,
     /// A UI's hold on the models folder, released when the catalogue is dropped or the process
     /// ends however it does.
     _user_lock: Option<std::fs::File>,
@@ -267,6 +279,9 @@ impl Catalogue {
             edit_timeout: settings.edit_timeout,
             client_name: Mutex::new("an agent".to_string()),
             take_over: std::sync::atomic::AtomicBool::new(false),
+            history: Mutex::new(None),
+            history_limits: (settings.history_changes, settings.history_bytes),
+            group: Mutex::new(None),
             _user_lock: user_lock,
             process: std::sync::OnceLock::new(),
         })

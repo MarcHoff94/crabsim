@@ -209,6 +209,51 @@ pub fn adopted(adopted: &Value) -> String {
     text
 }
 
+/// A model file's change history, newest first.
+pub fn history(history: &Value) -> String {
+    let entries = history["entries"].as_array().map_or(&[][..], Vec::as_slice);
+    if entries.is_empty() {
+        return format!("{} has no change history yet.\n", cell(&history["path"]));
+    }
+    let rows: Vec<Vec<String>> = entries
+        .iter()
+        .map(|entry| vec![cell(&entry["at"]), cell(&entry["author"]), if entry["undone"] == true { "undone".to_string() } else { String::new() }, cell(&entry["what"])])
+        .collect();
+    let mut text = table(&["When", "Who", "", "What"], &rows);
+    if history["more"] == true {
+        text += "There are older changes: give --limit to see more\n";
+    }
+    text
+}
+
+/// What `undo_model` or `redo_model` did, its entries under `field`.
+pub fn stepped(stepped: &Value, field: &str, done: &str) -> String {
+    let mut text = String::new();
+    for entry in stepped[field].as_array().into_iter().flatten() {
+        text += &format!("{done}: {} ({}, {})\n", cell(&entry["what"]), cell(&entry["author"]), cell(&entry["at"]));
+    }
+    text + &format!("{} is now SHA-256 {}\n", cell(&stepped["path"]), cell(&stepped["file_hash"]))
+}
+
+/// The changes `steps` steps of undo would reverse that the user didn't make: an agent's, or a
+/// change from outside crabsim. One line each, empty if there are none.
+pub fn undo_asks(history: &Value, steps: usize) -> String {
+    let mut text = String::new();
+    let mut groups = Vec::new();
+    for entry in history["entries"].as_array().into_iter().flatten().filter(|entry| entry["undone"] != true) {
+        if !groups.contains(&&entry["group"]) {
+            if groups.len() == steps {
+                break;
+            }
+            groups.push(&entry["group"]);
+        }
+        if entry["yours"] != true || entry["kind"] == "adopted" {
+            text += &format!("  {} ({}, {})\n", cell(&entry["what"]), cell(&entry["author"]), cell(&entry["at"]));
+        }
+    }
+    text
+}
+
 /// Who holds each model file: the user, or an agent's claim with its goal and what it's doing,
 /// and the blocked agents.
 pub fn editors(editors: &Value) -> String {

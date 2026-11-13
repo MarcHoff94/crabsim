@@ -166,6 +166,61 @@ impl Change {
     }
 }
 
+/// The longest wording the change history keeps for one batch.
+const WORDING_LENGTH: usize = 200;
+
+/// A batch in the command language, its changes joined with `;`, cut short past a length with
+/// how many changes it was.
+pub(crate) fn worded(changes: &[Change]) -> String {
+    shortened(&changes.iter().map(Change::wording).collect::<Vec<_>>().join("; "), changes.len())
+}
+
+/// `wording`, cut short past the length the history keeps, saying how many changes it was.
+pub(crate) fn shortened(wording: &str, changes: usize) -> String {
+    if wording.chars().count() <= WORDING_LENGTH {
+        return wording.to_string();
+    }
+    format!("{}… ({changes} changes)", wording.chars().take(WORDING_LENGTH).collect::<String>())
+}
+
+impl Change {
+    /// The change in the command language, as the change history words it, such as
+    /// `connect Split > Drill`. Changes the language has no command for are worded like it.
+    fn wording(&self) -> String {
+        let place = |position: &Position| format!("{} {}", position.x, position.y);
+        let name = |target: &Target| match target {
+            Target::Instance(name) | Target::Class(name) => name.clone(),
+        };
+        match self {
+            Change::AddInstance { name, class, position, .. } => match position {
+                Some(position) => format!("add {class} as {name} at {}", place(position)),
+                None => format!("add {class} as {name}"),
+            },
+            Change::RemoveInstance { name } => format!("remove {name}"),
+            Change::RenameInstance { name, to } => format!("rename {name} to {to}"),
+            Change::MoveInstance { name, position } => format!("move {name} to {}", place(position)),
+            Change::SetClass { name, class } => format!("set the class of {name} to {class}"),
+            Change::DuplicateInstance { name, to, .. } => format!("duplicate {name} as {to}"),
+            Change::Connect { from, to, .. } => format!("connect {from} > {to}"),
+            Change::Disconnect { from, to } => format!("disconnect {from} > {to}"),
+            Change::SetConnection { from, to, .. } => format!("set the connection {from} > {to}"),
+            Change::AddClass { name, parent, .. } => format!("derive {parent} as {name}"),
+            Change::RemoveClass { name, .. } => format!("class remove {name}"),
+            Change::RenameClass { name, to } => format!("class rename {name} to {to}"),
+            Change::SetParent { name, parent } => format!("set the parent of {name} to {parent}"),
+            Change::DuplicateClass { name, to } => format!("class duplicate {name} as {to}"),
+            Change::SetAttribute { target, attribute, value } => {
+                let value = value.as_str().map_or_else(|| value.to_string(), str::to_string);
+                format!("set {}.{attribute} {value}", name(target))
+            }
+            Change::RestoreInheritance { target, attribute } => format!("restore {}.{attribute}", name(target)),
+            Change::SetModelDescription { description: Some(description) } => format!("describe the model as {description}"),
+            Change::SetModelDescription { description: None } => "remove the model's description".to_string(),
+            Change::SetStream { name, stream } => format!("set the stream of {name} to {stream}"),
+        }
+    }
+}
+
 /// A connection, from an instance to its successor.
 #[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 pub struct Connection {
@@ -649,49 +704,58 @@ impl Operation for EditModel {
     type Output = EditModelOutput;
 
     fn run(catalogue: &Catalogue, input: EditModelInput) -> Result<EditModelOutput, OperationError> {
-        let mut editing = crate::editing::before_change(catalogue, &input.path, input.expected_hash.as_deref())?;
-        let (file, text) = read_file(catalogue, &input.path)?;
-        let model = crabsim_model::load(&text).map_err(|problems| {
-            let mut error = OperationError::invalid_model(&format!("`{}`", input.path), &problems);
-            error.message = format!("{}, so edit_model can't change it: fix it with write_model first", error.message);
-            error
-        })?;
-        let mut draft = Draft {
-            model: serde_json::from_str(&model.save()).expect("a saved model is JSON"),
-            also: AlsoRemoved::default(),
-            user: catalogue.source().is_user(),
-        };
-        let count = input.changes.len();
-        // Every change that can't apply, after which the rest still apply, so the result's own
-        // problems can be reported along with them in one go.
-        let mut refused = Vec::new();
-        for (place, change) in input.changes.into_iter().enumerate() {
-            let kind = change.kind();
-            if let Err(why) = draft.apply(change) {
-                refused.push(format!("changes/{place} ({kind}): {why}"));
-            }
-        }
-        if !refused.is_empty() {
-            let mut error = OperationError::invalid_input(format!("{}. Nothing was changed", refused.join("; ")));
-            if let Err(problems) = crabsim_model::load(&draft.model.to_string()) {
-                error.problems = problems.iter().map(crate::ModelProblem::from).collect();
-                error.message += ". The problems are those of the model the other changes would make";
-            }
-            return Err(error);
-        }
-        let edited = crabsim_model::load(&draft.model.to_string())
-            .map_err(|problems| OperationError::invalid_model("the model these changes would make", &problems))?
-            .save();
-        std::fs::write(&file, &edited).map_err(|error| OperationError::run_error(format!("`{}` can't be written: {error}", input.path)))?;
-        editing.record(&edited);
-        Ok(EditModelOutput {
-            path: input.path,
-            file_hash: hash(&edited),
-            model_hash: hash(&edited),
-            changes: count,
-            also_removed: draft.also,
-        })
+        edit(catalogue, input, None)
     }
+}
+
+/// `edit_model`, with what the change history calls the batch: `wording`, such as the commands
+/// it came from, or else its changes in the command language.
+pub(crate) fn edit(catalogue: &Catalogue, input: EditModelInput, wording: Option<String>) -> Result<EditModelOutput, OperationError> {
+    let wording = wording.unwrap_or_else(|| worded(&input.changes));
+    let mut editing = crate::editing::before_change(catalogue, &input.path, input.expected_hash.as_deref())?;
+    let (file, text) = read_file(catalogue, &input.path)?;
+    let model = crabsim_model::load(&text).map_err(|problems| {
+        let mut error = OperationError::invalid_model(&format!("`{}`", input.path), &problems);
+        error.message = format!("{}, so edit_model can't change it: fix it with write_model first", error.message);
+        error
+    })?;
+    let mut draft = Draft {
+        model: serde_json::from_str(&model.save()).expect("a saved model is JSON"),
+        also: AlsoRemoved::default(),
+        user: catalogue.source().is_user(),
+    };
+    let count = input.changes.len();
+    // Every change that can't apply, after which the rest still apply, so the result's own
+    // problems can be reported along with them in one go.
+    let mut refused = Vec::new();
+    for (place, change) in input.changes.into_iter().enumerate() {
+        let kind = change.kind();
+        if let Err(why) = draft.apply(change) {
+            refused.push(format!("changes/{place} ({kind}): {why}"));
+        }
+    }
+    if !refused.is_empty() {
+        let mut error = OperationError::invalid_input(format!("{}. Nothing was changed", refused.join("; ")));
+        if let Err(problems) = crabsim_model::load(&draft.model.to_string()) {
+            error.problems = problems.iter().map(crate::ModelProblem::from).collect();
+            error.message += ". The problems are those of the model the other changes would make";
+        }
+        return Err(error);
+    }
+    let edited = crabsim_model::load(&draft.model.to_string())
+        .map_err(|problems| OperationError::invalid_model("the model these changes would make", &problems))?
+        .save();
+    std::fs::write(&file, &edited).map_err(|error| OperationError::run_error(format!("`{}` can't be written: {error}", input.path)))?;
+    editing.record(&edited);
+    let change = crate::history::Change { before: crate::history::Before::Text(&text), after: &edited, kind: crate::history::Kind::Change, wording };
+    crate::history::keep(catalogue, &editing, &input.path, change);
+    Ok(EditModelOutput {
+        path: input.path,
+        file_hash: hash(&edited),
+        model_hash: hash(&edited),
+        changes: count,
+        also_removed: draft.also,
+    })
 }
 
 // --- get_attributes ---

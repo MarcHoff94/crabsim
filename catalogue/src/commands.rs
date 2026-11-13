@@ -4,7 +4,7 @@
 //! exactly alike. Names are matched like the window's search: exactly, or by a part only one name
 //! has.
 
-use crate::edit::{Change, EditModel, EditModelInput};
+use crate::edit::{Change, EditModelInput};
 use crate::error::OperationError;
 use crate::model_files::read_file;
 use crate::{entry, Catalogue, Effect, Entry, Operation};
@@ -700,7 +700,9 @@ impl Operation for RunCommands {
                 changes.push(serde_json::from_value::<Change>(change.clone()).expect("the parser writes changes edit_model reads"));
             }
         }
-        let edited = EditModel::run(catalogue, EditModelInput { path: input.path, changes, expected_hash: input.expected_hash }).map_err(|mut error| {
+        // The history words the line as it was typed, macros filled in.
+        let wording = crate::edit::shortened(&planned.iter().map(|command| command.command.as_str()).collect::<Vec<_>>().join("; "), changes.len());
+        let edited = crate::edit::edit(catalogue, EditModelInput { path: input.path, changes, expected_hash: input.expected_hash }, Some(wording)).map_err(|mut error| {
             error.message = name_commands(&error.message, &from_command, &planned);
             error
         })?;

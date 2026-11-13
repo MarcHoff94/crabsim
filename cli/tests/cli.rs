@@ -523,6 +523,9 @@ fn while_a_window_has_the_folder_the_cli_reads_and_runs_but_changes_nothing() {
     assert!(stderr(&edit).contains("window"), "{}", stderr(&edit));
     let revoke = crabsim(&["editors", "revoke", "--models", models.arg(), "demo.json"]);
     assert!(!revoke.status.success() && stderr(&revoke).contains("window"), "{}", stderr(&revoke));
+    let undo = crabsim(&["undo", "--models", models.arg(), "demo.json"]);
+    assert!(!undo.status.success() && stderr(&undo).contains("window"), "{}", stderr(&undo));
+    ok(&["history", "--models", models.arg(), "demo.json"]);
     ok(&["editors", "show", "--models", models.arg()]);
     ok(&["attributes", "--models", models.arg(), "demo.json", "Station 1"]);
     ok(&["describe", "--models", models.arg(), "--model", "demo.json"]);
@@ -567,4 +570,57 @@ fn validate_lists_problems_and_warnings_and_graph_distribution_gives_a_ranking()
     let broken = crabsim(&["validate", "--models", models.arg(), "broken.json"]);
     assert!(!broken.status.success(), "a model with problems fails");
     assert!(stdout(&broken).contains("1 problem:"), "{}", stdout(&broken));
+}
+
+// ---------- history, undo and redo ----------
+
+#[test]
+fn history_lists_the_changes_and_undo_and_redo_step_through_them() {
+    let models = Models::new("undo");
+    let file = models.0.join("demo.json");
+    ok(&["adopt", "--models", models.arg(), "demo.json"]);
+    assert!(ok(&["history", "--models", models.arg(), "demo.json"]).contains("no change history yet"));
+    let before = std::fs::read_to_string(&file).unwrap();
+    let edited = crabsim_with_stdin(&["edit", "--models", models.arg(), "demo.json", "-"], SLOWER);
+    assert!(edited.status.success(), "{edited:?}");
+
+    let history = ok(&["history", "--models", models.arg(), "demo.json"]);
+    assert!(history.contains("set Station 1.process_time 0:11"), "{history}");
+    assert!(history.contains("the user"), "{history}");
+
+    let undone = ok(&["undo", "--models", models.arg(), "demo.json"]);
+    assert!(undone.contains("Undone: set Station 1.process_time 0:11"), "{undone}");
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), before);
+    assert!(ok(&["history", "--models", models.arg(), "demo.json"]).contains("undone"));
+
+    let redone = ok(&["redo", "--models", models.arg(), "demo.json"]);
+    assert!(redone.contains("Redone: set Station 1.process_time 0:11"), "{redone}");
+    assert!(std::fs::read_to_string(&file).unwrap().contains("00:00:11"));
+
+    let nothing = crabsim(&["redo", "--models", models.arg(), "demo.json"]);
+    assert!(!nothing.status.success());
+    assert!(stderr(&nothing).contains("nothing to redo"), "{}", stderr(&nothing));
+}
+
+#[test]
+fn undo_names_an_agents_change_before_undoing_it_and_needs_a_take_over_past_its_claim() {
+    let models = Models::new("undo-agent");
+    let file = models.0.join("demo.json");
+    ok(&["adopt", "--models", models.arg(), "demo.json"]);
+    let before = std::fs::read_to_string(&file).unwrap();
+    let agent = agent(&models);
+    agent.call("claim_model", serde_json::json!({ "path": "demo.json", "goal": "a slower line", "doing": "slowing Station 1" })).unwrap();
+    agent.call("edit_model", serde_json::json!({ "path": "demo.json", "changes": serde_json::from_str::<serde_json::Value>(SLOWER).unwrap() })).unwrap();
+
+    let asked = crabsim(&["undo", "--models", models.arg(), "demo.json"]);
+    assert!(!asked.status.success());
+    assert!(stderr(&asked).contains("set Station 1.process_time 0:11") && stderr(&asked).contains("agent-1 (test-agent)") && stderr(&asked).contains("--yes"), "{}", stderr(&asked));
+    assert_ne!(std::fs::read_to_string(&file).unwrap(), before, "nothing was undone");
+
+    let held = crabsim(&["undo", "--models", models.arg(), "demo.json", "--yes"]);
+    assert!(!held.status.success());
+    assert!(stderr(&held).contains("--take-over"), "{}", stderr(&held));
+
+    ok(&["undo", "--models", models.arg(), "demo.json", "--yes", "--take-over"]);
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), before);
 }

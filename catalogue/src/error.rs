@@ -38,6 +38,11 @@ pub enum ErrorKind {
     /// A crabsim window has the models folder open, so it alone changes models and who edits them
     /// there, and no second window may open it.
     FolderInUse,
+    /// The model file's change history holds nothing to undo, or nothing to redo.
+    NothingToUndo,
+    /// The change to undo or redo was made by someone else: an agent undoes and redoes only its
+    /// own latest changes.
+    NotYours,
 }
 
 /// One thing wrong with a model, as `crabsim-model` reports it.

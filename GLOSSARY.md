@@ -328,6 +328,14 @@ _Avoid_: Lock, owner, text editor (a program such as a code editor)
 An agent's hold on one model file, which it needs for every change: granted at once if nobody holds the file, refused otherwise. It says the agent's **goal** and what it is **doing** now, which the agent updates as it goes. It ends when the agent releases it, its process ends, it stays unused for too long or the user revokes it. While the user has taken the right, it is **paused**.
 _Avoid_: Edit queue (there is none), lock
 
+**Change history**:
+A model file's changes in order, by the user and by agents, each with its author, its time and what it did. It is kept beside the models, so it is still there after a restart. A file keeps its newest changes, and a deleted file's history goes with it.
+_Avoid_: Edit log, version history
+
+**Undo**:
+Taking back the latest change in a model file's change history, after which the file is exactly as it was before it. **Redo** brings an undone change back, until the next change to the file. The user undoes anyone's changes, and an agent only its own latest ones. Never used for a simulation run, where an earlier instant is reached by going back.
+_Avoid_: Revert, go back (what a live session does), checkpoint
+
 **User**:
 The one person working with a models folder, through either the UI or the CLI, who controls who edits its model files. Only one UI can have a models folder open at a time: working in a second window means working on an independent copy of the folder.
 _Avoid_: Agent (never a user)

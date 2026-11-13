@@ -79,6 +79,8 @@ fn while_a_ui_has_the_folder_the_cli_reads_and_runs_but_changes_nothing() {
         ("block_agent", json!({ "agent": "agent-1" })),
         ("unblock_agent", json!({ "agent": "agent-1" })),
         ("revoke_claim", json!({ "path": "line.json" })),
+        ("undo_model", json!({ "path": "line.json" })),
+        ("redo_model", json!({ "path": "line.json" })),
     ] {
         let refused = err(&cli, name, input);
         assert_eq!(refused["kind"], "folder_in_use", "{name}: {refused}");
@@ -93,6 +95,7 @@ fn while_a_ui_has_the_folder_the_cli_reads_and_runs_but_changes_nothing() {
         ("get_attributes", json!({ "path": "line.json", "target": { "instance": "Work" } })),
         ("describe_model", json!({ "path": "line.json" })),
         ("get_editors", json!({})),
+        ("get_history", json!({ "path": "line.json" })),
         ("start_run", json!({ "model": "line.json", "length": "1:00", "observations": 1, "wait": 30 })),
         ("export_model", json!({ "path": "line.json", "format": "graphml" })),
     ] {

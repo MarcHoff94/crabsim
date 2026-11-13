@@ -470,6 +470,7 @@ fn the_hash_after_an_edit_is_what_get_attributes_then_gives() {
 /// The cost of loading, changing and saving a whole file per call, on the benchmark's model of
 /// 429 copies of the demo (6,006 objects), with unique names. Timing only, so on demand in
 /// release: `cargo test --release -p crabsim-catalogue --test edit_model -- --ignored --nocapture`.
+/// It also checks that an undo and a redo never take longer than the edit they reverse.
 #[test]
 #[ignore]
 fn get_attributes_and_edit_model_on_6006_objects() {
@@ -514,6 +515,33 @@ fn get_attributes_and_edit_model_on_6006_objects() {
         "edit_model",
     );
     time("validate_model", json!({ "path": "large.json" }), "validate_model");
+    // Undo against the edit it reverses (spec issue 107): seven edits that each change the file,
+    // so each is kept in the history, then each undone and redone.
+    let median = |what: &str, mut times: Vec<std::time::Duration>| {
+        times.sort();
+        println!("{what}: median {:?} of 7, fastest {:?}", times[3], times[0]);
+        times[3]
+    };
+    let timed = |name: &str, input: &dyn Fn(usize) -> Value| -> Vec<std::time::Duration> {
+        (0..7)
+            .map(|n| {
+                let start = std::time::Instant::now();
+                setup.ok(name, input(n));
+                start.elapsed()
+            })
+            .collect()
+    };
+    let step = |_: usize| json!({ "path": "large.json" });
+    let edits = timed("edit_model", &|n| {
+        json!({ "path": "large.json", "changes": [{ "change": "set_attribute", "target": { "instance": "Copy 200 / Station 2" }, "attribute": "process_time", "value": format!("0:{}", 20 + n) }] })
+    });
+    let edit = median("edit_model, one set_attribute kept in the history", edits);
+    let undo = median("undo_model", timed("undo_model", &step));
+    let redo = median("redo_model", timed("redo_model", &step));
+    time("get_history", json!({ "path": "large.json" }), "get_history");
+    let history = std::fs::metadata(setup.folder.join(".crabsim/history.sqlite")).map_or(0, |file| file.len());
+    println!("the history of 7 changes: {history} bytes");
+    assert!(undo <= edit && redo <= edit, "an undo or redo never takes longer than the edit it reverses: edit {edit:?}, undo {undo:?}, redo {redo:?}");
 }
 
 // ---------- Streams ----------

@@ -7,11 +7,12 @@
 //! compares the file's size and modified time, and only when they differ reads it again through
 //! the catalogue and compares its hash. A file watcher could take its place later.
 //!
-//! Building a model is a set of actions here, each exactly one `edit_model` batch, the unit a later
-//! undo will step through (spec issue 87). The window offers them only with no run in progress, and
+//! Building a model is a set of actions here, each exactly one `edit_model` batch, the unit
+//! undo steps through (spec issues 87 and 107). The window offers them only with no run in progress, and
 //! picks up what they saved through `check`, as it does an agent's change.
 
 use crate::editing::{ActRefusal, EditAction, Editors};
+use crate::history::{Entry, History};
 use crate::view::{Change, DEFAULT_MEASURING_PERIOD};
 use crabsim::{Clock, Dimensions, LiveSession, ModelDescription, ObjectKind, Position, SimTime};
 use crabsim_catalogue::{Catalogue, ErrorKind, Settings, Source};
@@ -179,15 +180,26 @@ pub enum Refusal {
     Invalid(String),
     /// No model file is open.
     NoModel,
+    /// The model file's history holds nothing to undo, or nothing to redo.
+    Nothing(String),
 }
 
 impl std::fmt::Display for Refusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Refusal::NotEditor(message) | Refusal::ChangedOutside(message) | Refusal::Invalid(message) => write!(f, "{message}"),
+            Refusal::NotEditor(message) | Refusal::ChangedOutside(message) | Refusal::Invalid(message) | Refusal::Nothing(message) => write!(f, "{message}"),
             Refusal::NoModel => write!(f, "no model file is open"),
         }
     }
+}
+
+/// What a step of undo or redo did.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Stepped {
+    /// The changes taken back, newest first, or brought back, oldest first.
+    pub entries: Vec<Entry>,
+    /// The instances the step touched, by name, as they are in the model now, for selecting them.
+    pub touched: Vec<String>,
 }
 
 /// A file's size and modified time, which change whenever it is written.
@@ -911,6 +923,63 @@ impl Workspace {
             // The window's font has no arrow, so a connection's name reads "In to Mill" there.
             _ => Refusal::Invalid(error.to_string().replace(" → ", " to ")),
         })
+    }
+
+    // ---------- Undo and redo ----------
+
+    /// The open model file's change history, newest first: who changed what, and when.
+    pub fn history(&self) -> Result<History, String> {
+        let path = self.opened.as_deref().ok_or("no model file is open")?;
+        let catalogue = self.catalogue.as_ref().ok_or("no models folder is open")?;
+        let read = catalogue.call("get_history", json!({ "path": path, "limit": 200 })).map_err(|error| error.to_string())?;
+        Ok(History::from_json(&read))
+    }
+
+    /// Takes back the open model file's latest `steps` steps, each one change or everything one
+    /// command did: the file is again as it was before them. `take_over` makes the step while an
+    /// agent holds the file, which keeps its right. The window picks up the saved file through
+    /// `check`.
+    pub fn undo(&mut self, steps: usize, take_over: bool) -> Result<Stepped, Refusal> {
+        self.step("undo_model", "undone", steps, take_over)
+    }
+
+    /// Brings back the `steps` steps last undone.
+    pub fn redo(&mut self, steps: usize, take_over: bool) -> Result<Stepped, Refusal> {
+        self.step("redo_model", "redone", steps, take_over)
+    }
+
+    fn step(&mut self, operation: &str, field: &str, steps: usize, take_over: bool) -> Result<Stepped, Refusal> {
+        let path = self.opened.clone().ok_or(Refusal::NoModel)?;
+        let catalogue = self.catalogue.as_ref().ok_or(Refusal::NoModel)?;
+        catalogue.set_take_over(take_over);
+        let stepped = catalogue.call(operation, json!({ "path": path, "steps": steps }));
+        catalogue.set_take_over(false);
+        let stepped = stepped.map_err(|error| match error.kind {
+            ErrorKind::NotEditor => Refusal::NotEditor(error.message.clone()),
+            ErrorKind::ChangedOutside => Refusal::ChangedOutside(error.message.clone()),
+            ErrorKind::NothingToUndo => Refusal::Nothing(error.message.clone()),
+            _ => Refusal::Invalid(error.to_string()),
+        })?;
+        // What the window draws now, against the file as the step left it.
+        let before = self.pending.as_ref().map_or(&self.model, |(_, model)| model);
+        let after = catalogue.call("read_model", json!({ "path": path })).ok().and_then(|read| crabsim_model::load(read["text"].as_str().unwrap_or_default()).ok());
+        let touched = after.map_or_else(Vec::new, |after| crate::history::touched(before, &after));
+        Ok(Stepped { entries: History::from_json(&json!({ "entries": stepped[field] })).entries, touched })
+    }
+
+    /// From now on, every change the window makes is one step of undo, until `end_group`: around
+    /// one command carried out as several changes, such as a macro whose lines go one a frame.
+    pub fn begin_group(&self) {
+        if let Some(catalogue) = &self.catalogue {
+            catalogue.begin_group();
+        }
+    }
+
+    /// Ends the group begun with `begin_group`.
+    pub fn end_group(&self) {
+        if let Some(catalogue) = &self.catalogue {
+            catalogue.end_group();
+        }
     }
 
     /// Who holds each model file in the folder, and the blocked agents.

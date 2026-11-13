@@ -35,6 +35,7 @@ use crabsim_ui::paths::{Paths, Strategy, Weigh};
 use crabsim_ui::attributes::{Form, RepairKind};
 use crabsim_ui::editing::{ActRefusal, Claim, EditAction, Editors};
 use crabsim_ui::help;
+use crabsim_ui::history::{Entry, History, Jump};
 use crabsim_ui::workspace::{AttributeView, ClassEntry, ConnectionView, End, ModelChange, Refusal, ValueFrom, Workspace};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -189,6 +190,10 @@ fn main() {
             seen_macros: std::collections::HashSet::new(),
             confirm_macro: None,
             pending_lines: std::collections::VecDeque::new(),
+            history: None,
+            confirm_undo: None,
+            select_names: None,
+            grouping: false,
         })
         .insert_resource(Session(Mutex::new(session)))
         .insert_resource(WatchedFile(Arc::new(Mutex::new(Vec::new()))))
@@ -363,6 +368,27 @@ struct Ui {
     confirm_macro: Option<(String, Vec<Unseen>)>,
     /// Lines of a macro still to carry out, one a frame, as a macro holding window commands runs.
     pending_lines: std::collections::VecDeque<String>,
+    /// The open model's change history, as last read, while the Agents tab shows it. `None` reads
+    /// it again.
+    history: Option<Result<History, String>>,
+    /// An undo or redo waiting for the user to confirm it.
+    confirm_undo: Option<StepAsk>,
+    /// The instances to select once the model an undo or redo just saved is drawn, by name,
+    /// in place of what was selected.
+    select_names: Option<Vec<String>>,
+    /// The lines of a macro going one a frame are one step of undo, until the last has gone.
+    grouping: bool,
+}
+
+/// An undo or redo the user is asked about first.
+#[derive(Clone, Debug)]
+struct StepAsk {
+    redo: bool,
+    steps: usize,
+    /// The changes it takes back or brings back.
+    entries: Vec<Entry>,
+    /// Who holds the model, when the step is a take-over.
+    held: Option<String>,
 }
 
 /// What the Paths tab's weights and strategies were worked out for: the model, by generation, the
@@ -669,9 +695,13 @@ fn pick_up_changes(mut ui: ResMut<Ui>, session: Res<Session>, watched: Res<Watch
         }
         Some(ModelChange::Changed) => {
             ui.view.set_model_changed(true);
+            ui.history = None;
             ui.view.commanded(wall);
         }
-        Some(ModelChange::NowHasProblems) => ui.view.commanded(wall),
+        Some(ModelChange::NowHasProblems) => {
+            ui.history = None;
+            ui.view.commanded(wall);
+        }
         None => {}
     }
 }
@@ -1179,7 +1209,8 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
         || ui.confirm_building.is_some()
         || ui.new_model.is_some()
         || ui.duplicating.is_some()
-        || ui.confirm_line.is_some();
+        || ui.confirm_line.is_some()
+        || ui.confirm_undo.is_some();
     let keyboard_free = !dialog_open && ctx.memory(|memory| memory.focused().is_none());
     let key_request = if keyboard_free {
         let typed = read_keys(&ctx);
@@ -1205,10 +1236,20 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
         Some(request) => Some(request),
         None if ui.confirm_line.is_none() && ui.confirm_macro.is_none() => match ui.pending_lines.pop_front() {
             Some(line) => run_line(ui, &session, &line, wall),
-            None => None,
+            None => {
+                // The macro's last line has gone: what follows is its own step of undo again.
+                if std::mem::take(&mut ui.grouping) {
+                    ui.workspace.end_group();
+                }
+                None
+            }
         },
         None => None,
     };
+    // The open model's history, for the Agents tab, read again after anything that may change it.
+    if ui.tab == Tab::Agents && ui.history.is_none() && ui.workspace.opened().is_some() {
+        ui.history = Some(ui.workspace.history());
+    }
     // The macros, read again when their file changes.
     if let Some(file) = ui.workspace.macros_file() {
         let stamp = stamp_of(&file);
@@ -1297,6 +1338,7 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
     let mut intervention = None;
     let mut attribute_change = None;
     let mut editors_action = None;
+    let mut history_clicked = None;
     let mut results_chosen = None;
     let mut renamed = None;
     let mut several_asked = None;
@@ -1357,6 +1399,7 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
                 if row.selectable_label(ui.tab == tab, label).on_hover_text(hint).clicked() && ui.tab != tab {
                     ui.tab = tab;
                     ui.editors = None;
+                    ui.history = None;
                     ui.editors_note = None;
                 }
             }
@@ -1397,7 +1440,10 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
                 results_chosen = results_tab(panel, results.as_ref().map(|(at, results)| (at.as_str(), results)), &mut ui.results_sort);
             }
             Tab::Paths => paths_tab(panel, &mut ui.paths, ui.view.objects(), ui.view.live_figure("mus_in").is_some()),
-            Tab::Agents => editors_action = agents_tab(panel, ui.workspace.opened(), ui.editors.as_ref(), ui.editors_note.as_deref()),
+            Tab::Agents => {
+                editors_action = agents_tab(panel, ui.workspace.opened(), ui.editors.as_ref(), ui.editors_note.as_deref());
+                history_clicked = history_section(panel, ui.history.as_ref(), ui.view.allows_building());
+            }
         });
     });
     // Full states are asked for while results are shown, or the Paths tab weighs the live run.
@@ -1406,6 +1452,17 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
     find_paths(ui);
     if let Some(id) = results_chosen {
         ui.view.select(Some(id));
+        ui.view.commanded(wall);
+    }
+    // A click on a change goes back, or on, to the model as it was after it, asking first.
+    if let Some(number) = history_clicked {
+        let jump = ui.history.as_ref().and_then(|history| history.as_ref().ok()).and_then(|history| history.jump_to(number));
+        match jump {
+            Some(Jump::Undo(steps)) => step_asked(ui, false, steps, true),
+            Some(Jump::Redo(steps)) => step_asked(ui, true, steps, true),
+            Some(Jump::Here) => ui.key_note = Some("The model is as it was after that change".to_string()),
+            None => {}
+        }
         ui.view.commanded(wall);
     }
     // Taking a model from an agent asks first, naming it, its goal and what it's doing.
@@ -1656,6 +1713,15 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
         }
         ui.view.commanded(wall);
     }
+    if let Some(ask) = ui.confirm_undo.clone()
+        && let Some(go) = confirm_step(&ctx, &ask)
+    {
+        ui.confirm_undo = None;
+        if go {
+            step_history(ui, ask.redo, ask.steps, true);
+        }
+        ui.view.commanded(wall);
+    }
     key_line(&ctx, ui, canvas);
     keys_help(&ctx, ui);
     ui.over_egui = ctx.is_pointer_over_egui();
@@ -1873,11 +1939,16 @@ fn replace_session(ui: &mut Ui, session: &Session, new_model: bool, wall: Durati
     if new_model {
         ui.paths = ui.paths.for_another_model();
     }
+    ui.history = None;
     let mut view = ViewState::with_settings_of(ui.workspace.description(), &ui.view);
     // The same model, reloaded or with another seed, keeps the object selected, found by its name.
     if !new_model {
-        // Everything selected stays selected, found by name.
-        let names: Vec<String> = ui.view.selection().iter().map(|&id| ui.view.objects()[id as usize].name.clone()).collect();
+        // Everything selected stays selected, found by name, unless an undo or redo says what it
+        // touched, which is selected instead.
+        let names: Vec<String> = match ui.select_names.take() {
+            Some(touched) => touched,
+            None => ui.view.selection().iter().map(|&id| ui.view.objects()[id as usize].name.clone()).collect(),
+        };
         for name in names {
             if let Some(id) = view.objects().iter().find(|object| object.name == name).map(|object| object.id) {
                 view.toggle(id);
@@ -2488,6 +2559,7 @@ fn build(ui: &mut Ui, building: Building, take_over: bool) {
     match building.apply(&mut ui.workspace, take_over) {
         // The window picks up the saved file next frame and draws the model again.
         Ok(select) => {
+            ui.history = None;
             ui.select_name = select;
             // A class renamed or added stays, or becomes, the one shown.
             let shown = match &building {
@@ -3496,6 +3568,140 @@ fn agents_tab(ui: &mut egui::Ui, opened: Option<&str>, editors: Option<&Result<E
     asked
 }
 
+/// The open model's change history, under the agents: every change newest first, with who made it
+/// and when, the undone ones greyed. Gives the number of the change clicked, to go back or on to
+/// the model as it was after it.
+fn history_section(ui: &mut egui::Ui, history: Option<&Result<History, String>>, building: bool) -> Option<i64> {
+    let mut clicked = None;
+    ui.add_space(8.0);
+    ui.separator();
+    ui.label(egui::RichText::new("History").strong()).on_hover_text("Every change to this model, by you and by agents, newest first. u undoes the latest and Ctrl+R redoes it");
+    let history = match history {
+        Some(Ok(history)) => history,
+        Some(Err(error)) => {
+            ui.label(egui::RichText::new(error).weak());
+            return None;
+        }
+        None => {
+            ui.label(egui::RichText::new("Open a model to see its changes.").weak());
+            return None;
+        }
+    };
+    if history.entries.is_empty() {
+        ui.label(egui::RichText::new("No changes yet. Every change made from now on is listed here, and u takes the latest back.").weak());
+        return None;
+    }
+    for entry in &history.entries {
+        let what = if entry.undone { egui::RichText::new(format!("{}  (undone)", entry.what)).weak() } else { egui::RichText::new(&entry.what) };
+        let hint = if !building {
+            RESET_FIRST
+        } else if entry.undone {
+            "Click to redo up to this change"
+        } else {
+            "Click to go back to the model as it was after this change"
+        };
+        let row = ui.add_enabled(building, egui::Label::new(what).selectable(false).sense(egui::Sense::click())).on_hover_text(hint).on_disabled_hover_text(RESET_FIRST);
+        if row.clicked() {
+            clicked = Some(entry.number);
+        }
+        ui.label(egui::RichText::new(format!("{}, {}", entry.author, entry.at)).weak().small());
+    }
+    if history.more {
+        ui.label(egui::RichText::new("Older changes aren't shown.").weak().small());
+    }
+    clicked
+}
+
+/// Undoes or redoes `steps` steps of the open model's changes, asking first when it would take
+/// back someone else's change or one from outside crabsim, when an agent holds the model, and
+/// always when `always` says so, as for a click on the history. During a run nothing changes.
+fn step_asked(ui: &mut Ui, redo: bool, steps: usize, always: bool) {
+    if !ui.view.allows_building() {
+        ui.key_note = Some(format!("{RESET_FIRST}. In a run, go back in time instead"));
+        return;
+    }
+    let history = match ui.workspace.history() {
+        Ok(history) => history,
+        Err(why) => {
+            ui.view.show_error(why);
+            return;
+        }
+    };
+    let entries: Vec<Entry> = if redo { history.redo_steps(steps) } else { history.undo_steps(steps) }.into_iter().cloned().collect();
+    if entries.is_empty() {
+        ui.key_note = Some(if redo { "Nothing to redo" } else { "Nothing to undo" }.to_string());
+        return;
+    }
+    let held = ui.workspace.opened().and_then(|path| ui.editors.as_ref()?.as_ref().ok()?.agent_holding(path)).map(|claim| format!("{} ({})", claim.agent, claim.client));
+    if always || held.is_some() || (!redo && entries.iter().any(Entry::asks)) {
+        ui.confirm_undo = Some(StepAsk { redo, steps, entries, held });
+    } else {
+        step_history(ui, redo, steps, false);
+    }
+}
+
+/// Undoes or redoes, saying what it did on the line at the foot of the canvas. What it touched is
+/// selected once the window has picked up the file.
+fn step_history(ui: &mut Ui, redo: bool, steps: usize, take_over: bool) {
+    let stepped = if redo { ui.workspace.redo(steps, take_over) } else { ui.workspace.undo(steps, take_over) };
+    let done = if redo { "Redone" } else { "Undone" };
+    ui.history = None;
+    match stepped {
+        Ok(stepped) => {
+            ui.key_note = Some(crabsim_ui::history::summary(done, &stepped.entries));
+            if !stepped.touched.is_empty() {
+                ui.select_names = Some(stepped.touched);
+                ui.class_selected = None;
+            }
+        }
+        // An agent took the model since the window last looked: who holds it is read again, and
+        // the step asked about as a take-over.
+        Err(Refusal::NotEditor(why)) if !take_over => {
+            ui.editors = Some(ui.workspace.editors());
+            let held = ui.workspace.opened().and_then(|path| ui.editors.as_ref()?.as_ref().ok()?.agent_holding(path)).is_some();
+            if held { step_asked(ui, redo, steps, false) } else { ui.view.show_error(format!("{done} nothing: {why}")) }
+        }
+        Err(Refusal::Nothing(_)) => ui.key_note = Some(if redo { "Nothing to redo" } else { "Nothing to undo" }.to_string()),
+        Err(Refusal::ChangedOutside(_)) => ui.view.show_error("This model file was changed outside crabsim: adopt it first, then undo takes that change back".to_string()),
+        Err(refusal) => ui.view.show_error(format!("{done} nothing: {refusal}")),
+    }
+}
+
+/// Asks before an undo or redo, naming every change it takes back or brings back. `Some(true)` to
+/// go ahead.
+fn confirm_step(ctx: &egui::Context, ask: &StepAsk) -> Option<bool> {
+    let mut answer = None;
+    let (verb, does) = if ask.redo { ("Redo", "It brings back:") } else { ("Undo", "It takes back:") };
+    let modal = egui::Modal::new(egui::Id::new("confirm undo")).show(ctx, |modal| {
+        modal.set_max_width(460.0);
+        modal.heading(match ask.entries.len() {
+            0 | 1 => format!("{verb} this change?"),
+            several => format!("{verb} these {several} changes?"),
+        });
+        if !ask.entries.is_empty() {
+            modal.label(does);
+            for entry in ask.entries.iter().take(12) {
+                modal.label(format!("  {}", entry.line()));
+            }
+            if ask.entries.len() > 12 {
+                modal.label(format!("  and {} more", ask.entries.len() - 12));
+            }
+        }
+        if let Some(held) = &ask.held {
+            modal.add_space(4.0);
+            modal.label(format!("{held} holds this model. This is one change past its claim, which it keeps: it reads the model again before its next change."));
+        }
+        modal.add_space(8.0);
+        if let Some(chosen) = answers(modal, &[verb, "Leave it"]) {
+            answer = Some(chosen == 0);
+        }
+    });
+    if modal.should_close() && answer.is_none() {
+        answer = Some(false);
+    }
+    answer
+}
+
 /// An attribute's name as people read it.
 fn attribute_label(attribute: &str) -> &str {
     match attribute {
@@ -3655,6 +3861,7 @@ fn read_keys(ctx: &egui::Context) -> Vec<Key> {
                     egui::Key::ArrowRight => Some(Key::Right),
                     egui::Key::Plus | egui::Key::Equals if modifiers.command => Some(Key::ZoomIn),
                     egui::Key::Minus if modifiers.command => Some(Key::ZoomOut),
+                    egui::Key::R if modifiers.command => Some(Key::Redo),
                     _ => None,
                 },
                 _ => None,
@@ -3918,6 +4125,8 @@ fn run_key(ctx: &egui::Context, ui: &mut Ui, session: &Session, command: Command
             None => ui.key_note = Some("The cursor isn't on a selected object".to_string()),
         },
         Command::Delete => delete_what_is_selected(ui),
+        Command::Undo(times) => step_asked(ui, false, times as usize, false),
+        Command::Redo(times) => step_asked(ui, true, times as usize, false),
         Command::Pan(direction) => {
             if let Some(camera) = ui.camera.as_mut() {
                 let step = 80.0;
@@ -4131,7 +4340,11 @@ fn run_line(ui: &mut Ui, session: &Session, line: &str, wall: Duration) -> Optio
         }
         Ok(Parsed::Changes(planned)) => planned,
         Ok(Parsed::Sequence(lines)) => {
-            // One a frame, so each window command gets its turn.
+            // One a frame, so each window command gets its turn, and all of them one step of undo.
+            if !ui.grouping {
+                ui.workspace.begin_group();
+                ui.grouping = true;
+            }
             ui.pending_lines.extend(lines);
             return None;
         }
@@ -4368,6 +4581,7 @@ fn keys_help(ctx: &egui::Context, ui: &mut Ui) {
                 ("@a  5@a", "run macro a, or five times; :@name args runs one with arguments"),
                 ("p c r", "add, connect from the selection, rename the selection"),
                 ("H J K L", "move the selection 1 m left, down, up, right"),
+                ("u  Ctrl+R", "undo the last change to the model, redo it: 3u undoes three. The Agents tab lists the changes"),
             ],
         ),
         ("Panels", &[("t1 to t4", "Inspector, Results, Paths, Agents"), ("Enter", "into the selection's first field, or the open tab's first control, then Tab on"), ("o", "open a model file")]),

@@ -20,6 +20,7 @@ fn each_key_asks_for_its_command() {
         ('<', Command::Predecessor(1)),
         ('G', Command::Last),
         ('d', Command::Delete),
+        ('u', Command::Undo(1)),
         ('0', Command::Fit),
         (' ', Command::StartOrHalt),
         ('x', Command::StepForward(1)),
@@ -36,6 +37,19 @@ fn each_key_asks_for_its_command() {
         assert_eq!(keys.press(Key::Char(key)), vec![command], "{key}");
     }
     assert_eq!(keys.press(Key::Char('q')), Vec::<Command>::new(), "a key that means nothing");
+    assert_eq!(keys.press(Key::Redo), vec![Command::Redo(1)]);
+    // A count takes several steps back or on, also while selecting visually.
+    assert_eq!(typed(&mut keys, "3u"), vec![Command::Undo(3)]);
+    typed(&mut keys, "12");
+    assert_eq!(keys.press(Key::Redo), vec![Command::Redo(12)]);
+    typed(&mut keys, "v");
+    assert_eq!(typed(&mut keys, "u"), vec![Command::Undo(1)]);
+    typed(&mut keys, "v");
+    // In a prompt, u is a letter and Ctrl+R does nothing.
+    typed(&mut keys, ":");
+    assert_eq!(typed(&mut keys, "u"), vec![Command::Prompted(PromptKind::Command, "u".to_string())]);
+    assert_eq!(keys.press(Key::Redo), Vec::<Command>::new());
+    keys.press(Key::Escape);
     assert_eq!(keys.press(Key::Enter), vec![Command::Edit]);
     assert_eq!(keys.press(Key::Escape), vec![Command::Unselect]);
     assert_eq!(keys.press(Key::Up), vec![Command::Pan(Direction::Up)]);

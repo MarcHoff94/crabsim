@@ -135,12 +135,12 @@ Slice 2's PR 3b, from spec issue 45 and ADR 0011. The editor right covers only c
 
 ## The change history: undo and redo
 
-Spec issue 107 and ADR 0017, built in its PR 1. The window's `u` and Ctrl+R follow in PR 2.
+Spec issue 107 and ADR 0017: the catalogue and the CLI in its PR 1, the window's `u`, Ctrl+R and History section in PR 2.
 
 - **Entries:** every change crabsim makes to a model file is kept in its change history, in `.crabsim/history.sqlite`: an `edit_model` or `run_commands` batch, `write_model` over an existing file, and an adoption. Each has its author (`the user`, or an agent such as `agent-3 (claude-code)`), its time, its kind and its wording in the command language, such as `connect Split > Drill`: a `run_commands` line as it was typed, and an `edit_model` batch worded from its changes. A change that changes nothing makes no entry.
 - **What an entry stores:** the file's whole text before and after it, each text once, so neighbouring entries share one. Undo writes the earlier text back and redo the later one, so the file and its hash are exactly what they were.
 - **One line:** the undone entries are always the newest, and a new change by anyone drops them.
-- **A step** is one entry, or every entry of one group. A front-end carrying out one command as several changes, such as the window running a macro with a count, calls `Catalogue::begin_group` before and `end_group` after, as it sets a take-over.
+- **A step** is one entry, or every entry of one group. A front-end carrying out one command as several changes, such as the window running a macro that holds window commands, whose lines go one a frame, calls `Catalogue::begin_group` before and `end_group` after, as it sets a take-over.
 - **`undo_model` and `redo_model`** follow the editor rules of a change: an agent needs its claim, a file changed outside is refused until `adopt_model`, and the user's step past an agent's claim needs a take-over. The user steps through anyone's entries. An agent steps only through its own, by its process: it stops at the first by someone else, saying whose in `stopped`, and is refused with `not_yours` when the nearest isn't its own. With nothing to step through, `nothing_to_undo`.
 - **A step is a change by whoever made it,** so an agent holding the file gets `model_changed` once after the user's undo.
 - **Adoptions:** `adopt_model` makes an entry from the text crabsim last saved to the file as it is, so one undo takes an outside change back. A file crabsim never saved has nothing to go back to, and makes none.
@@ -148,7 +148,7 @@ Spec issue 107 and ADR 0017, built in its PR 1. The window's `u` and Ctrl+R foll
 - **`get_history`** gives entries only: author, time, wording, kind, group, whether it's undone and whether it's the asker's. Never an earlier text. 50 entries if not told, at most 200.
 - **A file keeps** its last 200 changes or 50 MB of text, whichever is less, and always its newest change. `Settings` can set both, which the tests use.
 - **A history that doesn't match the file** any more, such as one restored from a backup, is dropped when it's next used. One that can't be written is logged and never fails a change already saved.
-- **Asking first** is the front-end's part: the CLI's `undo` lists an agent's change or an adoption it would reverse and wants `--yes`, and the window will ask.
+- **Asking first** is the front-end's part: the CLI's `undo` lists an agent's change or an adoption it would reverse and wants `--yes`, and the window asks in a dialog naming every change, also before a click on its History list goes back.
 - **The cost:** one write of the new text per change, and nothing in a run. On the 6,006-object model (2.3 MB), median of 7 in release on 2026-11-13: one `edit_model` change kept in the history 741 ms against 709 ms for one that changed nothing, `undo_model` 55 ms, `redo_model` 56 ms, `get_history` 0.2 ms, and 18.8 MB for 7 changes. The timing test fails if an undo or redo takes longer than the edit it reverses. Not measured: the same on a slow disk.
 
 ## Scope: what crabsim's operations can touch

@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// A Source feeding two Stations of one class, which feed a Drain, with a class derived from a
-/// derived class and a Buffer class, which the panel leaves out.
+/// derived class and a Buffer class.
 const LINE: &str = r#"{"format_version":2,"classes":[
   {"name":"Mill","parent":"Station","attributes":{"process_time":"0:45"}},
   {"name":"Fast mill","parent":"Mill","attributes":{"process_time":"0:30"}},
@@ -108,7 +108,7 @@ fn duplicating_a_model_copies_it_under_a_new_name_and_lists_it() {
 // ---------- Classes ----------
 
 #[test]
-fn the_classes_panel_is_a_tree_by_inheritance_without_buffers() {
+fn the_classes_panel_is_a_tree_by_inheritance() {
     let folder = Folder::new("classes");
     let workspace = open(&folder);
     let tree: Vec<(String, usize, bool)> = workspace.classes().into_iter().map(|ClassEntry { name, depth, built_in, .. }| (name, depth, built_in)).collect();
@@ -119,9 +119,10 @@ fn the_classes_panel_is_a_tree_by_inheritance_without_buffers() {
             ("Station".to_string(), 0, true),
             ("Mill".to_string(), 1, false),
             ("Fast mill".to_string(), 2, false),
+            ("Buffer".to_string(), 0, true),
+            ("Store".to_string(), 1, false),
             ("Drain".to_string(), 0, true),
-        ],
-        "Buffer and the classes derived from it wait for build step 7"
+        ]
     );
     let mill = workspace.class_attributes("Fast mill").unwrap();
     let process_time = mill.iter().find(|view| view.attribute == "process_time").unwrap();
@@ -322,7 +323,7 @@ fn a_built_in_classs_values_are_this_models_own_and_reach_everything_built_on_it
     assert_eq!(description.from, crabsim_ui::workspace::ValueFrom::Class("Station".into()), "a Mill inherits it");
     // The panel shows it as the built-in class, once.
     let names: Vec<String> = workspace.classes().into_iter().map(|entry| entry.name).collect();
-    assert_eq!(names, ["Source", "Station", "Mill", "Fast mill", "Drain"]);
+    assert_eq!(names, ["Source", "Station", "Mill", "Fast mill", "Buffer", "Store", "Drain"]);
     // Nothing depends on it in a way removing it would take: the built-in is still there.
     assert_eq!(workspace.class_dependents("Station"), Dependents::default());
     // Restoring its last value removes it.
@@ -413,4 +414,41 @@ fn a_command_line_is_one_batch_placing_beside_the_selection() {
     let refused = workspace.run_commands("remove Drill; remove Nobody", None, (0.0, 0.0), false).unwrap_err();
     assert!(refused.to_string().contains("2nd command (remove Nobody)"), "{refused}");
     assert!(folder.model().instances.iter().any(|instance| instance.name == "Drill"), "nothing changed");
+}
+
+// ---------- Buffers ----------
+
+#[test]
+fn a_buffer_is_placed_from_the_classes_panel_with_no_limit_and_takes_its_values() {
+    let folder = Folder::new("buffer");
+    let mut workspace = open(&folder);
+    let name = workspace.add_instance("Buffer", Position { x: 7.0, y: 5.0, z: 0.0 }, false).unwrap();
+    assert_eq!(name, "Buffer 1");
+    let value = |workspace: &Workspace, instance: &str, attribute: &str| {
+        let views = workspace.attributes(instance).unwrap();
+        let view = views.iter().find(|view| view.attribute == attribute).unwrap_or_else(|| panic!("no {attribute}"));
+        (view.value.clone(), view.from.clone())
+    };
+    let names: Vec<String> = workspace.attributes("Buffer 1").unwrap().into_iter().map(|view| view.attribute).collect();
+    assert_eq!(names, ["starting_mus", "capacity", "dwelling_time", "exit_strategy", "dimensions", "description", "state_notes"]);
+    assert_eq!(value(&workspace, "Buffer 1", "capacity"), (Some(json!("unlimited")), crabsim_ui::workspace::ValueFrom::BuiltIn));
+    assert_eq!(value(&workspace, "Buffer 1", "exit_strategy"), (Some(json!("first_in_first_out")), crabsim_ui::workspace::ValueFrom::BuiltIn));
+
+    // One of the model's own Buffer class takes that class's capacity.
+    let shelf = workspace.add_instance("Store", Position { x: 7.0, y: 8.0, z: 0.0 }, false).unwrap();
+    assert_eq!(value(&workspace, &shelf, "capacity"), (Some(json!(4)), crabsim_ui::workspace::ValueFrom::Class("Store".into())));
+
+    // Values typed in the inspector, as its fields give them.
+    for (attribute, typed) in [("capacity", "-1"), ("dwelling_time", "0:30"), ("exit_strategy", "last_in_first_out")] {
+        let mut form = crabsim_ui::attributes::Form::new(attribute, None);
+        form.parts[0].text = typed.to_string();
+        workspace.set_attribute(&shelf, attribute, form.value().unwrap(), false).unwrap();
+    }
+    assert_eq!(value(&workspace, &shelf, "capacity"), (Some(json!("unlimited")), crabsim_ui::workspace::ValueFrom::Instance));
+    assert_eq!(value(&workspace, &shelf, "dwelling_time").0, Some(json!("00:00:30")));
+    assert_eq!(value(&workspace, &shelf, "exit_strategy").0, Some(json!("last_in_first_out")));
+    // It can be connected and the model still runs.
+    workspace.connect("Station 1", &shelf, false).unwrap();
+    workspace.connect(&shelf, "Out", false).unwrap();
+    assert!(workspace.problems().is_none(), "the model has no problems");
 }

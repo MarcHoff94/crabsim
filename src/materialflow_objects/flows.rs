@@ -133,35 +133,90 @@ pub trait MaterialFlow: EventInterface + StopCtrl {
 	fn is_entrance_allowed(&self) -> bool;
 	fn is_exit_allowed(&self) -> bool;
 	fn process_mu_entrance(&mut self, mu: MoveableUnit, context: &mut EventContext) -> Result<Option<EventTemplate>, MaterialflowError>;
-	fn add_blocked(&mut self, id_blocked: u32);
-	fn remove_blocked(&mut self, id_blocked: u32);
+	/// Lists a predecessor it refused, whose MU has been ready to leave since `since`.
+	/// `answering_retry` says the predecessor was answering this object's retry.
+	fn add_blocked(&mut self, id_blocked: u32, since: SimTime, answering_retry: bool);
+	/// A listed predecessor's MU has moved. It waits on by its next MU, ready since `next`, or
+	/// gives up its place if it has none.
+	fn relist_blocked(&mut self, id_blocked: u32, next: Option<SimTime>);
 	fn notify_blocked_predecessors(&mut self) -> Result<Option<Vec<EventTemplate>>, MaterialflowError>;
 }
 
-/// Lists a predecessor as waiting. One already listed keeps its place, since it has been
-/// waiting from then on.
-pub fn list_blocked(blockedlist: &mut Vec<u32>, id_blocked: u32) {
-	if !blockedlist.contains(&id_blocked) {
-		blockedlist.push(id_blocked);
+/// A predecessor's place in the line for a successor to have room.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Waiting {
+	/// When the MU it offered became ready to leave, which the line is ordered by.
+	pub since: SimTime,
+	pub id: u32,
+	/// The successor has had room and sent it a retry. Until that retry is refused it isn't
+	/// waiting: if its MU goes in or the retry finds it stopped, the place is gone.
+	retried: bool,
+}
+
+/// Lists a predecessor as waiting with an MU ready to leave since `since`. The line is ordered by
+/// that time, longest ready first, and those ready at the same instant in the order they were
+/// listed (ADR 0018). One already listed keeps its place, and so does one whose retry from this
+/// successor was just refused (`answering_retry`), so those still waiting keep their order.
+#[inline]
+pub fn list_blocked(blockedlist: &mut Vec<Waiting>, id_blocked: u32, since: SimTime, answering_retry: bool) {
+	if let Some(at) = blockedlist.iter().position(|waiting| waiting.id == id_blocked) {
+		let listed = &mut blockedlist[at];
+		if !listed.retried {
+			return;
+		}
+		if answering_retry {
+			listed.retried = false;
+			return;
+		}
+		// Its last retry came to nothing, so it lost that place and joins the line afresh.
+		blockedlist.remove(at);
+	}
+	let waiting = Waiting { since, id: id_blocked, retried: false };
+	match blockedlist.last() {
+		// Nearly always the back: an MU refused now became ready now, or was listed before.
+		Some(last) if last.since > since => {
+			let at = blockedlist.iter().rposition(|listed| listed.since <= since).map_or(0, |last| last + 1);
+			blockedlist.insert(at, waiting);
+		}
+		_ => blockedlist.push(waiting),
 	}
 }
 
-/// Empties the list into one retry for each predecessor, longest-waiting first. A retry that
-/// is refused lists its predecessor again, so those still waiting keep their order.
-pub fn retries_for_blocked(blockedlist: &mut Vec<u32>, from: u32) -> Option<Vec<EventTemplate>> {
+/// A predecessor's MU has moved, so it gives up its place. If it has another MU ready to leave,
+/// since `next`, it waits on by that one, wherever it was listed.
+#[inline]
+pub fn relist_blocked(blockedlist: &mut Vec<Waiting>, id_blocked: u32, next: Option<SimTime>) {
+	let Some(at) = blockedlist.iter().position(|waiting| waiting.id == id_blocked) else {
+		return;
+	};
+	blockedlist.remove(at);
+	if let Some(since) = next {
+		list_blocked(blockedlist, id_blocked, since, false);
+	}
+}
+
+/// One retry for each predecessor waiting, longest-waiting first. Each keeps its entry until its
+/// retry is answered: refused, it is back in its place, and otherwise the place is gone. Those
+/// whose last retry came to nothing aren't waiting, and go in the same pass.
+pub fn retries_for_blocked(blockedlist: &mut Vec<Waiting>, from: u32) -> Option<Vec<EventTemplate>> {
 	if blockedlist.is_empty() {
 		return None;
 	}
-	Some(
-		blockedlist
-			.drain(..)
-			.map(|blocked_id| EventTemplate {
-				eventtype: EventType::BlockedRetry { from },
-				exec_time: SimTime::ZERO,
-				object_id: blocked_id,
-			})
-			.collect(),
-	)
+	let mut retries = Vec::with_capacity(blockedlist.len());
+	blockedlist.retain_mut(|waiting| {
+		if waiting.retried {
+			return false;
+		}
+		waiting.retried = true;
+		retries.push(EventTemplate { eventtype: EventType::BlockedRetry { from }, exec_time: SimTime::ZERO, object_id: waiting.id });
+		true
+	});
+	(!retries.is_empty()).then_some(retries)
+}
+
+/// The predecessors waiting in a line, longest-waiting first, for a state report.
+pub fn waiting_ids(blockedlist: &[Waiting]) -> Vec<u32> {
+	blockedlist.iter().filter(|waiting| !waiting.retried).map(|waiting| waiting.id).collect()
 }
 
 pub trait SuccessorContainer {
@@ -172,8 +227,12 @@ pub trait SuccessorContainer {
 	fn succ_pointer(&self) -> usize;
 	fn succ_pointer_mut(&mut self) -> &mut usize;
 	fn clear_content_and_idle(&mut self);
-	/// Hands over the next MU to leave, at time `now`.
+	/// Hands over the next MU to leave, at time `now`. Which one that is, is the object's own
+	/// business: its exit strategy.
 	fn take_content(&mut self, now: SimTime) -> Option<MoveableUnit>;
+	/// When the MU it would hand over at `now` became ready to leave, or `None` if it has none
+	/// that may leave.
+	fn offered_since(&self, now: SimTime) -> Option<SimTime>;
 	fn statistics_mut(&mut self) -> &mut StatisticsKeeper;
 }
 
@@ -190,6 +249,10 @@ pub trait DistributionStrategy {
 	/// Notes that the MU went to the successor at `idx`, so the next one starts after it.
 	fn moved(&mut self, idx: usize, n: usize, pointer: &mut usize) {
 		*pointer = (idx + 1) % n;
+	}
+	/// Whether this offers the MU in answer to a successor's retry.
+	fn answers_retry(&self) -> bool {
+		false
 	}
 }
 
@@ -273,9 +336,11 @@ pub fn try_to_move_to_successor_with_strategy<
 				obj.statistics_mut().count_mu_out();
 				let mu_id = mu.id;
 				let seq = context.seq;
-				// It is no longer waiting, so it gives up its place wherever it was refused.
+				// That MU is no longer waiting, so the object gives up its place wherever it was
+				// refused, and waits on there by its next MU if it has one ready.
+				let next = obj.offered_since(context.time);
 				for &refused_by in obj.successors() {
-					others.get_mut(refused_by).remove_blocked(pred_id);
+					others.get_mut(refused_by).relist_blocked(pred_id, next);
 				}
 				context.record(OccurrenceKind::MuMoved { mu_id, from: pred_id, to: succ_id });
 				log::info!("seq={} MU {} moved from {} to {}", seq, mu_id, pred_id, succ_id);
@@ -304,7 +369,9 @@ pub fn try_to_move_to_successor_with_strategy<
 				succ_id,
 				pred_id
 			);
-			others.get_mut(succ_id).add_blocked(pred_id);
+			if let Some(since) = obj.offered_since(context.time) {
+				others.get_mut(succ_id).add_blocked(pred_id, since, strategy.answers_retry());
+			}
 		}
 	}
 	match chosen {
@@ -326,6 +393,9 @@ impl<S: DistributionStrategy> DistributionStrategy for OnlySuccessor<'_, S> {
 	}
 	fn moved(&mut self, idx: usize, n: usize, pointer: &mut usize) {
 		self.1.moved(idx, n, pointer);
+	}
+	fn answers_retry(&self) -> bool {
+		true
 	}
 }
 

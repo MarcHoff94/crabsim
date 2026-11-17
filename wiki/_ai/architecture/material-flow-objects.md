@@ -20,7 +20,7 @@ section: architecture
 - A second random failure while failed is discarded; random failures continue under a forced one
 
 ## Pitfalls
-- Buffer is broken: loses MUs, never notifies predecessors, ignores a retry's `from`
+- Buffer: `VecDeque` of MUs in entry order with each one's ready time; `Capacity::Limited(n)` or `Unlimited` (ADR 0019); `dwelling_time`; `ExitStrategy` first in first out or last in first out picks the offered MU (`offered`), so movement code never knows it; one `MUExit` per MU at the end of its dwelling; `pass_on` moves every ready MU until refused, then blocked; retries to its own waiting predecessors after any MU left; reports `Idle` empty, `Processing` holding, `Blocked`; starting MUs; no stops yet
 
 ## Code locations
 - `src/materialflow_objects/model_object.rs`, `flows.rs`, `source.rs`, `station.rs`, `buffer.rs`, `drain.rs`

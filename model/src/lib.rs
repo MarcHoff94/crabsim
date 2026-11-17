@@ -17,6 +17,7 @@ mod suggest;
 mod warn;
 mod write;
 
+pub use crabsim::{Capacity, ExitStrategy};
 use crabsim::{Dimensions, ObjectKind, Position, SimTime};
 use serde::Serialize;
 use std::collections::HashSet;
@@ -25,6 +26,18 @@ use std::fmt;
 /// The only format version this crabsim reads and writes. Version 2 made connections a list of
 /// their own (ADR 0014), and version 1 isn't read any more.
 pub const FORMAT_VERSION: u64 = 2;
+
+/// An exit strategy's name in a file.
+pub fn exit_strategy_name(strategy: ExitStrategy) -> &'static str {
+    match strategy {
+        ExitStrategy::FirstInFirstOut => "first_in_first_out",
+        ExitStrategy::LastInFirstOut => "last_in_first_out",
+    }
+}
+
+pub fn exit_strategy_from_name(name: &str) -> Option<ExitStrategy> {
+    [ExitStrategy::FirstInFirstOut, ExitStrategy::LastInFirstOut].into_iter().find(|&strategy| exit_strategy_name(strategy) == name)
+}
 
 /// The built-in classes every chain of classes ends in.
 pub const BUILT_IN_CLASSES: [&str; 4] = ["Source", "Station", "Buffer", "Drain"];
@@ -133,10 +146,16 @@ pub struct Attributes {
     pub process_time: Option<SimTime>,
     /// A Station's random failures. None by default: it never fails.
     pub failures: Option<Failures>,
-    /// How many MUs a Station holds from Init. 0 by default, at most 1 for now.
+    /// How many MUs a Station or Buffer holds from Init. 0 by default. At most 1 for a Station,
+    /// for now, and at most its capacity for a Buffer.
     pub starting_mus: Option<u64>,
-    /// How many MUs a Buffer holds. Must be set somewhere, at least 1.
-    pub capacity: Option<u64>,
+    /// How many MUs a Buffer holds: a whole number from 1, or unlimited, which is the default.
+    pub capacity: Option<Capacity>,
+    /// How long each MU stays in a Buffer before it may leave, counted from its entry. 0 by
+    /// default.
+    pub dwelling_time: Option<SimTime>,
+    /// Which of the MUs that may leave a Buffer it passes on next. First in, first out by default.
+    pub exit_strategy: Option<ExitStrategy>,
     /// The object's size and rotation. Visual only. A default size by type.
     pub dimensions: Option<Dimensions>,
     /// Free text saying what the object is. Visual only.
@@ -197,6 +216,8 @@ impl Attributes {
             Attribute::Failures => self.failures.is_some(),
             Attribute::StartingMus => self.starting_mus.is_some(),
             Attribute::Capacity => self.capacity.is_some(),
+            Attribute::DwellingTime => self.dwelling_time.is_some(),
+            Attribute::ExitStrategy => self.exit_strategy.is_some(),
             Attribute::Dimensions => self.dimensions.is_some(),
             Attribute::Description => self.description.is_some(),
             Attribute::StateNotes => self.state_notes.is_some(),
@@ -212,6 +233,8 @@ impl Attributes {
             Attribute::Failures => self.failures = from.failures.clone(),
             Attribute::StartingMus => self.starting_mus = from.starting_mus,
             Attribute::Capacity => self.capacity = from.capacity,
+            Attribute::DwellingTime => self.dwelling_time = from.dwelling_time,
+            Attribute::ExitStrategy => self.exit_strategy = from.exit_strategy,
             Attribute::Dimensions => self.dimensions = from.dimensions,
             Attribute::Description => self.description = from.description.clone(),
             Attribute::StateNotes => self.state_notes = from.state_notes.clone(),
@@ -228,6 +251,8 @@ pub enum Attribute {
     Failures,
     StartingMus,
     Capacity,
+    DwellingTime,
+    ExitStrategy,
     Dimensions,
     Description,
     StateNotes,
@@ -235,12 +260,14 @@ pub enum Attribute {
 }
 
 impl Attribute {
-    pub const ALL: [Attribute; 9] = [
+    pub const ALL: [Attribute; 11] = [
         Attribute::Interval,
         Attribute::ProcessTime,
         Attribute::Failures,
         Attribute::StartingMus,
         Attribute::Capacity,
+        Attribute::DwellingTime,
+        Attribute::ExitStrategy,
         Attribute::Dimensions,
         Attribute::Description,
         Attribute::StateNotes,
@@ -255,6 +282,8 @@ impl Attribute {
             Attribute::Failures => "failures",
             Attribute::StartingMus => "starting_mus",
             Attribute::Capacity => "capacity",
+            Attribute::DwellingTime => "dwelling_time",
+            Attribute::ExitStrategy => "exit_strategy",
             Attribute::Dimensions => "dimensions",
             Attribute::Description => "description",
             Attribute::StateNotes => "state_notes",
@@ -269,7 +298,7 @@ impl Attribute {
             (_, Attribute::Dimensions | Attribute::Description | Attribute::StateNotes)
                 | ("Source", Attribute::Interval | Attribute::Distribution)
                 | ("Station", Attribute::ProcessTime | Attribute::Failures | Attribute::StartingMus | Attribute::Distribution)
-                | ("Buffer", Attribute::Capacity)
+                | ("Buffer", Attribute::StartingMus | Attribute::Capacity | Attribute::DwellingTime | Attribute::ExitStrategy)
         )
     }
 }
@@ -279,6 +308,8 @@ impl Attribute {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum State {
     Busy,
+    /// A Buffer with MUs in it, none of which is kept from leaving.
+    Holding,
     Blocked,
     Idle,
     Failed,
@@ -290,12 +321,13 @@ pub enum State {
 pub type StateNotes = std::collections::BTreeMap<State, String>;
 
 impl State {
-    pub const ALL: [State; 6] = [State::Busy, State::Blocked, State::Idle, State::Failed, State::ForcedFailure, State::Paused];
+    pub const ALL: [State; 7] = [State::Busy, State::Holding, State::Blocked, State::Idle, State::Failed, State::ForcedFailure, State::Paused];
 
     /// Its name in a file.
     pub fn name(self) -> &'static str {
         match self {
             State::Busy => "busy",
+            State::Holding => "holding",
             State::Blocked => "blocked",
             State::Idle => "idle",
             State::Failed => "failed",
@@ -312,6 +344,7 @@ impl State {
     pub fn label(self) -> &'static str {
         match self {
             State::Busy => "Busy",
+            State::Holding => "Holding",
             State::Blocked => "Blocked",
             State::Idle => "Idle",
             State::Failed => "Failed",
@@ -321,13 +354,14 @@ impl State {
     }
 
     /// The states an object of this built-in class can be in. A Source is always making its next
-    /// MU or waiting to pass one on, and a Drain takes MUs at once, so it is only ever idle. Only
-    /// Stations stop, so far.
+    /// MU or waiting to pass one on, and a Drain takes MUs at once, so it is only ever idle. A
+    /// Buffer does no work, so it is holding rather than busy, and idle when empty. Only Stations
+    /// stop, so far.
     pub fn of(built_in: &str) -> &'static [State] {
         match built_in {
             "Source" => &[State::Busy, State::Blocked],
-            "Station" => &State::ALL,
-            "Buffer" => &[State::Busy, State::Blocked, State::Idle],
+            "Station" => &[State::Busy, State::Blocked, State::Idle, State::Failed, State::ForcedFailure, State::Paused],
+            "Buffer" => &[State::Holding, State::Blocked, State::Idle],
             "Drain" => &[State::Idle],
             _ => &[],
         }
@@ -337,6 +371,7 @@ impl State {
     pub(crate) fn never(self) -> &'static str {
         match self {
             State::Busy => "busy",
+            State::Holding => "holding",
             State::Blocked => "blocked",
             State::Idle => "idle",
             State::Failed => "failed",
@@ -575,6 +610,12 @@ impl Model {
         if built_in == "Station" {
             attributes.process_time.get_or_insert(SimTime::ZERO);
             attributes.starting_mus.get_or_insert(0);
+        }
+        if built_in == "Buffer" {
+            attributes.starting_mus.get_or_insert(0);
+            attributes.capacity.get_or_insert(Capacity::Unlimited);
+            attributes.dwelling_time.get_or_insert(SimTime::ZERO);
+            attributes.exit_strategy.get_or_insert(ExitStrategy::FirstInFirstOut);
         }
         let kind = match built_in {
             "Source" => ObjectKind::Source,

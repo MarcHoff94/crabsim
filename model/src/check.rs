@@ -2,7 +2,10 @@
 //! out of range, values set nowhere, connections, and a Source that would create MUs forever.
 
 use crate::read::Broken;
-use crate::{Attribute, Attributes, Failures, Model, Problem, RepairTime, BUILT_IN_CLASSES};
+use crate::{Attribute, Attributes, Capacity, Failures, Model, Problem, RepairTime, BUILT_IN_CLASSES};
+
+/// More starting MUs than this in one Buffer is refused: each takes memory from Init on.
+const MOST_STARTING_MUS: u64 = 1_000_000;
 use crabsim::{Dimensions, SimTime};
 use std::collections::{HashMap, VecDeque};
 
@@ -207,27 +210,30 @@ impl<'m> Checker<'m> {
         }
         if let Some(built_in) = self.built_in(index) {
             self.attributes(owner, &instance.attributes, built_in);
-            self.required(index, built_in);
+            if built_in == "Buffer" {
+                self.starting_mus_fit(index);
+            }
         }
     }
 
-    /// Values that must be set somewhere in the chain, and aren't.
-    fn required(&mut self, index: usize, built_in: &str) {
-        let attribute = match built_in {
-            "Buffer" => Attribute::Capacity,
-            _ => return,
-        };
+    /// A Buffer can't start with more MUs than it holds, wherever the two values come from.
+    fn starting_mus_fit(&mut self, index: usize) {
         let model = self.model;
         let Some(resolved) = model.resolve(index) else { return };
-        if resolved.attributes.is_set(attribute) {
+        let (Some(starting), Some(Capacity::Limited(capacity))) = (resolved.attributes.starting_mus, resolved.attributes.capacity) else { return };
+        // One that was there but couldn't be read has been reported already, and a capacity of 0 too.
+        if starting <= capacity || capacity == 0 || self.unreadable_in_chain(index, Attribute::StartingMus) || self.unreadable_in_chain(index, Attribute::Capacity) {
             return;
         }
-        // One that was there but couldn't be read has been reported already.
-        if self.unreadable_in_chain(index, attribute) {
-            return;
-        }
-        let what = "a `capacity`: how many MUs it holds";
-        self.problem(Owner::Instance(index), "", format!("a {built_in} needs {what}. Set it on the instance or one of its classes"));
+        let own = &model.instances[index].attributes;
+        let at = if own.starting_mus.is_some() {
+            "/attributes/starting_mus"
+        } else if own.capacity.is_some() {
+            "/attributes/capacity"
+        } else {
+            ""
+        };
+        self.problem(Owner::Instance(index), at, format!("it starts with {starting} MUs but holds only {capacity}"));
     }
 
     /// Whether the instance or a class in its chain has this attribute but it couldn't be read, so
@@ -251,8 +257,11 @@ impl<'m> Checker<'m> {
                 self.problem(owner, &format!("/attributes/{name}"), format!("a {built_in} has no attribute `{name}`"));
             }
         }
-        if built_in == "Buffer" && attributes.capacity == Some(0) {
-            self.problem(owner, "/attributes/capacity", "a capacity must be at least 1");
+        if built_in == "Buffer" && attributes.capacity == Some(Capacity::Limited(0)) {
+            self.problem(owner, "/attributes/capacity", "a capacity must be at least 1, or \"unlimited\"");
+        }
+        if built_in == "Buffer" && attributes.starting_mus.is_some_and(|count| count > MOST_STARTING_MUS) {
+            self.problem(owner, "/attributes/starting_mus", "a Buffer can start with at most 1,000,000 MUs");
         }
         if built_in == "Station" && attributes.starting_mus.is_some_and(|count| count > 1) {
             self.problem(owner, "/attributes/starting_mus", "a Station can start with 0 or 1 MUs, until Stations have a capacity");
@@ -407,9 +416,9 @@ impl<'m> Checker<'m> {
     }
 
     /// A Source with an interval of 0 creates the next MU as soon as one leaves. If it can reach a
-    /// Drain through objects that take no time, nothing ever fills, so it would create MUs forever
-    /// without time passing. Buffers count as taking no time until they have dwelling times and
-    /// can fill up.
+    /// Drain or an unlimited Buffer through objects that take no time, nothing ever fills, so it
+    /// would create MUs forever without time passing. A Station takes no time with a process time
+    /// of 0, and a Buffer with a capacity when its dwelling time is 0.
     fn endless_sources(&mut self) {
         let model = self.model;
         for index in 0..model.instances.len() {
@@ -427,13 +436,15 @@ impl<'m> Checker<'m> {
                 } else {
                     String::new()
                 };
-                let drain = &model.instances[*path.last().expect("a path ends at a Drain")].name;
+                let end = *path.last().expect("a path ends at a Drain or an unlimited Buffer");
+                let name = &model.instances[end].name;
+                let reaches = if self.built_in(end) == Some("Drain") { format!("Drain `{name}`") } else { format!("`{name}`, a Buffer with no limit,") };
                 let at = if model.instances[index].attributes.interval.is_some() { "/attributes/interval" } else { "" };
                 self.problem(
                     Owner::Instance(index),
                     at,
                     format!(
-                        "with an interval of 0 this Source reaches Drain `{drain}`{through}, so nothing ever blocks it \
+                        "with an interval of 0 this Source reaches {reaches}{through}, so nothing ever blocks it \
                          and it would create MUs forever without time passing"
                     ),
                 );
@@ -441,7 +452,8 @@ impl<'m> Checker<'m> {
         }
     }
 
-    /// The objects from a Source's successor to a Drain, if every one before the Drain takes no time.
+    /// The objects from a Source's successor to a Drain or an unlimited Buffer, if every one
+    /// before it takes no time.
     fn zero_time_path_to_a_drain(&self, source: usize) -> Option<Vec<usize>> {
         let mut came_from: HashMap<usize, usize> = HashMap::new();
         let mut queue = VecDeque::from([source]);
@@ -451,8 +463,10 @@ impl<'m> Checker<'m> {
                 if next == source || came_from.contains_key(&next) {
                     continue;
                 }
+                let resolved = self.model.resolve(next);
+                let unlimited = self.built_in(next) == Some("Buffer") && resolved.as_ref().is_some_and(|resolved| resolved.attributes.capacity == Some(Capacity::Unlimited));
                 let passes = match self.built_in(next) {
-                    Some("Drain") => {
+                    Some("Drain" | "Buffer") if unlimited || self.built_in(next) == Some("Drain") => {
                         came_from.insert(next, at);
                         let mut path = vec![next];
                         while let Some(&before) = came_from.get(path.last().expect("not empty")) {
@@ -464,10 +478,8 @@ impl<'m> Checker<'m> {
                         path.reverse();
                         return Some(path);
                     }
-                    Some("Station") => {
-                        self.model.resolve(next).is_some_and(|resolved| resolved.attributes.process_time == Some(SimTime::ZERO))
-                    }
-                    Some("Buffer") => true,
+                    Some("Station") => resolved.is_some_and(|resolved| resolved.attributes.process_time == Some(SimTime::ZERO)),
+                    Some("Buffer") => resolved.is_some_and(|resolved| resolved.attributes.dwelling_time == Some(SimTime::ZERO)),
                     _ => false,
                 };
                 if passes {

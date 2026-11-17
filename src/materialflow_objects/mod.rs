@@ -13,4 +13,4 @@ pub use self::flows::BaseObject;
 pub use model_object::{ModelObject, OtherObjects};
 pub use station::SingleStation;
 pub use source::Source;
-pub use buffer::Buffer;
+pub use buffer::{Buffer, ExitStrategy};

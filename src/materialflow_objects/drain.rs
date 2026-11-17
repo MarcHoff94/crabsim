@@ -1,18 +1,18 @@
 use crate::error::MaterialflowError;
 use crate::event::{EventContext, EventTemplate, EventType};
-use crate::report::{ObjectKind, ObjectState, OccurrenceKind};
+use crate::report::{Capacity, ObjectKind, ObjectState, OccurrenceKind};
 use crate::statistics::StatisticsKeeper;
 use crate::time::SimTime;
 use super::flows::BaseObject;
 use crate::materialflow_objects::OtherObjects;
-use crate::flows::{list_blocked, EventInterface, InterruptionState, MaterialFlow, MoveableUnit, ProcessState, StopCtrl};
+use crate::flows::{list_blocked, relist_blocked, waiting_ids, Waiting, EventInterface, InterruptionState, MaterialFlow, MoveableUnit, ProcessState, StopCtrl};
 
 #[derive(Clone)]
 pub struct Drain {
     pub base: BaseObject,
     pub statistics: StatisticsKeeper,
     pub entrance_locked: bool,
-    pub blockedlist: Vec<u32>,
+    pub blockedlist: Vec<Waiting>,
 }
 impl Drain {
     pub fn new(object_id: u32) -> Drain {
@@ -54,9 +54,9 @@ impl EventInterface for Drain {
             stop: None,
             interruptions: Vec::new(),
             remaining: None,
-            blocked_predecessors: self.blockedlist.clone(),
+            blocked_predecessors: waiting_ids(&self.blockedlist),
             successors: Vec::new(),
-            capacity: 0,
+            capacity: Capacity::Limited(0),
             process_time: None,
             configured_process_time: None,
             statistics: self.statistics.read(now),
@@ -105,11 +105,11 @@ impl MaterialFlow for Drain {
         );
         Ok(None)
     }
-    fn add_blocked(&mut self, id_blocked: u32) {
-        list_blocked(&mut self.blockedlist, id_blocked);
+    fn add_blocked(&mut self, id_blocked: u32, since: SimTime, answering_retry: bool) {
+        list_blocked(&mut self.blockedlist, id_blocked, since, answering_retry);
     }
-    fn remove_blocked(&mut self, id_blocked: u32) {
-        self.blockedlist.retain(|&id| id != id_blocked);
+    fn relist_blocked(&mut self, id_blocked: u32, next: Option<SimTime>) {
+        relist_blocked(&mut self.blockedlist, id_blocked, next);
     }
     fn notify_blocked_predecessors(&mut self) -> Result<Option<Vec<EventTemplate>>, MaterialflowError> {
         //predecessors do not get notified from drain because drain is never blocking them

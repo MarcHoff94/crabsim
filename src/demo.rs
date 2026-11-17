@@ -1,7 +1,9 @@
 //! A small example model, run by the headless CLI and drawn by the UI.
 
 use crate::flows::FailureProfile;
+use crate::materialflow_objects::ExitStrategy;
 use crate::model::{ModelDescription, Position};
+use crate::report::Capacity;
 use crate::random_numbers::Distribution;
 use crate::simulation_run::SimulationRun;
 use crate::time::SimTime;
@@ -66,6 +68,40 @@ pub fn model() -> ModelDescription {
         (st5c, drain),
     ];
     for (from, to) in connections {
+        model.connect(from, to);
+    }
+    model
+}
+
+/// A second example, with Buffers: a line of three Stations with a store of 10 places between
+/// the first two, and a cooling section after the second, where every MU stays a minute and
+/// the newest is taken first once several may leave. `models/buffered-line.json` is the same
+/// model as a file, and the benchmark runs it.
+pub fn buffered_line() -> ModelDescription {
+    let mut model = ModelDescription::new();
+    let place = |model: &mut ModelDescription, id: u32, name: &str, x: f64| {
+        model.set_name(id, name);
+        model.set_position(id, Position { x, y: 0.0, z: 0.0 });
+        id
+    };
+    let failures = |availability: f32, repair_secs: f64| FailureProfile::new(availability, Distribution::ERLANG { mean: repair_secs * 1_000.0, k: 2 }, 0);
+    let source = model.add_source(SimTime::from_secs(5));
+    place(&mut model, source, "Source", 0.0);
+    let saw = model.add_station(SimTime::from_secs(4), failures(0.9, 60.0));
+    place(&mut model, saw, "Saw", 4.0);
+    let store = model.add_buffer(Capacity::Limited(10));
+    place(&mut model, store, "Store", 8.0);
+    let mill = model.add_station(SimTime::from_secs(5), failures(0.85, 90.0));
+    place(&mut model, mill, "Mill", 12.0);
+    let cooling = model.add_buffer(Capacity::Unlimited);
+    model.set_dwelling_time(cooling, SimTime::from_secs(60));
+    model.set_exit_strategy(cooling, ExitStrategy::LastInFirstOut);
+    place(&mut model, cooling, "Cooling", 16.0);
+    let pack = model.add_station(SimTime::from_secs(4), failures(0.95, 30.0));
+    place(&mut model, pack, "Pack", 20.0);
+    let drain = model.add_drain();
+    place(&mut model, drain, "Drain", 24.0);
+    for (from, to) in [(source, saw), (saw, store), (store, mill), (mill, cooling), (cooling, pack), (pack, drain)] {
         model.connect(from, to);
     }
     model

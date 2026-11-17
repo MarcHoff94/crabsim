@@ -119,13 +119,33 @@ pub enum ObjectKind {
     Drain,
 }
 
+/// How many MUs an object can hold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Capacity {
+    Limited(u64),
+    /// A Buffer that takes every MU. It grows as far as it's filled (ADR 0019).
+    Unlimited,
+}
+
+impl Capacity {
+    /// The number of MUs at which the object is full, which an unlimited one never reaches.
+    pub fn limit(self) -> u64 {
+        match self {
+            Capacity::Limited(limit) => limit,
+            Capacity::Unlimited => u64::MAX,
+        }
+    }
+}
+
 /// What one material-flow object reports about itself.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ObjectState {
     pub id: u32,
     pub kind: ObjectKind,
-    /// Ids of the MUs the object currently holds.
+    /// Ids of the MUs the object currently holds, for a Buffer in the order they came in.
     pub contents: Vec<u32>,
+    /// What it is doing. A Buffer is `Idle` when empty, `Processing` while it holds MUs, and
+    /// `Blocked` when an MU that may leave can't.
     pub process: ProcessState,
     /// The most serious active interruption, if the object is stopped.
     pub stop: Option<StopCause>,
@@ -137,7 +157,7 @@ pub struct ObjectState {
     pub blocked_predecessors: Vec<u32>,
     pub successors: Vec<u32>,
     /// How many MUs a Station or Buffer can hold. 0 for a Source or Drain.
-    pub capacity: u64,
+    pub capacity: Capacity,
     /// How long a Station works on one MU, now. `None` for other objects.
     pub process_time: Option<SimTime>,
     /// The process time in the Station's default state, which Reset returns to.

@@ -115,8 +115,15 @@ fn attribute_properties(attributes: &Attributes, has: impl Fn(Attribute) -> bool
     if let Some(mus) = attributes.starting_mus.filter(|_| has(Attribute::StartingMus)) {
         properties.push(("starting_mus", Value::Long(mus)));
     }
-    if let Some(capacity) = attributes.capacity.filter(|_| has(Attribute::Capacity)) {
+    // A Buffer with no limit has no `capacity` property.
+    if let Some(crabsim_model::Capacity::Limited(capacity)) = attributes.capacity.filter(|_| has(Attribute::Capacity)) {
         properties.push(("capacity", Value::Long(capacity)));
+    }
+    if let Some(time) = attributes.dwelling_time.filter(|_| has(Attribute::DwellingTime)) {
+        properties.push(("dwelling_time_s", seconds(time)));
+    }
+    if let Some(strategy) = attributes.exit_strategy.filter(|_| has(Attribute::ExitStrategy)) {
+        properties.push(("exit_strategy", Value::Text(crabsim_model::exit_strategy_name(strategy).to_string())));
     }
     if let Some(dimensions) = attributes.dimensions.filter(|_| has(Attribute::Dimensions)) {
         properties.push(("length", Value::Double(dimensions.length)));

@@ -1,0 +1,155 @@
+{
+  "$schema": "./model-file.schema.json",
+  "format_version": 2,
+  "description": "A line with Buffers: a Saw, a Store of 10 places, a Mill, a Cooling section where every MU stays a minute and the newest that may leave goes first, and packing. The Mill fails most, so the Store fills while it is down.",
+  "instances": [
+    {
+      "name": "Source",
+      "class": "Source",
+      "stream": 0,
+      "position": {
+        "x": 0.0,
+        "y": 0.0
+      },
+      "attributes": {
+        "interval": "00:00:05"
+      }
+    },
+    {
+      "name": "Saw",
+      "class": "Station",
+      "stream": 1,
+      "position": {
+        "x": 4.0,
+        "y": 0.0
+      },
+      "attributes": {
+        "process_time": "00:00:04",
+        "failures": {
+          "availability": 0.9,
+          "repair_time": {
+            "erlang": {
+              "mean": "00:01:00",
+              "k": 2
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "Store",
+      "class": "Buffer",
+      "stream": 2,
+      "position": {
+        "x": 8.0,
+        "y": 0.0
+      },
+      "attributes": {
+        "capacity": 10
+      }
+    },
+    {
+      "name": "Mill",
+      "class": "Station",
+      "stream": 3,
+      "position": {
+        "x": 12.0,
+        "y": 0.0
+      },
+      "attributes": {
+        "process_time": "00:00:05",
+        "failures": {
+          "availability": 0.85,
+          "repair_time": {
+            "erlang": {
+              "mean": "00:01:30",
+              "k": 2
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "Cooling",
+      "class": "Buffer",
+      "stream": 4,
+      "position": {
+        "x": 16.0,
+        "y": 0.0
+      },
+      "attributes": {
+        "capacity": "unlimited",
+        "dwelling_time": "00:01:00",
+        "exit_strategy": "last_in_first_out"
+      }
+    },
+    {
+      "name": "Pack",
+      "class": "Station",
+      "stream": 5,
+      "position": {
+        "x": 20.0,
+        "y": 0.0
+      },
+      "attributes": {
+        "process_time": "00:00:04",
+        "failures": {
+          "availability": 0.95,
+          "repair_time": {
+            "erlang": {
+              "mean": "00:00:30",
+              "k": 2
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "Drain",
+      "class": "Drain",
+      "stream": 6,
+      "position": {
+        "x": 24.0,
+        "y": 0.0
+      }
+    }
+  ],
+  "connections": [
+    {
+      "from": "Source",
+      "to": "Saw",
+      "exit": 1,
+      "entrance": 1
+    },
+    {
+      "from": "Saw",
+      "to": "Store",
+      "exit": 1,
+      "entrance": 1
+    },
+    {
+      "from": "Store",
+      "to": "Mill",
+      "exit": 1,
+      "entrance": 1
+    },
+    {
+      "from": "Mill",
+      "to": "Cooling",
+      "exit": 1,
+      "entrance": 1
+    },
+    {
+      "from": "Cooling",
+      "to": "Pack",
+      "exit": 1,
+      "entrance": 1
+    },
+    {
+      "from": "Pack",
+      "to": "Drain",
+      "exit": 1,
+      "entrance": 1
+    }
+  ]
+}

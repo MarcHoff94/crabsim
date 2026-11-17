@@ -8,9 +8,10 @@ use std::collections::{HashMap, VecDeque};
 impl Model {
     /// Every warning about a model without problems, in file order: an instance no Source
     /// reaches, one with no route to a Drain, a Drain list naming something that isn't a Drain,
-    /// and a weighted object whose weight is nothing on every route onward, so its successors
-    /// all rank the same. For a model `load` gave, so without problems: checking again would
-    /// cost as much as the warnings themselves.
+    /// a weighted object whose weight is nothing on every route onward, so its successors all
+    /// rank the same, and an unlimited Buffer that can get MUs faster than it can pass them on.
+    /// For a model `load` gave, so without problems: checking again would cost as much as the
+    /// warnings themselves.
     pub fn warnings(&self) -> Vec<Problem> {
         let count = self.instances.len();
         let index: HashMap<&str, usize> = self.instances.iter().enumerate().map(|(i, instance)| (instance.name.as_str(), i)).collect();
@@ -53,6 +54,37 @@ impl Model {
                 warn(format!("/instances/{i}"), name, "it has no route to a Drain, so an MU that reaches it can never leave the model".to_string());
             }
             let resolved = self.resolve(i).expect("checked");
+            if built_in[i] == "Buffer" && resolved.attributes.capacity == Some(crate::Capacity::Unlimited) {
+                // MUs per hour in and out, where the objects on both sides say: a Source's
+                // interval and a Station's process time. Anything else, and nothing is known.
+                let rate = |others: &Vec<usize>| -> Option<f64> {
+                    others.iter().try_fold(0.0, |sum, &other| {
+                        let has = self.resolve(other).expect("checked").attributes;
+                        let time = match built_in[other] {
+                            "Source" => has.interval,
+                            "Station" => has.process_time,
+                            _ => None,
+                        }?;
+                        Some(sum + 3_600_000.0 / time.as_millis() as f64)
+                    })
+                };
+                if let (Some(coming), Some(going)) = (rate(&predecessors[i]), rate(&successors[i]))
+                    && !successors[i].is_empty()
+                    && coming > going
+                {
+                    let per_hour = |rate: f64| if rate.is_finite() { format!("{rate:.0}") } else { "any number of".to_string() };
+                    let at = if instance.attributes.capacity.is_some() { format!("/instances/{i}/attributes/capacity") } else { format!("/instances/{i}") };
+                    warn(
+                        at,
+                        name,
+                        format!(
+                            "it has no limit and can get {} MUs an hour but pass on only {}, so it would grow for as long as the run lasts: give it a capacity, or make sure that is meant",
+                            per_hour(coming),
+                            per_hour(going)
+                        ),
+                    );
+                }
+            }
             let Some(DistributionStrategy::Weighted(weighted)) = &resolved.attributes.distribution else { continue };
             let at = match resolved.origin(Attribute::Distribution) {
                 Origin::Instance => format!("/instances/{i}/attributes/distribution/weighted"),

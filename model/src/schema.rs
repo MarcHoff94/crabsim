@@ -124,12 +124,17 @@ pub struct AttributesFile {
     pub process_time: Option<Time>,
     /// Station: random failures. Left out, it never fails.
     pub failures: Option<FailuresFile>,
-    /// Station: how many MUs it holds from the start of a run, 0 or 1.
-    #[schemars(range(max = 1))]
+    /// Station, Buffer: how many MUs it holds from the start of a run. 0 by default. A Station
+    /// 0 or 1, and a Buffer at most its capacity, in the order they count as having entered.
     pub starting_mus: Option<u64>,
-    /// Buffer: how many MUs it holds. Must be set somewhere in the chain of classes.
-    #[schemars(range(min = 1))]
-    pub capacity: Option<u64>,
+    /// Buffer: how many MUs it holds. Unlimited by default.
+    pub capacity: Option<CapacityFile>,
+    /// Buffer: how long each MU stays before it may leave, counted from its own entry. 0 by
+    /// default.
+    pub dwelling_time: Option<Time>,
+    /// Buffer: which of the MUs whose dwelling time is over it passes on next. First in, first
+    /// out by default.
+    pub exit_strategy: Option<ExitStrategyFile>,
     /// Any object: its size in metres and rotation in degrees. Visual only.
     pub dimensions: Option<DimensionsFile>,
     /// Any object: free text saying what it is. Visual only.
@@ -141,6 +146,39 @@ pub struct AttributesFile {
     /// Source, Station: which successor receives the MU it passes on (ADR 0016). Round robin by
     /// default. Inherited as a whole.
     pub distribution: Option<DistributionFile>,
+}
+
+/// A whole number from 1, or `"unlimited"`: it then takes every MU and grows as far as it's
+/// filled. -1 is read as unlimited too, and saved as `"unlimited"`.
+#[derive(JsonSchema)]
+#[serde(untagged)]
+pub enum CapacityFile {
+    Limited(FromOne),
+    Unlimited(UnlimitedFile),
+    MinusOne(MinusOne),
+}
+
+#[derive(JsonSchema)]
+#[schemars(extend("minimum" = 1))]
+pub struct FromOne(pub u64);
+
+#[derive(JsonSchema)]
+#[schemars(extend("const" = -1))]
+pub struct MinusOne(pub i64);
+
+#[derive(JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum UnlimitedFile {
+    Unlimited,
+}
+
+#[derive(JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ExitStrategyFile {
+    /// The MU that came in first.
+    FirstInFirstOut,
+    /// The MU that came in last, as from a stack.
+    LastInFirstOut,
 }
 
 /// `"round_robin"`, each successor in turn, or weighted: the best-ranked successor that can take
@@ -208,9 +246,12 @@ pub enum RankFile {
 #[derive(JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct StateNotesFile {
-    /// Source, Station, Buffer.
+    /// Source, Station.
     #[schemars(length(min = 1))]
     pub busy: Option<String>,
+    /// Buffer: it has MUs in it, none of which is kept from leaving.
+    #[schemars(length(min = 1))]
+    pub holding: Option<String>,
     /// Source, Station, Buffer.
     #[schemars(length(min = 1))]
     pub blocked: Option<String>,

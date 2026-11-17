@@ -11,7 +11,8 @@ crabsim exists to simulate long periods as fast as possible: a year of the demo 
 - **The command line** runs model files headless, runs experiments of several observations and keeps their results, compares runs and changes models.
 - **The MCP server** gives AI agents the same operations. An agent claims a model before changing it, and you see and manage its claims.
 - **Undo and redo** take back any change to a model file, yours or an agent's, from a change history kept beside the models.
-- **Not yet:** Buffer's movement is known to be broken, so models don't use it, and only Stations fail. The plan is in `docs/agents/handoff.md`.
+- **Buffers** hold MUs between machines, up to a capacity or without limit, for a dwelling time, first in, first out or last in, first out. `models/buffered-line.json` is an example.
+- **Not yet:** a Station works on one MU at a time, and only Stations fail. The plan is in `docs/agents/handoff.md`.
 
 ## Requirements
 

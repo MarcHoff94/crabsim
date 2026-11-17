@@ -102,8 +102,10 @@ impl Picture {
                 object.contents.retain(|&id| id != mu_id);
                 object.process = ProcessState::Idle;
                 object.completion = None;
+                object.hold();
                 if let Some(object) = objects.get_mut(to as usize) {
                     object.contents.push(mu_id);
+                    object.hold();
                 }
             }
             OccurrenceKind::MuLeft { mu_id, at, .. } => objects[at as usize].contents.retain(|&id| id != mu_id),
@@ -123,6 +125,7 @@ impl Picture {
                 let object = &mut objects[object_id as usize];
                 if object.process == ProcessState::Blocked {
                     object.process = ProcessState::Idle;
+                    object.hold();
                 }
             }
             OccurrenceKind::InterruptionBegan { object_id, cause } => {
@@ -159,6 +162,14 @@ impl ObjectPicture {
             }),
             completion: state.remaining.filter(|_| !stopped).map(|left| now + left),
             frozen: state.remaining.filter(|_| stopped),
+        }
+    }
+
+    /// A Buffer that isn't blocked is holding while it has MUs, which a run reports as
+    /// `Processing`, and otherwise empty. Nothing else changes for holding an MU.
+    fn hold(&mut self) {
+        if self.kind == ObjectKind::Buffer && self.process != ProcessState::Blocked {
+            self.process = if self.contents.is_empty() { ProcessState::Idle } else { ProcessState::Processing };
         }
     }
 

@@ -45,7 +45,7 @@ impl EventInterface for RecordsThenFails {
             remaining: None,
             blocked_predecessors: Vec::new(),
             successors: Vec::new(),
-            capacity: 0,
+            capacity: crate::report::Capacity::Limited(0),
             process_time: None,
             configured_process_time: None,
             statistics: Default::default(),
@@ -84,8 +84,8 @@ impl MaterialFlow for RecordsThenFails {
     ) -> Result<Option<EventTemplate>, MaterialflowError> {
         Err(MaterialflowError::EntranceDenied)
     }
-    fn add_blocked(&mut self, _id_blocked: u32) {}
-    fn remove_blocked(&mut self, _id_blocked: u32) {}
+    fn add_blocked(&mut self, _id_blocked: u32, _since: SimTime, _answering_retry: bool) {}
+    fn relist_blocked(&mut self, _id_blocked: u32, _next: Option<SimTime>) {}
     fn notify_blocked_predecessors(&mut self) -> Result<Option<Vec<EventTemplate>>, MaterialflowError> {
         Ok(None)
     }

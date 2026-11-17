@@ -78,8 +78,8 @@ fn shade_colour32(shade: Shade) -> egui::Color32 {
     egui::Color32::from_rgb(r, g, b)
 }
 
-const SHADES: [Shade; 7] =
-    [Shade::Unknown, Shade::Idle, Shade::Busy, Shade::Blocked, Shade::Paused, Shade::Failed, Shade::ForcedFailure];
+const SHADES: [Shade; 8] =
+    [Shade::Unknown, Shade::Idle, Shade::Busy, Shade::Holding, Shade::Blocked, Shade::Paused, Shade::Failed, Shade::ForcedFailure];
 
 fn main() {
     let opts = Opts::parse();
@@ -2246,8 +2246,11 @@ fn several_view(
         ui.add_space(4.0);
         ui.label(egui::RichText::new(attribute_label(&view.attribute)).strong());
         let mut commit = false;
+        if !form.options.is_empty() {
+            option_field(ui, form, &view.attribute);
+        }
         egui::Grid::new(("several", &view.attribute)).num_columns(2).spacing([8.0, 2.0]).show(ui, |grid| {
-            for part in form.parts.iter_mut().filter(|part| !part.label.is_empty() || form.repair.is_none()) {
+            for part in form.parts.iter_mut().filter(|part| form.options.is_empty() && (!part.label.is_empty() || form.repair.is_none())) {
                 grid.label(part.label);
                 commit |= grid.add(egui::TextEdit::singleline(&mut part.text).desired_width(120.0)).lost_focus();
                 grid.end_row();
@@ -3702,6 +3705,20 @@ fn confirm_step(ctx: &egui::Context, ask: &StepAsk) -> Option<bool> {
     answer
 }
 
+/// A value that is one of a few, as a menu of them. Where the fields differ between several
+/// objects, it shows none chosen.
+fn option_field(ui: &mut egui::Ui, form: &mut Form, attribute: &str) {
+    let options = form.options;
+    let chosen = options.iter().find(|(name, _)| form.parts[0].text == *name).map_or("", |(_, label)| label);
+    egui::ComboBox::from_id_salt(("option", attribute)).selected_text(chosen).show_ui(ui, |menu| {
+        for (name, label) in options {
+            if menu.selectable_label(form.parts[0].text == *name, *label).clicked() {
+                form.parts[0].text = name.to_string();
+            }
+        }
+    });
+}
+
 /// An attribute's name as people read it.
 fn attribute_label(attribute: &str) -> &str {
     match attribute {
@@ -3710,6 +3727,8 @@ fn attribute_label(attribute: &str) -> &str {
         "failures" => "Failures",
         "starting_mus" => "Starting MUs",
         "capacity" => "Capacity",
+        "dwelling_time" => "Dwelling time",
+        "exit_strategy" => "Exit strategy",
         "dimensions" => "Dimensions",
         "description" => "Description",
         "state_notes" => "State notes",
@@ -3769,6 +3788,10 @@ fn attributes_section(
         ui.scope(|fields| {
             if let Some(choice) = form.distribution.as_mut() {
                 distribution_fields(fields, choice, &view.attribute);
+                return;
+            }
+            if !form.options.is_empty() {
+                option_field(fields, form, &view.attribute);
                 return;
             }
             if let Some(kind) = form.repair {

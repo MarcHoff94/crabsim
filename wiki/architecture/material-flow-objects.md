@@ -110,7 +110,15 @@ The mean time between failures is `mttr_mean / (1/availability - 1)`, with the s
 
 ## Buffer
 
-Holds MUs up to a capacity. **Known to be broken** and not used by the demo: `process_mu_exit` takes an MU and then the move takes another, so a lone MU never leaves and one is lost per move with two or more. It also never notifies waiting predecessors, and ignores a retry's `from`. Fixing it is part of step 7 of the build order.
+Holds MUs, up to its `Capacity` or without limit (ADR 0019), each for the `dwelling_time` from its own entry, and passes on one at a time.
+
+- **Contents:** a `VecDeque` of MUs in entry order, each with the time its dwelling ends. One dwelling time for all means that is also the order they become ready in.
+- **Exit strategy:** `offered` picks the MU to pass on among those whose dwelling time is over: the first in, or the last in. `take_content` and `offered_since` go through it, so the code that moves MUs never knows the strategy.
+- **Events:** every MU that enters schedules one `MUExit` for the end of its dwelling time. On it, the Buffer passes on every MU that may leave until one is refused (`pass_on`), and then it is blocked. A blocked Buffer ignores further exits: it already waits in line. On a `BlockedRetry` it does the same, offering only the successor that sent it.
+- **Room again:** after any MU has left, it sends retries to the predecessors waiting for it.
+- **States:** `Idle` when empty, `Processing` while holding MUs, `Blocked` when an MU that may leave can't. Holding time is kept as busy time.
+- **Starting MUs** count as entered at Init, in their order, and Reset brings them back.
+- It can't be stopped yet.
 
 ## Drain
 

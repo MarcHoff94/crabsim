@@ -14,7 +14,7 @@ Agreed with the owner on 2026-11-06. **Built in step 4 for what today's model ha
 | | Source | Station | Buffer | Drain |
 |---|---|---|---|---|
 | MUs in / out | created / out | in / out | in / out | in / – |
-| Busy time | waiting out its interval | working on at least one MU | holding at least one MU | – |
+| Busy time | waiting out its interval | working on at least one MU | holding: it has MUs and none is kept from leaving | – |
 | Blocked time | yes | yes | yes | – |
 | Idle time | – (it always holds an MU) | yes | yes | yes |
 | Failed time, paused time | yes | yes | yes | yes |

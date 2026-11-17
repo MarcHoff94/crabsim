@@ -57,6 +57,8 @@ pub enum Shade {
     Unknown,
     Idle,
     Busy,
+    /// A Buffer with MUs in it, none of which is kept from leaving.
+    Holding,
     Blocked,
     Paused,
     Failed,
@@ -296,6 +298,8 @@ pub struct Details {
     pub statistics: ObjectStatistics,
     /// When the statistics began: at Init, or when they were last cleared.
     pub statistics_since: SimTime,
+    /// Whether it holds a limited number of MUs, so it can be full.
+    pub limited: bool,
 }
 
 impl Inspection {
@@ -317,7 +321,25 @@ impl Inspection {
                 let throughput = statistics.mus_per_hour(details.as_of).map_or_else(|| "–".to_string(), |per_hour| format!("{per_hour:.1} an hour"));
                 [("MUs in", statistics.mus_in.to_string()), ("Throughput", throughput)].into_iter().chain(lead_time).collect()
             }
-            ObjectKind::Station | ObjectKind::Buffer => {
+            // A Buffer does no work and doesn't stop yet, so it shows how full it was instead.
+            ObjectKind::Buffer => {
+                let mut rows = vec![
+                    ("MUs in", statistics.mus_in.to_string()),
+                    ("MUs out", statistics.mus_out.to_string()),
+                    ("Holding", share(statistics.time_busy)),
+                    ("Blocked", share(statistics.time_blocked)),
+                    ("Empty", share(statistics.time_idle)),
+                    ("Most MUs", statistics.max_contents.to_string()),
+                ];
+                if let Some(mean) = statistics.average_contents() {
+                    rows.push(("Mean MUs", format!("{mean:.1}")));
+                }
+                if details.limited {
+                    rows.push(("Full", share(statistics.time_full)));
+                }
+                rows
+            }
+            ObjectKind::Station => {
                 let mut rows = vec![
                     ("MUs in", statistics.mus_in.to_string()),
                     ("MUs out", statistics.mus_out.to_string()),
@@ -817,6 +839,8 @@ impl ViewState {
             Some(StopCause::ForcedFailure) => Shade::ForcedFailure,
             Some(StopCause::Pause) => Shade::Paused,
             None => match object.process() {
+                // A Buffer does no work: with MUs in it, it is holding.
+                ProcessState::Processing if object.kind() == ObjectKind::Buffer => Shade::Holding,
                 ProcessState::Processing => Shade::Busy,
                 ProcessState::Blocked => Shade::Blocked,
                 ProcessState::Idle => Shade::Idle,
@@ -888,7 +912,8 @@ impl ViewState {
     }
 
     /// Every MU to draw, each in the object that holds it, or none when MUs aren't shown. A move
-    /// takes no time, so an MU is drawn in its new holder at once.
+    /// takes no time, so an MU is drawn in its new holder at once. A Buffer's MUs aren't drawn:
+    /// it can hold any number, so it always shows a count.
     pub fn mu_markers(&self, camera: &Camera) -> Vec<MuMarker> {
         if !self.shows_mus(camera) {
             return Vec::new();
@@ -896,7 +921,7 @@ impl ViewState {
         self.picture
             .objects()
             .iter()
-            .filter(|pictured| !pictured.contents().is_empty())
+            .filter(|pictured| !pictured.contents().is_empty() && pictured.kind() != ObjectKind::Buffer)
             .flat_map(|pictured| {
                 let holder = pictured.id();
                 let spots = self.objects[holder as usize].mu_spots(pictured.contents().len());
@@ -905,16 +930,17 @@ impl ViewState {
             .collect()
     }
 
-    /// How many MUs each object holds, for the objects holding any, where MUs aren't drawn and a
-    /// count can be read.
+    /// How many MUs each object holds, for the objects holding any, where a count can be read:
+    /// every object where MUs aren't drawn, and a Buffer always.
     pub fn counts(&self, camera: &Camera) -> Vec<(u32, usize)> {
-        if self.shows_mus(camera) || label_size(camera).is_none() {
+        if label_size(camera).is_none() {
             return Vec::new();
         }
+        let drawn = self.shows_mus(camera);
         self.picture
             .objects()
             .iter()
-            .filter(|pictured| !pictured.contents().is_empty())
+            .filter(|pictured| !pictured.contents().is_empty() && (!drawn || pictured.kind() == ObjectKind::Buffer))
             .map(|pictured| (pictured.id(), pictured.contents().len()))
             .collect()
     }
@@ -1097,15 +1123,21 @@ impl ViewState {
             None => "No state yet",
             Some(pictured) if pictured.is_stopped() => "Stopped",
             Some(pictured) => match pictured.process() {
+                ProcessState::Processing if object.kind == ObjectKind::Buffer => "Holding",
                 ProcessState::Processing => "Busy",
                 ProcessState::Blocked => "Blocked",
                 ProcessState::Idle => "Idle",
             },
         };
         let blocked = pictured.filter(|pictured| pictured.process() == ProcessState::Blocked).map(|pictured| {
-            let holding = match pictured.contents().first() {
-                Some(mu) => format!("Holding MU {mu}"),
-                None => "Holding nothing".to_string(),
+            let holding = match pictured.contents() {
+                // Which of a Buffer's MUs goes next is its exit strategy's business.
+                [_, ..] if object.kind == ObjectKind::Buffer => match pictured.contents().len() {
+                    1 => "Holding 1 MU".to_string(),
+                    several => format!("Holding {several} MUs"),
+                },
+                [mu, ..] => format!("Holding MU {mu}"),
+                [] => "Holding nothing".to_string(),
             };
             let successors: Vec<String> = pictured
                 .successors()
@@ -1148,6 +1180,7 @@ impl ViewState {
             waiting: object.blocked_predecessors.iter().map(|&id| self.objects[id as usize].name.clone()).collect(),
             statistics: object.statistics,
             statistics_since: state.statistics_since,
+            limited: object.capacity != crabsim::Capacity::Unlimited,
         })
     }
 
@@ -1397,6 +1430,7 @@ impl Shade {
     pub fn of(state: State) -> Shade {
         match state {
             State::Busy => Shade::Busy,
+            State::Holding => Shade::Holding,
             State::Blocked => Shade::Blocked,
             State::Idle => Shade::Idle,
             State::Failed => Shade::Failed,
@@ -1411,6 +1445,7 @@ impl Shade {
             Shade::Unknown => "no state yet, before Init",
             Shade::Idle => State::Idle.label(),
             Shade::Busy => State::Busy.label(),
+            Shade::Holding => State::Holding.label(),
             Shade::Blocked => State::Blocked.label(),
             Shade::Paused => State::Paused.label(),
             Shade::Failed => State::Failed.label(),
@@ -1427,6 +1462,7 @@ pub fn rgb(shade: Shade) -> [f32; 3] {
         Shade::Unknown => [0.28, 0.29, 0.32],
         Shade::Idle => [0.50, 0.52, 0.56],
         Shade::Busy => [0.20, 0.70, 0.30],
+        Shade::Holding => [0.10, 0.62, 0.68],
         Shade::Blocked => [0.95, 0.60, 0.10],
         Shade::Paused => [0.25, 0.45, 0.95],
         Shade::Failed => [0.90, 0.15, 0.15],
@@ -1439,6 +1475,7 @@ fn doing(shade: Shade) -> &'static str {
         Shade::Unknown => "has no state yet",
         Shade::Idle => "is idle",
         Shade::Busy => "is busy",
+        Shade::Holding => "is holding MUs",
         Shade::Blocked => "is blocked",
         Shade::Paused => "is paused",
         Shade::Failed => "has failed",

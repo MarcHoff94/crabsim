@@ -17,10 +17,10 @@ A model is made of material-flow objects, each standing for a real thing. MUs fl
 |---|---|---|
 | Source | Creates an MU every interval and pushes it on | Works |
 | Station | Works on one MU for its process time, then pushes it on. Can fail, be paused or be forced to fail | Works |
-| Buffer | Holds MUs up to a capacity | Known to be broken, so models don't use it yet |
+| Buffer | Holds MUs up to a capacity or without limit, for a dwelling time | First in, first out or last in, first out. It can't be stopped yet |
 | Drain | Takes MUs out of the model and keeps exit statistics | Works |
 
-"Station" means only the processing type. Station capacity above 1, Buffer's dwelling time and stops on objects other than Stations are agreed but not built. See the handoff.
+"Station" means only the processing type. Station capacity above 1 and stops on objects other than Stations are agreed but not built. See the handoff.
 
 ## Building a model
 

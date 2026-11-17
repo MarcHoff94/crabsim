@@ -1137,7 +1137,11 @@ fn weights(catalogue: &Catalogue, graph: &Graph, weight: Weight, run: Option<&st
                         Attribute::ProcessTime => has.process_time.map(|time| time.as_millis() as f64 / 1000.0),
                         Attribute::Interval => has.interval.map(|time| time.as_millis() as f64 / 1000.0),
                         Attribute::StartingMus => has.starting_mus.map(|number| number as f64),
-                        _ => has.capacity.map(|number| number as f64),
+                        // A Buffer with no limit has no number to weigh.
+                        _ => match has.capacity {
+                            Some(crabsim_model::Capacity::Limited(number)) => Some(number as f64),
+                            _ => None,
+                        },
                     }
                 })
                 .collect();
@@ -1427,8 +1431,10 @@ fn find_instances(
     let mut wanted = Vec::new();
     for condition in &conditions {
         let attribute = attribute(&condition.attribute)?;
+        let unlimited = condition.value.as_str() == Some("unlimited") || condition.value.as_i64() == Some(-1);
         let value = match attribute {
-            Attribute::Interval | Attribute::ProcessTime => {
+            Attribute::Capacity if unlimited && condition.op == Op::Equal => Wanted::Exactly(serde_json::json!("unlimited")),
+            Attribute::Interval | Attribute::ProcessTime | Attribute::DwellingTime => {
                 let time = condition.value.as_str().and_then(parse_time).or_else(|| condition.value.as_f64().map(SimTime::from_secs_f64));
                 Wanted::Time(time.ok_or_else(|| {
                     OperationError::invalid_input(format!("`{}` is a time: write it as 90, 1:30 or 8:00:00, not {}", attribute.name(), condition.value))
@@ -1479,11 +1485,16 @@ fn find_instances(
             let has = &resolved.attributes;
             match value {
                 Wanted::Time(time) => {
-                    let own = if attribute == Attribute::Interval { has.interval } else { has.process_time };
+                    let own = match attribute {
+                        Attribute::Interval => has.interval,
+                        Attribute::DwellingTime => has.dwelling_time,
+                        _ => has.process_time,
+                    };
                     own.is_some_and(|own| op.holds(own.cmp(time)))
                 }
                 Wanted::Number(number) => {
-                    let own = if attribute == Attribute::Capacity { has.capacity } else { has.starting_mus };
+                    // A Buffer with no limit holds more than any number.
+                    let own = if attribute == Attribute::Capacity { has.capacity.map(crabsim_model::Capacity::limit) } else { has.starting_mus };
                     own.is_some_and(|own| op.holds(own.cmp(number)))
                 }
                 Wanted::Exactly(value) => values.get(attribute.name()) == Some(value),

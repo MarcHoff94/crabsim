@@ -4,6 +4,7 @@
 
 use crate::{Attributes, DistributionStrategy, WeightedStrategy, WEIGHABLE, BUILT_IN_CLASSES, Class, Connection, Failures, Instance, Model, Problem, RepairTime, State, StateNotes, FORMAT_VERSION, escape};
 use crabsim::time::parse_time;
+use crate::{exit_strategy_from_name, Capacity, ExitStrategy};
 use crabsim::{Dimensions, Position, SimTime};
 use serde_json::{Map, Value};
 use std::collections::HashSet;
@@ -37,7 +38,8 @@ const TOP_LEVEL: [&str; 6] = ["$schema", "format_version", "description", "class
 const INSTANCE: [&str; 5] = ["name", "class", "stream", "position", "attributes"];
 const CONNECTION: [&str; 5] = ["from", "to", "exit", "entrance", "description"];
 const CLASS: [&str; 3] = ["name", "parent", "attributes"];
-const ATTRIBUTES: [&str; 9] = ["interval", "process_time", "failures", "starting_mus", "capacity", "dimensions", "description", "state_notes", "distribution"];
+const ATTRIBUTES: [&str; 11] =
+    ["interval", "process_time", "failures", "starting_mus", "capacity", "dwelling_time", "exit_strategy", "dimensions", "description", "state_notes", "distribution"];
 
 pub(crate) fn read(text: &str) -> (Model, Vec<Problem>, Broken) {
     let mut reader = Reader::default();
@@ -296,7 +298,9 @@ impl Reader {
                 "process_time" => self.time(value, &at, name).map(|time| attributes.process_time = Some(time)),
                 "failures" => self.failures(value, &at, name).map(|failures| attributes.failures = Some(failures)),
                 "starting_mus" => self.count(value, &at, name).map(|count| attributes.starting_mus = Some(count)),
-                "capacity" => self.count(value, &at, name).map(|count| attributes.capacity = Some(count)),
+                "capacity" => self.capacity(value, &at, name).map(|capacity| attributes.capacity = Some(capacity)),
+                "dwelling_time" => self.time(value, &at, name).map(|time| attributes.dwelling_time = Some(time)),
+                "exit_strategy" => self.exit_strategy(value, &at, name).map(|strategy| attributes.exit_strategy = Some(strategy)),
                 "dimensions" => self.dimensions(value, &at, name).map(|dimensions| attributes.dimensions = Some(dimensions)),
                 "description" => self.text(value, &at, name).map(|text| attributes.description = Some(text)),
                 "state_notes" => self.state_notes(value, &at, name).map(|notes| attributes.state_notes = Some(notes)),
@@ -339,6 +343,26 @@ impl Reader {
             self.problem(pointer.to_owned(), name, format!("{value} should be a whole number, 0 or more"));
         }
         count
+    }
+
+    /// A whole number, or unlimited, which is written `"unlimited"` and also read from -1.
+    fn capacity(&mut self, value: &Value, pointer: &str, name: Option<&str>) -> Option<Capacity> {
+        if value.as_str() == Some("unlimited") || value.as_i64() == Some(-1) {
+            return Some(Capacity::Unlimited);
+        }
+        let capacity = value.as_u64().map(Capacity::Limited);
+        if capacity.is_none() {
+            self.problem(pointer.to_owned(), name, format!("{value} should be a whole number from 1, or \"unlimited\""));
+        }
+        capacity
+    }
+
+    fn exit_strategy(&mut self, value: &Value, pointer: &str, name: Option<&str>) -> Option<ExitStrategy> {
+        let strategy = value.as_str().and_then(exit_strategy_from_name);
+        if strategy.is_none() {
+            self.problem(pointer.to_owned(), name, format!("{value} is not an exit strategy: use \"first_in_first_out\" or \"last_in_first_out\""));
+        }
+        strategy
     }
 
     fn number(&mut self, fields: &Map<String, Value>, key: &str, pointer: &str, name: Option<&str>) -> Option<f64> {

@@ -148,34 +148,45 @@ enum Occurrences {
     Headless,
 }
 
+/// Objects in one line of each model.
+const DEMO_OBJECTS: usize = 14;
+const BUFFERED_OBJECTS: usize = 7;
+
 struct Scenario {
     name: &'static str,
+    /// The second example, `crabsim::demo::buffered_line`, with Buffers, rather than the demo.
+    buffered: bool,
     lines: usize,
     length: SimTime,
     length_label: &'static str,
     occurrences: Occurrences,
 }
 
-const SCENARIOS: [Scenario; 6] = [
-    Scenario { name: "demo-headless", lines: 1, length: YEAR, length_label: "1 year", occurrences: Occurrences::Headless },
+const SCENARIOS: [Scenario; 7] = [
+    Scenario { name: "demo-headless", buffered: false, lines: 1, length: YEAR, length_label: "1 year", occurrences: Occurrences::Headless },
     // The same run over ten times the length: peak memory should stay where it is.
-    Scenario { name: "demo-headless-10y", lines: 1, length: YEAR.times(10), length_label: "10 years", occurrences: Occurrences::Headless },
+    Scenario { name: "demo-headless-10y", buffered: false, lines: 1, length: YEAR.times(10), length_label: "10 years", occurrences: Occurrences::Headless },
     Scenario {
         name: "large-headless",
+        buffered: false,
         lines: LARGE_MODEL_LINES,
         length: SimTime::from_secs(2 * 86_400),
         length_label: "2 days",
         occurrences: Occurrences::Headless,
     },
-    Scenario { name: "demo-kept", lines: 1, length: YEAR, length_label: "1 year", occurrences: Occurrences::Kept },
-    Scenario { name: "demo-dropped", lines: 1, length: YEAR, length_label: "1 year", occurrences: Occurrences::Dropped },
+    Scenario { name: "demo-kept", buffered: false, lines: 1, length: YEAR, length_label: "1 year", occurrences: Occurrences::Kept },
+    Scenario { name: "demo-dropped", buffered: false, lines: 1, length: YEAR, length_label: "1 year", occurrences: Occurrences::Dropped },
     Scenario {
         name: "large-dropped",
+        buffered: false,
         lines: LARGE_MODEL_LINES,
         length: SimTime::from_secs(2 * 86_400),
         length_label: "2 days",
         occurrences: Occurrences::Dropped,
     },
+    // Buffers with and without a limit, a dwelling time and both exit strategies. Not the demo,
+    // so its figures compare only with its own from before.
+    Scenario { name: "buffered-headless", buffered: true, lines: 1, length: YEAR, length_label: "1 year", occurrences: Occurrences::Headless },
 ];
 
 /// One repetition of a scenario.
@@ -222,7 +233,7 @@ fn measure(scenario: &Scenario, seed: u64) -> Measurement {
     let bytes_before_model = LIVE_BYTES.load(Relaxed);
     PEAK_BYTES.store(bytes_before_model, Relaxed);
 
-    let mut run = reference_model(scenario.lines, seed);
+    let mut run = if scenario.buffered { crabsim::demo::buffered_line().build(seed) } else { reference_model(scenario.lines, seed) };
     if !matches!(scenario.occurrences, Occurrences::Headless) {
         run.set_recording(Recording::ALL);
     }
@@ -257,10 +268,10 @@ fn run_scenario(scenario: &Scenario, seed: u64, reps: usize) {
     let events = median.events as f64;
 
     println!(
-        "{:<14} {:>7} {:>6} {:>7.2}M/s {:>9.2}M {:>7.2}s {:>6.2}..{:<6.2} {:>8.2} {:>6.2} {:>10.1}MB {:>9} {:>11}",
+        "{:<17} {:>8} {:>6} {:>7.2}M/s {:>9.2}M {:>7.2}s {:>6.2}..{:<6.2} {:>8.2} {:>6.2} {:>10.1}MB {:>9} {:>11}",
         scenario.name,
         scenario.length_label,
-        scenario.lines * 14,
+        scenario.lines * if scenario.buffered { BUFFERED_OBJECTS } else { DEMO_OBJECTS },
         events / wall / 1e6,
         scenario.length.as_secs_f64() / wall / 1e6,
         wall,
@@ -347,7 +358,7 @@ fn main() {
     println!("seed {seed}, {reps} repetitions, wall time and rates are the median; simulated time per wall second is a ratio");
     println!("event queue entry: {} bytes", size_of::<ScheduledEvent>());
     println!(
-        "{:<14} {:>7} {:>6} {:>10} {:>10} {:>8} {:>14} {:>8} {:>6} {:>12} {:>9} {:>11}",
+        "{:<17} {:>8} {:>6} {:>10} {:>10} {:>8} {:>14} {:>8} {:>6} {:>12} {:>9} {:>11}",
         "scenario", "length", "objs", "events/s", "sim/wall", "wall", "fastest..slow", "alloc/ev", "occ/ev", "peak heap", "MUs left", "events"
     );
     for scenario in chosen {

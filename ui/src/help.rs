@@ -45,8 +45,9 @@ pub fn meaning(kind: ObjectKind, state: State) -> &'static str {
     match (kind, state) {
         (ObjectKind::Source, State::Busy) => "Making its next MU: waiting out its interval before offering it on.",
         (ObjectKind::Source, State::Blocked) => "Holding an MU that is ready to leave, but no successor can take it.",
-        (ObjectKind::Buffer, State::Busy) => "Holding at least one MU.",
+        (ObjectKind::Buffer, State::Blocked) => "Holding an MU that may leave, but no successor can take it.",
         (ObjectKind::Buffer, State::Idle) => "Empty, waiting for an MU.",
+        (_, State::Holding) => "Holding at least one MU, none of which is kept from leaving: each is still in its dwelling time.",
         (ObjectKind::Drain, State::Idle) => "Ready to take MUs out of the model. It takes each one at once, so it is always idle.",
         (_, State::Busy) => "Working on an MU.",
         (_, State::Blocked) => "Holding an MU whose work is done, but no successor can take it.",

@@ -176,7 +176,7 @@ pub fn attribute(wanted: &str) -> Result<Attribute, String> {
 /// as JSON as that, and the rest as text.
 fn value(attribute: Attribute, typed: &str) -> Value {
     let typed = typed.trim();
-    if matches!(attribute, Attribute::Interval | Attribute::ProcessTime) {
+    if matches!(attribute, Attribute::Interval | Attribute::ProcessTime | Attribute::DwellingTime) {
         return json!(typed);
     }
     serde_json::from_str(typed).unwrap_or_else(|_| json!(typed))

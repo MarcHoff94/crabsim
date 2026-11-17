@@ -98,7 +98,13 @@ pub(crate) fn attributes(attributes: &Attributes) -> Value {
         fields.insert("starting_mus".into(), json!(count));
     }
     if let Some(capacity) = attributes.capacity {
-        fields.insert("capacity".into(), json!(capacity));
+        fields.insert("capacity".into(), self::capacity(capacity));
+    }
+    if let Some(dwelling_time) = attributes.dwelling_time {
+        fields.insert("dwelling_time".into(), time(dwelling_time));
+    }
+    if let Some(strategy) = attributes.exit_strategy {
+        fields.insert("exit_strategy".into(), json!(crate::exit_strategy_name(strategy)));
     }
     if let Some(dimensions) = attributes.dimensions {
         let mut size = Map::new();
@@ -121,6 +127,14 @@ pub(crate) fn attributes(attributes: &Attributes) -> Value {
         fields.insert("distribution".into(), distribution(strategy));
     }
     Value::Object(fields)
+}
+
+/// A capacity as a file writes it: a number, or `"unlimited"`.
+pub(crate) fn capacity(capacity: crate::Capacity) -> Value {
+    match capacity {
+        crate::Capacity::Limited(limit) => json!(limit),
+        crate::Capacity::Unlimited => json!("unlimited"),
+    }
 }
 
 /// A distribution strategy, with every field of a weighted one written out but `drains` when it

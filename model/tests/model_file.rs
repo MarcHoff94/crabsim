@@ -1,7 +1,7 @@
 //! Model files at their seam: text in, a model, its problems or a run out.
 
 use crabsim::{demo, ModelDescription, OccurrenceKind, Recording, SimTime, SimulationRun};
-use crabsim_model::{load, Attribute, Class, Instance, Model, Origin, Problem};
+use crabsim_model::{load, Attribute, Capacity, Class, ExitStrategy, Instance, Model, Origin, Problem};
 use serde_json::{json, Value};
 
 fn secs(s: u64) -> SimTime {
@@ -280,7 +280,6 @@ fn every_problem_comes_back_at_once_in_file_order() {
             "/instances/1/attributes/proces_time: unknown attribute `proces_time`: did you mean `process_time`?",
             "/instances/1/attributes/starting_mus: a Station can start with 0 or 1 MUs, until Stations have a capacity",
             "/instances/2/name: instance 1 already has this name",
-            "/instances/3: a Buffer needs a `capacity`: how many MUs it holds. Set it on the instance or one of its classes",
             "/connections/0/to: no instance is called `Nowhere`",
             "/connections/1/to: `In` is a Source, which creates MUs and can't take any in",
         ]
@@ -385,7 +384,14 @@ fn values_out_of_range_are_refused() {
     assert_found(&failures(0.9, json!({ "constant": "1:00", "normal": { "mean": "1:00", "std": "0" } })), "/instances/0/attributes/failures/repair_time", "exactly one of");
     assert_found(&station(json!({ "dimensions": { "length": 0, "width": 1, "height": 1 } })), "/instances/0/attributes/dimensions/length", "above 0");
     assert_found(&file(json!([{ "name": "B", "class": "Buffer", "attributes": { "capacity": 0 } }])), "/instances/0/attributes/capacity", "at least 1");
-    assert_found(&file(json!([{ "name": "B", "class": "Buffer" }])), "/instances/0", "a Buffer needs a `capacity`");
+    let buffer = |attributes: Value| file(json!([{ "name": "B", "class": "Buffer", "attributes": attributes }]));
+    assert_found(&buffer(json!({ "capacity": -2 })), "/instances/0/attributes/capacity", "a whole number from 1, or \"unlimited\"");
+    assert_found(&buffer(json!({ "capacity": "lots" })), "/instances/0/attributes/capacity", "a whole number from 1, or \"unlimited\"");
+    assert_found(&buffer(json!({ "exit_strategy": "random" })), "/instances/0/attributes/exit_strategy", "\"first_in_first_out\" or \"last_in_first_out\"");
+    assert_found(&buffer(json!({ "dwelling_time": 5 })), "/instances/0/attributes/dwelling_time", "is not a time");
+    assert_found(&buffer(json!({ "capacity": 2, "starting_mus": 3 })), "/instances/0/attributes/starting_mus", "it starts with 3 MUs but holds only 2");
+    assert_found(&buffer(json!({ "starting_mus": 1_000_001 })), "/instances/0/attributes/starting_mus", "at most 1,000,000");
+    assert_found(&station(json!({ "dwelling_time": "5" })), "/instances/0/attributes/dwelling_time", "a Station has no attribute `dwelling_time`");
     assert_found(&station(json!({ "starting_mus": -1 })), "/instances/0/attributes/starting_mus", "a whole number");
 }
 
@@ -635,13 +641,20 @@ fn a_class_change_reaches_exactly_the_instances_that_inherit_it() {
 }
 
 #[test]
-fn a_required_value_can_come_from_a_class() {
+fn a_value_nobody_set_is_the_built_in_default() {
     let classes = json!([{ "name": "Store", "parent": "Buffer", "attributes": { "capacity": 5 } }]);
     let instances = json!([{ "name": "Shelf", "class": "Store" }]);
-    assert!(load(&with_classes(classes, instances)).is_ok());
+    let model = load(&with_classes(classes, instances)).unwrap();
+    assert_eq!(model.resolve(0).unwrap().attributes.capacity, Some(Capacity::Limited(5)));
+    assert_eq!(model.resolve(0).unwrap().origin(Attribute::Capacity), &Origin::Class("Store".into()));
+    // A Buffer nobody gave a capacity has no limit.
     let unset = with_classes(json!([{ "name": "Store", "parent": "Buffer" }]), json!([{ "name": "Shelf", "class": "Store" }]));
-    assert_found(&unset, "/instances/0", "a Buffer needs a `capacity`: how many MUs it holds. Set it on the instance or one of its classes");
-    // A Source's interval isn't required: it is 0 by default.
+    let model = load(&unset).unwrap();
+    let shelf = model.resolve(0).unwrap();
+    assert_eq!(shelf.attributes.capacity, Some(Capacity::Unlimited));
+    assert_eq!(shelf.origin(Attribute::Capacity), &Origin::BuiltIn);
+    assert_eq!((shelf.attributes.dwelling_time, shelf.attributes.exit_strategy, shelf.attributes.starting_mus), (Some(SimTime::ZERO), Some(ExitStrategy::FirstInFirstOut), Some(0)));
+    // A Source's interval is 0 by default.
     let source = with_classes(json!([]), json!([{ "name": "In", "class": "Source" }]));
     let model = load(&source).unwrap();
     assert_eq!(model.resolve(0).unwrap().attributes.interval, Some(SimTime::ZERO));
@@ -963,4 +976,140 @@ fn a_state_note_must_name_a_state_its_object_can_be_in_and_say_something() {
             "/instances/1/attributes/state_notes/idle: a note can't be empty: leave the state out instead",
         ]
     );
+}
+
+// ---------- Buffers ----------
+
+/// A Station starting with an MU and a stack starting with two feed a slow Station.
+fn stacked() -> String {
+    with_classes(
+        json!([{ "name": "Stack", "parent": "Buffer", "attributes": { "exit_strategy": "last_in_first_out", "dwelling_time": "0:04", "capacity": -1 } }]),
+        json!([
+            { "name": "Pre", "class": "Station", "successors": ["Pile"], "attributes": { "process_time": "1", "starting_mus": 1 } },
+            { "name": "Pile", "class": "Stack", "successors": ["Slow"], "attributes": { "starting_mus": 2 } },
+            { "name": "Slow", "class": "Station", "successors": ["Out"], "attributes": { "process_time": "10" } },
+            { "name": "Out", "class": "Drain" },
+        ]),
+    )
+}
+
+#[test]
+fn a_buffers_attributes_are_read_inherited_saved_and_built() {
+    let model = load(&stacked()).unwrap();
+    let pile = model.resolve(1).unwrap();
+    assert_eq!(pile.attributes.capacity, Some(Capacity::Unlimited));
+    assert_eq!(pile.attributes.exit_strategy, Some(ExitStrategy::LastInFirstOut));
+    assert_eq!(pile.attributes.dwelling_time, Some(secs(4)));
+    assert_eq!(pile.origin(Attribute::ExitStrategy), &Origin::Class("Stack".into()));
+    assert_eq!(pile.origin(Attribute::StartingMus), &Origin::Instance);
+    let saved = model.save();
+    assert!(saved.contains(r#""capacity": "unlimited""#), "-1 is saved as \"unlimited\": {saved}");
+    assert!(saved.contains(r#""exit_strategy": "last_in_first_out""#) && saved.contains(r#""dwelling_time": "00:00:04""#), "{saved}");
+    assert_eq!(load(&saved).unwrap(), model);
+    assert_eq!(load(&saved).unwrap().save(), saved, "canonical");
+
+    // Starting MUs are numbered in file order: 1 in Pre, 2 and 3 in Pile, which entered in that
+    // order. At 4 their dwelling time is over, and the stack passes on the newest that may leave.
+    let (occurrences, _) = run_for(&model.to_description(), 0, secs(100));
+    let into_slow: Vec<(u32, u64)> = occurrences
+        .iter()
+        .filter_map(|o| match o.kind {
+            crabsim::OccurrenceKind::MuMoved { mu_id, to: 2, .. } => Some((mu_id, o.time.as_secs())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(into_slow, [(3, 4), (1, 14), (2, 24)], "MU 1 came in at 1 and may leave from 5");
+}
+
+#[test]
+fn a_buffer_is_holding_not_busy_in_state_notes() {
+    let buffer = |notes: Value| file(json!([{ "name": "B", "class": "Buffer", "attributes": { "state_notes": notes } }]));
+    assert!(load(&buffer(json!({ "holding": "cooling down", "blocked": "the oven is full", "idle": "empty" }))).is_ok());
+    assert_found(&buffer(json!({ "busy": "cooling down" })), "/instances/0/attributes/state_notes/busy", "a Buffer is never busy");
+    let station = file(json!([{ "name": "S", "class": "Station", "attributes": { "state_notes": { "holding": "no" } } }]));
+    assert_found(&station, "/instances/0/attributes/state_notes/holding", "a Station is never holding");
+}
+
+#[test]
+fn a_source_with_an_interval_of_0_must_not_reach_a_buffer_with_no_limit() {
+    let line = |buffer: Value| {
+        file(json!([
+            { "name": "Feeder", "class": "Source", "successors": ["Gate"], "attributes": { "interval": "0" } },
+            { "name": "Gate", "class": "Station", "successors": ["Store"] },
+            { "name": "Store", "class": "Buffer", "successors": ["Slow"], "attributes": buffer },
+            { "name": "Slow", "class": "Station", "successors": ["Out"], "attributes": { "process_time": "10" } },
+            { "name": "Out", "class": "Drain" },
+        ]))
+    };
+    assert_eq!(
+        found(&line(json!({ "dwelling_time": "1:00" }))),
+        vec![
+            "/instances/0/attributes/interval: with an interval of 0 this Source reaches `Store`, a Buffer with no limit, through zero-time \
+             objects (Gate), so nothing ever blocks it and it would create MUs forever without time passing"
+        ]
+    );
+    // With a capacity it fills, and then the Source waits.
+    let model = load(&line(json!({ "capacity": 3 }))).unwrap();
+    let (_, state) = run_for(&model.to_description(), 0, secs(100));
+    assert_eq!(state.objects[2].contents.len(), 3);
+    // A Buffer with a capacity and no dwelling time is itself a zero-time object on the way.
+    let through = file(json!([
+        { "name": "Feeder", "class": "Source", "successors": ["Store"], "attributes": { "interval": "0" } },
+        { "name": "Store", "class": "Buffer", "successors": ["Out"], "attributes": { "capacity": 3 } },
+        { "name": "Out", "class": "Drain" },
+    ]));
+    assert_found(&through, "/instances/0/attributes/interval", "reaches Drain `Out` through zero-time objects (Store)");
+    let dwelling = through.replace(r#""capacity":3"#, r#""capacity":3,"dwelling_time":"5""#);
+    assert_ne!(dwelling, through);
+    assert!(load(&dwelling).is_ok(), "MUs stay 5 s, so it fills");
+}
+
+#[test]
+fn a_buffer_with_no_limit_that_fills_faster_than_it_empties_gets_a_warning() {
+    let line = |interval: &str, buffer: Value| {
+        file(json!([
+            { "name": "In", "class": "Source", "successors": ["Store"], "attributes": { "interval": interval } },
+            { "name": "Store", "class": "Buffer", "successors": ["Slow"], "attributes": buffer },
+            { "name": "Slow", "class": "Station", "successors": ["Out"], "attributes": { "process_time": "10" } },
+            { "name": "Out", "class": "Drain" },
+        ]))
+    };
+    let warnings = |text: String| -> Vec<String> { load(&text).unwrap().warnings().iter().map(|w| format!("{}: {}", w.pointer, w.message)).collect() };
+    assert_eq!(
+        warnings(line("5", json!({}))),
+        vec![
+            "/instances/1: it has no limit and can get 720 MUs an hour but pass on only 360, so it would grow for as long as the run lasts: \
+             give it a capacity, or make sure that is meant"
+        ]
+    );
+    assert_eq!(warnings(line("5", json!({ "capacity": "unlimited" })))[0].split(':').next(), Some("/instances/1/attributes/capacity"));
+    assert_eq!(warnings(line("5", json!({ "capacity": 50 }))), Vec::<String>::new(), "it has a limit");
+    assert_eq!(warnings(line("10", json!({}))), Vec::<String>::new(), "it empties as fast as it fills");
+}
+
+// ---------- The second example ----------
+
+fn buffered_line_file() -> String {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../models/buffered-line.json");
+    std::fs::read_to_string(path).expect("models/buffered-line.json exists").replace("\r\n", "\n")
+}
+
+#[test]
+fn the_buffered_line_file_builds_the_same_run_as_the_example_in_code() {
+    let from_file = built(&buffered_line_file());
+    let from_code = demo::buffered_line();
+    for id in 0..from_code.object_count() {
+        assert_eq!((from_file.kind(id), from_file.name(id), from_file.position(id)), (from_code.kind(id), from_code.name(id), from_code.position(id)));
+    }
+    for seed in [0, 7] {
+        assert_eq!(run_for(&from_file, seed, secs(86_400)), run_for(&from_code, seed, secs(86_400)), "seed {seed}");
+    }
+}
+
+#[test]
+fn the_buffered_line_file_is_in_canonical_form_with_no_warnings() {
+    let text = buffered_line_file();
+    let model = load(&text).unwrap();
+    assert_eq!(model.save(), text);
+    assert!(model.warnings().is_empty(), "{:?}", model.warnings());
 }

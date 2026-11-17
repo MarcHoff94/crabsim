@@ -217,7 +217,11 @@ pub fn weights(model: &Model, weigh: &Weigh, values: Option<&[Option<f64>]>) -> 
                     "process_time" if Attribute::ProcessTime.applies_to(resolved.built_in) => has.process_time.map(|time| time.as_millis() as f64 / 1000.0),
                     "interval" if Attribute::Interval.applies_to(resolved.built_in) => has.interval.map(|time| time.as_millis() as f64 / 1000.0),
                     "starting_mus" if Attribute::StartingMus.applies_to(resolved.built_in) => has.starting_mus.map(|count| count as f64),
-                    "capacity" if Attribute::Capacity.applies_to(resolved.built_in) => has.capacity.map(|count| count as f64),
+                    "capacity" if Attribute::Capacity.applies_to(resolved.built_in) => match has.capacity {
+                        // A Buffer with no limit has no number to weigh.
+                        Some(crabsim_model::Capacity::Limited(count)) => Some(count as f64),
+                        _ => None,
+                    },
                     _ => None,
                 }
             })

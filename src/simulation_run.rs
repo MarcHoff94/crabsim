@@ -249,7 +249,9 @@ impl SimulationRun {
     /// About how much memory a clone of this run takes.
     pub(crate) fn checkpoint_bytes(&self) -> u64 {
         const PER_OBJECT_ON_THE_HEAP: usize = 64;
-        let objects = self.objects.len() * (size_of::<ModelObject>() + PER_OBJECT_ON_THE_HEAP);
+        // A Buffer's MUs are the one thing whose size isn't known from the model.
+        let in_buffers: usize = self.objects.iter().map(|object| if let ModelObject::Buffer(buffer) = object { buffer.content_bytes() } else { 0 }).sum();
+        let objects = self.objects.len() * (size_of::<ModelObject>() + PER_OBJECT_ON_THE_HEAP) + in_buffers;
         let periods = self.periods.as_ref().map_or(0, Periods::bytes);
         (size_of::<SimulationRun>() + objects + periods + self.queue.len() * size_of::<ScheduledEvent>()) as u64
     }

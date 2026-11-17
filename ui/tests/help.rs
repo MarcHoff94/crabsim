@@ -18,6 +18,8 @@ fn the_help_lists_the_states_an_objects_type_can_be_in_each_with_what_it_means()
     assert_eq!(source, [State::Busy, State::Blocked]);
     let drain: Vec<State> = states(ObjectKind::Drain, None).iter().map(|help| help.state).collect();
     assert_eq!(drain, [State::Idle]);
+    let buffer: Vec<&str> = states(ObjectKind::Buffer, None).iter().map(|help| help.state.label()).collect();
+    assert_eq!(buffer, ["Holding", "Blocked", "Idle"], "a Buffer does no work, so it is holding rather than busy");
     for kind in [ObjectKind::Source, ObjectKind::Station, ObjectKind::Buffer, ObjectKind::Drain] {
         assert!(states(kind, None).iter().all(|help| !help.meaning.is_empty() && help.note.is_none()), "{kind:?}");
     }
@@ -37,7 +39,7 @@ fn the_models_own_notes_sit_beside_crabsims_meaning_never_instead_of_it() {
 
 #[test]
 fn every_state_has_its_own_colour_and_a_forced_failure_is_a_darker_red_than_a_failure() {
-    let shades = [Shade::Unknown, Shade::Idle, Shade::Busy, Shade::Blocked, Shade::Paused, Shade::Failed, Shade::ForcedFailure];
+    let shades = [Shade::Unknown, Shade::Idle, Shade::Busy, Shade::Holding, Shade::Blocked, Shade::Paused, Shade::Failed, Shade::ForcedFailure];
     for (i, a) in shades.iter().enumerate() {
         for b in &shades[i + 1..] {
             assert_ne!(rgb(*a), rgb(*b), "{a:?} and {b:?}");

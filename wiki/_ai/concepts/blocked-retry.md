@@ -12,15 +12,15 @@ section: concepts
 - `MUExit` is scheduled (work done); `BlockedRetry` is reactive (successor freed up)
 
 ## Invariants
-- `blockedlist`: longest-waiting first, each predecessor once; a refused retry lists it again
+- `blockedlist`: `Waiting { since, id }` per predecessor, once each, ordered by when its offered MU became ready to leave (ADR 0018), ties in the order they joined; a refused retry puts it back in the place it had; when its MU moves it gives up its place and waits on by its next ready MU, if any (`relist_blocked`)
 - A predecessor whose MU moves is removed from all its successors' lists
 - Retries run before other events at the same time, and offer only the sender, so nothing overtakes those waiting
 - A Drain's entrance is always open, so nothing waits for it
 
 ## Pitfalls
 - A retry that finds its predecessor stopped is used up; the predecessor relists at the back after repair
-- Giving up a place on any move assumes one MU per object: revisit with Station capacity, Buffer fix, exit strategies
-- Source's `is_exit_allowed` is always true, so with several successors a retry can move an MU before its interval ends (known problem)
+- With one MU per object that is the order there always was; a Buffer is the first object with several MUs
+- A Source answers a retry only once its MU's interval is over; a Buffer only while blocked
 - Without dedup, refused retries once multiplied into a false `ZeroTimeLoop`
 
 ## Code locations

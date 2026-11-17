@@ -29,8 +29,8 @@ Discrete-event material-flow simulator in Rust, built for speed. Engine library 
 ### Material Flow Model
 
 #### Facts
-- Object types: Source (creates an MU every interval), Station (one MU at a time for its process time; fails, pauses, forced failure), Buffer (capacity; known broken, unused), Drain (takes MUs out, exit statistics)
-- "Station" means only the processing type; Station capacity, Buffer dwelling time and stops on non-Stations are agreed but not built
+- Object types: Source (creates an MU every interval), Station (one MU at a time for its process time; fails, pauses, forced failure), Buffer (capacity or unlimited, dwelling time, first in first out or last in first out, starting MUs; idle, holding or blocked), Drain (takes MUs out, exit statistics)
+- "Station" means only the processing type; Station capacity and stops on non-Stations are agreed but not built
 - Built through `ModelDescription`: `add_source/add_station/add_station_holding/add_buffer/add_drain` return ids (= Init order), `connect(from, to)` appends a successor, `build(seed)` gives a run; one description builds many runs
 - Names, positions, dimensions live on the description for views; `build` drops them, so they can't change results
 - Topology is static; objects know only successor ids; predecessors appear only in `blockedlist`
@@ -83,7 +83,7 @@ Discrete-event material-flow simulator in Rust, built for speed. Engine library 
 
 #### Pitfalls
 - A retry that finds its predecessor stopped is used up; the predecessor relists at the back after repair
-- Giving up a place on any move assumes one MU per object: revisit with Station capacity, Buffer fix, exit strategies
+- A line of blocked predecessors is ordered by when each one's offered MU became ready to leave (ADR 0018); a predecessor whose MU moved waits on by its next MU, if it has one ready
 - Source's `is_exit_allowed` is always true, so with several successors a retry can move an MU before its interval ends (known problem)
 - Without dedup, refused retries once multiplied into a false `ZeroTimeLoop`
 
@@ -157,7 +157,6 @@ Discrete-event material-flow simulator in Rust, built for speed. Engine library 
 - A second random failure while failed is discarded; random failures continue under a forced one
 
 #### Pitfalls
-- Buffer is broken: loses MUs, never notifies predecessors, ignores a retry's `from`
 
 #### Code locations
 - `src/materialflow_objects/model_object.rs`, `flows.rs`, `source.rs`, `station.rs`, `buffer.rs`, `drain.rs`

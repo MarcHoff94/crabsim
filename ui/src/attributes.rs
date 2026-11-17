@@ -24,6 +24,9 @@ pub fn summary(value: &Value) -> String {
         });
         return format!("weighted: {what} by {by}, {order} first{drains}");
     }
+    if let Some((_, label)) = EXIT_STRATEGIES.iter().find(|(name, _)| value == *name) {
+        return label.to_lowercase();
+    }
     let Value::Object(fields) = value else {
         return text(value);
     };
@@ -101,7 +104,13 @@ pub struct Form {
     pub repair: Option<RepairKind>,
     /// For a distribution strategy: its choices, which aren't text.
     pub distribution: Option<DistributionChoice>,
+    /// For a value that is one of a few: each as a model file writes it, with its label. The
+    /// one chosen is the first part's text.
+    pub options: &'static [(&'static str, &'static str)],
 }
+
+/// A Buffer's exit strategies, by name in a model file, with their labels in the window.
+pub const EXIT_STRATEGIES: [(&str, &str); 2] = [("first_in_first_out", "First in, first out"), ("last_in_first_out", "Last in, first out")];
 
 /// What can be weighed, by name in a model file, with its label in the window.
 pub const WEIGHABLE: [(&str, &str); 4] = [("process_time", "Process time"), ("interval", "Interval"), ("starting_mus", "Starting MUs"), ("capacity", "Capacity")];
@@ -166,9 +175,11 @@ impl Form {
                 let rotation = size.get("rotation_degrees").and_then(Value::as_f64).map_or_else(|| "0".to_string(), number);
                 (vec![part("length", field("length")), part("width", field("width")), part("height", field("height")), part("rotation °", rotation)], None)
             }
+            "exit_strategy" => (vec![part("", value.and_then(Value::as_str).unwrap_or(EXIT_STRATEGIES[0].0))], None),
             _ => (vec![part("", text_of(value))], None),
         };
-        Form { attribute: attribute.to_string(), parts, repair, distribution: None }
+        let options: &[(&str, &str)] = if attribute == "exit_strategy" { &EXIT_STRATEGIES } else { &[] };
+        Form { attribute: attribute.to_string(), parts, repair, distribution: None, options }
     }
 
     /// The fields for `attribute`, whatever it is: state notes need the `states` the object can be
@@ -201,7 +212,7 @@ impl Form {
             successor: field("rank") == Some("successor"),
             drains: ticks,
         };
-        Form { attribute: "distribution".into(), parts: Vec::new(), repair: None, distribution: Some(choice) }
+        Form { attribute: "distribution".into(), parts: Vec::new(), repair: None, distribution: Some(choice), options: &[] }
     }
 
     /// The fields for state notes: one per state the object can be in, labelled with the state and
@@ -211,7 +222,7 @@ impl Form {
             .iter()
             .map(|state| part(state.label(), value.and_then(|notes| notes.get(state.name())).and_then(Value::as_str).unwrap_or_default()))
             .collect();
-        Form { attribute: "state_notes".into(), parts, repair: None, distribution: None }
+        Form { attribute: "state_notes".into(), parts, repair: None, distribution: None, options: &[] }
     }
 
     /// The states a state notes form has a field for.
@@ -241,8 +252,14 @@ impl Form {
         };
         let whole = |index: usize| -> Result<u64, String> { text(index).parse::<u64>().map_err(|_| format!("`{}` isn't a whole number of 0 or more", text(index))) };
         match self.attribute.as_str() {
-            "interval" | "process_time" => time(0),
-            "starting_mus" | "capacity" => whole(0).map(|n| json!(n)),
+            "interval" | "process_time" | "dwelling_time" => time(0),
+            "starting_mus" => whole(0).map(|n| json!(n)),
+            // No limit is -1 or the word, and a model file writes the word.
+            "capacity" if text(0) == "-1" || text(0).eq_ignore_ascii_case("unlimited") => Ok(json!("unlimited")),
+            "capacity" => match text(0).parse::<u64>() {
+                Ok(limit) if limit >= 1 => Ok(json!(limit)),
+                _ => Err(format!("`{}` isn't a capacity: type a whole number from 1, or -1 for no limit", text(0))),
+            },
             "failures" => {
                 let percent = float(0)?;
                 // 100 % available never fails, which a model file says by leaving failures out.

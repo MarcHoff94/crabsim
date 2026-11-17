@@ -89,8 +89,10 @@ Which attributes an instance has depends on its built-in class at the root of it
 | `interval` | Source | 0, so every Source is valid when placed | A time, 0 or more |
 | `process_time` | Station | 0, a dummy Station | A time, 0 or more |
 | `failures` | Station | none: never fails | See below |
-| `starting_mus` | Station | 0 | 0 or 1, until Station capacity exists |
-| `capacity` | Buffer | none: must be set somewhere in the chain | 1 or more. Buffer is known to be broken until step 7 of issue 3 |
+| `starting_mus` | Station, Buffer | 0 | A Station 0 or 1, until Station capacity exists. A Buffer at most its capacity, and at most 1,000,000: they count as entered at Init, in their order |
+| `capacity` | Buffer | `"unlimited"` | A whole number from 1, or `"unlimited"` (ADR 0019). `-1` is read as unlimited and saved as `"unlimited"` |
+| `dwelling_time` | Buffer | 0 | A time, 0 or more: how long each MU stays before it may leave, counted from its own entry |
+| `exit_strategy` | Buffer | `"first_in_first_out"` | That or `"last_in_first_out"`: which of the MUs whose dwelling time is over it passes on next |
 | `dimensions` | all | by type: Station 2 × 1.5 × 1.5 m, Buffer 2 × 1 × 1 m, Source and Drain 1 m each way | `length`, `width`, `height` above 0, `rotation_degrees` optional, 0 by default |
 | `description` | all | none | Free text |
 | `state_notes` | all | none | A note per state, see below |
@@ -108,7 +110,7 @@ Which attributes an instance has depends on its built-in class at the root of it
   ```json
   "state_notes": { "blocked": "waits for the conveyor to clear", "failed": "the gripper needs changing" }
   ```
-  The states are `busy`, `blocked`, `idle`, `failed`, `forced_failure` and `paused`, and a note may name only states its built-in class can be in: a Source is busy or blocked, a Station any of them, a Buffer busy, blocked or idle, and a Drain only idle. A note can't be empty. Like every attribute, the notes are inherited as a whole, so an instance that sets its own replaces its class's. A note never changes what is measured or a state's colour.
+  The states are `busy`, `holding`, `blocked`, `idle`, `failed`, `forced_failure` and `paused`, and a note may name only states its built-in class can be in: a Source is busy or blocked, a Station any of them but holding, a Buffer holding, blocked or idle, and a Drain only idle. A note can't be empty. Like every attribute, the notes are inherited as a whole, so an instance that sets its own replaces its class's. A note never changes what is measured or a state's colour.
 - **Distribution** says which successor receives the MU an object passes on (ADR 0016): `"round_robin"`, each successor in turn, or weighted:
   ```json
   "distribution": { "weighted": { "by": "process_time", "order": "smallest", "rank": "route", "drains": ["Out"] } }
@@ -149,7 +151,10 @@ What it catches:
 - Connections to an unknown name, into a Source, out of a Drain, from an object to itself, or the same connection twice, each with the connection's pointer, such as `/connections/3/to`, and its ends as its name, such as `In → Mill`.
 - Exits or entrances with gaps or repeats, such as an exit of 3 out of an object with 2 connections out, or two connections out of one object with exit 1.
 - Attributes the class doesn't have, values out of range, and required values set nowhere in the chain.
-- **A Source that would create MUs forever:** a Source with an interval of 0 that can reach a Drain through nothing but zero-time Stations and Buffers. Nothing ever fills, so it would create MUs without time passing. The run's zero-time-loop error stays as the backstop. Once Buffer is fixed and Station capacity exists, a full Buffer can block a Source, and this check gets refined.
+- **A Source that would create MUs forever:** a Source with an interval of 0 that can reach a Drain, or a Buffer with no limit, through nothing but zero-time objects: Stations with a process time of 0 and Buffers with a capacity and a dwelling time of 0. Nothing ever fills, so it would create MUs without time passing. A Buffer with a capacity and a dwelling time fills, and then the Source waits. The run's zero-time-loop error stays as the backstop.
+- **A Buffer that starts with more MUs than it holds,** wherever the two values come from.
+
+A model without problems can still get warnings from `validate_model`, which never stop a run. One of them is a Buffer with no limit that can get MUs faster than it can pass them on, judged from the intervals of the Sources and the process times of the Stations directly before and after it.
 
 ## Saving
 

@@ -1,12 +1,12 @@
 use crate::error::{InitError, MaterialflowError, RunTimeError};
 use crate::event::{EventContext, EventTemplate, EventType, ExitTicket};
-use crate::report::{Interruption, ObjectKind, ObjectState, OccurrenceKind, StopCause};
+use crate::report::{Capacity, Interruption, ObjectKind, ObjectState, OccurrenceKind, StopCause};
 use crate::statistics::{MachineState, StatisticsKeeper};
 use crate::time::SimTime;
 use super::flows::BaseObject;
 use crate::materialflow_objects::OtherObjects;
 use crate::flows::{
-	EventInterface, StopCtrl, FailureProfile, InterruptionState, MaterialFlow, MoveableUnit, ProcessState, SuccessorContainer, Distributing, list_blocked, retries_for_blocked, retry_move_to_successor, try_to_move_to_successor
+	EventInterface, StopCtrl, FailureProfile, InterruptionState, MaterialFlow, MoveableUnit, ProcessState, SuccessorContainer, Distributing, Waiting, list_blocked, relist_blocked, waiting_ids, retries_for_blocked, retry_move_to_successor, try_to_move_to_successor
 };
 
 #[derive(Clone)]
@@ -25,7 +25,10 @@ pub struct SingleStation {
 	pub succ_pointer: usize,
 	/// How it picks the successor for its MU. Set by the run, which ranks the successors.
 	pub distribution: Distributing,
-	pub blockedlist: Vec<u32>,
+	pub blockedlist: Vec<Waiting>,
+	/// When the MU it holds became ready to leave: when its work finished, or when the stop ended
+	/// that kept it from leaving. Read only while a finished MU waits.
+	ready_since: SimTime,
 	pub entrancelocked: bool,
 	pub exitlocked: bool,
 	pub state: ProcessState,
@@ -63,6 +66,7 @@ impl SingleStation {
 			succ_pointer: 0,
 			distribution: Distributing::RoundRobin,
 			blockedlist: Vec::new(),
+			ready_since: SimTime::ZERO,
 			entrancelocked: false,
 			exitlocked: false,
 			state: ProcessState::Idle,
@@ -107,6 +111,7 @@ impl SingleStation {
 					return Ok(None);
 				}
 				self.completion_time = None;
+				self.ready_since = context.time;
 				if let Some(mu_id) = self.content.as_ref().map(|mu| mu.id) {
 					context.record(OccurrenceKind::WorkFinished { mu_id, at: self.base.object_id });
 				}
@@ -289,7 +294,10 @@ impl SingleStation {
 				events.push(self.exit_event(mu_id, remain));
 			}
 		} else if self.content.is_some() {
-			// Blocked when the stop began (MU done, waiting to exit): retry the move
+			// Blocked when the stop began (MU done, waiting to exit): retry the move. A stopped
+			// Station releases no MU, so its MU is ready to leave again from now. Where it is
+			// still listed it keeps its place.
+			self.ready_since = context.time;
 			match try_to_move_to_successor(self, context, others) {
 				Ok(Some(evt)) => {
 					self.entrancelocked = false;
@@ -401,11 +409,11 @@ impl MaterialFlow for SingleStation {
 		self.update_statistics(context.time);
 		Ok(Some(exit))
 	}
-	fn add_blocked(&mut self, id_blocked: u32) {
-		list_blocked(&mut self.blockedlist, id_blocked);
+	fn add_blocked(&mut self, id_blocked: u32, since: SimTime, answering_retry: bool) {
+		list_blocked(&mut self.blockedlist, id_blocked, since, answering_retry);
 	}
-	fn remove_blocked(&mut self, id_blocked: u32) {
-		self.blockedlist.retain(|&id| id != id_blocked);
+	fn relist_blocked(&mut self, id_blocked: u32, next: Option<SimTime>) {
+		relist_blocked(&mut self.blockedlist, id_blocked, next);
 	}
 	fn notify_blocked_predecessors(&mut self) -> Result<Option<Vec<EventTemplate>>, MaterialflowError> {
 		Ok(retries_for_blocked(&mut self.blockedlist, self.base.object_id))
@@ -449,6 +457,7 @@ impl EventInterface for SingleStation {
 		self.stop_count = 0;
 		self.succ_pointer = 0;
 		self.blockedlist.clear();
+		self.ready_since = SimTime::ZERO;
 		self.entrancelocked = false;
 		self.exitlocked = false;
 		self.state = ProcessState::Idle;
@@ -472,9 +481,9 @@ impl EventInterface for SingleStation {
 			stop: self.interruption().cause(),
 			interruptions: self.interruptions(),
 			remaining,
-			blocked_predecessors: self.blockedlist.clone(),
+			blocked_predecessors: waiting_ids(&self.blockedlist),
 			successors: self.succ.clone(),
-			capacity: self.statistics.capacity(),
+			capacity: Capacity::Limited(self.statistics.capacity()),
 			process_time: Some(self.proc_time),
 			configured_process_time: Some(self.configured_proc_time),
 			statistics: self.statistics.read(now),
@@ -519,6 +528,9 @@ impl SuccessorContainer for SingleStation {
 	}
 	fn take_content(&mut self, _now: SimTime) -> Option<MoveableUnit> {
 		self.content.take()
+	}
+	fn offered_since(&self, _now: SimTime) -> Option<SimTime> {
+		self.content.as_ref().map(|_| self.ready_since)
 	}
 	fn statistics_mut(&mut self) -> &mut StatisticsKeeper {
 		&mut self.statistics

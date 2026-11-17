@@ -390,3 +390,42 @@ fn a_distribution_reads_as_one_line() {
         "weighted: successor by process time, largest first, to Out"
     );
 }
+
+// ---------- A Buffer's fields ----------
+
+#[test]
+fn a_capacity_is_a_number_from_1_or_no_limit_typed_as_minus_1_or_the_word() {
+    let mut form = Form::new("capacity", Some(&json!("unlimited")));
+    assert_eq!(form.parts[0].text, "unlimited");
+    assert!(form.matches(Some(&json!("unlimited"))));
+    for no_limit in ["-1", "unlimited", " Unlimited "] {
+        typed(&mut form, &[no_limit]);
+        assert_eq!(form.value(), Ok(json!("unlimited")), "{no_limit}");
+    }
+    typed(&mut form, &["12"]);
+    assert_eq!(form.value(), Ok(json!(12)));
+    assert!(!form.matches(Some(&json!("unlimited"))), "something waits to be applied");
+    for wrong in ["0", "-2", "many", "2.5", ""] {
+        typed(&mut form, &[wrong]);
+        assert!(form.value().unwrap_err().contains("a whole number from 1, or -1 for no limit"), "{wrong}");
+    }
+}
+
+#[test]
+fn an_exit_strategy_is_one_of_two_and_a_dwelling_time_a_time() {
+    let form = Form::new("exit_strategy", None);
+    assert_eq!(form.options.iter().map(|(_, label)| *label).collect::<Vec<_>>(), ["First in, first out", "Last in, first out"]);
+    assert_eq!(form.value(), Ok(json!("first_in_first_out")), "the default until another is chosen");
+    let mut form = Form::new("exit_strategy", Some(&json!("last_in_first_out")));
+    assert!(form.matches(Some(&json!("last_in_first_out"))));
+    form.parts[0].text = "first_in_first_out".into();
+    assert!(!form.matches(Some(&json!("last_in_first_out"))));
+    assert_eq!(summary(&json!("last_in_first_out")), "last in, first out");
+    assert_eq!(summary(&json!("unlimited")), "unlimited");
+
+    let mut form = Form::new("dwelling_time", Some(&json!("00:00:30")));
+    typed(&mut form, &["2:00"]);
+    assert_eq!(form.value(), Ok(json!("2:00")));
+    typed(&mut form, &["a while"]);
+    assert!(form.value().unwrap_err().contains("isn't a time"));
+}

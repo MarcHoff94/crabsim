@@ -81,8 +81,13 @@ pub fn weight(object: &ModelObject, by: WeighBy) -> Option<u64> {
     match (object, by) {
         (ModelObject::Station(station), WeighBy::ProcessTime) => Some(station.proc_time.as_millis()),
         (ModelObject::Station(station), WeighBy::StartingMus) => Some(u64::from(station.starting_content.is_some())),
+        (ModelObject::Buffer(buffer), WeighBy::StartingMus) => Some(buffer.starting_mus.len() as u64),
         (ModelObject::Source(source), WeighBy::Interval) => Some(source.proc_time.as_millis()),
-        (ModelObject::Buffer(buffer), WeighBy::Capacity) => Some(buffer.capacity as u64),
+        // An unlimited Buffer has no number to weigh.
+        (ModelObject::Buffer(buffer), WeighBy::Capacity) => match buffer.capacity {
+            crate::report::Capacity::Limited(limit) => Some(limit),
+            crate::report::Capacity::Unlimited => None,
+        },
         _ => None,
     }
 }

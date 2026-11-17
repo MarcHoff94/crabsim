@@ -129,11 +129,11 @@ impl MaterialFlow for ModelObject {
     fn process_mu_entrance(&mut self, mu: MoveableUnit, context: &mut EventContext) -> Result<Option<EventTemplate>, MaterialflowError> {
         on_the_object!(self, object => object.process_mu_entrance(mu, context))
     }
-    fn add_blocked(&mut self, id_blocked: u32) {
-        on_the_object!(self, object => object.add_blocked(id_blocked))
+    fn add_blocked(&mut self, id_blocked: u32, since: SimTime, answering_retry: bool) {
+        on_the_object!(self, object => object.add_blocked(id_blocked, since, answering_retry))
     }
-    fn remove_blocked(&mut self, id_blocked: u32) {
-        on_the_object!(self, object => object.remove_blocked(id_blocked))
+    fn relist_blocked(&mut self, id_blocked: u32, next: Option<SimTime>) {
+        on_the_object!(self, object => object.relist_blocked(id_blocked, next))
     }
     fn notify_blocked_predecessors(&mut self) -> Result<Option<Vec<EventTemplate>>, MaterialflowError> {
         on_the_object!(self, object => object.notify_blocked_predecessors())

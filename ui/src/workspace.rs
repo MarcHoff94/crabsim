@@ -562,8 +562,7 @@ impl Workspace {
 
     /// The classes an instance can be placed from, as a tree by inheritance: each built-in class,
     /// which stands for the model's own values for it, followed by the model's classes derived
-    /// from it, depth first, in file order. Buffer and the classes derived from it are left out
-    /// until build step 7 fixes Buffer.
+    /// from it, depth first, in file order.
     pub fn classes(&self) -> Vec<ClassEntry> {
         fn below(model: &Model, parent: &str, depth: usize, into: &mut Vec<ClassEntry>) {
             for class in model.classes.iter().filter(|class| class.parent == parent && !class.refines_built_in()) {
@@ -572,7 +571,7 @@ impl Workspace {
             }
         }
         let mut entries = Vec::new();
-        for built_in in BUILT_IN_CLASSES.into_iter().filter(|&class| class != "Buffer") {
+        for built_in in BUILT_IN_CLASSES {
             entries.push(ClassEntry { name: built_in.to_string(), parent: None, depth: 0, built_in: true });
             below(&self.model, built_in, 1, &mut entries);
         }

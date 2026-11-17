@@ -27,8 +27,13 @@ pub(crate) fn build(model: &Model) -> ModelDescription {
                 }
             }
             "Buffer" => {
-                let capacity = attributes.capacity.expect("checked: a Buffer has a capacity");
-                description.add_buffer(usize::try_from(capacity).unwrap_or(usize::MAX))
+                let buffer = description.add_buffer(attributes.capacity.unwrap_or(crabsim::Capacity::Unlimited));
+                description.set_dwelling_time(buffer, attributes.dwelling_time.unwrap_or(SimTime::ZERO));
+                description.set_exit_strategy(buffer, attributes.exit_strategy.unwrap_or_default());
+                let starting = attributes.starting_mus.unwrap_or(0) as u32;
+                description.set_starting_mus(buffer, &(next_mu..next_mu + starting).collect::<Vec<u32>>());
+                next_mu += starting;
+                buffer
             }
             "Drain" => description.add_drain(),
             other => unreachable!("checked: `{other}` is a built-in class"),

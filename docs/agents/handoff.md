@@ -1,6 +1,6 @@
 # crabsim handoff
 
-Written 2026-11-07 at the end of a working session, and updated after each step since, last on 2026-11-13 after undo (spec issue 107). "Current state" below is older: it was last checked on 2026-11-10. Read this first, then check it against the code and git, because it describes a moment in time.
+Written 2026-11-07 at the end of a working session, and updated after each step since, last on 2026-11-16 after PR 1 of build step 7 (spec issue 110). Read this first, then check it against the code and git, because it describes a moment in time.
 
 **The UI's order of work is done.** UI stage 1 was built in four slices, PRs 24 to 27: the demo drawn live with state colours and MUs, pan and zoom, the run controls, speed, time mode, stepping, going back to a time, the error banner, the inspector, interventions on Stations and their marks. Step 7 trimmed the CLI to a headless run of the demo, in PR 30.
 
@@ -21,6 +21,8 @@ Written 2026-11-07 at the end of a working session, and updated after each step 
 
 **Undo, [spec issue 107](https://github.com/MarcHoff94/crabsim/issues/107),** designed with the owner on 2026-11-13 in three rounds (ADR 0017): one change history per model file in `.crabsim/history.sqlite`, with everyone's changes, each storing the file's whole text, so undo and redo write a text back exactly. Both PRs are built: PR 1 (#108, merged) with the history, `get_history`, `undo_model` and `redo_model` (32 tools over MCP), an agent undoing only its own latest changes, groups, and the CLI's `history`, `undo` and `redo`; and PR 2, on the branch `feat/undo-window`, with the window's `u`, Ctrl+R and counts, asking first, the line at the foot of the canvas, selecting what a step touched, and the History section in the Agents tab. PR 2 was tried in the window on 2026-11-13, driven by a script sending keys and clicks and taking screenshots (`u`, `2u`, Ctrl+R, a click on the History list, `u` during a run, an agent's change undone past its claim over MCP, and a macro with a window command undone in one step): everything worked and nothing needed fixing. Found while building: `5@a` was already one batch, so only a macro holding window commands needed a group, and a model made with New model and then changed outside has nothing to undo to after Adopt, because a new file's text isn't kept until its first change. This was done on the owner's second PC, where `gh` is installed since that day and nothing else from "Folders outside the repository" or "Installed binaries" below exists.
 
+**Build step 7, the domain model, is designed in its first round, [spec issue 110](https://github.com/MarcHoff94/crabsim/issues/110),** with the owner on 2026-11-13 and 2026-11-15 in four rounds: Buffer made to work, Station capacity, and blocked predecessors waiting by MU. **Its PR 1 is built,** on the branch `feat/buffer-waiting-by-mu`: waiting by MU (ADR 0018), Buffer with a capacity or none (ADR 0019), a dwelling time, both exit strategies and starting MUs, the Source fix, and Buffer in the model file, the catalogue and the window. PR 2, Station capacity, is next. See "Build step 7, round 1" under "Agreed design".
+
 ## Start here
 
 1. Read `CLAUDE.md`.
@@ -32,17 +34,17 @@ Written 2026-11-07 at the end of a working session, and updated after each step 
 
 ## Current state
 
-Checked on 2026-11-10, on Rust 1.99.1, at `master` after PR 85 (`736134e`): 652 tests pass, with 5 ignored: the long run, the test that writes the schema file again, and three timing tests of the catalogue on 6,006 objects. That is the default members (`cargo test --all-targets`), the MCP server (`cargo test -p crabsim-mcp`) and the UI (`cargo test -p crabsim-ui --profile ui`).
+Checked on 2026-11-15, on Rust 1.99.1, at `master` after PR 109 (`da3b522`), on the owner's second PC: 806 tests pass, with 5 ignored: the long run, the test that writes the schema file again, and three timing tests of the catalogue on 6,006 objects. That is 602 in the default members (`cargo test --all-targets`), 3 for the MCP server (`cargo test -p crabsim-mcp`) and 201 for the UI (`cargo test -p crabsim-ui --profile ui`). The default members and the MCP server were last run on 2026-11-13 after PR 108, and PR 109 changed only the UI and docs.
 
 | Where | State |
 |---|---|
-| `master` on GitHub | Steps 1 to 6 of the build order, UI stages 1 and 2, steps 1 to 4 of the AI-native order of work through slice 3 of the catalogue, claims, and the first-time experience, through PR 85 |
-| Open issues | Specs #3 (only build step 7 left) and #28 (steps 5 to 8 left), and #58, the MCP tool list's size, to monitor. #63 and #73 were closed on 2026-11-09, #78 on 2026-11-10 |
+| `master` on GitHub | Steps 1 to 6 of the build order, UI stages 1 and 2, steps 1 to 4 of the AI-native order of work through slice 3 of the catalogue, claims, the first-time experience, building in the window, the distribution strategy, the keyboard with its command line and macros, and undo, through PR 109 |
+| Open issues | Spec #110, build step 7's first round, not built. Specs #3 (only build step 7 left) and #28 (steps 5 to 8 left). #58, the MCP tool list's size, to monitor, and #106, the slow edit on large models. Specs #87, #96, #99, #102 and #107 are built and still open: the owner closes them |
 | `prototype/restore-replay` | The throwaway prototype from build step 5. Keep it, and never merge it |
 | `prototype/ui-bevy` | The throwaway UI prototype from UI step 2, with temporary counters in the session. Keep it, and never merge it |
-| Merged branches still on GitHub | 17, the docs, UI stage 2, claims and first-time branches, all merged into `master`: safe to delete (`git branch -r --merged origin/master`). Deleting remote branches needs the owner's own hand: the permission check refuses it to an agent |
-| Folders outside the repository | `C:\Users\marcu\crabsim-models`, the models folder of the first MCP trial, `C:\Users\marcu\crabsim-trial`, where agents ran three harness trials, with their reports (trial 3 in `trial-3`), and `C:\Users\marcu\Documents\crabsim-models`, the window's default models folder, made with the demo when PR 81 was tried |
-| Installed binaries | `C:\Users\marcu\AppData\Local\crabsim\bin`, which the owner's IDE harnesses run: `crabsim-mcp.exe` and `crabsim.exe` from `master` at PR 77, so without `find_bottleneck`, the model file listing rule and `state_notes`. Rebuild and copy them after changes to the catalogue or the MCP server, before an agent trial. A running server can't be overwritten, but it can be renamed aside |
+| Merged branches still on GitHub | Not counted since 2026-11-10, when there were 17, and more since: safe to delete (`git branch -r --merged origin/master`). Deleting remote branches needs the owner's own hand: the permission check refuses it to an agent |
+| Folders outside the repository | On the owner's first PC: `C:\Users\marcu\crabsim-models`, the models folder of the first MCP trial, `C:\Users\marcu\crabsim-trial`, where agents ran three harness trials, with their reports (trial 3 in `trial-3`), and `C:\Users\marcu\Documents\crabsim-models`, the window's default models folder. On the second PC none of these exist until the window is first started without `--models` |
+| Installed binaries | On the first PC: `C:\Users\marcu\AppData\Local\crabsim\bin`, which the owner's IDE harnesses run, with `crabsim-mcp.exe` and `crabsim.exe` from `master` at PR 77, so without everything since. Rebuild and copy them after changes to the catalogue or the MCP server, before an agent trial. A running server can't be overwritten, but it can be renamed aside. On the second PC nothing is installed: `.vscode/mcp.json` there, untracked, runs the server with `cargo run --release -p crabsim-mcp` on the repo's `models` folder |
 
 The owner merges PRs on GitHub themselves, so fetch before assuming local `master` is current. The repo has no CI, so a local test run is the only check. A UI window left open holds `target/ui/crabsim-ui.exe`, so a UI build fails until it's closed: never close the owner's window, build elsewhere with `CARGO_TARGET_DIR` instead. `.crabsim/` is ignored everywhere, since trying the window on the repository's `models` folder writes it there.
 
@@ -92,10 +94,47 @@ Performance is the first thing to weigh in design trade-offs. It is a guideline 
   - **Partly filled batch start:** waits indefinitely, with the waiting MUs visible in state. A timeout can come later if needed.
   - **Batch entrance:** closed once full, until the Station is completely empty.
   - **Individual entrance:** open whenever a slot is free. A finished MU still waiting to leave occupies its slot.
-- **Buffer** holds MUs and stays a separate concept from Station even though it can behave alike (ADR 0001). *Buffer's movement is still broken.*
+- **Buffer** holds MUs and stays a separate concept from Station even though it can behave alike (ADR 0001). *Built in PR 1 of build step 7, without stops.*
   - **Dwelling time:** one fixed value per Buffer, default 0, counted individually from each MU's entry.
   - **Stops and dwelling time:** a stop doesn't affect dwelling time by default, and this is configurable.
   - **What a stopped Buffer does:** entrance and exit are closed, and it keeps its contents.
+
+### Build step 7, round 1 (PR 1 built, PRs 2 and 3 not)
+
+[Spec issue 110](https://github.com/MarcHoff94/crabsim/issues/110), decided with the owner on 2026-11-13 and 2026-11-15. It adds to and sharpens "Model" above. In short:
+
+- **Scope:** Buffer, Station capacity and how blocked predecessors wait with several MUs per object, with the Source bug fixed on the way. Stops on Source, Buffer and Drain, `StopCtrl`, the failure time bases and whether a stopped predecessor keeps its place are the second round.
+- **Waiting by MU:** a successor's line of blocked predecessors is ordered by how long each predecessor's next MU has been ready to leave. With one MU per object that is today's order. The owner chose it over a predecessor keeping its place until empty, which starves the others, and over taking turns per object.
+- **Buffer:**
+  - **Capacity** is a whole number from 1 or unlimited, and a new Buffer is unlimited. Written `"unlimited"`, with `-1` accepted wherever a capacity is entered and saved as `"unlimited"`. The owner wants unlimited knowingly: it grows only as far as it's filled, and is the one case where memory isn't flat. Validate warns, and nothing limits it.
+  - **Exit strategy:** the Buffer decides which MU it shows to the movement code, which never knows the strategy, so strategies are added without touching it. First in, first out by default, and last in, first out, each among the MUs whose dwelling time is over. Stations with capacity keep "earliest finished first".
+  - **Starting MUs** up to its capacity.
+  - **States:** empty, holding and blocked, holding with its own word and colour.
+- **Station capacity:**
+  - **Starting MUs** up to its capacity. A full starting batch begins work at Init, and a part of one waits.
+  - **States:** work outranks blocking, so it's blocked only when nothing is in work and a finished MU can't leave. A batch waiting to fill is idle.
+  - **Busy splits into three parts that don't overlap,** the owner's idea for finding bottlenecks with capacity above 1: full, not full, and partly blocked (it works while a finished MU can't leave), which outranks the other two.
+  - **The likely-bottleneck rule** counts only "busy, full" and stopped time.
+- **Fill statistics for a Buffer,** asked for by the owner: mean, median, lowest and highest number of MUs and the full share, weighted by time, and a histogram of 64 bars. Its width is automatic by default (one level per bar up to 63 MUs, then doubling), or set with `histogram_bar_width` on the Buffer, where the last bar then collects everything beyond the range. A stored run keeps the figures and the histogram, the histogram in a table of its own.
+- **During a run:** the rules are set (capacity at once and refused below the MUs held, the rest from the next MU or batch), and the interventions come with the live-session operations.
+- **Model file:** `capacity` and `start` on a Station, and `capacity` (now optional), `dwelling_time`, `exit_strategy` and `histogram_bar_width` on a Buffer, all optional, so the format stays version 2.
+- **Performance:** the benchmark's existing scenarios stay within about ±2% of the baseline on the second PC, with figures in each PR, and a new scenario with Buffers and a capacity Station is added. The demo stays as it is, and `models/buffered-line.json` is a second example.
+- **Three PRs,** each tryable in the window: waiting by MU with Buffer and both ADRs, then Station capacity, then fill statistics.
+- **PR 1, built on 2026-11-16, and what it settled beyond the spec:**
+  - **Each place in a line has its own time.** A first version ordered the line by one "ready since" per predecessor, and the demo's hashes changed: a Station stopped while blocked keeps its old place where its retry wasn't used up, and rejoins at the back where it was. So a successor no longer empties its line when it sends retries: each entry stays, marked, until its retry is answered. Refused, the predecessor is back in its place, and otherwise the place is gone. With that, every occurrence of the demo and of two other models hashed the same as `master`.
+  - **Ready at the same instant:** in the order they joined the line. A Buffer whose MU moved joins again behind others ready at the same instant.
+  - **A stopped Station's MU** counts as ready again from the end of the stop, which is today's behaviour. Whether it should keep its place is still the second round's question.
+  - **A last in, first out Buffer keeps its place** while it waits, though the MU it would pass on changes as newer ones become ready. Following the newest MU would send a stack to the back of every line each time one arrives.
+  - **A Buffer's events:** one `MUExit` per MU at the end of its dwelling time, which is one event for an MU that enters a blocked Buffer and does nothing. Not optimised.
+  - **24 bytes per MU held,** not the spec's "about 16": the MU and when its dwelling ends.
+  - **Holding** is a state of its own in state notes (`holding`), the glossary and the window, where an empty Buffer is Idle. In the statistics and the results store, holding time is the busy time (`working_share`), until fill statistics in PR 3.
+  - **One dwelling time for all MUs in a Buffer** is what `offered` relies on: MUs become ready in the order they came in. The dwelling time as an intervention, with the live-session operations, has to keep that true or change the search.
+  - **The warning about an unlimited Buffer** compares MUs per hour in and out from the Sources and Stations directly beside it, and says nothing when anything else is beside it. A rough rule, the PR's own.
+  - **A Buffer starts with at most 1,000,000 MUs,** a check the spec didn't have, so a typo can't take the memory at Init.
+  - **Not weighed:** a Buffer's dwelling time isn't a weight for routes or a weighted distribution, and an unlimited capacity weighs nothing.
+  - **Left for PR 3:** Buffers in the Results tab, the median and the histogram. The inspector already shows most and mean MUs and the full share.
+  - **Performance not settled.** Measured on 2026-11-17 with the machine busy, alternating `master` and the branch six times each: demo headless 7.77M to 7.36M events/s (−5%), 6,006 objects headless 4.08M to 3.95M (−3%), demo with occurrences dropped 6.88M to 6.94M (+1%), medians, with `master` alone ranging from 5.9M to 8.2M. The spec asks for ±2%, so measure again on a quiet machine before merging, and if the loss holds, profile the line's bookkeeping (`retries_for_blocked` now keeps entries and `retain`s them, and a move asks `offered_since`). Event counts and MUs out were identical in every scenario. The new `buffered-headless` scenario ran at about 7.0M events/s.
+  - **`models/buffered-line.json`** has two Buffers and no capacity Station yet: PR 2 adds one, to the file, to `demo::buffered_line` and so to the benchmark's `buffered-headless` scenario, whose figures then change.
 
 ### Stops
 - **Interruption** is the cause (a failure or a pause). **Stop** is the resulting state of the object. A failure from t=20 to 30 plus a pause from t=25 to 35 is two interruptions and one stop from t=20 to 35.
@@ -154,17 +193,26 @@ Agreed on 2026-11-06, replacing the original repair plan:
 4. ✅ Headless run without recording, with statistics for what today's model has. Memory is now flat with simulated length.
 5. ✅ Throwaway prototype of restore and replay, for real cost figures. It held up: see `docs/design/restore-replay-prototype.md`. The code is on the branch `prototype/restore-replay`, never to be merged.
 6. ✅ Read-ahead `LiveSession`, with Pause on Stations, going back, stepping forward and time modes.
-7. ⬜ The earlier domain work, in this order. It comes after UI stage 1 unless the owner says otherwise, and drag and drop needs it, because the palette and forms depend on what each object can be configured with.
+7. ⬜ The earlier domain work. Its first round is spec issue 110: blocked predecessors waiting by MU and Buffer are built (PR 1), and Station capacity with start modes (PR 2) and fill statistics (PR 3) are not. The second round, not designed:
    - Finish stops on the other three object types, including failure profiles. Pause and overlap on Stations are done, through `PauseOn` and `PauseOff` events, while `StopCtrl` is still `todo!()`, so decide what becomes of it.
-   - Fix `Buffer`, test it, and add dwelling time.
    - Add the time bases.
-   - Add Station capacity and start modes, with the exit strategy seam.
 
 The statistics that depend on domain work arrive with step 7.
 
 `ExitTicket` was designed with capacity in mind, because a whole Station stops at once, but that's untested until capacity exists.
 
 **Baseline:** `cargo bench --bench reference`, tuned release profile, no logger and no view, Rust 1.99.1, median of 7 repetitions on the owner's PC, measured on 2026-11-07. The demo model is 15.5M events per simulated year.
+
+**On the owner's second PC,** where work continued from 2026-11-13, the same benchmark at `master` after PR 109, median of 5 repetitions, is the baseline for step 7. It is about a third slower than the first PC, with the same event counts and MUs out:
+
+| Scenario | Events/s | Wall time | Peak heap |
+|---|---|---|---|
+| Demo model, headless, 1 year | 8.83M | 1.76 s | Under 0.05 MB |
+| Demo model, headless, 10 years | 8.77M | 17.71 s | Under 0.05 MB |
+| 6,006 objects, headless, 2 days | 4.88M | 7.48 s | 19.6 MB |
+| Demo model, one advance, occurrences kept | 6.21M | 2.50 s | 2,148 MB |
+
+The table below is the first PC's, from 2026-11-07.
 
 | Scenario | Events/s | One simulated year | Peak heap |
 |---|---|---|---|
@@ -316,6 +364,8 @@ Designed and built on 2026-11-08, [spec issue 63](https://github.com/MarcHoff94/
 
 ### This PC
 
+**A second PC since 2026-11-13,** also Windows 11 and Rust 1.99.1: GitHub CLI 2.104.0 was installed there that day with winget and logged in. A shell started before the install doesn't have `gh` on its PATH, so call it as `C:\Program Files\GitHub CLI\gh.exe` until the app is restarted. The rest of this section describes the first PC.
+
 Checked on 2026-11-07, on Windows 11:
 
 - **Installed:** Rust 1.99.1 (stable, and pinned by the repo) with cargo and rustup, for `x86_64-pc-windows-msvc` only. WebView2 runtime 156, and `gh`.
@@ -435,10 +485,7 @@ The grilling session ended here on 2026-11-07, with nothing left open.
 
 ## Known problems
 
-- **`Buffer` is broken** (from reading, not run): `process_mu_exit` takes an MU and then the move takes another, so a lone MU never leaves, and with two or more, one is lost per move. It also never notifies blocked predecessors, and as a predecessor it ignores a retry's `from`. Its test only proves it replays consistently.
-- **A predecessor gives up its place when any MU moves:** this assumes one MU per object. Station capacity, the Buffer fix and exit strategies must revisit it.
 - **A stopped predecessor loses its place** (from reading): a retry that finds it stopped is used up, so it lists itself again at the back after its repair. The owner may want it to keep its place. Decide when `StopCtrl` is built.
-- **Source with several successors** (from reading): a `BlockedRetry` can move an MU before its interval ends, because `is_exit_allowed` is always true.
 - **Illegal connections panic while running,** in a model built in code: an edge into a Source, or a self-loop. `ModelDescription` only rejects a successor on a Drain and ids not in the model. A model file can't have them: its check refuses both.
 - **Dead code** hidden by `#![allow(dead_code)]`: `MUEntrance`, `Finished`, `exitlocked`, `Paused`, and `FailureProfile.mtbf`.
 
@@ -460,13 +507,15 @@ Done on 2026-11-07: the wiki was rewritten against today's code, with four pages
 - **Prove behaviour didn't change.** Steps 3, 4 and 6 hashed every occurrence and the final state against `master` before trusting a refactor, with a throwaway program outside the repo. Event counts alone wouldn't have shown a change in order.
 - **Say what wasn't measured.** The owner reads the limits of a result, so say what a figure doesn't cover, and which ones are single runs.
 - **The shell is Windows PowerShell 5.1.** `&&` doesn't work there, so give commands one per line. Git Bash is available to agents through the Bash tool.
+- **Try the window yourself when asked.** With no tool for driving a desktop, a PowerShell script worked on 2026-11-13: it brings the crabsim window to the front, sends keys with `SendKeys` and clicks with `mouse_event`, moving the pointer a moment before pressing, and saves a screenshot of that window's client area to read back. It must stop on any error before sending keys and send nothing unless the crabsim window is in front, or the keys land in whatever is. Run the window on a scratch models folder, never the owner's, and close only the process you started. An agent is played by a script speaking JSON-RPC to `crabsim-mcp`.
+- **Say which decisions you made while building.** The owner reads them in the PR and the summary, such as how a history entry is worded or what counts as an agent's own change.
 
 ## Possible next steps
 
 In the owner's order of 2026-11-09:
 
 1. **Keyboard navigation, step 2,** [spec issue 102](https://github.com/MarcHoff94/crabsim/issues/102): is built: the visual cursor, the `:` command language with `run_commands`, and macros. Undo followed as spec issue 107, built in two PRs. Next is trying it in the window, also with an agent connected, and later a look at what the archived agents' macros (`.crabsim/agent-macros.jsonl`) show. Further off, user code in Rust or a language of crabsim's own, a large topic for a careful round. Weights on connections and MUs counted per connection, both wanted for control strategies, follow distribution shares after build step 7 (spec issue 96).
-2. **Step 7 of the build order, the domain model, starting with a design round.** What it covers, from "Build order" and "Agreed design": stops on Source, Buffer and Drain with failure profiles, and what becomes of `StopCtrl`, which is still `todo!()`; fixing Buffer (see "Known problems") and adding dwelling time; the failure time bases; Station capacity with start modes and the exit-strategy seam. Decisions waiting for it: whether a stopped predecessor keeps its place among the blocked ("Known problems"), and how blocked predecessors give up their place once objects hold more than one MU. A suggestion from 2026-11-09: scope the first round to Buffer, Station capacity and blocked predecessors with several MUs, which are tied together and make bottleneck studies realistic, with stops on the other objects and time bases second. Take a fresh benchmark baseline first, since it's the first engine change since 2026-11-07, and take in the Source bug from "Known problems". Each new attribute arrives with its operation, its place in the model file and its schema.
+2. **Step 7 of the build order, the domain model.** Its first round is [spec issue 110](https://github.com/MarcHoff94/crabsim/issues/110), and its PR 1 is built: try it in the window first, since nobody has yet (place a Buffer, set its values, run `models/buffered-line.json`). Then PR 2, Station capacity, test-first at `SimulationRun`'s interface, with every occurrence of the demo hashed against `master` and the benchmark before and after, and PR 3, fill statistics. After them the second round's design: stops on Source, Buffer and Drain with failure profiles, what becomes of `StopCtrl`, which is still `todo!()`, the failure time bases, and whether a stopped predecessor keeps its place among the blocked. Each new attribute arrives with its operation, its place in the model file and its schema.
 3. **The rest of issue 28:** crabsim's first skills, as the test that the operations are enough (step 5), such as finding the bottleneck, which trial 3 did by hand and `find_bottleneck` now answers; experiments and studies (6); live-session operations and class changes as interventions (7); then in-app agents (8).
 4. **The MCP tool list's size, [issue 58](https://github.com/MarcHoff94/crabsim/issues/58):** a design round on shrinking it, when the owner chooses. It was 90.3 KB on 2026-11-09, after PR 77, with 24 tools. Spec 78 added `find_bottleneck` and lengthened `list_models`'s description and `model_file_format`'s schema, not measured since. Measure it again after each slice.
 

@@ -2204,6 +2204,34 @@ fn the_picture_rebuilds_from_occurrences_with_blocking() {
     assert_picture_rebuilds(blocking_line, &[1, 2, 5, 11, 40, 333, 1_000, 2_500, 7_777], &[], Toggle::Pause);
 }
 
+/// Source -> a small last in, first out Buffer -> Station -> a Buffer with a dwelling time, which
+/// starts with two MUs -> a slow Station with failures -> an unlimited Buffer where MUs only
+/// dwell -> Drain. The first two Buffers fill and block, and the last is holding or empty.
+fn buffered_line() -> SimulationRun {
+    let failures = FailureProfile::new(0.8, Distribution::ERLANG { mean: 20_000.0, k: 2 }, 0);
+    let mut model = ModelDescription::new();
+    let src = model.add_source(secs(2));
+    let stack = model.add_buffer(crabsim::Capacity::Limited(3));
+    model.set_exit_strategy(stack, crabsim::ExitStrategy::LastInFirstOut);
+    let a = model.add_station(secs(3), failures.clone());
+    let cooling = model.add_buffer(crabsim::Capacity::Limited(4));
+    model.set_dwelling_time(cooling, secs(6));
+    model.set_starting_mus(cooling, &[1, 2]);
+    let b = model.add_station(secs(4), failures);
+    let resting = model.add_buffer(crabsim::Capacity::Unlimited);
+    model.set_dwelling_time(resting, secs(3));
+    let dr = model.add_drain();
+    for (from, to) in [(src, stack), (stack, a), (a, cooling), (cooling, b), (b, resting), (resting, dr)] {
+        model.connect(from, to);
+    }
+    model.build(5)
+}
+
+#[test]
+fn the_picture_rebuilds_from_occurrences_with_buffers() {
+    assert_picture_rebuilds(buffered_line, &[1, 2, 6, 7, 11, 40, 333, 1_000, 2_500, 7_777], &[], Toggle::Pause);
+}
+
 #[test]
 fn the_picture_rebuilds_from_occurrences_on_the_demo_model() {
     // Branches, several predecessors and a Station that often blocks, paused along the way.

@@ -8,7 +8,8 @@
 use crate::distribution::{DistributionRule, Ranking};
 use crate::flows::{FailureProfile, MoveableUnit};
 use crate::materialflow_objects::{Buffer, Drain, ModelObject, SingleStation, Source};
-use crate::report::ObjectKind;
+use crate::materialflow_objects::ExitStrategy;
+use crate::report::{Capacity, ObjectKind};
 use crate::simulation_run::SimulationRun;
 use crate::time::SimTime;
 
@@ -88,8 +89,34 @@ impl ModelDescription {
         self.add(ModelObject::Station(SingleStation::new(id, process_time, failures, Some(mu), Vec::new())))
     }
 
-    pub fn add_buffer(&mut self, capacity: usize) -> u32 {
+    /// A Buffer that holds up to `capacity` MUs, empty in its default state, passing them on
+    /// first in, first out with no dwelling time.
+    pub fn add_buffer(&mut self, capacity: Capacity) -> u32 {
         self.add(ModelObject::Buffer(Buffer::new(self.next_id(), capacity, Vec::new())))
+    }
+
+    /// Sets the MUs a Buffer holds in its default state, by id, in the order they count as
+    /// entered at Init.
+    pub fn set_starting_mus(&mut self, id: u32, mus: &[u32]) {
+        self.buffer_mut(id).set_starting_mus(mus.to_vec());
+    }
+
+    /// Sets how long each MU stays in a Buffer before it may leave, counted from its entry.
+    pub fn set_dwelling_time(&mut self, id: u32, dwelling_time: SimTime) {
+        self.buffer_mut(id).set_dwelling_time(dwelling_time);
+    }
+
+    /// Sets which of the MUs that may leave a Buffer it passes on next.
+    pub fn set_exit_strategy(&mut self, id: u32, exit_strategy: ExitStrategy) {
+        self.buffer_mut(id).exit_strategy = exit_strategy;
+    }
+
+    fn buffer_mut(&mut self, id: u32) -> &mut Buffer {
+        match self.objects.get_mut(id as usize) {
+            Some(ModelObject::Buffer(buffer)) => buffer,
+            Some(_) => panic!("object {id} is not a Buffer"),
+            None => panic!("object {id} is not in the model"),
+        }
     }
 
     pub fn add_drain(&mut self) -> u32 {

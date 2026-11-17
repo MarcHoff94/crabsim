@@ -46,11 +46,12 @@ Keeping them apart lets a retry that reaches a busy object be ignored, and lets 
 
 ## The retry rule
 
-A `blockedlist` holds the predecessors waiting for an object, longest-waiting first, each listed once:
+A `blockedlist` holds the predecessors waiting for an object, each listed once as a `Waiting` with the time the MU it offered became ready to leave. The line is ordered by that time, longest ready first, and those ready at the same instant in the order they joined (ADR 0018):
 
-- `list_blocked` leaves a predecessor that is already listed in its place. `retries_for_blocked` empties the list into retries in that order, and a retry that is refused lists its predecessor again.
-- When a predecessor's MU moves, `try_to_move_to_successor` removes it from all its successors' lists, so it can't keep a place from an earlier wait.
-- An object that is empty when a retry arrives does nothing, because it has nothing to wait with.
+- `list_blocked` inserts a predecessor by its MU's time and leaves one that is already listed in its place.
+- `retries_for_blocked` sends a retry to everyone in the line, in order, and marks each entry as retried. A retry that is refused puts its predecessor back in the place it had. An entry whose retry came to nothing, because the predecessor was stopped, is dropped at the next round and replaced if the predecessor lists itself afresh.
+- When a predecessor's MU moves, `try_to_move_to_successor` calls `relist_blocked` at all its successors: it gives up its place, and if it has another MU ready, as a Buffer can, it waits on in the same lines by that MU's time.
+- An object that is empty when a retry arrives does nothing, because it has nothing to wait with. A Buffer answers a retry only while it is blocked.
 
 Without the first of these, each refused retry added another entry until one release fired over a million retries at one instant, which tripped `ZERO_TIME_EVENT_LIMIT` in long runs.
 
@@ -61,11 +62,11 @@ Two more things stop anything reaching a free successor ahead of those waiting f
 
 A retry that finds its predecessor stopped is used up, so that predecessor lists itself again at the back after its repair. The owner may want it to keep its place: that's to decide when stops are built for every object type.
 
-All this serves today's push with one MU per object. Giving up a place on any move assumes the predecessor has no other MU waiting, so revisit it with Station capacity, the Buffer fix and exit strategies.
+With one MU per object this gives the order crabsim always had. A Buffer is the first object with several MUs, and a Station with a capacity follows.
 
 ## Source and Drain
 
-A Source handles `BlockedRetry` too: once its MU has moved, it creates the next one at once. Its `is_exit_allowed` is always true, so with several successors a retry can move an MU before its interval ends. That's a known problem.
+A Source handles `BlockedRetry` too: once its MU has moved, it creates the next one at once. It answers a retry only while its MU's interval is over, so a retry from a successor it no longer waits for can't move the next MU early.
 
 A Drain's entrance is always open, so predecessors never wait for it, and it never sends retries.
 

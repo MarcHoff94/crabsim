@@ -377,7 +377,7 @@ fn reset_replays_a_preloaded_station() {
 fn reset_replays_a_buffer() {
     let mut model = ModelDescription::new();
     let src = source(&mut model, 10);
-    let buf = model.add_buffer(3);
+    let buf = model.add_buffer(crabsim::Capacity::Limited(3));
     let dr = drain(&mut model);
     model.connect(src, buf);
     model.connect(buf, dr);
@@ -640,7 +640,7 @@ fn state_reports_a_stations_process_time() {
 fn a_buffer_is_reported_like_any_other_object() {
     let mut model = ModelDescription::new();
     let src = source(&mut model, 10);
-    let buf = model.add_buffer(3);
+    let buf = model.add_buffer(crabsim::Capacity::Limited(3));
     model.connect(src, buf);
     let mut run = recorded(model.build(0));
     run.init().unwrap();
@@ -876,12 +876,12 @@ fn the_source_keeps_producing_after_being_blocked() {
 #[test]
 fn blocked_list_holds_each_predecessor_once_through_the_station_interface() {
     let mut s = SingleStation::new(1, secs(10), no_failures(0.0), None, Vec::new());
-    s.add_blocked(5);
-    s.add_blocked(5);
+    s.add_blocked(5, secs(1), false);
+    s.add_blocked(5, secs(2), false);
     assert_eq!(s.blockedlist.len(), 1);
     let mut d = Drain::new(2);
-    d.add_blocked(7);
-    d.add_blocked(7);
+    d.add_blocked(7, secs(1), false);
+    d.add_blocked(7, secs(2), false);
     assert_eq!(d.blockedlist.len(), 1);
 }
 
@@ -1694,13 +1694,13 @@ fn state_reports_capacity() {
     let mut model = ModelDescription::new();
     let src = source(&mut model, 10);
     let st = station(&mut model, 10);
-    let buf = model.add_buffer(3);
+    let buf = model.add_buffer(crabsim::Capacity::Limited(3));
     let dr = drain(&mut model);
     let state = model.build(0).state();
-    assert_eq!(object(&state, src).capacity, 0);
-    assert_eq!(object(&state, st).capacity, 1);
-    assert_eq!(object(&state, buf).capacity, 3);
-    assert_eq!(object(&state, dr).capacity, 0);
+    assert_eq!(object(&state, src).capacity, crabsim::Capacity::Limited(0));
+    assert_eq!(object(&state, st).capacity, crabsim::Capacity::Limited(1));
+    assert_eq!(object(&state, buf).capacity, crabsim::Capacity::Limited(3));
+    assert_eq!(object(&state, dr).capacity, crabsim::Capacity::Limited(0));
 }
 
 #[test]
@@ -1826,10 +1826,9 @@ fn a_jam_shows_in_the_rate_and_the_longest_exit_interval() {
 
 #[test]
 fn a_buffer_counts_its_mus_and_contents() {
-    // A Buffer's movement is known to be broken, so this only covers what it counts on entry.
     let mut model = ModelDescription::new();
     let src = source(&mut model, 10);
-    let buf = model.add_buffer(3);
+    let buf = model.add_buffer(crabsim::Capacity::Limited(3));
     model.connect(src, buf);
     let mut run = model.build(0);
     run.init().unwrap();

@@ -1,6 +1,6 @@
 use crate::error::{InitError, MaterialflowError, RunTimeError};
 use crate::event::{EventContext, EventTemplate, EventType, ExitTicket};
-use crate::report::{ObjectKind, ObjectState, OccurrenceKind};
+use crate::report::{Capacity, ObjectKind, ObjectState, OccurrenceKind};
 use crate::statistics::{MachineState, StatisticsKeeper};
 use crate::time::SimTime;
 use crate::materialflow_objects::OtherObjects;
@@ -14,6 +14,8 @@ pub fn handle_source_mu_exit(
 	context: &mut EventContext,
 	others: &mut OtherObjects<'_>,
 ) -> Result<Option<Vec<EventTemplate>>, RunTimeError> {
+	// Its interval has ended, so its MU is ready to leave from now.
+	source.ready_since = context.time;
 	let event_template_result = try_to_move_to_successor(source, context, others);
 	match event_template_result {
 		Ok(opt_evt) => {
@@ -45,6 +47,8 @@ pub struct Source {
 	pub content: Option<MoveableUnit>,
 	pub proc_time: SimTime,
 	pub completion_time: Option<SimTime>,
+	/// When its MU's interval ended. Read only while that MU waits to leave.
+	ready_since: SimTime,
 	pub succ: Vec<u32>,
 	pub succ_pointer: usize,
 	/// How it picks the successor for its MU. Set by the run, which ranks the successors.
@@ -64,6 +68,7 @@ impl Source {
 			content: None,
 			proc_time,
 			completion_time: None,
+			ready_since: SimTime::ZERO,
 			succ,
 			succ_pointer: 0,
 			distribution: Distributing::RoundRobin,
@@ -171,6 +176,7 @@ impl EventInterface for Source {
 	fn reset(&mut self) {
 		self.content = None;
 		self.completion_time = None;
+		self.ready_since = SimTime::ZERO;
 		self.succ_pointer = 0;
 		self.state = ProcessState::Idle;
 		self.interruption = InterruptionState::None;
@@ -191,7 +197,7 @@ impl EventInterface for Source {
 			remaining: self.completion_time.map(|completion| completion.saturating_sub(now)),
 			blocked_predecessors: Vec::new(),
 			successors: self.succ.clone(),
-			capacity: self.statistics.capacity(),
+			capacity: Capacity::Limited(self.statistics.capacity()),
 			process_time: None,
 			configured_process_time: None,
 			statistics: self.statistics.read(now),
@@ -217,8 +223,10 @@ impl StopCtrl for Source {
 }
 
 impl MaterialFlow for Source {
+	/// Only an MU whose interval has ended may leave. A retry can arrive during the interval,
+	/// from a successor that listed the Source before its last MU went elsewhere.
 	fn is_exit_allowed(&self) -> bool {
-		true
+		self.state != ProcessState::Processing
 	}
 	fn is_entrance_allowed(&self) -> bool {
 		false
@@ -230,10 +238,10 @@ impl MaterialFlow for Source {
 	) -> Result<Option<EventTemplate>, MaterialflowError> {
 		panic!("Source should not be processing MU entrance")
 	}
-	fn add_blocked(&mut self, _id_blocked: u32) {
+	fn add_blocked(&mut self, _id_blocked: u32, _since: SimTime, _answering_retry: bool) {
 		panic!("Source cannot receive blocked objects")
 	}
-	fn remove_blocked(&mut self, _id_blocked: u32) {}
+	fn relist_blocked(&mut self, _id_blocked: u32, _next: Option<SimTime>) {}
 	fn notify_blocked_predecessors(&mut self) -> Result<Option<Vec<EventTemplate>>, MaterialflowError> {
 		//source has no predecessors
 		Ok(None)
@@ -263,6 +271,9 @@ impl SuccessorContainer for Source {
 		let mut mu = self.content.take()?;
 		mu.left_source = now;
 		Some(mu)
+	}
+	fn offered_since(&self, _now: SimTime) -> Option<SimTime> {
+		self.content.as_ref().map(|_| self.ready_since)
 	}
 	fn statistics_mut(&mut self) -> &mut StatisticsKeeper {
 		&mut self.statistics

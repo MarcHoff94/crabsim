@@ -136,13 +136,13 @@ _Avoid_: ParallelStation, parallel machines
 A Station with a process time of 0. It takes no time, and is there so that something can happen as an MU passes, such as user code at a hook.
 
 **Buffer**:
-A material-flow object that holds MUs without working on them, optionally for a dwelling time.
+A material-flow object that holds MUs without working on them, optionally for a dwelling time, up to its capacity or without limit. It passes on one MU at a time, chosen by its exit strategy among those whose dwelling time is over. It is idle when empty, holding, or blocked.
 
 **Drain**:
 A material-flow object that takes MUs out of the model.
 
 **Capacity**:
-How many MUs a Station or Buffer can hold at the same time.
+How many MUs a Station or Buffer can hold at the same time. A Buffer's may be unlimited, which is what a new Buffer has: it then takes every MU and grows as far as it's filled (ADR 0019).
 
 **Connection**:
 The way from one material-flow object to another along which MUs pass. It is a thing of its own in a model, with its own properties: its exit, its place in the order its object offers MUs to its successors, its entrance, its place among the connections into the object it leads to, and a description. Moving along it takes no time: travel time belongs to objects such as a conveyor.
@@ -193,7 +193,7 @@ The object holding a finished MU sends it to a successor that can accept it. Thi
 A successor that can receive an MU chooses which MU it wants from its predecessor. Planned, not yet part of the model.
 
 **Exit strategy**:
-The rule for which MU leaves an object next. By default, the earliest finished MU leaves first, with ties broken by entry order.
+The rule for which MU leaves an object next. By default, the earliest finished MU leaves first, with ties broken by entry order. A Buffer's is **first in, first out**, the default, or **last in, first out**, each among the MUs whose dwelling time is over.
 
 **Distribution strategy**:
 The rule for which successor receives the MU that is leaving, set per Source or Station as its `distribution` (ADR 0016). **Round robin**, the default, offers each MU to the successors in turn. **Weighted** ranks the successors by a weight, such as each one's best route onward to a Drain by process time, and offers the MU to the best one that can take it, those ranking equal taking turns.
@@ -262,14 +262,17 @@ _Avoid_: Process time (how long one MU takes, not a basis for failures)
 The fixed-size numbers every material-flow object keeps about a simulation run. They are always on, and their size does not depend on how long the run is.
 
 **Busy**:
-The state of an object doing what it is there for: a Station working on at least one MU, a Source waiting out its interval, a Buffer holding at least one MU.
-_Avoid_: Processing (a Buffer does no work, and Processing time is a time basis)
+The state of an object doing its work: a Station working on at least one MU, a Source waiting out its interval.
+_Avoid_: Processing (Processing time is a time basis)
+
+**Holding**:
+The state of a Buffer with at least one MU in it, none of which is kept from leaving: each is still in its dwelling time. A Buffer does no work, so it is holding rather than busy, with its own colour. In the statistics its holding time is kept where other objects keep busy time.
 
 **State note**:
 A model's own explanation of what one state means for a class or instance, such as Blocked meaning "the robot waits for the conveyor". It is inherited like any attribute and shown beside crabsim's fixed definition of the state, never instead of it. It cannot change what is measured or the state's colour.
 
 **Blocked**:
-The state of an object holding an MU that is ready to leave but that no successor can accept.
+The state of an object holding an MU that is ready to leave but that no successor can accept. It waits in line at each of its successors, and the line is ordered by how long each predecessor's MU has been ready to leave, whichever object holds it (ADR 0018).
 
 **Idle**:
 The state of an object that is not busy, blocked or stopped. A partly filled batch start Station waiting to start is idle.

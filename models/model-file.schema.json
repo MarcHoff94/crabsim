@@ -91,17 +91,22 @@
           "$ref": "#/$defs/FailuresFile"
         },
         "starting_mus": {
-          "description": "Station: how many MUs it holds from the start of a run, 0 or 1.",
+          "description": "Station, Buffer: how many MUs it holds from the start of a run. 0 by default. A Station 0 or 1, and a Buffer at most its capacity, in the order they count as having entered.",
           "type": "integer",
           "format": "uint64",
-          "minimum": 0,
-          "maximum": 1
+          "minimum": 0
         },
         "capacity": {
-          "description": "Buffer: how many MUs it holds. Must be set somewhere in the chain of classes.",
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 1
+          "description": "Buffer: how many MUs it holds. Unlimited by default.",
+          "$ref": "#/$defs/CapacityFile"
+        },
+        "dwelling_time": {
+          "description": "Buffer: how long each MU stays before it may leave, counted from its own entry. 0 by default.",
+          "$ref": "#/$defs/Time"
+        },
+        "exit_strategy": {
+          "description": "Buffer: which of the MUs whose dwelling time is over it passes on next. First in, first out by default.",
+          "$ref": "#/$defs/ExitStrategyFile"
         },
         "dimensions": {
           "description": "Any object: its size in metres and rotation in degrees. Visual only.",
@@ -246,6 +251,50 @@
         }
       ]
     },
+    "CapacityFile": {
+      "description": "A whole number from 1, or `\"unlimited\"`: it then takes every MU and grows as far as it's filled. -1 is read as unlimited too, and saved as `\"unlimited\"`.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/FromOne"
+        },
+        {
+          "$ref": "#/$defs/UnlimitedFile"
+        },
+        {
+          "$ref": "#/$defs/MinusOne"
+        }
+      ]
+    },
+    "FromOne": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 1
+    },
+    "UnlimitedFile": {
+      "type": "string",
+      "enum": [
+        "unlimited"
+      ]
+    },
+    "MinusOne": {
+      "type": "integer",
+      "format": "int64",
+      "const": -1
+    },
+    "ExitStrategyFile": {
+      "oneOf": [
+        {
+          "description": "The MU that came in first.",
+          "type": "string",
+          "const": "first_in_first_out"
+        },
+        {
+          "description": "The MU that came in last, as from a stack.",
+          "type": "string",
+          "const": "last_in_first_out"
+        }
+      ]
+    },
     "DimensionsFile": {
       "description": "An object's size and rotation.",
       "type": "object",
@@ -283,7 +332,12 @@
       "type": "object",
       "properties": {
         "busy": {
-          "description": "Source, Station, Buffer.",
+          "description": "Source, Station.",
+          "type": "string",
+          "minLength": 1
+        },
+        "holding": {
+          "description": "Buffer: it has MUs in it, none of which is kept from leaving.",
           "type": "string",
           "minLength": 1
         },

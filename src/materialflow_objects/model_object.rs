@@ -4,7 +4,8 @@
 use super::flows::{BaseObject, EventInterface, InterruptionState, MaterialFlow, MoveableUnit, StopCtrl};
 #[cfg(test)]
 use super::records_then_fails::RecordsThenFails;
-use super::{Buffer, Drain, SingleStation, Source};
+use super::{Buffer, Drain, MultiStation, SingleStation, Source};
+use crate::flows::FailureProfile;
 use crate::error::{InitError, MaterialflowError, RunTimeError};
 use crate::event::{EventContext, EventTemplate, EventType};
 use crate::report::ObjectState;
@@ -14,7 +15,10 @@ use crate::time::SimTime;
 #[derive(Clone)]
 pub enum ModelObject {
     Source(Source),
+    /// A Station of capacity 1.
     Station(SingleStation),
+    /// A Station with a capacity above 1. Separate, so capacity 1 keeps its cheaper path.
+    MultiStation(MultiStation),
     Buffer(Buffer),
     Drain(Drain),
     /// No real object fails part way through an event, so only tests can exercise that.
@@ -28,6 +32,7 @@ macro_rules! on_the_object {
         match $self {
             ModelObject::Source($object) => $body,
             ModelObject::Station($object) => $body,
+            ModelObject::MultiStation($object) => $body,
             ModelObject::Buffer($object) => $body,
             ModelObject::Drain($object) => $body,
             #[cfg(test)]
@@ -40,6 +45,38 @@ impl ModelObject {
     pub fn as_station(&self) -> Option<&SingleStation> {
         match self {
             ModelObject::Station(station) => Some(station),
+            _ => None,
+        }
+    }
+
+    /// Whether it is a Station, of any capacity.
+    pub fn is_station(&self) -> bool {
+        matches!(self, ModelObject::Station(_) | ModelObject::MultiStation(_))
+    }
+
+    /// A Station's process time now, whatever its capacity.
+    pub fn process_time(&self) -> Option<SimTime> {
+        match self {
+            ModelObject::Station(station) => Some(station.proc_time),
+            ModelObject::MultiStation(station) => Some(station.proc_time),
+            _ => None,
+        }
+    }
+
+    /// A Station's process time now and in its default state, to change.
+    pub(crate) fn process_times_mut(&mut self) -> Option<(&mut SimTime, &mut SimTime)> {
+        match self {
+            ModelObject::Station(station) => Some((&mut station.proc_time, &mut station.configured_proc_time)),
+            ModelObject::MultiStation(station) => Some((&mut station.proc_time, &mut station.configured_proc_time)),
+            _ => None,
+        }
+    }
+
+    /// A Station's failures, whatever its capacity.
+    pub fn failure_profile(&self) -> Option<&FailureProfile> {
+        match self {
+            ModelObject::Station(station) => Some(&station.failure_profile),
+            ModelObject::MultiStation(station) => Some(&*station.failure_profile),
             _ => None,
         }
     }
@@ -60,6 +97,7 @@ impl ModelObject {
         match self {
             ModelObject::Source(source) => &source.succ,
             ModelObject::Station(station) => &station.succ,
+            ModelObject::MultiStation(station) => &station.succ,
             ModelObject::Buffer(buffer) => &buffer.succ,
             ModelObject::Drain(_) => &[],
             #[cfg(test)]
@@ -72,6 +110,7 @@ impl ModelObject {
         match self {
             ModelObject::Source(source) => Some(&mut source.distribution),
             ModelObject::Station(station) => Some(&mut station.distribution),
+            ModelObject::MultiStation(station) => Some(&mut station.distribution),
             ModelObject::Buffer(buffer) => Some(&mut buffer.distribution),
             _ => None,
         }

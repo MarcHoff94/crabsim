@@ -43,6 +43,7 @@ impl EventInterface for RecordsThenFails {
             stop: None,
             interruptions: Vec::new(),
             remaining: None,
+            work: Vec::new(),
             blocked_predecessors: Vec::new(),
             successors: Vec::new(),
             capacity: crate::report::Capacity::Limited(0),

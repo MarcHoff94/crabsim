@@ -54,6 +54,7 @@ impl EventInterface for Drain {
             stop: None,
             interruptions: Vec::new(),
             remaining: None,
+            work: Vec::new(),
             blocked_predecessors: waiting_ids(&self.blockedlist),
             successors: Vec::new(),
             capacity: Capacity::Limited(0),

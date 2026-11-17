@@ -1,6 +1,6 @@
 use crate::error::{InitError, MaterialflowError, RunTimeError};
 use crate::event::{EventContext, EventTemplate, EventType, ExitTicket};
-use crate::report::{Capacity, Interruption, ObjectKind, ObjectState, OccurrenceKind, StopCause};
+use crate::report::{Capacity, Interruption, ObjectKind, ObjectState, OccurrenceKind, StopCause, WorkLeft};
 use crate::statistics::{MachineState, StatisticsKeeper};
 use crate::time::SimTime;
 use super::flows::BaseObject;
@@ -9,16 +9,17 @@ use crate::flows::{
 	EventInterface, StopCtrl, FailureProfile, InterruptionState, MaterialFlow, MoveableUnit, ProcessState, SuccessorContainer, Distributing, Waiting, list_blocked, relist_blocked, waiting_ids, retries_for_blocked, retry_move_to_successor, try_to_move_to_successor
 };
 
-/// When a Station's work ends, or ended. One field for both, since a Station is never working and
-/// holding a finished MU at once, and a Station is the largest object: every object in a run takes
-/// its size, so 16 more bytes cost the 6,006-object benchmark about 4% on a 12 MB cache.
+/// When a Station's work ends, or ended, or how much is left of it. One field for all three, since
+/// a Station is only ever in one of them, and a Station is the largest object: every object in a
+/// run takes its size, so 16 more bytes cost the 6,006-object benchmark about 4% on a 12 MB cache.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Finish {
-	/// Not working, and no finished MU waiting. Also while stopped mid-work, when the work left is
-	/// `interrupted_remain_proc_time`.
+	/// Not working, and no finished MU waiting.
 	Unknown,
 	/// Working, done at this time.
 	At(SimTime),
+	/// Stopped mid-work, with this much work left.
+	Interrupted(SimTime),
 	/// Holding a finished MU, ready to leave since this time: when its work finished, or when the
 	/// stop ended that kept it from leaving.
 	ReadySince(SimTime),
@@ -31,7 +32,6 @@ pub struct SingleStation {
 	/// The process time in the default state. Reset returns `proc_time` to it.
 	pub configured_proc_time: SimTime,
 	finish: Finish,
-	pub interrupted_remain_proc_time: Option<SimTime>,
 	pub stop_count: u32,
 	pub failure_profile: FailureProfile,
 	pub starting_content: Option<MoveableUnit>,
@@ -69,7 +69,6 @@ impl SingleStation {
 			proc_time,
 			configured_proc_time: proc_time,
 			finish: Finish::Unknown,
-			interrupted_remain_proc_time: None,
 			stop_count: 0,
 			failure_profile,
 			starting_content: content.clone(),
@@ -104,7 +103,6 @@ impl SingleStation {
 	/// Begins work on the MU now in the station and returns the exit for its completion time.
 	fn start_work(&mut self, mu_id: u32, context: &mut EventContext) -> EventTemplate {
 		self.finish = Finish::At(context.time + self.proc_time);
-		self.interrupted_remain_proc_time = None;
 		self.entrancelocked = true;
 		self.state = ProcessState::Processing;
 		context.record(OccurrenceKind::WorkStarted { mu_id, at: self.base.object_id, duration: self.proc_time });
@@ -284,12 +282,11 @@ impl SingleStation {
 		}
 		self.statistics.count_stop();
 		if matches!(self.state, ProcessState::Processing) {
-			let completion = match std::mem::replace(&mut self.finish, Finish::Unknown) {
+			let completion = match self.finish {
 				Finish::At(completion) => completion,
 				_ => SimTime::ZERO,
 			};
-			let remaining = completion.saturating_sub(context.time);
-			self.interrupted_remain_proc_time = Some(remaining);
+			self.finish = Finish::Interrupted(completion.saturating_sub(context.time));
 			self.stop_count += 1;
 		}
 	}
@@ -300,7 +297,7 @@ impl SingleStation {
 		others: &mut OtherObjects<'_>,
 		events: &mut Vec<EventTemplate>,
 	) -> Result<(), RunTimeError> {
-		if let Some(remain) = self.interrupted_remain_proc_time.take() {
+		if let Finish::Interrupted(remain) = self.finish {
 			// Resume interrupted processing
 			self.finish = Finish::At(context.time + remain);
 			self.state = ProcessState::Processing;
@@ -467,7 +464,6 @@ impl EventInterface for SingleStation {
 		self.proc_time = self.configured_proc_time;
 		self.content = self.starting_content.clone();
 		self.finish = Finish::Unknown;
-		self.interrupted_remain_proc_time = None;
 		self.stop_count = 0;
 		self.succ_pointer = 0;
 		self.blockedlist.clear();
@@ -484,11 +480,11 @@ impl EventInterface for SingleStation {
 		self.statistics.clear(now);
 	}
 	fn report(&self, now: SimTime) -> ObjectState {
-		let remaining = self.interrupted_remain_proc_time
-			.or_else(|| match self.finish {
-				Finish::At(completion) => Some(completion.saturating_sub(now)),
-				_ => None,
-			});
+		let remaining = match self.finish {
+			Finish::Interrupted(left) => Some(left),
+			Finish::At(completion) => Some(completion.saturating_sub(now)),
+			_ => None,
+		};
 		ObjectState {
 			id: self.base.object_id,
 			kind: ObjectKind::Station,
@@ -497,6 +493,7 @@ impl EventInterface for SingleStation {
 			stop: self.interruption().cause(),
 			interruptions: self.interruptions(),
 			remaining,
+			work: self.content.iter().zip(remaining).map(|(mu, left)| WorkLeft { mu_id: mu.id, left }).collect(),
 			blocked_predecessors: waiting_ids(&self.blockedlist),
 			successors: self.succ.clone(),
 			capacity: Capacity::Limited(self.statistics.capacity()),

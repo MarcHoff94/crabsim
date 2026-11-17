@@ -50,8 +50,10 @@ fn results_give_every_drain_and_station_and_the_likely_bottleneck_by_the_catalog
     }
 
     let likely = results.bottleneck.as_ref().expect("the demo has Stations");
-    let most = results.stations.iter().map(|station| station.busy + station.failed + station.paused).fold(0.0, f64::max);
-    assert!((likely.not_idle_share - most).abs() < 1e-12, "the Station busy or stopped most");
+    assert!(!results.with_capacity, "the demo's Stations have capacity 1");
+    assert!(results.stations.iter().all(|station| station.busy_full == station.busy), "so all their busy time is full");
+    let most = results.stations.iter().map(|station| station.busy_full + station.failed + station.paused).fold(0.0, f64::max);
+    assert!((likely.full_or_stopped_share - most).abs() < 1e-12, "the Station busy and full or stopped most");
     assert!(results.stations.iter().any(|station| station.name == likely.instance));
     assert!(!likely.upstream.is_empty(), "with its neighbours upstream as evidence");
 }

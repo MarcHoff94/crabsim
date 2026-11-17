@@ -17,10 +17,13 @@ pub(crate) fn entries() -> Vec<Entry> {
 }
 
 /// Every statistic the store keeps, in the order results show them.
-pub const STATISTICS: [&str; 11] = [
+pub const STATISTICS: [&str; 14] = [
     "mus_in",
     "mus_out",
     "working_share",
+    "working_full_share",
+    "working_not_full_share",
+    "working_partly_blocked_share",
     "blocked_share",
     "idle_share",
     "failed_share",
@@ -42,8 +45,10 @@ const SMALL_MODEL: usize = 20;
 const BLOCKED_FLOOR: f64 = 0.01;
 
 /// An object's figures at the end of an observation, by their names in the store. A figure that
-/// doesn't exist, such as a share before any time was measured, is left out.
-pub(crate) fn figures(statistics: &ObjectStatistics, now: SimTime) -> Vec<(&'static str, f64)> {
+/// doesn't exist, such as a share before any time was measured, is left out, and so are the three
+/// parts of working but for a Station with a capacity above 1, `with_capacity`: for any other
+/// object working is all full.
+pub(crate) fn figures(statistics: &ObjectStatistics, now: SimTime, with_capacity: bool) -> Vec<(&'static str, f64)> {
     let mut figures = vec![("mus_in", statistics.mus_in as f64), ("mus_out", statistics.mus_out as f64)];
     let measured = statistics.measured_time().as_millis() as f64;
     if measured > 0.0 {
@@ -55,6 +60,15 @@ pub(crate) fn figures(statistics: &ObjectStatistics, now: SimTime) -> Vec<(&'sta
             ("paused_share", statistics.time_paused),
         ] {
             figures.push((name, time.as_millis() as f64 / measured));
+        }
+        if with_capacity {
+            for (name, time) in [
+                ("working_full_share", statistics.time_busy_full()),
+                ("working_not_full_share", statistics.time_busy_not_full),
+                ("working_partly_blocked_share", statistics.time_busy_partly_blocked),
+            ] {
+                figures.push((name, time.as_millis() as f64 / measured));
+            }
         }
     }
     figures.push(("failures", statistics.failures as f64));

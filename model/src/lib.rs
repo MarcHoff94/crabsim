@@ -17,7 +17,7 @@ mod suggest;
 mod warn;
 mod write;
 
-pub use crabsim::{Capacity, ExitStrategy};
+pub use crabsim::{Capacity, ExitStrategy, StartMode};
 use crabsim::{Dimensions, ObjectKind, Position, SimTime};
 use serde::Serialize;
 use std::collections::HashSet;
@@ -37,6 +37,18 @@ pub fn exit_strategy_name(strategy: ExitStrategy) -> &'static str {
 
 pub fn exit_strategy_from_name(name: &str) -> Option<ExitStrategy> {
     [ExitStrategy::FirstInFirstOut, ExitStrategy::LastInFirstOut].into_iter().find(|&strategy| exit_strategy_name(strategy) == name)
+}
+
+/// A Station's start mode's name in a file.
+pub fn start_name(start: StartMode) -> &'static str {
+    match start {
+        StartMode::Individual => "individual",
+        StartMode::Batch => "batch",
+    }
+}
+
+pub fn start_from_name(name: &str) -> Option<StartMode> {
+    [StartMode::Individual, StartMode::Batch].into_iter().find(|&start| start_name(start) == name)
 }
 
 /// The built-in classes every chain of classes ends in.
@@ -146,11 +158,13 @@ pub struct Attributes {
     pub process_time: Option<SimTime>,
     /// A Station's random failures. None by default: it never fails.
     pub failures: Option<Failures>,
-    /// How many MUs a Station or Buffer holds from Init. 0 by default. At most 1 for a Station,
-    /// for now, and at most its capacity for a Buffer.
+    /// How many MUs a Station or Buffer holds from Init. 0 by default, and at most its capacity.
     pub starting_mus: Option<u64>,
-    /// How many MUs a Buffer holds: a whole number from 1, or unlimited, which is the default.
+    /// How many MUs a Station or Buffer holds. A Station's is a whole number from 1, and 1 by
+    /// default. A Buffer's is a whole number from 1, or unlimited, which is the default.
     pub capacity: Option<Capacity>,
+    /// When a Station with capacity begins work: on each MU's entry, the default, or once full.
+    pub start: Option<StartMode>,
     /// How long each MU stays in a Buffer before it may leave, counted from its entry. 0 by
     /// default.
     pub dwelling_time: Option<SimTime>,
@@ -216,6 +230,7 @@ impl Attributes {
             Attribute::Failures => self.failures.is_some(),
             Attribute::StartingMus => self.starting_mus.is_some(),
             Attribute::Capacity => self.capacity.is_some(),
+            Attribute::Start => self.start.is_some(),
             Attribute::DwellingTime => self.dwelling_time.is_some(),
             Attribute::ExitStrategy => self.exit_strategy.is_some(),
             Attribute::Dimensions => self.dimensions.is_some(),
@@ -233,6 +248,7 @@ impl Attributes {
             Attribute::Failures => self.failures = from.failures.clone(),
             Attribute::StartingMus => self.starting_mus = from.starting_mus,
             Attribute::Capacity => self.capacity = from.capacity,
+            Attribute::Start => self.start = from.start,
             Attribute::DwellingTime => self.dwelling_time = from.dwelling_time,
             Attribute::ExitStrategy => self.exit_strategy = from.exit_strategy,
             Attribute::Dimensions => self.dimensions = from.dimensions,
@@ -251,6 +267,7 @@ pub enum Attribute {
     Failures,
     StartingMus,
     Capacity,
+    Start,
     DwellingTime,
     ExitStrategy,
     Dimensions,
@@ -260,12 +277,13 @@ pub enum Attribute {
 }
 
 impl Attribute {
-    pub const ALL: [Attribute; 11] = [
+    pub const ALL: [Attribute; 12] = [
         Attribute::Interval,
         Attribute::ProcessTime,
         Attribute::Failures,
         Attribute::StartingMus,
         Attribute::Capacity,
+        Attribute::Start,
         Attribute::DwellingTime,
         Attribute::ExitStrategy,
         Attribute::Dimensions,
@@ -282,6 +300,7 @@ impl Attribute {
             Attribute::Failures => "failures",
             Attribute::StartingMus => "starting_mus",
             Attribute::Capacity => "capacity",
+            Attribute::Start => "start",
             Attribute::DwellingTime => "dwelling_time",
             Attribute::ExitStrategy => "exit_strategy",
             Attribute::Dimensions => "dimensions",
@@ -297,7 +316,7 @@ impl Attribute {
             (built_in, self),
             (_, Attribute::Dimensions | Attribute::Description | Attribute::StateNotes)
                 | ("Source", Attribute::Interval | Attribute::Distribution)
-                | ("Station", Attribute::ProcessTime | Attribute::Failures | Attribute::StartingMus | Attribute::Distribution)
+                | ("Station", Attribute::ProcessTime | Attribute::Failures | Attribute::StartingMus | Attribute::Capacity | Attribute::Start | Attribute::Distribution)
                 | ("Buffer", Attribute::StartingMus | Attribute::Capacity | Attribute::DwellingTime | Attribute::ExitStrategy)
         )
     }
@@ -610,6 +629,8 @@ impl Model {
         if built_in == "Station" {
             attributes.process_time.get_or_insert(SimTime::ZERO);
             attributes.starting_mus.get_or_insert(0);
+            attributes.capacity.get_or_insert(Capacity::Limited(1));
+            attributes.start.get_or_insert(StartMode::Individual);
         }
         if built_in == "Buffer" {
             attributes.starting_mus.get_or_insert(0);

@@ -24,7 +24,7 @@ pub fn summary(value: &Value) -> String {
         });
         return format!("weighted: {what} by {by}, {order} first{drains}");
     }
-    if let Some((_, label)) = EXIT_STRATEGIES.iter().find(|(name, _)| value == *name) {
+    if let Some((_, label)) = EXIT_STRATEGIES.iter().chain(&STARTS).find(|(name, _)| value == *name) {
         return label.to_lowercase();
     }
     let Value::Object(fields) = value else {
@@ -112,6 +112,9 @@ pub struct Form {
 /// A Buffer's exit strategies, by name in a model file, with their labels in the window.
 pub const EXIT_STRATEGIES: [(&str, &str); 2] = [("first_in_first_out", "First in, first out"), ("last_in_first_out", "Last in, first out")];
 
+/// When a Station with capacity begins work, by name in a model file, with its label in the window.
+pub const STARTS: [(&str, &str); 2] = [("individual", "Each MU on entry"), ("batch", "Batch, when full")];
+
 /// What can be weighed, by name in a model file, with its label in the window.
 pub const WEIGHABLE: [(&str, &str); 4] = [("process_time", "Process time"), ("interval", "Interval"), ("starting_mus", "Starting MUs"), ("capacity", "Capacity")];
 
@@ -176,9 +179,14 @@ impl Form {
                 (vec![part("length", field("length")), part("width", field("width")), part("height", field("height")), part("rotation °", rotation)], None)
             }
             "exit_strategy" => (vec![part("", value.and_then(Value::as_str).unwrap_or(EXIT_STRATEGIES[0].0))], None),
+            "start" => (vec![part("", value.and_then(Value::as_str).unwrap_or(STARTS[0].0))], None),
             _ => (vec![part("", text_of(value))], None),
         };
-        let options: &[(&str, &str)] = if attribute == "exit_strategy" { &EXIT_STRATEGIES } else { &[] };
+        let options: &[(&str, &str)] = match attribute {
+            "exit_strategy" => &EXIT_STRATEGIES,
+            "start" => &STARTS,
+            _ => &[],
+        };
         Form { attribute: attribute.to_string(), parts, repair, distribution: None, options }
     }
 

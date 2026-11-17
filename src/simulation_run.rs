@@ -158,8 +158,10 @@ impl SimulationRun {
     /// schedules nothing, so it costs nothing per event.
     pub fn set_process_time(&mut self, id: u32, process_time: SimTime) -> Result<(), RunError> {
         match self.objects.get_mut(id as usize) {
-            Some(ModelObject::Station(station)) => {
-                station.proc_time = process_time;
+            Some(object) if object.is_station() => {
+                if let Some((now, _)) = object.process_times_mut() {
+                    *now = process_time;
+                }
                 // A weighted object may weigh it.
                 self.rank_successors();
                 Ok(())
@@ -173,8 +175,8 @@ impl SimulationRun {
     /// that is each Station's process time.
     pub fn keep_changes_as_default(&mut self) {
         for object in &mut self.objects {
-            if let ModelObject::Station(station) = object {
-                station.configured_proc_time = station.proc_time;
+            if let Some((now, configured)) = object.process_times_mut() {
+                *configured = *now;
             }
         }
     }

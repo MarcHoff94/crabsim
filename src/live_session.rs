@@ -13,7 +13,6 @@
 
 use crate::error::RunError;
 use crate::event::EventType;
-use crate::materialflow_objects::ModelObject;
 use crate::report::{Occurrence, Recording, RunState};
 use crate::simulation_run::SimulationRun;
 use crate::time::SimTime;
@@ -1180,7 +1179,7 @@ impl<'a, C: Clock> SessionThread<'a, C> {
         | Action::EndForcedFailure(id) = action
         {
             match self.run.object(id) {
-                Some(ModelObject::Station(_)) => {}
+                Some(object) if object.is_station() => {}
                 Some(_) => {
                     self.observe(SessionOutput::Error(SessionError::NotAStation(id)));
                     return;

@@ -39,6 +39,8 @@ Counts stay separate because a stop can't be worked out from the others: that ex
 
 A Station with several MUs is busy while at least one is in work, which matches the Processing time basis. It's blocked when none is in work and a finished MU is waiting. It's idle otherwise, including a partly filled batch waiting to start.
 
+Busy splits into three parts that don't overlap, built with Station capacity (spec issue 110, PR 2): `time_busy_not_full`, working with free places and nothing waiting to leave, `time_busy_partly_blocked`, working while a finished MU can't leave, which outranks the other two, and what is left, `time_busy_full()`, every place in work. Only a Station with a capacity above 1 has the first two, so with capacity 1 all busy time is full. They are stored for a Station with a capacity above 1 as `working_full_share`, `working_not_full_share` and `working_partly_blocked_share`. The two fields grow every object by 16 bytes, which a `SingleStation` wins back by keeping the work left during a stop in the field that holds when its work completes.
+
 ### MU level: what each MU is doing
 
 Machine-level time hides what's happening inside a multi-MU object, so utilisation and bottlenecks are judged from MU time. Each MU is in one state at any moment:
@@ -60,7 +62,7 @@ Example: a capacity 2 Station over 100s has one slot working throughout, and the
 
 ### Finding a bottleneck
 
-No bottleneck figure is stored. Walk along the flow and compare blocked and starved shares. The bottleneck is where upstream objects are mostly blocked or full, and downstream objects are mostly starved.
+No bottleneck figure is stored. Walk along the flow and compare blocked and starved shares. The bottleneck is where upstream objects are mostly blocked or full, and downstream objects are mostly starved. The catalogue's rule, which the window's Results tab and `find_bottleneck` share, ranks Stations by busy and full plus stopped time, so a Station with capacity that works half empty isn't taken for one.
 
 - **Shifting bottlenecks:** read `state()` at two times and subtract, which gives the numbers for that period at no extra cost.
 - **Branching models:** the comparison is harder to read there than on a line. A bottleneck report for those can come later and use the same numbers.
@@ -121,7 +123,7 @@ A run can measure in periods of a fixed length of simulated time (glossary: Meas
 - **Periods start when statistics do:** at Init, and again whenever `clear_statistics` runs, so a warm-up is never inside a period.
 - **A period ends after every event at its end time.** The run completes it when its clock passes the end, before the first later event, or when an advance leaves the clock at the end or later. So a run halted exactly at a period's end counts it, and a headless run read at that time has the same statistics the period closed with. MUs counted at Init itself fall before the first period.
 - **Running sums, not snapshots:** each period's figures go into a `Spread` per figure and object (count, mean and sum of squared differences, by Welford's method), and the run keeps only the statistics at the last period end to subtract from. So memory doesn't grow with the run's length, which a list of per-period snapshots would break: about 10 GB for a simulated year of the 6,006-object model. The cost is that individual periods can't be read back, such as for a chart over time.
-- **The figures:** MUs in per hour, and the busy, blocked, idle, failed, paused, stopped (failed or paused) and not-idle shares of the period. Not-idle and stopped have their own spreads, because a sum's variance needs the covariance, which separate spreads don't keep.
+- **The figures:** MUs in per hour, and the busy (with its three parts), blocked, idle, failed, paused, stopped (failed or paused) and full-or-stopped shares of the period. Full-or-stopped, busy and full plus stopped, is what the likely-bottleneck rule ranks by. It and stopped have their own spreads, because a sum's variance needs the covariance, which separate spreads don't keep.
 - **Per event:** one comparison of the next event's time with the end of the period in progress, which is the end of time without periods. Closing a period reads every object's statistics once.
 - **Checkpoints and replay** need nothing of their own: the periods are part of the run, so a checkpoint holds them and replay closes the same periods again.
 - **`RunState::periods`** reports the length, how many periods are complete and every object's figures.

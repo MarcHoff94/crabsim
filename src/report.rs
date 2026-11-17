@@ -137,6 +137,13 @@ impl Capacity {
     }
 }
 
+/// An MU in work in a Station, and how much work is left on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WorkLeft {
+    pub mu_id: u32,
+    pub left: SimTime,
+}
+
 /// What one material-flow object reports about itself.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ObjectState {
@@ -152,8 +159,12 @@ pub struct ObjectState {
     /// Every active interruption, most serious first, with when it began. A view needs them all,
     /// so that it still knows the object is stopped after the most serious one ends.
     pub interruptions: Vec<Interruption>,
-    /// Time left until the object's current work completes, frozen during a stop.
+    /// Time left until the object's current work completes, frozen during a stop. For a Station
+    /// with several MUs in work, the soonest.
     pub remaining: Option<SimTime>,
+    /// Each MU in work in a Station and the work left on it, frozen during a stop, in the order
+    /// they came in. Empty for other objects.
+    pub work: Vec<WorkLeft>,
     pub blocked_predecessors: Vec<u32>,
     pub successors: Vec<u32>,
     /// How many MUs a Station or Buffer can hold. 0 for a Source or Drain.

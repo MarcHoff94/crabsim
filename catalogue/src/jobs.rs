@@ -410,7 +410,8 @@ fn record(store: &mut Store, plan: &Plan, k: u32, outcome: &Outcome) -> rusqlite
             "INSERT INTO statistics (run, observation, object, class, built_in_class, statistic, value) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         )?;
         for (object, info) in outcome.state.objects.iter().zip(&plan.objects) {
-            for (statistic, value) in figures(&object.statistics, outcome.state.time) {
+            let with_capacity = object.kind == crabsim::ObjectKind::Station && object.capacity.limit() > 1;
+            for (statistic, value) in figures(&object.statistics, outcome.state.time, with_capacity) {
                 insert.execute(params![plan.id, k, info.name, info.class, info.built_in, statistic, value])?;
             }
         }

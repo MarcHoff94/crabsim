@@ -195,6 +195,7 @@ impl EventInterface for Source {
 			// A Source can't be interrupted yet: its stops aren't built.
 			interruptions: Vec::new(),
 			remaining: self.completion_time.map(|completion| completion.saturating_sub(now)),
+			work: Vec::new(),
 			blocked_predecessors: Vec::new(),
 			successors: self.succ.clone(),
 			capacity: Capacity::Limited(self.statistics.capacity()),

@@ -100,6 +100,9 @@ pub(crate) fn attributes(attributes: &Attributes) -> Value {
     if let Some(capacity) = attributes.capacity {
         fields.insert("capacity".into(), self::capacity(capacity));
     }
+    if let Some(start) = attributes.start {
+        fields.insert("start".into(), json!(crate::start_name(start)));
+    }
     if let Some(dwelling_time) = attributes.dwelling_time {
         fields.insert("dwelling_time".into(), time(dwelling_time));
     }

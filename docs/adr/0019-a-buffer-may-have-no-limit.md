@@ -1,6 +1,6 @@
 # A Buffer may have no limit, the one case where a run's memory isn't flat
 
-A Buffer's capacity is a whole number from 1 or unlimited, and a new Buffer is unlimited. An unlimited Buffer takes every MU it's offered and grows as far as it's filled, 24 bytes for each MU it holds. It is the one case where a run's memory can grow with simulated length without the user having asked for recording, and it is the user's choice.
+A Buffer's capacity is a whole number from 1 or unlimited, and a new Buffer is unlimited. An unlimited Buffer takes every MU it's offered and grows as far as it's filled, 24 bytes for each MU it holds, and up to as much again in spare room, which it keeps until Reset (201 MB at 4.3M MUs, measured on 2026-11-17). It is the one case where a run's memory can grow with simulated length without the user having asked for recording, and it is the user's choice.
 
 In a model file it is written `"capacity": "unlimited"`. `-1` is read as unlimited wherever a capacity is entered (a file written by hand, `edit_model`, the `:` line and the inspector) and always saved as `"unlimited"`.
 

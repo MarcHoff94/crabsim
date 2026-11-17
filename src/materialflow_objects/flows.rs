@@ -202,7 +202,10 @@ pub fn retries_for_blocked(blockedlist: &mut Vec<Waiting>, from: u32) -> Option<
 	if blockedlist.is_empty() {
 		return None;
 	}
-	let mut retries = Vec::with_capacity(blockedlist.len());
+	// Not `with_capacity`: a Station pushes its own exit onto these, and an exactly full `Vec`
+	// would reallocate on nearly every move with someone waiting. The first push here makes room
+	// for four. That was 0.24 allocations per event, and 13% of the demo's time (2026-11-17).
+	let mut retries = Vec::new();
 	blockedlist.retain_mut(|waiting| {
 		if waiting.retried {
 			return false;

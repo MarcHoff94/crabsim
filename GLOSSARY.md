@@ -142,7 +142,10 @@ A material-flow object that holds MUs without working on them, optionally for a 
 A material-flow object that takes MUs out of the model.
 
 **Capacity**:
-How many MUs a Station or Buffer can hold at the same time. A Buffer's may be unlimited, which is what a new Buffer has: it then takes every MU and grows as far as it's filled (ADR 0019).
+How many MUs a Station or Buffer can hold at the same time. A Station's is a whole number from 1, and 1 by default: one machine working on that many MUs at once. A Buffer's may be unlimited, which is what a new Buffer has: it then takes every MU and grows as far as it's filled (ADR 0019).
+
+**Start**:
+When a Station with a capacity above 1 begins work on its MUs: individual, each MU on its entry, or batch, all of them once the Station is full, after which it takes no MU until it is completely empty.
 
 **Connection**:
 The way from one material-flow object to another along which MUs pass. It is a thing of its own in a model, with its own properties: its exit, its place in the order its object offers MUs to its successors, its entrance, its place among the connections into the object it leads to, and a description. Moving along it takes no time: travel time belongs to objects such as a conveyor.
@@ -262,7 +265,7 @@ _Avoid_: Process time (how long one MU takes, not a basis for failures)
 The fixed-size numbers every material-flow object keeps about a simulation run. They are always on, and their size does not depend on how long the run is.
 
 **Busy**:
-The state of an object doing its work: a Station working on at least one MU, a Source waiting out its interval.
+The state of an object doing its work: a Station working on at least one MU, a Source waiting out its interval. A Station with a capacity above 1 is busy in one of three ways that don't overlap: full, with every place in work; not full, with free places and nothing waiting to leave; and partly blocked, working while a finished MU can't leave, which outranks the other two. The likely bottleneck counts only busy and full.
 _Avoid_: Processing (Processing time is a time basis)
 
 **Holding**:

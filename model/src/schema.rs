@@ -124,11 +124,15 @@ pub struct AttributesFile {
     pub process_time: Option<Time>,
     /// Station: random failures. Left out, it never fails.
     pub failures: Option<FailuresFile>,
-    /// Station, Buffer: how many MUs it holds from the start of a run. 0 by default. A Station
-    /// 0 or 1, and a Buffer at most its capacity, in the order they count as having entered.
+    /// Station, Buffer: how many MUs it holds from the start of a run, at most its capacity, in
+    /// the order they count as having entered. 0 by default.
     pub starting_mus: Option<u64>,
-    /// Buffer: how many MUs it holds. Unlimited by default.
+    /// Station, Buffer: how many MUs it holds. A Station's is a whole number from 1 to 10,000, and
+    /// 1 by default: one machine working on that many MUs at once. A Buffer's is unlimited by
+    /// default.
     pub capacity: Option<CapacityFile>,
+    /// Station: when it begins work on its MUs. Individual by default.
+    pub start: Option<StartFile>,
     /// Buffer: how long each MU stays before it may leave, counted from its own entry. 0 by
     /// default.
     pub dwelling_time: Option<Time>,
@@ -170,6 +174,15 @@ pub struct MinusOne(pub i64);
 #[serde(rename_all = "snake_case")]
 pub enum UnlimitedFile {
     Unlimited,
+}
+
+#[derive(JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum StartFile {
+    /// Each MU starts on entry, with its own process time.
+    Individual,
+    /// Work begins when the Station is full, and its entrance stays closed until it is empty.
+    Batch,
 }
 
 #[derive(JsonSchema)]

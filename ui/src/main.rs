@@ -592,6 +592,7 @@ enum Tab {
 enum SortBy {
     Model,
     Busy,
+    Full,
     Blocked,
     Idle,
     Failed,
@@ -3380,7 +3381,7 @@ fn results_tab(ui: &mut egui::Ui, results: Option<(&str, &crabsim_ui::view::Resu
                         row.label(&likely.instance);
                     }
                 }
-                row.label(format!("busy or stopped {}", percent(likely.not_idle_share)));
+                row.label(format!("busy and full or stopped {}", percent(likely.full_or_stopped_share)));
             });
             if let Some(runner_up) = &results.too_close {
                 ui.colored_label(
@@ -3404,21 +3405,26 @@ fn results_tab(ui: &mut egui::Ui, results: Option<(&str, &crabsim_ui::view::Resu
     let key = |station: &crabsim_ui::view::StationResult| match *sort {
         SortBy::Model => 0.0,
         SortBy::Busy => station.busy,
+        SortBy::Full => station.busy_full,
         SortBy::Blocked => station.blocked,
         SortBy::Idle => station.idle,
         SortBy::Failed => station.failed + station.paused,
     };
     stations.sort_by(|a, b| key(b).total_cmp(&key(a)));
-    egui::Grid::new("stations").num_columns(5).spacing([4.0, 2.0]).striped(true).show(ui, |grid| {
+    // A Station with capacity can be busy without being full, which the bottleneck rule counts.
+    let full = results.with_capacity;
+    egui::Grid::new("stations").num_columns(if full { 6 } else { 5 }).spacing([4.0, 2.0]).striped(true).show(ui, |grid| {
         if grid.selectable_label(*sort == SortBy::Model, "Station").on_hover_text("In model order").clicked() {
             *sort = SortBy::Model;
         }
-        for (by, label, shade, hint) in [
+        let columns = [
             (SortBy::Busy, "Busy", Shade::Busy, "Working on an MU. Click to sort"),
-            (SortBy::Blocked, "Blocked", Shade::Blocked, "Holding a finished MU no successor can take. Click to sort"),
+            (SortBy::Full, "Full", Shade::Busy, "Working with every place in work, which the likely bottleneck counts. Click to sort"),
+            (SortBy::Blocked, "Blocked", Shade::Blocked, "Holding a finished MU no successor can take, with nothing in work. Click to sort"),
             (SortBy::Idle, "Idle", Shade::Idle, "Waiting for an MU. Click to sort"),
             (SortBy::Failed, "Stop", Shade::Failed, "Stopped: failed, under a forced failure or paused. Click to sort"),
-        ] {
+        ];
+        for (by, label, shade, hint) in columns.into_iter().filter(|&(by, ..)| full || by != SortBy::Full) {
             let text = egui::RichText::new(label).color(shade_colour32(shade));
             if grid.selectable_label(*sort == by, text).on_hover_text(hint).clicked() {
                 *sort = by;
@@ -3429,12 +3435,16 @@ fn results_tab(ui: &mut egui::Ui, results: Option<(&str, &crabsim_ui::view::Resu
             pick(grid, station.id, &station.name, &mut chosen);
             match station.intervals {
                 Some(intervals) => {
-                    for interval in [intervals.busy, intervals.blocked, intervals.idle, intervals.stopped] {
+                    let shown = [Some(intervals.busy), full.then_some(intervals.busy_full), Some(intervals.blocked), Some(intervals.idle), Some(intervals.stopped)];
+                    for interval in shown.into_iter().flatten() {
                         grid.label(percent_interval(interval));
                     }
                 }
                 None => {
                     grid.label(percent(station.busy));
+                    if full {
+                        grid.label(percent(station.busy_full));
+                    }
                     grid.label(percent(station.blocked));
                     grid.label(percent(station.idle));
                     grid.label(percent(station.failed + station.paused));
@@ -3729,6 +3739,7 @@ fn attribute_label(attribute: &str) -> &str {
         "capacity" => "Capacity",
         "dwelling_time" => "Dwelling time",
         "exit_strategy" => "Exit strategy",
+        "start" => "Start",
         "dimensions" => "Dimensions",
         "description" => "Description",
         "state_notes" => "State notes",

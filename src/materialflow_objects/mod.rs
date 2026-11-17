@@ -1,6 +1,7 @@
 pub mod drain;
 pub mod flows;
 pub mod model_object;
+pub mod multi_station;
 #[cfg(test)]
 pub mod records_then_fails;
 pub mod source;
@@ -12,5 +13,6 @@ pub use flows::{Distributing, DistributionStrategy, LowestIndexStrategy, Moveabl
 pub use self::flows::BaseObject;
 pub use model_object::{ModelObject, OtherObjects};
 pub use station::SingleStation;
+pub use multi_station::{MultiStation, StartMode};
 pub use source::Source;
 pub use buffer::{Buffer, ExitStrategy};

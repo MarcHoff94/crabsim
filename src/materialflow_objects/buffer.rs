@@ -276,6 +276,7 @@ impl EventInterface for Buffer {
             stop: None,
             interruptions: Vec::new(),
             remaining: None,
+            work: Vec::new(),
             blocked_predecessors: waiting_ids(&self.blockedlist),
             successors: self.succ.clone(),
             capacity: self.capacity,

@@ -12,7 +12,14 @@ pub struct ObjectStatistics {
     /// A Source's are the MUs it created. A starting MU counts at Init.
     pub mus_in: u64,
     pub mus_out: u64,
+    /// All the time it worked, in three parts that don't overlap: full, not full and partly
+    /// blocked. Only a Station with a capacity above 1 has the last two, and `time_busy_full`
+    /// is what is left. For a Buffer, busy is holding.
     pub time_busy: SimTime,
+    /// Busy with free places and nothing waiting to leave.
+    pub time_busy_not_full: SimTime,
+    /// Busy while at least one finished MU can't leave. Outranks full and not full.
+    pub time_busy_partly_blocked: SimTime,
     pub time_blocked: SimTime,
     pub time_idle: SimTime,
     pub time_failed: SimTime,
@@ -50,6 +57,11 @@ impl ObjectStatistics {
     /// The time these numbers cover.
     pub fn measured_time(&self) -> SimTime {
         self.time_busy + self.time_blocked + self.time_idle + self.time_failed + self.time_paused
+    }
+
+    /// Busy with every place in work: all its busy time unless it has a capacity above 1.
+    pub fn time_busy_full(&self) -> SimTime {
+        self.time_busy.saturating_sub(self.time_busy_not_full).saturating_sub(self.time_busy_partly_blocked)
     }
 
     /// How many MUs the object held on average. None until any time has been measured.
@@ -90,7 +102,12 @@ fn ratio(part: f64, whole: f64) -> Option<f64> {
 /// The one thing an object is doing at any moment, by the priority in the statistics design.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MachineState {
+    /// Busy with every place in work, or for a Buffer, holding.
     Busy,
+    /// Busy with free places, and nothing waiting to leave.
+    BusyNotFull,
+    /// Busy while a finished MU can't leave.
+    BusyPartlyBlocked,
     Blocked,
     Idle,
     Failed,
@@ -229,6 +246,14 @@ impl StatisticsKeeper {
 fn add_time(statistics: &mut ObjectStatistics, state: MachineState, contents: u64, capacity: u64, time: SimTime) {
     let (machine, mu) = match state {
         MachineState::Busy => (&mut statistics.time_busy, &mut statistics.mu_time_busy),
+        MachineState::BusyNotFull => {
+            statistics.time_busy_not_full += time;
+            (&mut statistics.time_busy, &mut statistics.mu_time_busy)
+        }
+        MachineState::BusyPartlyBlocked => {
+            statistics.time_busy_partly_blocked += time;
+            (&mut statistics.time_busy, &mut statistics.mu_time_busy)
+        }
         MachineState::Blocked => (&mut statistics.time_blocked, &mut statistics.mu_time_blocked),
         MachineState::Idle => (&mut statistics.time_idle, &mut statistics.mu_time_waiting),
         MachineState::Failed => (&mut statistics.time_failed, &mut statistics.mu_time_stopped),
@@ -306,14 +331,19 @@ impl Spread {
 pub struct PeriodFigures {
     pub mus_in_per_hour: Spread,
     pub busy: Spread,
+    /// The three parts of busy, which add up to it.
+    pub busy_full: Spread,
+    pub busy_not_full: Spread,
+    pub busy_partly_blocked: Spread,
     pub blocked: Spread,
     pub idle: Spread,
     pub failed: Spread,
     pub paused: Spread,
     /// Failed or paused.
     pub stopped: Spread,
-    /// Busy, failed or paused: what the likely-bottleneck rule ranks by.
-    pub not_idle: Spread,
+    /// Busy and full, failed or paused: what the likely-bottleneck rule ranks by, so a Station
+    /// that works half empty doesn't look like a bottleneck.
+    pub full_or_stopped: Spread,
 }
 
 impl PeriodFigures {
@@ -321,14 +351,18 @@ impl PeriodFigures {
         let length = length.as_millis() as f64;
         let share = |of: fn(&ObjectStatistics) -> SimTime| (of(after).saturating_sub(of(before))).as_millis() as f64 / length;
         let (busy, failed, paused) = (share(|s| s.time_busy), share(|s| s.time_failed), share(|s| s.time_paused));
+        let busy_full = share(|s| s.time_busy_full());
         self.mus_in_per_hour.add((after.mus_in - before.mus_in) as f64 * 3_600_000.0 / length);
         self.busy.add(busy);
+        self.busy_full.add(busy_full);
+        self.busy_not_full.add(share(|s| s.time_busy_not_full));
+        self.busy_partly_blocked.add(share(|s| s.time_busy_partly_blocked));
         self.blocked.add(share(|s| s.time_blocked));
         self.idle.add(share(|s| s.time_idle));
         self.failed.add(failed);
         self.paused.add(paused);
         self.stopped.add(failed + paused);
-        self.not_idle.add(busy + failed + paused);
+        self.full_or_stopped.add(busy_full + failed + paused);
     }
 }
 
@@ -417,6 +451,22 @@ mod tests {
         assert_eq!(statistics.time_full, SimTime::from_secs(20));
         assert_eq!(statistics.max_contents, 2);
         assert_eq!(statistics.average_contents(), Some(50.0 / 30.0));
+    }
+
+    #[test]
+    fn busy_splits_into_full_not_full_and_partly_blocked() {
+        let mut keeper = StatisticsKeeper::new(3);
+        keeper.observe(SimTime::ZERO, MachineState::BusyNotFull, 1);
+        keeper.observe(SimTime::from_secs(10), MachineState::Busy, 3);
+        keeper.observe(SimTime::from_secs(30), MachineState::BusyPartlyBlocked, 3);
+        keeper.observe(SimTime::from_secs(35), MachineState::Blocked, 1);
+        let statistics = keeper.read(SimTime::from_secs(40));
+        assert_eq!(statistics.time_busy, SimTime::from_secs(35));
+        assert_eq!(statistics.time_busy_not_full, SimTime::from_secs(10));
+        assert_eq!(statistics.time_busy_partly_blocked, SimTime::from_secs(5));
+        assert_eq!(statistics.time_busy_full(), SimTime::from_secs(20));
+        assert_eq!(statistics.time_blocked, SimTime::from_secs(5));
+        assert_eq!(statistics.measured_time(), SimTime::from_secs(40));
     }
 
     #[test]

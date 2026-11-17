@@ -80,7 +80,11 @@ pub struct Ranking {
 pub fn weight(object: &ModelObject, by: WeighBy) -> Option<u64> {
     match (object, by) {
         (ModelObject::Station(station), WeighBy::ProcessTime) => Some(station.proc_time.as_millis()),
+        (ModelObject::MultiStation(station), WeighBy::ProcessTime) => Some(station.proc_time.as_millis()),
         (ModelObject::Station(station), WeighBy::StartingMus) => Some(u64::from(station.starting_content.is_some())),
+        (ModelObject::MultiStation(station), WeighBy::StartingMus) => Some(station.starting_mus.len() as u64),
+        (ModelObject::Station(_), WeighBy::Capacity) => Some(1),
+        (ModelObject::MultiStation(station), WeighBy::Capacity) => Some(station.capacity),
         (ModelObject::Buffer(buffer), WeighBy::StartingMus) => Some(buffer.starting_mus.len() as u64),
         (ModelObject::Source(source), WeighBy::Interval) => Some(source.proc_time.as_millis()),
         // An unlimited Buffer has no number to weigh.

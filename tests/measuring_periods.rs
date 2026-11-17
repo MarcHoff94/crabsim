@@ -57,13 +57,13 @@ fn each_period_is_the_difference_between_a_headless_runs_statistics_at_its_ends(
         let busy = per_period(|s| s.time_busy.as_millis() as f64 / LENGTH);
         let blocked = per_period(|s| s.time_blocked.as_millis() as f64 / LENGTH);
         let failed = per_period(|s| s.time_failed.as_millis() as f64 / LENGTH);
-        let not_idle = per_period(|s| (s.time_busy + s.time_failed + s.time_paused).as_millis() as f64 / LENGTH);
+        let full_or_stopped = per_period(|s| (s.time_busy_full() + s.time_failed + s.time_paused).as_millis() as f64 / LENGTH);
         let mus_in = per_period(|s| s.mus_in as f64);
         for (spread, values) in [
             (figures.busy, &busy),
             (figures.blocked, &blocked),
             (figures.failed, &failed),
-            (figures.not_idle, &not_idle),
+            (figures.full_or_stopped, &full_or_stopped),
             (figures.mus_in_per_hour, &mus_in),
         ] {
             let (mean, variance) = mean_and_variance(values);

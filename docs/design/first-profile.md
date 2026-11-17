@@ -223,6 +223,23 @@ Speed doesn't change as it fills (17.6M events/s, LIFO 16.7M). Memory is 24 byte
 
 **Object sizes** are as PR 111 left them: `ModelObject` 1,280 bytes, set by `SingleStation`, with `Buffer` 496, `Source` 448 and `Drain` 312.
 
+### After Station capacity
+
+Measured on 2026-11-17 on the first PC, for PR 2 of build step 7: the branch against `master` after PR 112, by the alternating method above, ten rounds.
+
+| Scenario | `master` | With Station capacity | Change | Slower in |
+|---|---|---|---|---|
+| `demo-headless` | 14.61M/s | 14.49M/s | −0.9% | 7 of 10 |
+| `large-headless` | 7.12M/s | 7.00M/s | −1.8% | 10 of 10 |
+| `demo-dropped` | 13.15M/s | 13.42M/s | +2.1% | 3 of 10 |
+| `large-dropped` | 6.11M/s | 6.04M/s | −1.1% | 8 of 10 |
+| `demo-kept` | 9.75M/s | 9.73M/s | −0.2% | 5 of 10 |
+
+- **Within the spec's ±2%,** with identical events and MUs left, and every occurrence of the demo and a split model with a Buffer hashed identical over 20 simulated days on three seeds.
+- **Why so little changes:** a Station of capacity 1 stays a `SingleStation`, and every object stays 1,280 bytes. The statistics' two new fields would have added 16 bytes, which `SingleStation` won back by keeping the work left during a stop in its `Finish` field, and a `MultiStation` boxes its failure profile, so at 544 bytes it needs no tag of its own in `ModelObject`.
+- **The 6,006-object model's −1.8% is steady** (slower in all ten rounds), so it is likely real: the extra `ModelObject` variant in every dispatch, or the statistics' two new buckets. Not measured apart.
+- **`buffered-headless` changed model:** the line now has an Oven of capacity 6 with individual start. 44.1M events a year at 12.6M events/s, one more event per MU than without it, passing the same 5,087,928 MUs. With batch start the Oven passed only 3.2M: a batch closed until empty waits idle while it fills.
+
 ## Release profile
 
 Each build was run 12 times in rotation, as a fresh process each time. Clean build time includes dependencies.

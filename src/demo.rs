@@ -1,7 +1,7 @@
 //! A small example model, run by the headless CLI and drawn by the UI.
 
 use crate::flows::FailureProfile;
-use crate::materialflow_objects::ExitStrategy;
+use crate::materialflow_objects::{ExitStrategy, StartMode};
 use crate::model::{ModelDescription, Position};
 use crate::report::Capacity;
 use crate::random_numbers::Distribution;
@@ -73,10 +73,10 @@ pub fn model() -> ModelDescription {
     model
 }
 
-/// A second example, with Buffers: a line of three Stations with a store of 10 places between
-/// the first two, and a cooling section after the second, where every MU stays a minute and
-/// the newest is taken first once several may leave. `models/buffered-line.json` is the same
-/// model as a file, and the benchmark runs it.
+/// A second example, with Buffers and a Station with capacity: a line of three Stations with a
+/// store of 10 places between the first two, an oven baking up to 6 MUs at once after the second, and a
+/// cooling section, where every MU stays a minute and the newest is taken first once several may
+/// leave. `models/buffered-line.json` is the same model as a file, and the benchmark runs it.
 pub fn buffered_line() -> ModelDescription {
     let mut model = ModelDescription::new();
     let place = |model: &mut ModelDescription, id: u32, name: &str, x: f64| {
@@ -93,15 +93,24 @@ pub fn buffered_line() -> ModelDescription {
     place(&mut model, store, "Store", 8.0);
     let mill = model.add_station(SimTime::from_secs(5), failures(0.85, 90.0));
     place(&mut model, mill, "Mill", 12.0);
+    // Added after the others, so it has the next stream, as a model file gives it, and the others
+    // keep theirs.
+    let oven = model.add_station(SimTime::from_secs(25), FailureProfile::new(1.0, Distribution::CONSTANT { value: 0.0 }, 0));
+    model.set_station_capacity(oven, 6, StartMode::Individual);
+    place(&mut model, oven, "Oven", 16.0);
+    model.set_stream(oven, 7);
     let cooling = model.add_buffer(Capacity::Unlimited);
     model.set_dwelling_time(cooling, SimTime::from_secs(60));
     model.set_exit_strategy(cooling, ExitStrategy::LastInFirstOut);
-    place(&mut model, cooling, "Cooling", 16.0);
+    place(&mut model, cooling, "Cooling", 20.0);
     let pack = model.add_station(SimTime::from_secs(4), failures(0.95, 30.0));
-    place(&mut model, pack, "Pack", 20.0);
+    place(&mut model, pack, "Pack", 24.0);
     let drain = model.add_drain();
-    place(&mut model, drain, "Drain", 24.0);
-    for (from, to) in [(source, saw), (saw, store), (store, mill), (mill, cooling), (cooling, pack), (pack, drain)] {
+    place(&mut model, drain, "Drain", 28.0);
+    for (id, stream) in [(cooling, 4), (pack, 5), (drain, 6)] {
+        model.set_stream(id, stream);
+    }
+    for (from, to) in [(source, saw), (saw, store), (store, mill), (mill, oven), (oven, cooling), (cooling, pack), (pack, drain)] {
         model.connect(from, to);
     }
     model

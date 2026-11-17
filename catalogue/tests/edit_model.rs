@@ -412,12 +412,18 @@ fn get_attributes_gives_every_attribute_with_its_value_and_origin() {
     assert_eq!(got["file_hash"], hash(&setup.folder.read("line.json")));
     let attributes: Vec<(String, Value)> = got["attributes"].as_array().unwrap().iter().map(|a| (a["attribute"].as_str().unwrap().to_string(), a.clone())).collect();
     let names: Vec<&str> = attributes.iter().map(|(name, _)| name.as_str()).collect();
-    assert_eq!(names, ["process_time", "failures", "starting_mus", "dimensions", "description", "state_notes", "distribution"], "every attribute a Station has");
+    assert_eq!(
+        names,
+        ["process_time", "failures", "starting_mus", "capacity", "start", "dimensions", "description", "state_notes", "distribution"],
+        "every attribute a Station has"
+    );
     let of = |name: &str| attributes.iter().find(|(n, _)| n == name).unwrap().1.clone();
     assert_eq!(of("distribution"), json!({ "attribute": "distribution", "from": "not_set" }), "round robin by default, set nowhere");
     assert_eq!(of("process_time"), json!({ "attribute": "process_time", "value": "00:00:50", "from": "instance" }));
     assert_eq!(of("failures"), json!({ "attribute": "failures", "value": { "availability": 0.9, "repair_time": { "constant": "00:01:00" } }, "from": "class", "class": "Mill" }));
     assert_eq!(of("starting_mus"), json!({ "attribute": "starting_mus", "value": 0, "from": "built_in" }));
+    assert_eq!(of("capacity"), json!({ "attribute": "capacity", "value": 1, "from": "built_in" }));
+    assert_eq!(of("start"), json!({ "attribute": "start", "value": "individual", "from": "built_in" }));
     assert_eq!(of("dimensions")["from"], "built_in");
     assert_eq!(of("description"), json!({ "attribute": "description", "from": "not_set" }));
     assert_eq!(of("state_notes"), json!({ "attribute": "state_notes", "from": "not_set" }));

@@ -91,14 +91,18 @@
           "$ref": "#/$defs/FailuresFile"
         },
         "starting_mus": {
-          "description": "Station, Buffer: how many MUs it holds from the start of a run. 0 by default. A Station 0 or 1, and a Buffer at most its capacity, in the order they count as having entered.",
+          "description": "Station, Buffer: how many MUs it holds from the start of a run, at most its capacity, in the order they count as having entered. 0 by default.",
           "type": "integer",
           "format": "uint64",
           "minimum": 0
         },
         "capacity": {
-          "description": "Buffer: how many MUs it holds. Unlimited by default.",
+          "description": "Station, Buffer: how many MUs it holds. A Station's is a whole number from 1 to 10,000, and 1 by default: one machine working on that many MUs at once. A Buffer's is unlimited by default.",
           "$ref": "#/$defs/CapacityFile"
+        },
+        "start": {
+          "description": "Station: when it begins work on its MUs. Individual by default.",
+          "$ref": "#/$defs/StartFile"
         },
         "dwelling_time": {
           "description": "Buffer: how long each MU stays before it may leave, counted from its own entry. 0 by default.",
@@ -280,6 +284,20 @@
       "type": "integer",
       "format": "int64",
       "const": -1
+    },
+    "StartFile": {
+      "oneOf": [
+        {
+          "description": "Each MU starts on entry, with its own process time.",
+          "type": "string",
+          "const": "individual"
+        },
+        {
+          "description": "Work begins when the Station is full, and its entrance stays closed until it is empty.",
+          "type": "string",
+          "const": "batch"
+        }
+      ]
     },
     "ExitStrategyFile": {
       "oneOf": [

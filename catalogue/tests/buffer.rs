@@ -114,7 +114,7 @@ fn find_instances_and_exports_know_a_buffers_values() {
     assert_eq!(find(json!([{ "attribute": "capacity", "op": ">", "value": 1000 }])), ["Store"], "no limit is more than any number");
     set(&setup, "capacity", json!(5));
     set(&setup, "dwelling_time", json!("1:00"));
-    assert_eq!(find(json!([{ "attribute": "capacity", "op": "<=", "value": 5 }])), ["Store"]);
+    assert_eq!(find(json!([{ "attribute": "capacity", "op": "<=", "value": 5 }])), ["Store", "Slow"], "a Station has a capacity too, 1 by default");
     assert_eq!(find(json!([{ "attribute": "capacity", "op": "=", "value": "unlimited" }])), Vec::<String>::new());
     assert_eq!(find(json!([{ "attribute": "dwelling_time", "op": ">=", "value": "0:30" }])), ["Store"]);
     let exported = setup.ok("export_model", json!({ "path": "line.json", "format": "cypher" }));

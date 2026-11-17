@@ -30,10 +30,10 @@ pub struct ObjectPicture {
     process: ProcessState,
     /// When each active interruption began, by `StopCause::index`.
     interrupted_since: [Option<SimTime>; 3],
-    /// When the work in progress completes, while not stopped.
-    completion: Option<SimTime>,
-    /// The work left, frozen while stopped.
-    frozen: Option<SimTime>,
+    /// Each MU in work, in the order it came in, with when its work completes, or while
+    /// stopped the work left on it, frozen. A Station with capacity has several, a Source the
+    /// MU it is making.
+    work: Vec<(u32, SimTime)>,
 }
 
 impl Picture {
@@ -95,13 +95,21 @@ impl Picture {
                 let object = &mut objects[at as usize];
                 object.contents = vec![mu_id];
                 object.process = ProcessState::Processing;
-                object.completion = Some(now + duration);
+                object.work = vec![(mu_id, now + duration)];
             }
             OccurrenceKind::MuMoved { mu_id, from, to } => {
                 let object = &mut objects[from as usize];
                 object.contents.retain(|&id| id != mu_id);
-                object.process = ProcessState::Idle;
-                object.completion = None;
+                object.work.retain(|&(id, _)| id != mu_id);
+                // A Station with capacity may still have MUs in work, or with none in work hold only
+                // finished MUs that were refused, so it stays blocked: the run reports no change.
+                object.process = if !object.work.is_empty() {
+                    ProcessState::Processing
+                } else if object.kind == ObjectKind::Station && object.process == ProcessState::Blocked && !object.contents.is_empty() {
+                    ProcessState::Blocked
+                } else {
+                    ProcessState::Idle
+                };
                 object.hold();
                 if let Some(object) = objects.get_mut(to as usize) {
                     object.contents.push(mu_id);
@@ -109,16 +117,17 @@ impl Picture {
                 }
             }
             OccurrenceKind::MuLeft { mu_id, at, .. } => objects[at as usize].contents.retain(|&id| id != mu_id),
-            OccurrenceKind::WorkStarted { at, duration, .. } => {
+            OccurrenceKind::WorkStarted { mu_id, at, duration } => {
                 let object = &mut objects[at as usize];
                 object.process = ProcessState::Processing;
-                object.completion = Some(now + duration);
+                object.work.push((mu_id, now + duration));
             }
-            OccurrenceKind::WorkFinished { at, .. } => objects[at as usize].completion = None,
+            OccurrenceKind::WorkFinished { mu_id, at } => objects[at as usize].work.retain(|&(id, _)| id != mu_id),
             OccurrenceKind::Blocked { object_id } => {
+                // Work outranks blocking, so nothing is in work.
                 let object = &mut objects[object_id as usize];
                 object.process = ProcessState::Blocked;
-                object.completion = None;
+                object.work.clear();
             }
             OccurrenceKind::Unblocked { object_id } => {
                 // A Source unblocks by creating its next MU, which has already set what it is doing.
@@ -132,7 +141,9 @@ impl Picture {
                 let object = &mut objects[object_id as usize];
                 // Only the first interruption of a stop freezes the work.
                 if !object.is_stopped() {
-                    object.frozen = object.completion.take().map(|completion| completion.saturating_sub(now));
+                    for (_, time) in &mut object.work {
+                        *time = time.saturating_sub(now);
+                    }
                 }
                 object.interrupted_since[cause.index()] = Some(now);
             }
@@ -141,7 +152,9 @@ impl Picture {
                 object.interrupted_since[cause.index()] = None;
                 // Only the last interruption of a stop to end resumes the work.
                 if !object.is_stopped() {
-                    object.completion = object.frozen.take().map(|left| now + left);
+                    for (_, time) in &mut object.work {
+                        *time = now + *time;
+                    }
                 }
             }
         }
@@ -160,8 +173,15 @@ impl ObjectPicture {
             interrupted_since: StopCause::ALL.map(|cause| {
                 state.interruptions.iter().find(|interruption| interruption.cause == cause).map(|i| i.since)
             }),
-            completion: state.remaining.filter(|_| !stopped).map(|left| now + left),
-            frozen: state.remaining.filter(|_| stopped),
+            work: if state.work.is_empty() {
+                // A Source reports only its time left, on the MU it holds.
+                state.remaining.map(|left| (state.contents.first().copied().unwrap_or(u32::MAX), left)).into_iter().collect::<Vec<_>>()
+            } else {
+                state.work.iter().map(|work| (work.mu_id, work.left)).collect::<Vec<_>>()
+            }
+            .into_iter()
+            .map(|(mu_id, left)| (mu_id, if stopped { left } else { now + left }))
+            .collect(),
         }
     }
 
@@ -211,8 +231,16 @@ impl ObjectPicture {
         StopCause::ALL.into_iter().find(|cause| self.interrupted_since[cause.index()].is_some())
     }
 
-    /// Time left until the object's current work completes at `now`, frozen during a stop.
+    /// Time left until the object's current work completes at `now`, frozen during a stop. For a
+    /// Station with several MUs in work, the soonest.
     pub fn remaining(&self, now: SimTime) -> Option<SimTime> {
-        self.frozen.or_else(|| self.completion.map(|completion| completion.saturating_sub(now)))
+        let soonest = self.work.iter().map(|&(_, time)| time).min()?;
+        Some(if self.is_stopped() { soonest } else { soonest.saturating_sub(now) })
+    }
+
+    /// Each MU in work and the time left on it at `now`, in the order they came in.
+    pub fn work(&self, now: SimTime) -> Vec<(u32, SimTime)> {
+        let stopped = self.is_stopped();
+        self.work.iter().map(|&(mu_id, time)| (mu_id, if stopped { time } else { time.saturating_sub(now) })).collect()
     }
 }

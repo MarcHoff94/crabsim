@@ -66,7 +66,11 @@ fn every_attribute_comes_with_its_value_and_where_it_comes_from() {
     let folder = Folder::new("read");
     let workspace = open(&folder);
     let names: Vec<String> = workspace.attributes("P1").unwrap().into_iter().map(|view| view.attribute).collect();
-    assert_eq!(names, ["process_time", "failures", "starting_mus", "dimensions", "description", "state_notes", "distribution"], "a Station's attributes, in a fixed order");
+    assert_eq!(
+        names,
+        ["process_time", "failures", "starting_mus", "capacity", "start", "dimensions", "description", "state_notes", "distribution"],
+        "a Station's attributes, in a fixed order"
+    );
     assert_eq!(of(&workspace, "P1", "process_time"), (Some(json!("00:00:05")), ValueFrom::Class("Press".into())));
     assert_eq!(of(&workspace, "P2", "process_time"), (Some(json!("00:00:07")), ValueFrom::Instance));
     assert_eq!(of(&workspace, "P1", "starting_mus"), (Some(json!(0)), ValueFrom::BuiltIn));
@@ -409,6 +413,18 @@ fn a_capacity_is_a_number_from_1_or_no_limit_typed_as_minus_1_or_the_word() {
         typed(&mut form, &[wrong]);
         assert!(form.value().unwrap_err().contains("a whole number from 1, or -1 for no limit"), "{wrong}");
     }
+}
+
+#[test]
+fn a_stations_start_is_one_of_two() {
+    let form = Form::new("start", None);
+    assert_eq!(form.options.iter().map(|(_, label)| *label).collect::<Vec<_>>(), ["Each MU on entry", "Batch, when full"]);
+    assert_eq!(form.value(), Ok(json!("individual")), "the default until another is chosen");
+    let mut form = Form::new("start", Some(&json!("batch")));
+    assert!(form.matches(Some(&json!("batch"))));
+    form.parts[0].text = "individual".into();
+    assert_eq!(form.value(), Ok(json!("individual")));
+    assert_eq!(summary(&json!("batch")), "batch, when full");
 }
 
 #[test]

@@ -1,7 +1,7 @@
 {
   "$schema": "./model-file.schema.json",
   "format_version": 2,
-  "description": "A line with Buffers: a Saw, a Store of 10 places, a Mill, a Cooling section where every MU stays a minute and the newest that may leave goes first, and packing. The Mill fails most, so the Store fills while it is down.",
+  "description": "A line with Buffers and a Station with capacity: a Saw, a Store of 10 places, a Mill, an Oven baking up to 6 at once for 25 s each, a Cooling section where every MU stays a minute and the newest that may leave goes first, and packing. The Mill fails most, so the Store fills while it is down.",
   "instances": [
     {
       "name": "Source",
@@ -70,11 +70,24 @@
       }
     },
     {
+      "name": "Oven",
+      "class": "Station",
+      "stream": 7,
+      "position": {
+        "x": 16.0,
+        "y": 0.0
+      },
+      "attributes": {
+        "process_time": "00:00:25",
+        "capacity": 6
+      }
+    },
+    {
       "name": "Cooling",
       "class": "Buffer",
       "stream": 4,
       "position": {
-        "x": 16.0,
+        "x": 20.0,
         "y": 0.0
       },
       "attributes": {
@@ -88,7 +101,7 @@
       "class": "Station",
       "stream": 5,
       "position": {
-        "x": 20.0,
+        "x": 24.0,
         "y": 0.0
       },
       "attributes": {
@@ -109,7 +122,7 @@
       "class": "Drain",
       "stream": 6,
       "position": {
-        "x": 24.0,
+        "x": 28.0,
         "y": 0.0
       }
     }
@@ -135,6 +148,12 @@
     },
     {
       "from": "Mill",
+      "to": "Oven",
+      "exit": 1,
+      "entrance": 1
+    },
+    {
+      "from": "Oven",
       "to": "Cooling",
       "exit": 1,
       "entrance": 1

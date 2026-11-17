@@ -60,12 +60,13 @@ impl Model {
                 let rate = |others: &Vec<usize>| -> Option<f64> {
                     others.iter().try_fold(0.0, |sum, &other| {
                         let has = self.resolve(other).expect("checked").attributes;
-                        let time = match built_in[other] {
-                            "Source" => has.interval,
-                            "Station" => has.process_time,
-                            _ => None,
-                        }?;
-                        Some(sum + 3_600_000.0 / time.as_millis() as f64)
+                        let (time, at_once) = match built_in[other] {
+                            "Source" => (has.interval, 1),
+                            // A Station with capacity works on that many at once.
+                            "Station" => (has.process_time, has.capacity.map_or(1, crate::Capacity::limit)),
+                            _ => (None, 1),
+                        };
+                        Some(sum + at_once as f64 * 3_600_000.0 / time?.as_millis() as f64)
                     })
                 };
                 if let (Some(coming), Some(going)) = (rate(&predecessors[i]), rate(&successors[i]))

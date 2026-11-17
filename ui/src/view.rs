@@ -300,6 +300,8 @@ pub struct Details {
     pub statistics_since: SimTime,
     /// Whether it holds a limited number of MUs, so it can be full.
     pub limited: bool,
+    /// How many MUs a Station works on at once.
+    pub capacity: u64,
 }
 
 impl Inspection {
@@ -344,13 +346,23 @@ impl Inspection {
                     ("MUs in", statistics.mus_in.to_string()),
                     ("MUs out", statistics.mus_out.to_string()),
                     ("Busy", share(statistics.time_busy)),
+                ];
+                // With capacity, busy splits into three parts that add up to it.
+                if details.capacity > 1 {
+                    rows.extend([
+                        ("  every place in work", share(statistics.time_busy_full())),
+                        ("  with free places", share(statistics.time_busy_not_full)),
+                        ("  partly blocked", share(statistics.time_busy_partly_blocked)),
+                    ]);
+                }
+                rows.extend([
                     ("Blocked", share(statistics.time_blocked)),
                     ("Idle", share(statistics.time_idle)),
                     ("Failed", share(statistics.time_failed)),
                     ("Paused", share(statistics.time_paused)),
                     ("Failures", statistics.failures.to_string()),
                     ("Pauses", statistics.pauses.to_string()),
-                ];
+                ]);
                 if let Some(availability) = statistics.achieved_availability() {
                     rows.push(("Availability", format!("{:.1} %", availability * 100.0)));
                 }
@@ -413,6 +425,8 @@ pub struct StationResult {
     pub id: u32,
     pub name: String,
     pub busy: f64,
+    /// Busy with every place in work: all of `busy` with capacity 1.
+    pub busy_full: f64,
     pub blocked: f64,
     pub idle: f64,
     pub failed: f64,
@@ -452,12 +466,13 @@ impl Interval {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct StationIntervals {
     pub busy: Interval,
+    pub busy_full: Interval,
     pub blocked: Interval,
     pub idle: Interval,
     /// Failed or paused.
     pub stopped: Interval,
-    /// Busy or stopped, which the likely-bottleneck rule ranks by.
-    pub not_idle: Interval,
+    /// Busy and full or stopped, which the likely-bottleneck rule ranks by.
+    pub full_or_stopped: Interval,
 }
 
 /// How far measuring periods have got.
@@ -488,11 +503,13 @@ pub struct Results {
     pub drains: Vec<DrainResult>,
     /// In model order.
     pub stations: Vec<StationResult>,
+    /// Some Station has a capacity above 1, so its full share differs from its busy share.
+    pub with_capacity: bool,
     /// By the catalogue's rule, the same `find_bottleneck` gives agents.
     pub bottleneck: Option<LikelyBottleneck>,
     /// How far measuring periods have got, when the run measures in them.
     pub periods: Option<PeriodsSoFar>,
-    /// The runner-up the likely bottleneck can't be told from: their busy-or-stopped intervals
+    /// The runner-up the likely bottleneck can't be told from: their full-or-stopped intervals
     /// overlap. Only once intervals are given.
     pub too_close: Option<String>,
     /// The model's longest mean time between failures or repair time, when the measuring period
@@ -1181,6 +1198,7 @@ impl ViewState {
             statistics: object.statistics,
             statistics_since: state.statistics_since,
             limited: object.capacity != crabsim::Capacity::Unlimited,
+            capacity: object.capacity.limit(),
         })
     }
 
@@ -1208,6 +1226,9 @@ impl ViewState {
             let share = |time: SimTime| (measured > 0.0).then(|| time.as_millis() as f64 / measured);
             let value = match figure {
                 "working_share" => share(statistics.time_busy),
+                "working_full_share" => share(statistics.time_busy_full()),
+                "working_not_full_share" => share(statistics.time_busy_not_full),
+                "working_partly_blocked_share" => share(statistics.time_busy_partly_blocked),
                 "blocked_share" => share(statistics.time_blocked),
                 "idle_share" => share(statistics.time_idle),
                 "failed_share" => share(statistics.time_failed),
@@ -1238,6 +1259,7 @@ impl ViewState {
         let mut shares = Vec::new();
         let mut drains = Vec::new();
         let mut stations = Vec::new();
+        let mut with_capacity = false;
         for object in &state.objects {
             let Some(view) = self.objects.get(object.id as usize) else { continue };
             let statistics = &object.statistics;
@@ -1248,11 +1270,13 @@ impl ViewState {
                 name: view.name.clone(),
                 built_in: built_in.to_string(),
                 working: share(statistics.time_busy),
+                working_full: share(statistics.time_busy_full()),
                 blocked: share(statistics.time_blocked),
                 idle: share(statistics.time_idle),
                 failed: share(statistics.time_failed),
                 paused: share(statistics.time_paused),
             });
+            with_capacity |= view.kind == ObjectKind::Station && object.capacity.limit() > 1;
             match view.kind {
                 ObjectKind::Drain => drains.push(DrainResult {
                     id: object.id,
@@ -1266,6 +1290,7 @@ impl ViewState {
                     id: object.id,
                     name: view.name.clone(),
                     busy: share(statistics.time_busy),
+                    busy_full: share(statistics.time_busy_full()),
                     blocked: share(statistics.time_blocked),
                     idle: share(statistics.time_idle),
                     failed: share(statistics.time_failed),
@@ -1273,10 +1298,11 @@ impl ViewState {
                     intervals: figures(object.id).and_then(|figures| {
                         Some(StationIntervals {
                             busy: Interval::of(figures.busy)?,
+                            busy_full: Interval::of(figures.busy_full)?,
                             blocked: Interval::of(figures.blocked)?,
                             idle: Interval::of(figures.idle)?,
                             stopped: Interval::of(figures.stopped)?,
-                            not_idle: Interval::of(figures.not_idle)?,
+                            full_or_stopped: Interval::of(figures.full_or_stopped)?,
                         })
                     }),
                 }),
@@ -1289,10 +1315,10 @@ impl ViewState {
             .map(|connection| (self.objects[connection.from as usize].name.clone(), self.objects[connection.to as usize].name.clone()))
             .collect();
         let bottleneck = likely_bottleneck(&shares, &connections);
-        let not_idle = |name: &str| stations.iter().find(|station| station.name == name)?.intervals.map(|intervals| intervals.not_idle);
+        let full_or_stopped = |name: &str| stations.iter().find(|station| station.name == name)?.intervals.map(|intervals| intervals.full_or_stopped);
         let too_close = bottleneck.as_ref().and_then(|likely| {
             let (runner_up, _) = likely.ranking.get(1)?;
-            not_idle(&likely.instance)?.overlaps(&not_idle(runner_up)?).then(|| runner_up.clone())
+            full_or_stopped(&likely.instance)?.overlaps(&full_or_stopped(runner_up)?).then(|| runner_up.clone())
         });
         let short_against = periods
             .and_then(|periods| Some((periods.length, self.longest_failure_time?)))
@@ -1303,6 +1329,7 @@ impl ViewState {
             since: state.statistics_since,
             drains,
             stations,
+            with_capacity,
             bottleneck,
             periods: periods.map(|periods| PeriodsSoFar { length: periods.length, complete: periods.complete }),
             too_close,

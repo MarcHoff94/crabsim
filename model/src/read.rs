@@ -4,7 +4,7 @@
 
 use crate::{Attributes, DistributionStrategy, WeightedStrategy, WEIGHABLE, BUILT_IN_CLASSES, Class, Connection, Failures, Instance, Model, Problem, RepairTime, State, StateNotes, FORMAT_VERSION, escape};
 use crabsim::time::parse_time;
-use crate::{exit_strategy_from_name, Capacity, ExitStrategy};
+use crate::{exit_strategy_from_name, start_from_name, Capacity, ExitStrategy, StartMode};
 use crabsim::{Dimensions, Position, SimTime};
 use serde_json::{Map, Value};
 use std::collections::HashSet;
@@ -38,8 +38,8 @@ const TOP_LEVEL: [&str; 6] = ["$schema", "format_version", "description", "class
 const INSTANCE: [&str; 5] = ["name", "class", "stream", "position", "attributes"];
 const CONNECTION: [&str; 5] = ["from", "to", "exit", "entrance", "description"];
 const CLASS: [&str; 3] = ["name", "parent", "attributes"];
-const ATTRIBUTES: [&str; 11] =
-    ["interval", "process_time", "failures", "starting_mus", "capacity", "dwelling_time", "exit_strategy", "dimensions", "description", "state_notes", "distribution"];
+const ATTRIBUTES: [&str; 12] =
+    ["interval", "process_time", "failures", "starting_mus", "capacity", "start", "dwelling_time", "exit_strategy", "dimensions", "description", "state_notes", "distribution"];
 
 pub(crate) fn read(text: &str) -> (Model, Vec<Problem>, Broken) {
     let mut reader = Reader::default();
@@ -299,6 +299,7 @@ impl Reader {
                 "failures" => self.failures(value, &at, name).map(|failures| attributes.failures = Some(failures)),
                 "starting_mus" => self.count(value, &at, name).map(|count| attributes.starting_mus = Some(count)),
                 "capacity" => self.capacity(value, &at, name).map(|capacity| attributes.capacity = Some(capacity)),
+                "start" => self.start(value, &at, name).map(|start| attributes.start = Some(start)),
                 "dwelling_time" => self.time(value, &at, name).map(|time| attributes.dwelling_time = Some(time)),
                 "exit_strategy" => self.exit_strategy(value, &at, name).map(|strategy| attributes.exit_strategy = Some(strategy)),
                 "dimensions" => self.dimensions(value, &at, name).map(|dimensions| attributes.dimensions = Some(dimensions)),
@@ -355,6 +356,14 @@ impl Reader {
             self.problem(pointer.to_owned(), name, format!("{value} should be a whole number from 1, or \"unlimited\""));
         }
         capacity
+    }
+
+    fn start(&mut self, value: &Value, pointer: &str, name: Option<&str>) -> Option<StartMode> {
+        let start = value.as_str().and_then(start_from_name);
+        if start.is_none() {
+            self.problem(pointer.to_owned(), name, format!("{value} is not a start: use \"individual\" or \"batch\""));
+        }
+        start
     }
 
     fn exit_strategy(&mut self, value: &Value, pointer: &str, name: Option<&str>) -> Option<ExitStrategy> {

@@ -6,6 +6,9 @@ use crate::{Attribute, Attributes, Capacity, Failures, Model, Problem, RepairTim
 
 /// More starting MUs than this in one Buffer is refused: each takes memory from Init on.
 const MOST_STARTING_MUS: u64 = 1_000_000;
+/// A Station with capacity looks through its places on each of its events, so a typo such as
+/// 1000000 would slow every one of them.
+const MOST_STATION_CAPACITY: u64 = 10_000;
 use crabsim::{Dimensions, SimTime};
 use std::collections::{HashMap, VecDeque};
 
@@ -210,13 +213,14 @@ impl<'m> Checker<'m> {
         }
         if let Some(built_in) = self.built_in(index) {
             self.attributes(owner, &instance.attributes, built_in);
-            if built_in == "Buffer" {
+            if built_in == "Buffer" || built_in == "Station" {
                 self.starting_mus_fit(index);
             }
         }
     }
 
-    /// A Buffer can't start with more MUs than it holds, wherever the two values come from.
+    /// A Buffer or Station can't start with more MUs than it holds, wherever the two values come
+    /// from.
     fn starting_mus_fit(&mut self, index: usize) {
         let model = self.model;
         let Some(resolved) = model.resolve(index) else { return };
@@ -263,8 +267,14 @@ impl<'m> Checker<'m> {
         if built_in == "Buffer" && attributes.starting_mus.is_some_and(|count| count > MOST_STARTING_MUS) {
             self.problem(owner, "/attributes/starting_mus", "a Buffer can start with at most 1,000,000 MUs");
         }
-        if built_in == "Station" && attributes.starting_mus.is_some_and(|count| count > 1) {
-            self.problem(owner, "/attributes/starting_mus", "a Station can start with 0 or 1 MUs, until Stations have a capacity");
+        if built_in == "Station" && attributes.capacity == Some(Capacity::Limited(0)) {
+            self.problem(owner, "/attributes/capacity", "a Station's capacity must be at least 1");
+        }
+        if built_in == "Station" && attributes.capacity == Some(Capacity::Unlimited) {
+            self.problem(owner, "/attributes/capacity", "a Station's capacity is a whole number from 1: only a Buffer can be unlimited");
+        }
+        if built_in == "Station" && attributes.capacity.is_some_and(|capacity| capacity.limit() > MOST_STATION_CAPACITY) {
+            self.problem(owner, "/attributes/capacity", "a Station's capacity can be at most 10,000");
         }
         if let (Some(failures), "Station") = (&attributes.failures, built_in) {
             self.failures(owner, failures);

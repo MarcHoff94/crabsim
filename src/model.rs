@@ -7,7 +7,7 @@
 
 use crate::distribution::{DistributionRule, Ranking};
 use crate::flows::{FailureProfile, MoveableUnit};
-use crate::materialflow_objects::{Buffer, Drain, ModelObject, SingleStation, Source};
+use crate::materialflow_objects::{Buffer, Drain, ModelObject, MultiStation, SingleStation, Source, StartMode};
 use crate::materialflow_objects::ExitStrategy;
 use crate::report::{Capacity, ObjectKind};
 use crate::simulation_run::SimulationRun;
@@ -89,16 +89,64 @@ impl ModelDescription {
         self.add(ModelObject::Station(SingleStation::new(id, process_time, failures, Some(mu), Vec::new())))
     }
 
+    /// Gives a Station a capacity, from 1, and says when it begins work on its MUs. Capacity 1
+    /// keeps the cheaper `SingleStation`, whatever the start, since a batch of one starts on
+    /// entry. Its process time, failures, successors and starting MUs carry over.
+    pub fn set_station_capacity(&mut self, id: u32, capacity: u64, start: StartMode) {
+        assert!(capacity >= 1, "a Station's capacity is at least 1");
+        let object = self.objects.get_mut(id as usize).unwrap_or_else(|| panic!("object {id} is not in the model"));
+        let (proc_time, failures, succ, mus) = match object {
+            ModelObject::Station(station) => (station.configured_proc_time, station.failure_profile.clone(), station.succ.clone(), station.starting_content.iter().map(|mu| mu.id).collect()),
+            ModelObject::MultiStation(station) => (station.configured_proc_time, (*station.failure_profile).clone(), station.succ.clone(), station.starting_mus.clone()),
+            _ => panic!("object {id} is not a Station"),
+        };
+        *object = if capacity == 1 {
+            let mu = mus.first().map(|&mu_id| MoveableUnit { id: mu_id, location_id: id, left_source: SimTime::ZERO });
+            ModelObject::Station(SingleStation::new(id, proc_time, failures, mu, succ))
+        } else {
+            let mut station = MultiStation::new(id, proc_time, failures, capacity, start);
+            station.succ = succ;
+            station.set_starting_mus(mus);
+            ModelObject::MultiStation(station)
+        };
+    }
+
+    /// Builds every Station with capacity 1 as a `MultiStation`, for tests that check it behaves
+    /// exactly like a `SingleStation`.
+    #[cfg(test)]
+    pub(crate) fn with_general_stations(&self) -> ModelDescription {
+        let mut model = self.clone();
+        for object in &mut model.objects {
+            if let ModelObject::Station(station) = object {
+                let mut general = MultiStation::new(station.base.object_id, station.configured_proc_time, station.failure_profile.clone(), 1, StartMode::Individual);
+                general.succ = station.succ.clone();
+                general.set_starting_mus(station.starting_content.iter().map(|mu| mu.id).collect());
+                *object = ModelObject::MultiStation(general);
+            }
+        }
+        model
+    }
+
     /// A Buffer that holds up to `capacity` MUs, empty in its default state, passing them on
     /// first in, first out with no dwelling time.
     pub fn add_buffer(&mut self, capacity: Capacity) -> u32 {
         self.add(ModelObject::Buffer(Buffer::new(self.next_id(), capacity, Vec::new())))
     }
 
-    /// Sets the MUs a Buffer holds in its default state, by id, in the order they count as
-    /// entered at Init.
+    /// Sets the MUs a Buffer or Station holds in its default state, by id, in the order they
+    /// count as entered at Init. A Station of capacity 1 holds at most one.
     pub fn set_starting_mus(&mut self, id: u32, mus: &[u32]) {
-        self.buffer_mut(id).set_starting_mus(mus.to_vec());
+        match self.objects.get_mut(id as usize) {
+            Some(ModelObject::Buffer(buffer)) => buffer.set_starting_mus(mus.to_vec()),
+            Some(ModelObject::MultiStation(station)) => station.set_starting_mus(mus.to_vec()),
+            Some(ModelObject::Station(station)) => {
+                assert!(mus.len() <= 1, "a Station of capacity 1 holds one MU at most");
+                station.starting_content = mus.first().map(|&mu_id| MoveableUnit { id: mu_id, location_id: id, left_source: SimTime::ZERO });
+                station.content = station.starting_content.clone();
+            }
+            Some(_) => panic!("object {id} can't hold starting MUs"),
+            None => panic!("object {id} is not in the model"),
+        }
     }
 
     /// Sets how long each MU stays in a Buffer before it may leave, counted from its entry.
@@ -129,6 +177,7 @@ impl ModelDescription {
         let successors = match self.objects.get_mut(from as usize) {
             Some(ModelObject::Source(source)) => &mut source.succ,
             Some(ModelObject::Station(station)) => &mut station.succ,
+            Some(ModelObject::MultiStation(station)) => &mut station.succ,
             Some(ModelObject::Buffer(buffer)) => &mut buffer.succ,
             Some(_) => panic!("object {from} can't have successors"),
             None => panic!("object {from} is not in the model"),
@@ -182,7 +231,7 @@ impl ModelDescription {
     pub fn kind(&self, id: u32) -> ObjectKind {
         match self.object(id) {
             ModelObject::Source(_) => ObjectKind::Source,
-            ModelObject::Station(_) => ObjectKind::Station,
+            ModelObject::Station(_) | ModelObject::MultiStation(_) => ObjectKind::Station,
             ModelObject::Buffer(_) => ObjectKind::Buffer,
             ModelObject::Drain(_) => ObjectKind::Drain,
             #[cfg(test)]
@@ -195,8 +244,7 @@ impl ModelDescription {
     pub fn longest_failure_time(&self) -> Option<SimTime> {
         self.objects
             .iter()
-            .filter_map(ModelObject::as_station)
-            .map(|station| &station.failure_profile)
+            .filter_map(ModelObject::failure_profile)
             .filter(|failures| failures.active)
             .map(|failures| failures.mtbf.max(SimTime::from_millis_f64(failures.dist_sampler_mttr.params.mean())))
             .max()
@@ -208,6 +256,7 @@ impl ModelDescription {
         match self.object(id) {
             ModelObject::Source(source) => &source.succ,
             ModelObject::Station(station) => &station.succ,
+            ModelObject::MultiStation(station) => &station.succ,
             ModelObject::Buffer(buffer) => &buffer.succ,
             ModelObject::Drain(_) => &[],
             #[cfg(test)]

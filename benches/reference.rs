@@ -150,7 +150,7 @@ enum Occurrences {
 
 /// Objects in one line of each model.
 const DEMO_OBJECTS: usize = 14;
-const BUFFERED_OBJECTS: usize = 7;
+const BUFFERED_OBJECTS: usize = 8;
 
 struct Scenario {
     name: &'static str,

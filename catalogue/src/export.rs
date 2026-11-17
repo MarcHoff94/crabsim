@@ -119,6 +119,9 @@ fn attribute_properties(attributes: &Attributes, has: impl Fn(Attribute) -> bool
     if let Some(crabsim_model::Capacity::Limited(capacity)) = attributes.capacity.filter(|_| has(Attribute::Capacity)) {
         properties.push(("capacity", Value::Long(capacity)));
     }
+    if let Some(start) = attributes.start.filter(|_| has(Attribute::Start)) {
+        properties.push(("start", Value::Text(crabsim_model::start_name(start).to_string())));
+    }
     if let Some(time) = attributes.dwelling_time.filter(|_| has(Attribute::DwellingTime)) {
         properties.push(("dwelling_time_s", seconds(time)));
     }

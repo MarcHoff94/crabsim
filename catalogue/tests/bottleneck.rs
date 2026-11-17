@@ -8,7 +8,7 @@ use crabsim_catalogue::bottleneck::{likely_bottleneck, Shares};
 use serde_json::json;
 
 fn station(name: &str, working: f64, blocked: f64, idle: f64, failed: f64) -> Shares {
-    Shares { name: name.into(), built_in: "Station".into(), working, blocked, idle, failed, paused: 0.0 }
+    Shares { name: name.into(), built_in: "Station".into(), working, working_full: working, blocked, idle, failed, paused: 0.0 }
 }
 
 fn connections(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
@@ -18,17 +18,17 @@ fn connections(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
 #[test]
 fn the_likely_bottleneck_is_the_station_busy_or_stopped_most_with_its_neighbours_as_evidence() {
     let objects = vec![
-        Shares { name: "In".into(), built_in: "Source".into(), working: 0.2, blocked: 0.8, idle: 0.0, failed: 0.0, paused: 0.0 },
+        Shares { name: "In".into(), built_in: "Source".into(), working: 0.2, working_full: 0.2, blocked: 0.8, idle: 0.0, failed: 0.0, paused: 0.0 },
         station("Saw", 0.30, 0.65, 0.05, 0.0),
         // Less working than Saw, but failed much of the time: what limits the line.
         station("Press", 0.60, 0.0, 0.05, 0.35),
         station("Pack", 0.25, 0.0, 0.75, 0.0),
-        Shares { name: "Out".into(), built_in: "Drain".into(), working: 0.0, blocked: 0.0, idle: 1.0, failed: 0.0, paused: 0.0 },
+        Shares { name: "Out".into(), built_in: "Drain".into(), working: 0.0, working_full: 0.0, blocked: 0.0, idle: 1.0, failed: 0.0, paused: 0.0 },
     ];
     let edges = connections(&[("In", "Saw"), ("Saw", "Press"), ("Press", "Pack"), ("Pack", "Out")]);
     let found = likely_bottleneck(&objects, &edges).expect("Stations ran");
     assert_eq!(found.instance, "Press");
-    assert!((found.not_idle_share - 0.95).abs() < 1e-9, "busy plus stopped: {}", found.not_idle_share);
+    assert!((found.full_or_stopped_share - 0.95).abs() < 1e-9, "busy plus stopped: {}", found.full_or_stopped_share);
     assert_eq!(found.upstream, vec![("Saw".to_string(), 0.65)], "upstream mostly blocked");
     assert_eq!(found.downstream, vec![("Pack".to_string(), 0.75)], "downstream mostly starved");
     let edges = connections(&[("In", "Saw"), ("Saw", "Press"), ("Press", "Pack"), ("Press", "Out"), ("Pack", "Out")]);
@@ -39,8 +39,18 @@ fn the_likely_bottleneck_is_the_station_busy_or_stopped_most_with_its_neighbours
 }
 
 #[test]
+fn a_station_with_capacity_working_with_free_places_is_not_the_likely_bottleneck() {
+    let mut oven = station("Oven", 0.98, 0.0, 0.02, 0.0);
+    oven.working_full = 0.05;
+    let objects = vec![oven, station("Pack", 0.90, 0.0, 0.10, 0.0)];
+    let found = likely_bottleneck(&objects, &connections(&[("Oven", "Pack")])).unwrap();
+    assert_eq!(found.instance, "Pack", "the Oven works nearly all the time, but almost never full");
+    assert_eq!(found.ranking.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>(), ["Pack", "Oven"]);
+}
+
+#[test]
 fn without_stations_there_is_no_likely_bottleneck() {
-    let objects = vec![Shares { name: "In".into(), built_in: "Source".into(), working: 1.0, blocked: 0.0, idle: 0.0, failed: 0.0, paused: 0.0 }];
+    let objects = vec![Shares { name: "In".into(), built_in: "Source".into(), working: 1.0, working_full: 1.0, blocked: 0.0, idle: 0.0, failed: 0.0, paused: 0.0 }];
     assert!(likely_bottleneck(&objects, &[]).is_none());
 }
 
@@ -66,7 +76,7 @@ fn find_bottleneck_names_it_for_a_run_from_the_means_over_its_observations() {
     common::assert_fits_its_schema(&setup.catalogue, "find_bottleneck", &found);
     assert_eq!(found["run"], run);
     assert_eq!(found["likely"]["instance"], "Slow", "{found:#}");
-    assert!(found["likely"]["not_idle_share"].as_f64().unwrap() > 0.99, "{found:#}");
+    assert!(found["likely"]["full_or_stopped_share"].as_f64().unwrap() > 0.99, "{found:#}");
     assert_eq!(found["likely"]["upstream"][0]["instance"], "Fast");
     assert!(found["likely"]["upstream"][0]["blocked_share"].as_f64().unwrap() > 0.5, "Fast waits for Slow: {found:#}");
     assert_eq!(found["likely"]["downstream"][0]["instance"], "After");
@@ -75,4 +85,38 @@ fn find_bottleneck_names_it_for_a_run_from_the_means_over_its_observations() {
     assert!(found["rule"].as_str().unwrap().contains("likely"));
 
     assert_eq!(setup.err("find_bottleneck", json!({ "run": "run-99" }))["kind"], "not_found");
+}
+
+/// An Oven of capacity 4 working 15 s on each MU that comes every 5 s, so about three are in work
+/// all the time but never four, then Slow working 4.5 s on each.
+const OVEN_LINE: &str = r#"{"format_version":2,"instances":[
+  {"name":"In","class":"Source","attributes":{"interval":"5"}},
+  {"name":"Oven","class":"Station","attributes":{"process_time":"15","capacity":4}},
+  {"name":"Slow","class":"Station","attributes":{"process_time":"4.5"}},
+  {"name":"Out","class":"Drain"}],"connections":[
+  {"from":"In","to":"Oven","exit":1,"entrance":1},
+  {"from":"Oven","to":"Slow","exit":1,"entrance":1},
+  {"from":"Slow","to":"Out","exit":1,"entrance":1}]}"#;
+
+#[test]
+fn find_bottleneck_counts_only_the_time_a_station_with_capacity_was_full() {
+    let setup = Setup::new("bottleneck-capacity");
+    setup.ok("write_model", json!({ "path": "oven.json", "text": OVEN_LINE }));
+    let run = setup.start(json!({ "model": "oven.json", "seed": 1, "length": "8:00:00", "observations": 2 }));
+    setup.finished(&run);
+    let found = setup.ok("find_bottleneck", json!({ "run": run }));
+    common::assert_fits_its_schema(&setup.catalogue, "find_bottleneck", &found);
+    assert_eq!(found["likely"]["instance"], "Slow", "{found:#}");
+    assert_eq!(found["ranking"][1]["instance"], "Oven", "{found:#}");
+    assert!(found["ranking"][1]["full_or_stopped_share"].as_f64().unwrap() < 0.01, "{found:#}");
+
+    // Only the Station with capacity has the parts of its working share stored.
+    let results = setup.ok("run_results", json!({ "run": run, "objects": ["Oven", "Slow"] }));
+    let figures = |name: &str| results["objects"].as_array().unwrap().iter().find(|object| object["name"] == name).unwrap()["figures"].clone();
+    let oven = figures("Oven");
+    assert!(oven["working_share"]["mean"].as_f64().unwrap() > 0.99, "{oven:#}");
+    assert!(oven["working_not_full_share"]["mean"].as_f64().unwrap() > 0.99, "{oven:#}");
+    // Never full: a figure that is 0 in every observation isn't shown.
+    assert!(oven.get("working_full_share").is_none_or(|full| full["mean"].as_f64().unwrap() < 0.01), "{oven:#}");
+    assert!(figures("Slow").get("working_full_share").is_none(), "a Station of capacity 1 is all full");
 }

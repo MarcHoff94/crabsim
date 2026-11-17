@@ -1,7 +1,7 @@
 //! Model files at their seam: text in, a model, its problems or a run out.
 
 use crabsim::{demo, ModelDescription, OccurrenceKind, Recording, SimTime, SimulationRun};
-use crabsim_model::{load, Attribute, Capacity, Class, ExitStrategy, Instance, Model, Origin, Problem};
+use crabsim_model::{load, Attribute, Capacity, Class, ExitStrategy, Instance, Model, Origin, Problem, StartMode};
 use serde_json::{json, Value};
 
 fn secs(s: u64) -> SimTime {
@@ -278,7 +278,7 @@ fn every_problem_comes_back_at_once_in_file_order() {
         found(&text),
         vec![
             "/instances/1/attributes/proces_time: unknown attribute `proces_time`: did you mean `process_time`?",
-            "/instances/1/attributes/starting_mus: a Station can start with 0 or 1 MUs, until Stations have a capacity",
+            "/instances/1/attributes/starting_mus: it starts with 2 MUs but holds only 1",
             "/instances/2/name: instance 1 already has this name",
             "/connections/0/to: no instance is called `Nowhere`",
             "/connections/1/to: `In` is a Source, which creates MUs and can't take any in",
@@ -1085,6 +1085,67 @@ fn a_buffer_with_no_limit_that_fills_faster_than_it_empties_gets_a_warning() {
     assert_eq!(warnings(line("5", json!({ "capacity": "unlimited" })))[0].split(':').next(), Some("/instances/1/attributes/capacity"));
     assert_eq!(warnings(line("5", json!({ "capacity": 50 }))), Vec::<String>::new(), "it has a limit");
     assert_eq!(warnings(line("10", json!({}))), Vec::<String>::new(), "it empties as fast as it fills");
+    let two_at_once = line("5", json!({})).replace(r#""process_time":"10""#, r#""process_time":"10","capacity":2"#);
+    assert!(two_at_once.contains(r#""capacity":2"#));
+    assert_eq!(warnings(two_at_once), Vec::<String>::new(), "a Station of capacity 2 passes on 720 an hour");
+}
+
+// ---------- Station capacity ----------
+
+/// An oven of capacity 3 with batch start, inherited from a class, starting with 2 MUs, fed by a
+/// Station starting with one.
+fn oven_line() -> String {
+    with_classes(
+        json!([{ "name": "Oven", "parent": "Station", "attributes": { "capacity": 3, "start": "batch", "process_time": "0:20" } }]),
+        json!([
+            { "name": "Pre", "class": "Station", "successors": ["Bake"], "attributes": { "process_time": "5", "starting_mus": 1 } },
+            { "name": "Bake", "class": "Oven", "successors": ["Out"], "attributes": { "starting_mus": 2 } },
+            { "name": "Out", "class": "Drain" },
+        ]),
+    )
+}
+
+#[test]
+fn a_stations_capacity_and_start_are_read_inherited_saved_and_built() {
+    let model = load(&oven_line()).unwrap();
+    let bake = model.resolve(1).unwrap();
+    assert_eq!(bake.attributes.capacity, Some(Capacity::Limited(3)));
+    assert_eq!(bake.attributes.start, Some(StartMode::Batch));
+    assert_eq!(bake.origin(Attribute::Start), &Origin::Class("Oven".into()));
+    let pre = model.resolve(0).unwrap();
+    assert_eq!((pre.attributes.capacity, pre.attributes.start), (Some(Capacity::Limited(1)), Some(StartMode::Individual)), "the defaults");
+    assert_eq!(pre.origin(Attribute::Capacity), &Origin::BuiltIn);
+    let saved = model.save();
+    assert!(saved.contains(r#""capacity": 3"#) && saved.contains(r#""start": "batch""#), "{saved}");
+    assert_eq!(load(&saved).unwrap(), model);
+    assert_eq!(load(&saved).unwrap().save(), saved, "canonical");
+
+    // MU 1 starts in Pre, 2 and 3 in Bake, whose batch begins when MU 1 joins them at 5.
+    let (occurrences, state) = run_for(&model.to_description(), 0, secs(100));
+    let started: Vec<(u32, u64)> = occurrences
+        .iter()
+        .filter_map(|o| match o.kind {
+            OccurrenceKind::WorkStarted { mu_id, at: 1, .. } => Some((mu_id, o.time.as_secs())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(started, [(2, 5), (3, 5), (1, 5)]);
+    assert_eq!(state.objects[1].capacity, Capacity::Limited(3));
+    assert_eq!(state.objects[2].statistics.mus_in, 3);
+}
+
+#[test]
+fn a_stations_capacity_is_a_whole_number_from_1_and_holds_its_starting_mus() {
+    let station = |attributes: Value| file(json!([{ "name": "S", "class": "Station", "attributes": attributes }]));
+    assert!(load(&station(json!({ "capacity": 4, "starting_mus": 4, "start": "individual" }))).is_ok());
+    assert_found(&station(json!({ "capacity": 0 })), "/instances/0/attributes/capacity", "at least 1");
+    assert_found(&station(json!({ "capacity": "unlimited" })), "/instances/0/attributes/capacity", "only a Buffer can be unlimited");
+    assert_found(&station(json!({ "capacity": -1 })), "/instances/0/attributes/capacity", "only a Buffer can be unlimited");
+    assert_found(&station(json!({ "capacity": 10_001 })), "/instances/0/attributes/capacity", "at most 10,000");
+    assert_found(&station(json!({ "capacity": 2, "starting_mus": 3 })), "/instances/0/attributes/starting_mus", "it starts with 3 MUs but holds only 2");
+    assert_found(&station(json!({ "start": "all_at_once" })), "/instances/0/attributes/start", "use \"individual\" or \"batch\"");
+    let buffer = file(json!([{ "name": "B", "class": "Buffer", "attributes": { "start": "batch" } }]));
+    assert_found(&buffer, "/instances/0/attributes/start", "a Buffer has no attribute `start`");
 }
 
 // ---------- The second example ----------

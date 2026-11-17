@@ -89,8 +89,9 @@ Which attributes an instance has depends on its built-in class at the root of it
 | `interval` | Source | 0, so every Source is valid when placed | A time, 0 or more |
 | `process_time` | Station | 0, a dummy Station | A time, 0 or more |
 | `failures` | Station | none: never fails | See below |
-| `starting_mus` | Station, Buffer | 0 | A Station 0 or 1, until Station capacity exists. A Buffer at most its capacity, and at most 1,000,000: they count as entered at Init, in their order |
-| `capacity` | Buffer | `"unlimited"` | A whole number from 1, or `"unlimited"` (ADR 0019). `-1` is read as unlimited and saved as `"unlimited"` |
+| `starting_mus` | Station, Buffer | 0 | At most its capacity, and for a Buffer at most 1,000,000: they count as entered at Init, in their order. A Station's full starting batch begins work at Init, and a part of one waits |
+| `capacity` | Station, Buffer | 1 for a Station, `"unlimited"` for a Buffer | A Station's is a whole number from 1 to 10,000: one machine working on that many MUs at once. A Buffer's is a whole number from 1, or `"unlimited"` (ADR 0019). `-1` is read as unlimited and saved as `"unlimited"`, so a Station refuses it |
+| `start` | Station | `"individual"` | `"individual"`, each MU starting on entry, or `"batch"`, work beginning once the Station is full, its entrance closed until it is empty |
 | `dwelling_time` | Buffer | 0 | A time, 0 or more: how long each MU stays before it may leave, counted from its own entry |
 | `exit_strategy` | Buffer | `"first_in_first_out"` | That or `"last_in_first_out"`: which of the MUs whose dwelling time is over it passes on next |
 | `dimensions` | all | by type: Station 2 × 1.5 × 1.5 m, Buffer 2 × 1 × 1 m, Source and Drain 1 m each way | `length`, `width`, `height` above 0, `rotation_degrees` optional, 0 by default |

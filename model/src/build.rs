@@ -19,11 +19,19 @@ pub(crate) fn build(model: &Model) -> ModelDescription {
             "Station" => {
                 let process_time = attributes.process_time.unwrap_or(SimTime::ZERO);
                 let failures = failure_profile(attributes.failures.as_ref());
-                if attributes.starting_mus.unwrap_or(0) == 1 {
+                let starting = attributes.starting_mus.unwrap_or(0) as u32;
+                let capacity = attributes.capacity.map_or(1, crabsim::Capacity::limit);
+                if starting == 1 && capacity == 1 {
                     next_mu += 1;
                     description.add_station_holding(process_time, failures, next_mu - 1)
                 } else {
-                    description.add_station(process_time, failures)
+                    let station = description.add_station(process_time, failures);
+                    if capacity > 1 {
+                        description.set_station_capacity(station, capacity, attributes.start.unwrap_or_default());
+                        description.set_starting_mus(station, &(next_mu..next_mu + starting).collect::<Vec<u32>>());
+                        next_mu += starting;
+                    }
+                    station
                 }
             }
             "Buffer" => {

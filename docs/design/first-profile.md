@@ -143,6 +143,86 @@ Every scenario gave the same events and MUs left on both compilers, so the updat
 - **A simulated year of the large model** would take about 16 minutes headless, from 36.5M events per 2 simulated days.
 - **Not measured here:** a live session at 6,000 objects. The UI prototype measures that, on a real clock.
 
+### After Buffer and waiting by MU
+
+Measured on 2026-11-17 on the first PC (Ryzen 5 7600X3D, 96 MB of L3, a desktop on mains), after PR 111 merged Buffer and waiting by MU (ADR 0018, ADR 0019). PR 111 itself was measured only on the second PC, a laptop with 12 MB of L3, where the version that merged was never timed on mains. The method, which suits any before and after: build the other commit's benchmark in a `git worktree` with its own `CARGO_TARGET_DIR` (`cargo bench --bench reference --no-run`), copy both `reference-*.exe` binaries aside, run each as `--bench --reps 1 --scenario <name>`, alternating the two for ten rounds and swapping which goes first each round, then compare medians and count the rounds in which each was slower. A single run can be far off: the first `buffered-headless` here gave 8.6M events/s, and every later one 12 to 14M.
+
+**PR 111 against the code before it** (`da3b522` against `a553f03`):
+
+| Scenario | Before | After PR 111 | Change | After slower in |
+|---|---|---|---|---|
+| `demo-headless` | 13.22M/s | 12.85M/s | −2.8% | 9 of 10 |
+| `large-headless` | 6.71M/s | 6.61M/s | −1.5% | 9 of 10 |
+| `demo-dropped` | 11.52M/s | 11.41M/s | −0.9% | 6 of 10 |
+| `large-dropped` | 5.75M/s | 5.58M/s | −2.9% | 8 of 10 |
+| `demo-kept` | 9.01M/s | 8.98M/s | −0.3% | 8 of 10 |
+
+Events, MUs left and peak heap were identical in every round. So the size fix in PR 111 worked as the second PC suggested (the large model is within ±2% here too, where its 7.7 MB of objects fit easily in L3), but the demo was still 2.8% slower, outside the spec's ±2%.
+
+**Where the demo's loss came from: one allocation.** The handoff named two suspects, the `retried` mark keeping entries in lines and `offered_since` on every move, and a throwaway build without each settled it:
+
+- **Without `offered_since`:** 12.71M against 12.32M in one paired run, within the noise. A Station's `offered_since` is trivially `None` after its MU is taken.
+- **Emptying the line on retry, as before PR 111:** 14.31M/s and 0.62 allocations per event instead of 0.86, but different results, so not a fix in itself. The drop in allocations was the clue.
+- **The cause:** `retries_for_blocked` made its `Vec` with `with_capacity(len)`, and a Station that frees up pushes its own exit onto the retries it gets back (`station.rs`, `be.push(event_template)`). An exactly full `Vec` reallocates on that push, so nearly every move to a Station with someone waiting cost an allocation and a copy. The code before PR 111 collected to an exact size too, so it paid the same, and the loss in PR 111 is the rest of the line's bookkeeping on top. `Vec::new()` makes room for four on the first push, and the Station's push fits.
+
+**After the fix** (`Vec::new()` in `retries_for_blocked`), against the code before PR 111:
+
+| Scenario | Before PR 111 | With the fix | Change | Fix slower in | Allocations per event |
+|---|---|---|---|---|---|
+| `demo-headless` | 12.89M/s | 14.57M/s | +13.0% | 0 of 10 | 0.86 to 0.62 |
+| `large-headless` | 6.68M/s | 7.04M/s | +5.4% | 0 of 10 | 0.86 to 0.62 |
+| `demo-dropped` | 11.23M/s | 13.11M/s | +16.6% | 0 of 10 | |
+| `large-dropped` | 5.75M/s | 6.03M/s | +4.9% | 0 of 10 | |
+| `demo-kept` | 8.93M/s | 9.63M/s | +8.0% | 0 of 10 | |
+| `buffered-headless`, against PR 111 | 13.20M/s | 14.02M/s | +6.2% | 0 of 10 | 0.87 to 0.74 |
+
+Every occurrence and the final state, of the demo and the buffered line over 20 simulated days on seeds 0, 7 and 123, hashed identical with and without the fix, and the events and MUs left matched in every round. The large model gains less because its time goes more to memory than to the allocator.
+
+**The buffered line, counted.** A throwaway build counting events by object and kind, over one simulated year on seed 0:
+
+| | Demo | Buffered line |
+|---|---|---|
+| Objects | 14 | 7 |
+| Events | 15.5M | 39.0M |
+| MUs left | 1.60M | 5.09M |
+| Events per MU left | 9.7 | 7.7 |
+| Busiest object | Station 1, 21% of events | Store, 26% of events |
+| `relist_blocked` calls per event | 0.92, a third of them finding an entry | 0.78, a quarter finding one |
+| Longest line | 3 | 1 |
+| Inserted in the middle of a line | never | never |
+
+- **A Buffer's exits that do nothing:** 4.35M a year, 11% of the buffered line's events, are `MUExit`s for a Buffer that is already blocked: Store sits full in front of Mill, its bottleneck, and every MU entering it schedules an exit at the end of its zero dwelling time that finds it waiting in Mill's line. Each is cheap: a pop from the queue, a match and a statistics update. Scheduling an exit only for the MU at the front, or none while blocked, would remove them, at the cost of more logic per entry. Not tried.
+- **Store gets a retry for almost every MU** (4.9M a year), because Mill sends one each time it frees up. That is the movement working as designed, not waste.
+- **`relist_blocked`** is a dispatch through `ModelObject` and a scan of a line of at most 3 for every successor on every move, mostly finding nothing. It was there before PR 111 as `remove_blocked`, so it isn't new cost.
+
+**Buffer variants**, headless, one simulated year, median of 5, a throwaway program on `master` before the fix:
+
+| Model | Events/s | Events per MU left | Peak heap |
+|---|---|---|---|
+| The buffered line (`buffered-headless`) | 12.65M | 7.66 | Under 0.05 MB |
+| Cooling first in, first out | 13.30M | 7.66 | Under 0.05 MB |
+| Cooling without its dwelling time | 14.03M | 7.66 | Under 0.05 MB |
+| The same line without its Buffers | 15.58M | 5.12 | Under 0.05 MB |
+| Source, Buffer of 1, Station, Drain | 16.96M | 3.00 | Under 0.05 MB |
+| Buffer of 1,000 kept full, dwelling 1 h, FIFO | 13.07M | 5.00 | 0.1 MB |
+| Unlimited, dwelling 1 h, about 3,600 held, FIFO | 11.80M | 3.00 | 0.2 MB |
+| The same, LIFO | 9.59M | 3.00 | 0.2 MB |
+
+- **Without its Buffers** the line passes 9% fewer MUs (4.61M against 5.09M), so the Buffers buy throughput with 2.5 more events per MU and 1.6 s more wall time per simulated year.
+- **Last in, first out with a dwelling time** is the dearest case: with the newest MU still dwelling, `offered` does a binary search over everything held, and it is asked several times per move. At 3,600 MUs held that's 19% slower than first in, first out. In the buffered line, where Cooling holds about a dozen, it's 5%. Without a dwelling time the newest MU is always ready and no search happens.
+
+**An unlimited Buffer filling**, a Source every second into an unlimited Buffer before a Station of 2 s, single runs:
+
+| Simulated | MUs held at the end | Peak heap | Bytes per MU held |
+|---|---|---|---|
+| 1 day | 43,200 | 1.6 MB | 37 |
+| 10 days | 432,000 | 12.6 MB | 29 |
+| 100 days | 4,320,000 | 201 MB | 47 |
+
+Speed doesn't change as it fills (17.6M events/s, LIFO 16.7M). Memory is 24 bytes per MU held plus up to as much again in spare room, since a `VecDeque` doubles as it grows, so between 24 and 48 bytes per MU. It never shrinks: a Buffer that once held a million MUs keeps their room until Reset, and a checkpoint's clone holds only what's in it.
+
+**Object sizes** are as PR 111 left them: `ModelObject` 1,280 bytes, set by `SingleStation`, with `Buffer` 496, `Source` 448 and `Drain` 312.
+
 ## Release profile
 
 Each build was run 12 times in rotation, as a fresh process each time. Clean build time includes dependencies.

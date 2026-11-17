@@ -21,7 +21,7 @@ We decided it on 2026-11-13 and 2026-11-15 in the design round for build step 7 
 
 ## Consequences
 
-- An insert in order into a short list when a predecessor is refused, which is nearly always at the back, and one more small call when an MU moves. Nothing on other events. Measured on 2026-11-17 against `master`, alternating ten rounds: headless runs 3 to 4% slower (the demo 4.1%, 6,006 objects 3.0%) and a run recording everything 2.9% faster. The headless loss is outside the ±2% the spec asks for, and isn't yet known to come from this rule rather than from the Buffer's larger size in every object.
+- An insert in order into a short list when a predecessor is refused, which is nearly always at the back, and one more small call when an MU moves. Nothing on other events. The first version made headless runs 3 to 4% slower on the owner's second PC. Part of that was the line's bookkeeping, made cheaper since, and part a Station grown by the 8 bytes of when its MU became ready, which every object pays because each takes the largest one's size. A Station now keeps that time in the field that holds when its work completes, since the two are never needed at once. The fixed version is still to be measured against `master`, and the ±2% the spec asks for to be confirmed, before merging.
 - A model without Buffers gives exactly the results it gave before: every occurrence of the demo and of two other models, over 20 simulated days on three seeds, hashed the same as on `master`.
 - Whether a stopped predecessor should keep its place, instead of rejoining at the back after its repair, is decided with stops in the second round of build step 7.
 - Pull, where the successor chooses the MU, would replace this line with the successor's own rule.

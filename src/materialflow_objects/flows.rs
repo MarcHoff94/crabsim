@@ -157,6 +157,7 @@ pub struct Waiting {
 /// that time, longest ready first, and those ready at the same instant in the order they were
 /// listed (ADR 0018). One already listed keeps its place, and so does one whose retry from this
 /// successor was just refused (`answering_retry`), so those still waiting keep their order.
+#[inline]
 pub fn list_blocked(blockedlist: &mut Vec<Waiting>, id_blocked: u32, since: SimTime, answering_retry: bool) {
 	if let Some(at) = blockedlist.iter().position(|waiting| waiting.id == id_blocked) {
 		let listed = &mut blockedlist[at];
@@ -170,13 +171,20 @@ pub fn list_blocked(blockedlist: &mut Vec<Waiting>, id_blocked: u32, since: SimT
 		// Its last retry came to nothing, so it lost that place and joins the line afresh.
 		blockedlist.remove(at);
 	}
-	// Nearly always the back: an MU refused now became ready now or was listed before.
-	let at = blockedlist.iter().rposition(|waiting| waiting.since <= since).map_or(0, |last| last + 1);
-	blockedlist.insert(at, Waiting { since, id: id_blocked, retried: false });
+	let waiting = Waiting { since, id: id_blocked, retried: false };
+	match blockedlist.last() {
+		// Nearly always the back: an MU refused now became ready now, or was listed before.
+		Some(last) if last.since > since => {
+			let at = blockedlist.iter().rposition(|listed| listed.since <= since).map_or(0, |last| last + 1);
+			blockedlist.insert(at, waiting);
+		}
+		_ => blockedlist.push(waiting),
+	}
 }
 
 /// A predecessor's MU has moved, so it gives up its place. If it has another MU ready to leave,
 /// since `next`, it waits on by that one, wherever it was listed.
+#[inline]
 pub fn relist_blocked(blockedlist: &mut Vec<Waiting>, id_blocked: u32, next: Option<SimTime>) {
 	let Some(at) = blockedlist.iter().position(|waiting| waiting.id == id_blocked) else {
 		return;
@@ -188,25 +196,22 @@ pub fn relist_blocked(blockedlist: &mut Vec<Waiting>, id_blocked: u32, next: Opt
 }
 
 /// One retry for each predecessor waiting, longest-waiting first. Each keeps its entry until its
-/// retry is answered: refused, it is back in its place, and otherwise the place is gone.
+/// retry is answered: refused, it is back in its place, and otherwise the place is gone. Those
+/// whose last retry came to nothing aren't waiting, and go in the same pass.
 pub fn retries_for_blocked(blockedlist: &mut Vec<Waiting>, from: u32) -> Option<Vec<EventTemplate>> {
 	if blockedlist.is_empty() {
 		return None;
 	}
-	// Those whose last retry came to nothing aren't waiting.
-	blockedlist.retain(|waiting| !waiting.retried);
-	if blockedlist.is_empty() {
-		return None;
-	}
-	Some(
-		blockedlist
-			.iter_mut()
-			.map(|waiting| {
-				waiting.retried = true;
-				EventTemplate { eventtype: EventType::BlockedRetry { from }, exec_time: SimTime::ZERO, object_id: waiting.id }
-			})
-			.collect(),
-	)
+	let mut retries = Vec::with_capacity(blockedlist.len());
+	blockedlist.retain_mut(|waiting| {
+		if waiting.retried {
+			return false;
+		}
+		waiting.retried = true;
+		retries.push(EventTemplate { eventtype: EventType::BlockedRetry { from }, exec_time: SimTime::ZERO, object_id: waiting.id });
+		true
+	});
+	(!retries.is_empty()).then_some(retries)
 }
 
 /// The predecessors waiting in a line, longest-waiting first, for a state report.

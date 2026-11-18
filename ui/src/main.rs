@@ -3185,9 +3185,47 @@ fn inspector(ui: &mut egui::Ui, inspection: Option<&Inspection>, process_time_te
                 grid.end_row();
             }
         });
+        if let Some(fill) = &details.fill {
+            fill_histogram(ui, fill);
+        }
         ui.label(egui::RichText::new(format!("as of {}", format_time_exact(details.as_of))).weak().small());
     }
     asked
+}
+
+/// A Buffer's fill histogram as bars, the time at each number of MUs, each named on hover.
+fn fill_histogram(ui: &mut egui::Ui, fill: &crabsim::FillStatistics) {
+    let bars = crabsim_ui::view::fill_bars(fill);
+    if bars.is_empty() {
+        return;
+    }
+    ui.add_space(4.0);
+    ui.label("Time at each number of MUs").on_hover_text("How long it held each number of MUs, of the time measured. Hover a bar for its share");
+    // The panel's own width: a long line such as the MUs held can make the inspector's content
+    // wider than the panel, which would spread the bars out of sight.
+    let width = (INSPECTOR_WIDTH - 24.0).min(ui.available_width());
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, 56.0), egui::Sense::hover());
+    let painter = ui.painter_at(rect);
+    let most = bars.iter().map(|bar| bar.share).fold(0.0, f64::max).max(f64::EPSILON);
+    let step = rect.width() / bars.len() as f32;
+    let colour = shade_colour32(Shade::Holding);
+    for (at, bar) in bars.iter().enumerate() {
+        let height = (bar.share / most) as f32 * (rect.height() - 2.0);
+        let left = rect.left() + at as f32 * step;
+        let shape = egui::Rect::from_min_max(egui::pos2(left + step * 0.1, rect.bottom() - height), egui::pos2(left + step * 0.9, rect.bottom()));
+        painter.rect_filled(shape, 0.0, colour);
+    }
+    painter.line_segment([rect.left_bottom(), rect.right_bottom()], ui.visuals().widgets.noninteractive.fg_stroke);
+    if let Some(pointer) = response.hover_pos() {
+        let at = (((pointer.x - rect.left()) / step) as usize).min(bars.len() - 1);
+        response.on_hover_text(format!("{} MUs: {:.1} % of the time", bars[at].mus, bars[at].share * 100.0));
+    }
+    ui.allocate_ui(egui::vec2(width, 14.0), |row| {
+        row.horizontal(|row| {
+            row.label(egui::RichText::new(&bars[0].mus).weak().small());
+            row.with_layout(egui::Layout::right_to_left(egui::Align::Center), |row| row.label(egui::RichText::new(&bars[bars.len() - 1].mus).weak().small()));
+        });
+    });
 }
 
 /// Does one of the user's controls, if who holds the open model is still as shown. Either way the
@@ -3457,6 +3495,26 @@ fn results_tab(ui: &mut egui::Ui, results: Option<(&str, &crabsim_ui::view::Resu
             }
         });
     });
+    if !results.buffers.is_empty() {
+        ui.add_space(8.0);
+        ui.label(egui::RichText::new("Buffers").strong()).on_hover_text("How full each Buffer was, weighted by time");
+        egui::Grid::new("buffers").num_columns(5).spacing([8.0, 2.0]).striped(true).show(ui, |grid| {
+            grid.label("Buffer");
+            grid.label("Mean").on_hover_text("MUs held on average over time");
+            grid.label("Median").on_hover_text("Half the time it held this many or fewer: exact while the histogram's bars are 1 MU wide");
+            grid.label("Most").on_hover_text("The most MUs it held");
+            grid.label("Full").on_hover_text("The share of time it held as many as its capacity. A Buffer with no limit is never full");
+            grid.end_row();
+            for buffer in &results.buffers {
+                pick(grid, buffer.id, &buffer.name, &mut chosen);
+                grid.label(buffer.mean.map_or_else(|| "–".to_string(), |mean| format!("{mean:.1}")));
+                grid.label(&buffer.median);
+                grid.label(buffer.most.to_string());
+                grid.label(buffer.full.map_or_else(|| "–".to_string(), percent));
+                grid.end_row();
+            }
+        });
+    }
     chosen
 }
 
@@ -3743,6 +3801,7 @@ fn attribute_label(attribute: &str) -> &str {
         "capacity" => "Capacity",
         "dwelling_time" => "Dwelling time",
         "exit_strategy" => "Exit strategy",
+        "histogram_bar_width" => "Histogram bar width",
         "start" => "Start",
         "dimensions" => "Dimensions",
         "description" => "Description",

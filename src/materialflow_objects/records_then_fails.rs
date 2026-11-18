@@ -50,6 +50,7 @@ impl EventInterface for RecordsThenFails {
             process_time: None,
             configured_process_time: None,
             statistics: Default::default(),
+            fill: None,
         }
     }
     fn clear_statistics(&mut self, _now: SimTime) {}

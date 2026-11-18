@@ -240,6 +240,23 @@ Measured on 2026-11-17 on the first PC, for PR 2 of build step 7: the branch aga
 - **The 6,006-object model's −1.8% is steady** (slower in all ten rounds), so it is likely real: the extra `ModelObject` variant in every dispatch, or the statistics' two new buckets. Not measured apart.
 - **`buffered-headless` changed model:** the line now has an Oven of capacity 6 with individual start. 44.1M events a year at 12.6M events/s, one more event per MU than without it, passing the same 5,087,928 MUs. With batch start the Oven passed only 3.2M: a batch closed until empty waits idle while it fills.
 
+### After fill statistics
+
+Measured on 2026-11-18 on the first PC, for PR 3 of build step 7, against `master` after PR 113, ten alternating rounds per set.
+
+| Scenario | Change | Slower in |
+|---|---|---|
+| `demo-headless` | −0.7% | 8 of 10 |
+| `large-headless` | +0.2% | 4 of 10 |
+| `demo-kept` | +0.6% | 4 of 10 |
+| `demo-dropped` | −2.4%, then −3.6% | 7, then 10 of 10 |
+| `buffered-headless` | −1.1%, −2.3%, then −4.3% | 7, 9 and 9 of 10 |
+
+- **The first version cost the buffered line 6.1%.** Its fill keeper kept its own clock, comparing and storing the MUs held on every Buffer event. A throwaway build keeping the fields but never calling it was within noise (−0.9%), so the size of a Buffer, 560 bytes more, costs nothing here. Feeding the histogram from the stretches the `StatisticsKeeper` already measures (`observe_stretch`), and finding a bar by a shift with a fast path for an automatic width, brought it down to the range above.
+- **The noise was high:** `master` itself ran `buffered-headless` between 9.7M and 12.3M events/s in one set, and the same binary measured −1.1% and −4.3% in two sets.
+- **`demo-dropped` runs none of the new code:** the demo has no Buffer, and no function on its path changed. Its loss is likely where the compiler placed code. Not proven with a control build.
+- Events and MUs left were identical in every round, and every occurrence and object state of the demo and the buffered line hashed identical to `master` over 20 simulated days on three seeds.
+
 ## Release profile
 
 Each build was run 12 times in rotation, as a fresh process each time. Clean build time includes dependencies.

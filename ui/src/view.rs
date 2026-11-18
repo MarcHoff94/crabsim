@@ -9,8 +9,7 @@ use crabsim_catalogue::bottleneck::{likely_bottleneck, LikelyBottleneck, Shares}
 use crabsim_model::State;
 use crabsim::{
     ModelDescription, ObjectKind, ObjectStatistics, SessionOutput, Picture, ProcessState, RunState, SessionStatus,
-    SimTime, Spread, StopCause, TimeMode,
-};
+    SimTime, Spread, StopCause, TimeMode, FillStatistics};
 use std::collections::VecDeque;
 use std::time::Duration;
 
@@ -302,6 +301,44 @@ pub struct Details {
     pub limited: bool,
     /// How many MUs a Station works on at once.
     pub capacity: u64,
+    /// A Buffer's fewest MUs and fill histogram.
+    pub fill: Option<FillStatistics>,
+}
+
+/// A fill histogram's median as the inspector and Results say it: one number while bars are 1 MU
+/// wide, otherwise the bar it lies in, such as "4 to 7" or "315 or more".
+pub fn median_text(fill: &FillStatistics) -> String {
+    match fill.median() {
+        None => "–".to_string(),
+        Some((from, Some(to))) if to == from => from.to_string(),
+        Some((from, Some(to))) => format!("{from} to {to}"),
+        Some((from, None)) => format!("{from} or more"),
+    }
+}
+
+/// One bar of a Buffer's fill histogram as drawn: the MUs it covers, as text, and its share of the
+/// time measured.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FillBar {
+    pub mus: String,
+    pub share: f64,
+}
+
+/// A fill histogram's bars from the first to the last with any time, each with its share.
+pub fn fill_bars(fill: &FillStatistics) -> Vec<FillBar> {
+    let histogram = &fill.histogram;
+    let total = histogram.total().as_millis() as f64;
+    let Some(last) = histogram.bars.iter().rposition(|time| time.as_millis() > 0) else { return Vec::new() };
+    (0..=last)
+        .map(|bar| {
+            let mus = match histogram.range(bar) {
+                (from, Some(to)) if to == from => from.to_string(),
+                (from, Some(to)) => format!("{from} to {to}"),
+                (from, None) => format!("{from} or more"),
+            };
+            FillBar { mus, share: histogram.bars[bar].as_millis() as f64 / total }
+        })
+        .collect()
 }
 
 impl Inspection {
@@ -333,8 +370,14 @@ impl Inspection {
                     ("Empty", share(statistics.time_idle)),
                     ("Most MUs", statistics.max_contents.to_string()),
                 ];
+                if let Some(fill) = &details.fill {
+                    rows.push(("Fewest MUs", fill.lowest.to_string()));
+                }
                 if let Some(mean) = statistics.average_contents() {
                     rows.push(("Mean MUs", format!("{mean:.1}")));
+                }
+                if let Some(fill) = &details.fill {
+                    rows.push(("Median MUs", median_text(fill)));
                 }
                 if details.limited {
                     rows.push(("Full", share(statistics.time_full)));
@@ -417,6 +460,18 @@ pub struct DrainResult {
     pub mean_lead_time: Option<SimTime>,
     /// MUs an hour, from the spread between measuring periods, once `MIN_PERIODS` are complete.
     pub throughput_interval: Option<Interval>,
+}
+
+/// A Buffer's line in the Results tab: how full it was.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BufferResult {
+    pub id: u32,
+    pub name: String,
+    pub mean: Option<f64>,
+    pub median: String,
+    pub most: u64,
+    /// Its full share, from 0 to 1, when it has a limit.
+    pub full: Option<f64>,
 }
 
 /// A Station's line in the Results tab: its shares of the time measured, from 0 to 1.
@@ -505,6 +560,8 @@ pub struct Results {
     pub stations: Vec<StationResult>,
     /// Some Station has a capacity above 1, so its full share differs from its busy share.
     pub with_capacity: bool,
+    /// In model order.
+    pub buffers: Vec<BufferResult>,
     /// By the catalogue's rule, the same `find_bottleneck` gives agents.
     pub bottleneck: Option<LikelyBottleneck>,
     /// How far measuring periods have got, when the run measures in them.
@@ -1199,6 +1256,7 @@ impl ViewState {
             statistics_since: state.statistics_since,
             limited: object.capacity != crabsim::Capacity::Unlimited,
             capacity: object.capacity.limit(),
+            fill: object.fill.as_deref().cloned(),
         })
     }
 
@@ -1259,6 +1317,7 @@ impl ViewState {
         let mut shares = Vec::new();
         let mut drains = Vec::new();
         let mut stations = Vec::new();
+        let mut buffers = Vec::new();
         let mut with_capacity = false;
         for object in &state.objects {
             let Some(view) = self.objects.get(object.id as usize) else { continue };
@@ -1285,6 +1344,14 @@ impl ViewState {
                     throughput_per_hour: statistics.mus_per_hour(state.time),
                     mean_lead_time: statistics.lead_time_mean(),
                     throughput_interval: figures(object.id).and_then(|figures| Interval::of(figures.mus_in_per_hour)),
+                }),
+                ObjectKind::Buffer => buffers.push(BufferResult {
+                    id: object.id,
+                    name: view.name.clone(),
+                    mean: statistics.average_contents(),
+                    median: object.fill.as_deref().map_or_else(|| "–".to_string(), median_text),
+                    most: statistics.max_contents,
+                    full: (object.capacity != crabsim::Capacity::Unlimited).then(|| share(statistics.time_full)),
                 }),
                 ObjectKind::Station => stations.push(StationResult {
                     id: object.id,
@@ -1330,6 +1397,7 @@ impl ViewState {
             drains,
             stations,
             with_capacity,
+            buffers,
             bottleneck,
             periods: periods.map(|periods| PeriodsSoFar { length: periods.length, complete: periods.complete }),
             too_close,

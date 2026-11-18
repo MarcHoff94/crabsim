@@ -85,11 +85,34 @@ fn the_inspector_shows_how_full_a_buffer_was_instead_of_work_and_stops() {
     };
     let limited = labels(Capacity::Limited(3));
     let names: Vec<&str> = limited.iter().map(|(label, _)| *label).collect();
-    assert_eq!(names, ["MUs in", "MUs out", "Holding", "Blocked", "Empty", "Most MUs", "Mean MUs", "Full"]);
+    assert_eq!(names, ["MUs in", "MUs out", "Holding", "Blocked", "Empty", "Most MUs", "Fewest MUs", "Mean MUs", "Median MUs", "Full"]);
     let value = |label: &str| limited.iter().find(|(name, _)| *name == label).unwrap().1.clone();
     assert_eq!((value("MUs in"), value("MUs out"), value("Most MUs")), ("4".to_string(), "1".to_string(), "3".to_string()));
     // Empty until 2, blocked from 9, and full from 6 to 7 and from 8: of 12 s.
     assert_eq!((value("Empty"), value("Blocked"), value("Full")), ("16.7 %".to_string(), "25.0 %".to_string(), "41.7 %".to_string()));
     let unlimited: Vec<&str> = labels(Capacity::Unlimited).iter().map(|(label, _)| *label).collect();
-    assert_eq!(unlimited, ["MUs in", "MUs out", "Holding", "Blocked", "Empty", "Most MUs", "Mean MUs"], "one with no limit is never full");
+    assert_eq!(unlimited, ["MUs in", "MUs out", "Holding", "Blocked", "Empty", "Most MUs", "Fewest MUs", "Mean MUs", "Median MUs"], "one with no limit is never full");
+}
+
+#[test]
+fn the_inspector_and_results_say_how_full_a_buffer_was_with_its_histogram() {
+    // Empty to 2, 1 MU to 4, 2 to 6, 3 to 7, 2 to 8 and 3 to 12: half of the 12 s is reached at 2.
+    let mut watched = halted_at(12, Capacity::Limited(3));
+    watched.details();
+    let rows = watched.view.inspection().unwrap().statistics_rows();
+    let value = |label: &str| rows.iter().find(|(name, _)| *name == label).unwrap().1.clone();
+    assert_eq!((value("Fewest MUs"), value("Median MUs")), ("0".to_string(), "2".to_string()));
+    let details = watched.view.inspection().unwrap().details.clone().unwrap();
+    let bars = crabsim_ui::view::fill_bars(details.fill.as_ref().unwrap());
+    let shown: Vec<(&str, String)> = bars.iter().map(|bar| (bar.mus.as_str(), format!("{:.3}", bar.share))).collect();
+    assert_eq!(shown, [("0", "0.167".to_string()), ("1", "0.167".to_string()), ("2", "0.250".to_string()), ("3", "0.417".to_string())]);
+
+    watched.view.set_results_open(true);
+    watched.details();
+    let results = watched.view.results().unwrap();
+    assert_eq!(results.buffers.len(), 1);
+    let store = &results.buffers[0];
+    assert_eq!((store.name.as_str(), store.median.as_str(), store.most), ("Store", "2", 3));
+    assert!((store.full.unwrap() - 5.0 / 12.0).abs() < 1e-9);
+    assert!((store.mean.unwrap() - 23.0 / 12.0).abs() < 1e-9, "{:?}", store.mean);
 }

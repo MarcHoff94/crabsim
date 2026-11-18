@@ -170,6 +170,9 @@ pub struct Attributes {
     pub dwelling_time: Option<SimTime>,
     /// Which of the MUs that may leave a Buffer it passes on next. First in, first out by default.
     pub exit_strategy: Option<ExitStrategy>,
+    /// How many MUs each bar of a Buffer's fill histogram covers, from 1. Automatic by default:
+    /// one each, doubling whenever more MUs come than the 64 bars reach.
+    pub histogram_bar_width: Option<u64>,
     /// The object's size and rotation. Visual only. A default size by type.
     pub dimensions: Option<Dimensions>,
     /// Free text saying what the object is. Visual only.
@@ -233,6 +236,7 @@ impl Attributes {
             Attribute::Start => self.start.is_some(),
             Attribute::DwellingTime => self.dwelling_time.is_some(),
             Attribute::ExitStrategy => self.exit_strategy.is_some(),
+            Attribute::HistogramBarWidth => self.histogram_bar_width.is_some(),
             Attribute::Dimensions => self.dimensions.is_some(),
             Attribute::Description => self.description.is_some(),
             Attribute::StateNotes => self.state_notes.is_some(),
@@ -251,6 +255,7 @@ impl Attributes {
             Attribute::Start => self.start = from.start,
             Attribute::DwellingTime => self.dwelling_time = from.dwelling_time,
             Attribute::ExitStrategy => self.exit_strategy = from.exit_strategy,
+            Attribute::HistogramBarWidth => self.histogram_bar_width = from.histogram_bar_width,
             Attribute::Dimensions => self.dimensions = from.dimensions,
             Attribute::Description => self.description = from.description.clone(),
             Attribute::StateNotes => self.state_notes = from.state_notes.clone(),
@@ -270,6 +275,7 @@ pub enum Attribute {
     Start,
     DwellingTime,
     ExitStrategy,
+    HistogramBarWidth,
     Dimensions,
     Description,
     StateNotes,
@@ -277,7 +283,7 @@ pub enum Attribute {
 }
 
 impl Attribute {
-    pub const ALL: [Attribute; 12] = [
+    pub const ALL: [Attribute; 13] = [
         Attribute::Interval,
         Attribute::ProcessTime,
         Attribute::Failures,
@@ -286,6 +292,7 @@ impl Attribute {
         Attribute::Start,
         Attribute::DwellingTime,
         Attribute::ExitStrategy,
+        Attribute::HistogramBarWidth,
         Attribute::Dimensions,
         Attribute::Description,
         Attribute::StateNotes,
@@ -303,6 +310,7 @@ impl Attribute {
             Attribute::Start => "start",
             Attribute::DwellingTime => "dwelling_time",
             Attribute::ExitStrategy => "exit_strategy",
+            Attribute::HistogramBarWidth => "histogram_bar_width",
             Attribute::Dimensions => "dimensions",
             Attribute::Description => "description",
             Attribute::StateNotes => "state_notes",
@@ -317,7 +325,7 @@ impl Attribute {
             (_, Attribute::Dimensions | Attribute::Description | Attribute::StateNotes)
                 | ("Source", Attribute::Interval | Attribute::Distribution)
                 | ("Station", Attribute::ProcessTime | Attribute::Failures | Attribute::StartingMus | Attribute::Capacity | Attribute::Start | Attribute::Distribution)
-                | ("Buffer", Attribute::StartingMus | Attribute::Capacity | Attribute::DwellingTime | Attribute::ExitStrategy)
+                | ("Buffer", Attribute::StartingMus | Attribute::Capacity | Attribute::DwellingTime | Attribute::ExitStrategy | Attribute::HistogramBarWidth)
         )
     }
 }

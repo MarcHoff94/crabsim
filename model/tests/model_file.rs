@@ -1090,6 +1090,24 @@ fn a_buffer_with_no_limit_that_fills_faster_than_it_empties_gets_a_warning() {
     assert_eq!(warnings(two_at_once), Vec::<String>::new(), "a Station of capacity 2 passes on 720 an hour");
 }
 
+#[test]
+fn a_buffers_histogram_bar_width_is_read_saved_built_and_checked() {
+    let buffer = |attributes: Value| file(json!([{ "name": "B", "class": "Buffer", "attributes": attributes }]));
+    let model = load(&buffer(json!({ "histogram_bar_width": 5 }))).unwrap();
+    assert_eq!(model.resolve(0).unwrap().attributes.histogram_bar_width, Some(5));
+    assert_eq!(load(&buffer(json!({}))).unwrap().resolve(0).unwrap().attributes.histogram_bar_width, None, "automatic");
+    let saved = model.save();
+    assert!(saved.contains(r#""histogram_bar_width": 5"#), "{saved}");
+    assert_eq!(load(&saved).unwrap(), model);
+    let mut run = model.to_description().build(0);
+    run.init().unwrap();
+    assert_eq!(run.state().objects[0].fill.as_ref().unwrap().histogram.width, 5);
+    assert_found(&buffer(json!({ "histogram_bar_width": 0 })), "/instances/0/attributes/histogram_bar_width", "at least 1 MU");
+    assert_found(&buffer(json!({ "histogram_bar_width": "wide" })), "/instances/0/attributes/histogram_bar_width", "whole number");
+    let station = file(json!([{ "name": "S", "class": "Station", "attributes": { "histogram_bar_width": 2 } }]));
+    assert_found(&station, "/instances/0/attributes/histogram_bar_width", "a Station has no attribute");
+}
+
 // ---------- Station capacity ----------
 
 /// An oven of capacity 3 with batch start, inherited from a class, starting with 2 MUs, fed by a

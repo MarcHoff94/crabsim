@@ -416,6 +416,20 @@ fn a_capacity_is_a_number_from_1_or_no_limit_typed_as_minus_1_or_the_word() {
 }
 
 #[test]
+fn a_histogram_bar_width_is_a_whole_number_from_1_or_empty_for_automatic() {
+    let mut form = Form::new("histogram_bar_width", None);
+    assert_eq!(form.value(), Ok(json!(null)), "empty is automatic");
+    typed(&mut form, &["4"]);
+    assert_eq!(form.value(), Ok(json!(4)));
+    typed(&mut form, &["Automatic"]);
+    assert_eq!(form.value(), Ok(json!(null)));
+    for wrong in ["0", "-1", "wide"] {
+        typed(&mut form, &[wrong]);
+        assert!(form.value().unwrap_err().contains("bar width"), "{wrong}");
+    }
+}
+
+#[test]
 fn a_stations_start_is_one_of_two() {
     let form = Form::new("start", None);
     assert_eq!(form.options.iter().map(|(_, label)| *label).collect::<Vec<_>>(), ["Each MU on entry", "Batch, when full"]);

@@ -1389,7 +1389,7 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
     if selected.is_some() {
         ui.class_selected = None;
     }
-    let right = egui::Panel::right("inspector").exact_size(INSPECTOR_WIDTH).show(&mut root, |panel| {
+    let inspector_left = inspector_panel(&mut root, |panel| {
         panel.horizontal(|row| {
             for (tab, label, hint) in [
                 (Tab::Inspector, "Inspector", "The object clicked on the canvas: its state, statistics and attributes (t1)"),
@@ -1446,7 +1446,7 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
                 history_clicked = history_section(panel, ui.history.as_ref(), ui.view.allows_building());
             }
         });
-    });
+    }).1;
     // Full states are asked for while results are shown, or the Paths tab weighs the live run.
     let live_paths = ui.tab == Tab::Paths && matches!(ui.paths.weigh, Weigh::Figure(_));
     ui.view.set_results_open(ui.tab == Tab::Results || live_paths);
@@ -1645,7 +1645,7 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
     }
     let canvas = egui::Rect::from_min_max(
         egui::pos2(left_edge, bottom_of_bars),
-        egui::pos2(right.response.rect.left(), ctx.viewport_rect().bottom()),
+        egui::pos2(inspector_left, ctx.viewport_rect().bottom()),
     );
     ui.canvas = Some(canvas);
     place_dragged_class(&ctx, ui, canvas);
@@ -3068,6 +3068,41 @@ fn plural(count: usize) -> &'static str {
     if count == 1 { "" } else { "s" }
 }
 
+/// Shows the inspector panel at the window's right and returns what its contents gave and the
+/// panel's left edge, where the canvas ends. The edge is taken from the panel's clip rect, which
+/// egui sets before the contents: when the contents are wider than the panel, egui clamps the
+/// panel's response to its size by keeping the overflowing right edge, so `response.rect.left()`
+/// lies inside the panel by as much as they overflow, and names on the canvas, clipped to it,
+/// were drawn over the panel.
+fn inspector_panel<R>(root: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui) -> R) -> (R, f32) {
+    egui::Panel::right("inspector")
+        .exact_size(INSPECTOR_WIDTH)
+        .show(root, |panel| {
+            let left = panel.clip_rect().left();
+            (add_contents(panel), left)
+        })
+        .inner
+}
+
+/// How many MUs an object holds have their numbers in the inspector, the rest counted.
+const HOLDS_LISTED: usize = 50;
+
+/// What the inspector says an object holds: the MUs, with how many when more than one, listing at
+/// most `HOLDS_LISTED` so the text stays short for a Buffer holding thousands.
+fn holds(contents: &[u32]) -> String {
+    match contents {
+        [] => "nothing".to_string(),
+        [mu] => format!("MU {mu}"),
+        mus => {
+            let listed = mus.iter().take(HOLDS_LISTED).map(|mu| format!("MU {mu}")).collect::<Vec<_>>().join(", ");
+            match mus.len().saturating_sub(HOLDS_LISTED) {
+                0 => format!("{} MUs: {listed}", mus.len()),
+                more => format!("{} MUs: {listed} and {more} more", mus.len()),
+            }
+        }
+    }
+}
+
 /// What the view state says about the selected object, and the interventions it offers. Returns
 /// the intervention asked for, if any. `process_time_text` is what has been typed for a new
 /// process time.
@@ -3091,10 +3126,8 @@ fn inspector(ui: &mut egui::Ui, inspection: Option<&Inspection>, process_time_te
         grid.label(inspection.state);
         grid.end_row();
         grid.label("Holds");
-        grid.label(match inspection.contents.as_slice() {
-            [] => "nothing".to_string(),
-            mus => mus.iter().map(|mu| format!("MU {mu}")).collect::<Vec<_>>().join(", "),
-        });
+        // Cut short to the panel's width, all of it on hover, so a full Buffer can't widen the panel.
+        grid.add(egui::Label::new(holds(&inspection.contents)).truncate());
         grid.end_row();
         if let Some(remaining) = inspection.remaining {
             grid.label("Work left");
@@ -4963,5 +4996,57 @@ fn pace_frames(ui: Res<Ui>, time: Res<Time<Real>>, mut winit: ResMut<WinitSettin
         } else {
             WinitSettings::desktop_app()
         };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Runs frames of a window 1000 by 600 with only the inspector panel, holding `contents`, and
+    /// returns the panel's left edge as `inspector_panel` gives it and as egui's response has it.
+    fn inspector_edges(contents: &str) -> (f32, f32) {
+        let ctx = egui::Context::default();
+        let input = || egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 600.0))),
+            ..Default::default()
+        };
+        let mut edges = (0.0, 0.0);
+        // The second frame lays out with what the first measured, as the window does every frame.
+        for _ in 0..2 {
+            let _ = ctx.run_ui(input(), |root| {
+                let mut response = None;
+                let (_, left) = inspector_panel(root, |panel| {
+                    egui::ScrollArea::vertical().show(panel, |panel| {
+                        response = Some(panel.add(egui::Label::new(contents).extend()).rect);
+                    });
+                });
+                edges = (left, response.map_or(f32::NAN, |rect| rect.left()));
+            });
+        }
+        edges
+    }
+
+    #[test]
+    fn the_canvas_ends_where_the_inspector_begins_however_wide_its_contents() {
+        let (narrow, _) = inspector_edges("Short");
+        assert_eq!(narrow, 1000.0 - INSPECTOR_WIDTH);
+        // A line far wider than the panel, such as a long Holds line before it was cut short:
+        // egui's response would put the panel's left edge hundreds of points into the panel.
+        let wide = (0..60).map(|mu| format!("MU {mu}")).collect::<Vec<_>>().join(", ");
+        let (left, label_left) = inspector_edges(&wide);
+        assert_eq!(left, 1000.0 - INSPECTOR_WIDTH);
+        assert!(label_left >= left, "the panel's contents begin at {label_left}, left of its edge at {left}");
+    }
+
+    #[test]
+    fn the_holds_line_counts_the_mus_and_lists_at_most_fifty() {
+        assert_eq!(holds(&[]), "nothing");
+        assert_eq!(holds(&[7]), "MU 7");
+        assert_eq!(holds(&[126, 127, 128]), "3 MUs: MU 126, MU 127, MU 128");
+        let many: Vec<u32> = (0..53).collect();
+        let text = holds(&many);
+        assert!(text.starts_with("53 MUs: MU 0, MU 1,"), "{text}");
+        assert!(text.ends_with("MU 49 and 3 more"), "{text}");
     }
 }

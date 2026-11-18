@@ -509,6 +509,7 @@ impl EventInterface for MultiStation {
 			process_time: Some(self.proc_time),
 			configured_process_time: Some(self.configured_proc_time),
 			statistics: self.statistics.read(now),
+			fill: None,
 		}
 	}
 	fn get_object_id(&self) -> &u32 {

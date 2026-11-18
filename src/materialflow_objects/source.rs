@@ -202,6 +202,7 @@ impl EventInterface for Source {
 			process_time: None,
 			configured_process_time: None,
 			statistics: self.statistics.read(now),
+			fill: None,
 		}
 	}
 	fn get_object_id(&self) -> &u32 {

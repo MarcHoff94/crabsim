@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 pub const STORE_FILE: &str = "results.sqlite";
 
 /// The tables' version, kept in SQLite's `user_version`. A change to the tables raises it.
-const TABLES_VERSION: i64 = 3;
+const TABLES_VERSION: i64 = 4;
 
 /// The most rows `query_results` returns.
 pub const QUERY_ROW_LIMIT: usize = 1_000;
@@ -67,6 +67,15 @@ CREATE TABLE IF NOT EXISTS statistics (
 );
 CREATE INDEX IF NOT EXISTS statistics_by_run ON statistics (run, statistic, object);
 CREATE INDEX IF NOT EXISTS statistics_by_object ON statistics (run, object);
+CREATE TABLE IF NOT EXISTS histograms (
+    run TEXT NOT NULL,
+    observation INTEGER NOT NULL,
+    object TEXT NOT NULL,
+    from_mus INTEGER NOT NULL,
+    to_mus INTEGER,
+    time_s REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS histograms_by_object ON histograms (run, object);
 ";
 
 /// The tables and statistic names, as `query_results` describes them to an agent.
@@ -77,7 +86,8 @@ macro_rules! tables_description {
             "runs(id TEXT such as 'run-3', model_path, model_text: the canonical model file the run used, model_hash: SHA-256 of model_text so equal hashes mean the same model, seed TEXT, length_s, warm_up_s, observations, label, source: 'mcp' or 'cli', crabsim_version, started and finished: UTC ISO 8601, state: queued|running|done|failed|cancelled|interrupted, process: the lock id of the crabsim process that ran it, crabsim_build: the git commit crabsim was built from, agent: such as 'agent-3 (claude-code)' or 'the user'). ",
             "observations(run, number from 1, seed TEXT: the observation's own seed, events, wall_time_s, error, error_time_s: simulated seconds). ",
             "statistics(run, observation, object: instance name, class, built_in_class: Source|Station|Buffer|Drain, statistic, value REAL), one row per figure of an observation that ran to its end. ",
-            "Statistics: mus_in, mus_out, working_share, blocked_share, idle_share, failed_share, paused_share (each 0 to 1 of the time measured after the warm-up), for a Station with a capacity above 1 working_full_share, working_not_full_share and working_partly_blocked_share (the three parts of working_share), failures, availability (0 to 1), and for Drains throughput_per_hour and mean_lead_time_s. Times are in seconds. Besides SQLite's own functions, such as avg, min, max and count, there are sqrt, power, ln, exp and log10, for example to work out a standard deviation. ",
+            "histograms(run, observation, object, from_mus, to_mus: NULL for a last bar that takes everything from from_mus, time_s), how long each Buffer held each number of MUs, one row per bar with any time, the bars 1 MU wide or, with more MUs, a wider power of 2 unless the model sets histogram_bar_width. ",
+            "Statistics: mus_in, mus_out, working_share, blocked_share, idle_share, failed_share, paused_share (each 0 to 1 of the time measured after the warm-up), for a Station with a capacity above 1 working_full_share, working_not_full_share and working_partly_blocked_share (the three parts of working_share), failures, availability (0 to 1), for Drains throughput_per_hour and mean_lead_time_s, and for Buffers mean_mus, min_mus (the fewest held for any time), max_mus, median_mus (weighted by time, the fewest MUs of the histogram bar holding it) and, with a limit, full_share. Times are in seconds. Besides SQLite's own functions, such as avg, min, max and count, there are sqrt, power, ln, exp and log10, for example to work out a standard deviation. ",
             "Example: SELECT object, AVG(value) FROM statistics WHERE run = 'run-3' AND statistic = 'blocked_share' GROUP BY object HAVING AVG(value) > 0.3"
         )
     };

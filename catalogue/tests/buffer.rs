@@ -36,7 +36,7 @@ fn a_buffer_has_its_attributes_with_defaults_and_takes_minus_1_for_no_limit() {
     let setup = setup("buffer-attributes");
     let got = setup.ok("get_attributes", json!({ "path": "line.json", "target": { "instance": "Store" } }));
     let names: Vec<&str> = got["attributes"].as_array().unwrap().iter().map(|a| a["attribute"].as_str().unwrap()).collect();
-    assert_eq!(names, ["starting_mus", "capacity", "dwelling_time", "exit_strategy", "dimensions", "description", "state_notes"], "every attribute a Buffer has");
+    assert_eq!(names, ["starting_mus", "capacity", "dwelling_time", "exit_strategy", "histogram_bar_width", "dimensions", "description", "state_notes"], "every attribute a Buffer has");
     assert_eq!(attribute(&setup, "capacity"), json!({ "attribute": "capacity", "value": "unlimited", "from": "built_in" }));
     assert_eq!(attribute(&setup, "dwelling_time"), json!({ "attribute": "dwelling_time", "value": "00:00:00", "from": "built_in" }));
     assert_eq!(attribute(&setup, "exit_strategy"), json!({ "attribute": "exit_strategy", "value": "first_in_first_out", "from": "built_in" }));
@@ -120,4 +120,42 @@ fn find_instances_and_exports_know_a_buffers_values() {
     let exported = setup.ok("export_model", json!({ "path": "line.json", "format": "cypher" }));
     let script = setup.folder.read(exported["files"][0]["path"].as_str().unwrap());
     assert!(script.contains("capacity: 5") && script.contains("dwelling_time_s: 60") && script.contains("exit_strategy: 'first_in_first_out'"), "{script}");
+}
+
+#[test]
+fn a_run_keeps_a_buffers_fill_and_run_results_gives_its_histogram_when_named() {
+    let setup = setup("buffer-fill");
+    set(&setup, "capacity", json!(5));
+    let run = setup.start(json!({ "model": "line.json", "seed": 1, "length": "1:00:00", "observations": 2 }));
+    setup.finished(&run);
+    let stored = setup.stored(&run, "Store");
+    let figures = &stored[&1];
+    assert_eq!((figures["max_mus"], figures["median_mus"]), (5.0, 5.0), "full nearly all the time: {figures:?}");
+    assert!(figures["full_share"] > 0.9 && figures["mean_mus"] > 4.5, "{figures:?}");
+    assert_eq!(figures["min_mus"], 0.0, "empty until the first MU");
+    assert!(setup.stored(&run, "Slow")[&1].get("mean_mus").is_none(), "only a Buffer");
+
+    let named = setup.ok("run_results", json!({ "run": run, "objects": ["Store"] }));
+    let histogram = named["objects"][0]["histogram"].as_array().unwrap().clone();
+    let last = histogram.last().unwrap();
+    assert_eq!((last["from_mus"].as_u64(), last["to_mus"].as_u64()), (Some(5), Some(5)));
+    assert!(last["share"].as_f64().unwrap() > 0.9, "{histogram:?}");
+    let total: f64 = histogram.iter().map(|bar| bar["share"].as_f64().unwrap()).sum();
+    assert!((total - 1.0).abs() < 1e-3, "{total}");
+    let summary = setup.ok("run_results", json!({ "run": run }));
+    assert!(summary["objects"].as_array().unwrap().iter().all(|object| object.get("histogram").is_none()), "only when named");
+
+    let rows = setup.ok("query_results", json!({ "sql": format!("SELECT count(*) AS bars FROM histograms WHERE run = '{run}' AND object = 'Store'") }));
+    assert!(rows.to_string().contains("bars"), "{rows}");
+    setup.ok("forget_run", json!({ "run": run }));
+    let rows = setup.ok("query_results", json!({ "sql": format!("SELECT count(*) AS bars FROM histograms WHERE run = '{run}'") }));
+    assert!(rows.to_string().contains('0'), "forgotten with the run: {rows}");
+}
+
+#[test]
+fn a_buffers_histogram_bar_width_is_an_attribute() {
+    let setup = setup("buffer-bar-width");
+    assert_eq!(attribute(&setup, "histogram_bar_width"), json!({ "attribute": "histogram_bar_width", "from": "not_set" }), "automatic");
+    set(&setup, "histogram_bar_width", json!(4));
+    assert_eq!(attribute(&setup, "histogram_bar_width")["value"], 4);
 }

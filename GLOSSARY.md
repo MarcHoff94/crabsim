@@ -268,6 +268,9 @@ The fixed-size numbers every material-flow object keeps about a simulation run. 
 The state of an object doing its work: a Station working on at least one MU, a Source waiting out its interval. A Station with a capacity above 1 is busy in one of three ways that don't overlap: full, with every place in work; not full, with free places and nothing waiting to leave; and partly blocked, working while a finished MU can't leave, which outranks the other two. The likely bottleneck counts only busy and full.
 _Avoid_: Processing (Processing time is a time basis)
 
+**Fill histogram**:
+How long a Buffer held each number of MUs, in 64 bars. Each bar covers one number of MUs until more come than the bars reach, and then twice as many, or as many as the model sets, the last bar then taking everything beyond. It gives a Buffer's median fill.
+
 **Holding**:
 The state of a Buffer with at least one MU in it, none of which is kept from leaving: each is still in its dwelling time. A Buffer does no work, so it is holding rather than busy, with its own colour. In the statistics its holding time is kept where other objects keep busy time.
 

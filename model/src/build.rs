@@ -38,6 +38,7 @@ pub(crate) fn build(model: &Model) -> ModelDescription {
                 let buffer = description.add_buffer(attributes.capacity.unwrap_or(crabsim::Capacity::Unlimited));
                 description.set_dwelling_time(buffer, attributes.dwelling_time.unwrap_or(SimTime::ZERO));
                 description.set_exit_strategy(buffer, attributes.exit_strategy.unwrap_or_default());
+                description.set_histogram_bar_width(buffer, attributes.histogram_bar_width);
                 let starting = attributes.starting_mus.unwrap_or(0) as u32;
                 description.set_starting_mus(buffer, &(next_mu..next_mu + starting).collect::<Vec<u32>>());
                 next_mu += starting;

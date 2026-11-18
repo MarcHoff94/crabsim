@@ -2,7 +2,7 @@
 //! these instead of reaching into material-flow objects or engine events.
 
 use crate::flows::ProcessState;
-use crate::statistics::{MeasuringPeriods, ObjectStatistics};
+use crate::statistics::{FillStatistics, MeasuringPeriods, ObjectStatistics};
 use crate::time::SimTime;
 
 /// Something that happened in the model at a point in simulation time.
@@ -174,6 +174,9 @@ pub struct ObjectState {
     /// The process time in the Station's default state, which Reset returns to.
     pub configured_process_time: Option<SimTime>,
     pub statistics: ObjectStatistics,
+    /// How full a Buffer was: the fewest MUs it held and its histogram. `None` for other objects,
+    /// which then allocate nothing for it.
+    pub fill: Option<Box<FillStatistics>>,
 }
 
 /// The full current state of a simulation run.

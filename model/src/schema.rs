@@ -139,6 +139,11 @@ pub struct AttributesFile {
     /// Buffer: which of the MUs whose dwelling time is over it passes on next. First in, first
     /// out by default.
     pub exit_strategy: Option<ExitStrategyFile>,
+    /// Buffer: how many MUs each of its fill histogram's 64 bars covers, from 1. Left out, it is
+    /// automatic: one each, doubling whenever more MUs come than the bars reach. Set, the last bar
+    /// collects everything beyond, such as 315 or more with a width of 5.
+    #[schemars(range(min = 1))]
+    pub histogram_bar_width: Option<u64>,
     /// Any object: its size in metres and rotation in degrees. Visual only.
     pub dimensions: Option<DimensionsFile>,
     /// Any object: free text saying what it is. Visual only.

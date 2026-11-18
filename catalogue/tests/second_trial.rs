@@ -85,7 +85,7 @@ fn a_store_of_the_second_version_gains_build_and_agent_and_keeps_its_runs() {
     assert_eq!(results["crabsim_build"], "unknown", "a run from before builds were recorded");
     assert_eq!(results["agent"], "unknown");
     let version = catalogue.call("query_results", json!({ "sql": "SELECT user_version FROM pragma_user_version" })).unwrap();
-    assert_eq!(version["rows"][0][0], 3);
+    assert_eq!(version["rows"][0][0], 4, "upgraded to the latest tables, with histograms");
 }
 
 #[test]

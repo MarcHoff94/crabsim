@@ -38,8 +38,8 @@ const TOP_LEVEL: [&str; 6] = ["$schema", "format_version", "description", "class
 const INSTANCE: [&str; 5] = ["name", "class", "stream", "position", "attributes"];
 const CONNECTION: [&str; 5] = ["from", "to", "exit", "entrance", "description"];
 const CLASS: [&str; 3] = ["name", "parent", "attributes"];
-const ATTRIBUTES: [&str; 12] =
-    ["interval", "process_time", "failures", "starting_mus", "capacity", "start", "dwelling_time", "exit_strategy", "dimensions", "description", "state_notes", "distribution"];
+const ATTRIBUTES: [&str; 13] =
+    ["interval", "process_time", "failures", "starting_mus", "capacity", "start", "dwelling_time", "exit_strategy", "histogram_bar_width", "dimensions", "description", "state_notes", "distribution"];
 
 pub(crate) fn read(text: &str) -> (Model, Vec<Problem>, Broken) {
     let mut reader = Reader::default();
@@ -302,6 +302,7 @@ impl Reader {
                 "start" => self.start(value, &at, name).map(|start| attributes.start = Some(start)),
                 "dwelling_time" => self.time(value, &at, name).map(|time| attributes.dwelling_time = Some(time)),
                 "exit_strategy" => self.exit_strategy(value, &at, name).map(|strategy| attributes.exit_strategy = Some(strategy)),
+                "histogram_bar_width" => self.count(value, &at, name).map(|width| attributes.histogram_bar_width = Some(width)),
                 "dimensions" => self.dimensions(value, &at, name).map(|dimensions| attributes.dimensions = Some(dimensions)),
                 "description" => self.text(value, &at, name).map(|text| attributes.description = Some(text)),
                 "state_notes" => self.state_notes(value, &at, name).map(|notes| attributes.state_notes = Some(notes)),

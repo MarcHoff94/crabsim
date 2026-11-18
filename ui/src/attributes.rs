@@ -262,6 +262,12 @@ impl Form {
         match self.attribute.as_str() {
             "interval" | "process_time" | "dwelling_time" => time(0),
             "starting_mus" => whole(0).map(|n| json!(n)),
+            // Automatic is no value at all, which a model file says by leaving it out.
+            "histogram_bar_width" if text(0).is_empty() || text(0).eq_ignore_ascii_case("automatic") => Ok(Value::Null),
+            "histogram_bar_width" => match text(0).parse::<u64>() {
+                Ok(width) if width >= 1 => Ok(json!(width)),
+                _ => Err(format!("`{}` isn't a bar width: type a whole number of MUs from 1, or leave it empty for automatic", text(0))),
+            },
             // No limit is -1 or the word, and a model file writes the word.
             "capacity" if text(0) == "-1" || text(0).eq_ignore_ascii_case("unlimited") => Ok(json!("unlimited")),
             "capacity" => match text(0).parse::<u64>() {

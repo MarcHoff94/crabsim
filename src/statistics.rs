@@ -168,6 +168,27 @@ impl StatisticsKeeper {
         self.totals.max_contents = self.totals.max_contents.max(contents);
     }
 
+    /// The same as `observe`, but hands back the stretch of time that just ended, with the MUs
+    /// held through it, when one did. A Buffer feeds its fill histogram from these, so it needs no
+    /// clock of its own: every stretch has one number of MUs.
+    #[inline]
+    pub(crate) fn observe_stretch(&mut self, now: SimTime, state: MachineState, contents: u64) -> Option<(u64, SimTime)> {
+        if state == self.state && contents == self.contents {
+            return None;
+        }
+        let stretch = (self.contents, now.saturating_sub(self.since));
+        self.add_time_up_to(now);
+        self.state = state;
+        self.contents = contents;
+        self.totals.max_contents = self.totals.max_contents.max(contents);
+        Some(stretch)
+    }
+
+    /// The MUs held now, and for how long by `now`: the stretch still in progress.
+    pub(crate) fn in_progress(&self, now: SimTime) -> (u64, SimTime) {
+        (self.contents, now.saturating_sub(self.since))
+    }
+
     pub fn count_mu_in(&mut self) {
         self.totals.mus_in += 1;
     }
@@ -263,6 +284,159 @@ fn add_time(statistics: &mut ObjectStatistics, state: MachineState, contents: u6
     *mu += time.times(contents);
     if capacity > 0 && contents >= capacity {
         statistics.time_full += time;
+    }
+}
+
+/// How many bars a Buffer's fill histogram has, whatever their width.
+pub const HISTOGRAM_BARS: usize = 64;
+
+/// How long a Buffer held each number of MUs, in `HISTOGRAM_BARS` bars, so it has the same size
+/// however full the Buffer gets. Bar `i` covers `i × width` up to `(i + 1) × width − 1` MUs.
+/// Automatic, the width starts at 1 and doubles whenever more MUs come than the bars reach, two
+/// bars merging into one, so the bars always start at 0 and line up. Set by the model, the width
+/// never changes and the last bar collects everything from `63 × width` up.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Histogram {
+    pub width: u64,
+    /// Set by the model, so the last bar is open-ended.
+    pub fixed: bool,
+    pub bars: [SimTime; HISTOGRAM_BARS],
+    /// An automatic width is a power of 2, so a bar is found by a shift rather than a division:
+    /// this is on a Buffer's per-event path.
+    shift: u32,
+}
+
+impl Histogram {
+    /// One MU per bar to start with, doubling as needed, or `width` MUs per bar for good.
+    pub fn new(width: Option<u64>) -> Histogram {
+        Histogram { width: width.unwrap_or(1).max(1), fixed: width.is_some(), bars: [SimTime::ZERO; HISTOGRAM_BARS], shift: 0 }
+    }
+
+    /// Adds `time` spent holding `level` MUs.
+    #[inline]
+    pub(crate) fn add(&mut self, level: u64, time: SimTime) {
+        // Automatic and within the bars, nearly always: one comparison.
+        if !self.fixed {
+            let bar = level >> self.shift;
+            if bar < HISTOGRAM_BARS as u64 {
+                self.bars[bar as usize] += time;
+                return;
+            }
+        }
+        let bar = self.bar_of(level);
+        self.bars[bar] += time;
+    }
+
+    #[cold]
+    fn bar_of(&mut self, level: u64) -> usize {
+        if self.fixed {
+            return (level / self.width).min(HISTOGRAM_BARS as u64 - 1) as usize;
+        }
+        while level >> self.shift >= HISTOGRAM_BARS as u64 {
+            for bar in 0..HISTOGRAM_BARS / 2 {
+                self.bars[bar] = self.bars[2 * bar] + self.bars[2 * bar + 1];
+            }
+            self.bars[HISTOGRAM_BARS / 2..].fill(SimTime::ZERO);
+            self.width *= 2;
+            self.shift += 1;
+        }
+        (level >> self.shift) as usize
+    }
+
+    /// The MUs bar `bar` covers, from and to, with no end for a set width's last bar.
+    pub fn range(&self, bar: usize) -> (u64, Option<u64>) {
+        let from = bar as u64 * self.width;
+        if self.fixed && bar == HISTOGRAM_BARS - 1 {
+            (from, None)
+        } else {
+            (from, Some(from + self.width - 1))
+        }
+    }
+
+    /// All the time it covers.
+    pub fn total(&self) -> SimTime {
+        self.bars.iter().fold(SimTime::ZERO, |sum, &time| sum + time)
+    }
+
+    /// The bar holding the median, weighted by time: the first whose time, with all below it,
+    /// reaches half the total. Exact to the bar's width. None before any time has passed.
+    pub fn median_bar(&self) -> Option<usize> {
+        let total = self.total();
+        if total == SimTime::ZERO {
+            return None;
+        }
+        let mut below = SimTime::ZERO;
+        self.bars.iter().position(|&time| {
+            below += time;
+            below.as_millis() * 2 >= total.as_millis()
+        })
+    }
+
+    /// The bars that have any time, each with its place, range and time, in order.
+    pub fn used(&self) -> impl Iterator<Item = (usize, (u64, Option<u64>), SimTime)> + '_ {
+        self.bars.iter().enumerate().filter(|(_, time)| **time > SimTime::ZERO).map(|(bar, &time)| (bar, self.range(bar), time))
+    }
+}
+
+/// What only a Buffer keeps about how full it was, beyond its `ObjectStatistics`: the fewest MUs
+/// it held for any length of time, and the histogram. Its mean and most MUs and its full share are
+/// in `ObjectStatistics`, which every object has.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FillStatistics {
+    /// The fewest MUs it held for some time, or holds now.
+    pub lowest: u64,
+    pub histogram: Histogram,
+}
+
+impl FillStatistics {
+    /// The MUs the median lies between, weighted by time: one number while bars are 1 MU wide.
+    pub fn median(&self) -> Option<(u64, Option<u64>)> {
+        self.histogram.median_bar().map(|bar| self.histogram.range(bar))
+    }
+}
+
+/// Keeps a Buffer's fill statistics from the stretches of time its `StatisticsKeeper` hands it,
+/// each at one number of MUs (`observe_stretch`), so it keeps no clock of its own and costs a
+/// Buffer's events only an addition when a stretch ends. Measured on the buffered line, a keeper
+/// with its own clock cost 3.5% of a headless run.
+#[derive(Debug, Clone)]
+pub(crate) struct FillKeeper {
+    width: Option<u64>,
+    histogram: Histogram,
+    /// `u64::MAX` until a level has been held for some time.
+    lowest: u64,
+}
+
+impl FillKeeper {
+    pub(crate) fn new(width: Option<u64>) -> FillKeeper {
+        FillKeeper { width, histogram: Histogram::new(width), lowest: u64::MAX }
+    }
+
+    /// `time` spent holding `level` MUs.
+    #[inline]
+    pub(crate) fn add(&mut self, level: u64, time: SimTime) {
+        if time > SimTime::ZERO {
+            self.histogram.add(level, time);
+            self.lowest = self.lowest.min(level);
+        }
+    }
+
+    /// With the stretch `in_progress`, the MUs held now and for how long, changing nothing.
+    pub(crate) fn read(&self, (level, time): (u64, SimTime)) -> FillStatistics {
+        let mut histogram = self.histogram.clone();
+        histogram.add(level, time);
+        FillStatistics { lowest: self.lowest.min(level), histogram }
+    }
+
+    /// Starts afresh, as its `StatisticsKeeper` does when cleared or reset.
+    pub(crate) fn clear(&mut self) {
+        self.histogram = Histogram::new(self.width);
+        self.lowest = u64::MAX;
+    }
+
+    pub(crate) fn set_width(&mut self, width: Option<u64>) {
+        self.width = width;
+        self.histogram = Histogram::new(width);
     }
 }
 
@@ -467,6 +641,70 @@ mod tests {
         assert_eq!(statistics.time_busy_full(), SimTime::from_secs(20));
         assert_eq!(statistics.time_blocked, SimTime::from_secs(5));
         assert_eq!(statistics.measured_time(), SimTime::from_secs(40));
+    }
+
+    /// A Buffer's two keepers, fed as a Buffer feeds them.
+    struct Fill {
+        keeper: StatisticsKeeper,
+        fill: FillKeeper,
+    }
+
+    impl Fill {
+        fn new(width: Option<u64>) -> Fill {
+            Fill { keeper: StatisticsKeeper::new(0), fill: FillKeeper::new(width) }
+        }
+        fn observe(&mut self, now: SimTime, level: u64) {
+            if let Some((held, time)) = self.keeper.observe_stretch(now, MachineState::Busy, level) {
+                self.fill.add(held, time);
+            }
+        }
+        fn read(&self, now: SimTime) -> FillStatistics {
+            self.fill.read(self.keeper.in_progress(now))
+        }
+        fn clear(&mut self, now: SimTime) {
+            self.keeper.clear(now);
+            self.fill.clear();
+        }
+    }
+
+    #[test]
+    fn an_automatic_histogram_doubles_its_bars_and_a_set_one_collects_the_rest_in_its_last() {
+        let mut fill = Fill::new(None);
+        fill.observe(SimTime::ZERO, 3);
+        fill.observe(SimTime::from_secs(10), 63);
+        fill.observe(SimTime::from_secs(15), 64);
+        let read = fill.read(SimTime::from_secs(20));
+        assert_eq!(read.histogram.width, 2, "64 MUs don't fit 64 bars of one");
+        assert_eq!(read.histogram.bars[1], SimTime::from_secs(10), "3 is in the bar of 2 and 3");
+        assert_eq!(read.histogram.bars[31], SimTime::from_secs(5), "62 and 63");
+        assert_eq!(read.histogram.bars[32], SimTime::from_secs(5), "64 and 65");
+        assert_eq!(read.histogram.total(), SimTime::from_secs(20));
+        assert_eq!(read.lowest, 3);
+        assert_eq!(read.median(), Some((2, Some(3))), "half the time at 3, exact to the bar");
+
+        let mut fill = Fill::new(Some(5));
+        fill.observe(SimTime::ZERO, 7);
+        fill.observe(SimTime::from_secs(4), 1_000);
+        let read = fill.read(SimTime::from_secs(10));
+        assert_eq!(read.histogram.width, 5);
+        assert_eq!(read.histogram.range(63), (315, None), "315 or more");
+        assert_eq!((read.histogram.bars[1], read.histogram.bars[63]), (SimTime::from_secs(4), SimTime::from_secs(6)));
+        assert_eq!(read.median(), Some((315, None)));
+    }
+
+    #[test]
+    fn the_lowest_fill_is_the_fewest_held_for_some_time() {
+        let mut fill = Fill::new(None);
+        fill.observe(SimTime::ZERO, 4);
+        // Empty for no time at all, as when an MU leaves and another comes at one instant.
+        fill.observe(SimTime::from_secs(10), 0);
+        fill.observe(SimTime::from_secs(10), 2);
+        assert_eq!(fill.read(SimTime::from_secs(12)).lowest, 2);
+        assert_eq!(fill.read(SimTime::from_secs(10)).lowest, 2, "it holds 2 now");
+        fill.clear(SimTime::from_secs(12));
+        let cleared = fill.read(SimTime::from_secs(13));
+        assert_eq!((cleared.lowest, cleared.histogram.total()), (2, SimTime::from_secs(1)));
+        assert_eq!(Fill::new(None).read(SimTime::ZERO).median(), None);
     }
 
     #[test]

@@ -409,10 +409,15 @@ fn record(store: &mut Store, plan: &Plan, k: u32, outcome: &Outcome) -> rusqlite
         let mut insert = transaction.prepare(
             "INSERT INTO statistics (run, observation, object, class, built_in_class, statistic, value) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         )?;
+        let mut insert_bar = transaction.prepare("INSERT INTO histograms (run, observation, object, from_mus, to_mus, time_s) VALUES (?1, ?2, ?3, ?4, ?5, ?6)")?;
         for (object, info) in outcome.state.objects.iter().zip(&plan.objects) {
-            let with_capacity = object.kind == crabsim::ObjectKind::Station && object.capacity.limit() > 1;
-            for (statistic, value) in figures(&object.statistics, outcome.state.time, with_capacity) {
+            for (statistic, value) in figures(object, outcome.state.time) {
                 insert.execute(params![plan.id, k, info.name, info.class, info.built_in, statistic, value])?;
+            }
+            if let Some(fill) = &object.fill {
+                for (_, (from, to), time) in fill.histogram.used() {
+                    insert_bar.execute(params![plan.id, k, info.name, from as i64, to.map(|to| to as i64), time.as_secs_f64()])?;
+                }
             }
         }
     }

@@ -393,3 +393,54 @@ fn a_source_keeps_its_next_mu_for_the_whole_interval_when_two_successors_free_up
     // MU 5 waits from 6 and goes at 101. MU 6 is created then, and its interval ends at 103.
     assert_eq!(left_the_source, [(3, 2), (4, 4), (5, 101), (6, 103)]);
 }
+
+// ---------- Fill statistics (PR 3) ----------
+
+/// A Buffer starting with MUs 1 to 4 before a Station working 10 s: it holds 3 from 0 to 10, 2 to
+/// 20, 1 to 30 and none after.
+fn emptying() -> (ModelDescription, u32) {
+    let mut model = ModelDescription::new();
+    let store = buffer_holding(&mut model, Capacity::Limited(4), &[1, 2, 3, 4]);
+    let slow = station(&mut model, 10);
+    let out = model.add_drain();
+    connect(&mut model, &[(store, slow), (slow, out)]);
+    (model, store)
+}
+
+#[test]
+fn a_buffer_reports_its_fewest_mus_its_median_and_a_histogram_of_its_fill() {
+    let (model, store) = emptying();
+    let (run, _) = run_to(&model, 40);
+    let state = run.state();
+    let fill = state.objects[store as usize].fill.as_deref().expect("a Buffer has fill statistics");
+    assert_eq!(fill.lowest, 0);
+    assert_eq!(fill.histogram.width, 1);
+    assert_eq!(&fill.histogram.bars[..5], &[secs(10), secs(10), secs(10), secs(10), SimTime::ZERO]);
+    assert_eq!(fill.median(), Some((1, Some(1))), "half the time at 1 or fewer");
+    let statistics = state.objects[store as usize].statistics;
+    assert_eq!((statistics.max_contents, statistics.average_contents()), (4, Some(1.5)));
+    assert!(state.objects.iter().filter(|object| object.id != store).all(|object| object.fill.is_none()), "only a Buffer has them");
+}
+
+#[test]
+fn fill_statistics_start_afresh_when_cleared_and_at_reset() {
+    let (model, store) = emptying();
+    let (mut run, _) = run_to(&model, 25);
+    run.clear_statistics();
+    run.advance_to(secs(28)).unwrap();
+    let fill = run.state().objects[store as usize].fill.clone().unwrap();
+    assert_eq!((fill.lowest, fill.histogram.total(), fill.histogram.bars[1]), (1, secs(3), secs(3)));
+    run.reset();
+    assert_eq!(run.state(), model.build(0).state());
+}
+
+#[test]
+fn a_set_bar_width_holds_and_its_last_bar_takes_the_rest() {
+    let (mut model, store) = emptying();
+    model.set_histogram_bar_width(store, Some(2));
+    let (run, _) = run_to(&model, 40);
+    let fill = run.state().objects[store as usize].fill.clone().unwrap();
+    assert_eq!(fill.histogram.width, 2);
+    assert_eq!(&fill.histogram.bars[..3], &[secs(20), secs(20), SimTime::ZERO], "0 and 1, then 2 and 3");
+    assert_eq!(fill.median(), Some((0, Some(1))));
+}

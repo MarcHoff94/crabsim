@@ -154,6 +154,12 @@ impl ModelDescription {
         self.buffer_mut(id).set_dwelling_time(dwelling_time);
     }
 
+    /// Sets the width of a Buffer's fill histogram's bars, in MUs, or `None` for automatic: one
+    /// level per bar, doubling whenever more MUs come than the 64 bars reach.
+    pub fn set_histogram_bar_width(&mut self, id: u32, width: Option<u64>) {
+        self.buffer_mut(id).set_histogram_bar_width(width);
+    }
+
     /// Sets which of the MUs that may leave a Buffer it passes on next.
     pub fn set_exit_strategy(&mut self, id: u32, exit_strategy: ExitStrategy) {
         self.buffer_mut(id).exit_strategy = exit_strategy;

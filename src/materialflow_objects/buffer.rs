@@ -4,7 +4,7 @@ use crate::error::{InitError, MaterialflowError, RunTimeError};
 use crate::event::{EventContext, EventTemplate, EventType, ExitTicket};
 use crate::materialflow_objects::OtherObjects;
 use crate::report::{Capacity, ObjectKind, ObjectState, OccurrenceKind};
-use crate::statistics::{MachineState, StatisticsKeeper};
+use crate::statistics::{FillKeeper, MachineState, StatisticsKeeper};
 use crate::time::SimTime;
 use super::flows::{
     list_blocked, relist_blocked, retries_for_blocked, retry_move_to_successor, try_to_move_to_successor, waiting_ids, BaseObject, Distributing, EventInterface,
@@ -55,6 +55,10 @@ pub struct Buffer {
     /// An MU that may leave was refused by every successor, so the Buffer waits in their lines.
     blocked: bool,
     pub statistics: StatisticsKeeper,
+    /// How full it was: only a Buffer keeps this, so no other object grows.
+    fill: FillKeeper,
+    /// The width of its histogram's bars, or automatic.
+    pub histogram_bar_width: Option<u64>,
 }
 
 impl Buffer {
@@ -72,6 +76,8 @@ impl Buffer {
             blockedlist: Vec::new(),
             blocked: false,
             statistics: StatisticsKeeper::new(capacity.limit()),
+            fill: FillKeeper::new(None),
+            histogram_bar_width: None,
         }
     }
 
@@ -169,7 +175,9 @@ impl Buffer {
     /// Tells the statistics what the Buffer ended up doing.
     fn update_statistics(&mut self, now: SimTime) {
         let state = MachineState::of(&InterruptionState::None, &self.process_state());
-        self.statistics.observe(now, state, self.content.len() as u64);
+        if let Some((held, time)) = self.statistics.observe_stretch(now, state, self.content.len() as u64) {
+            self.fill.add(held, time);
+        }
     }
 
     /// About how much memory its MUs take, for a checkpoint holding them.
@@ -262,9 +270,11 @@ impl EventInterface for Buffer {
         self.blockedlist.clear();
         self.blocked = false;
         self.statistics.reset();
+        self.fill.clear();
     }
     fn clear_statistics(&mut self, now: SimTime) {
         self.statistics.clear(now);
+        self.fill.clear();
     }
     fn report(&self, now: SimTime) -> ObjectState {
         ObjectState {
@@ -283,6 +293,7 @@ impl EventInterface for Buffer {
             process_time: None,
             configured_process_time: None,
             statistics: self.statistics.read(now),
+            fill: Some(Box::new(self.fill.read(self.statistics.in_progress(now)))),
         }
     }
     fn get_object_id(&self) -> &u32 {
@@ -316,6 +327,12 @@ impl Buffer {
             .map(|&id| Held { mu: MoveableUnit { id, location_id: object_id, left_source: SimTime::ZERO }, ready_at: dwelling_time })
             .collect();
         self.starting_mus = mus;
+    }
+
+    /// Sets the width of its fill histogram's bars, or `None` for automatic.
+    pub fn set_histogram_bar_width(&mut self, width: Option<u64>) {
+        self.histogram_bar_width = width;
+        self.fill.set_width(width);
     }
 
     /// Sets how long each MU stays. In the default state, its starting MUs dwell that long too.

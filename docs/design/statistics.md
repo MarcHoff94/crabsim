@@ -60,6 +60,16 @@ Example: a capacity 2 Station over 100s has one slot working throughout, and the
 
 `time_full` is the time spent at capacity. It describes how full the object is rather than what it's doing, so it isn't one of the state buckets and doesn't add up with them.
 
+### How full a Buffer was
+
+Built in PR 3 of build step 7 (spec issue 110). Mean, most MUs and the full share are in `ObjectStatistics`, which every object has. The fewest MUs and a histogram are a Buffer's alone (`FillKeeper` in the Buffer, reported as `ObjectState::fill`, `FillStatistics`), so no other object grows and others allocate nothing for them in a state.
+
+- **The histogram** has 64 bars of time, about 0.5 KB, so its size doesn't grow with the run or the Buffer. Automatic, bar *i* holds *i* MUs, and when more MUs come than the bars reach, neighbouring bars merge and the width doubles, so bars always start at 0 and line up across observations. With `histogram_bar_width` the width stays and the last bar takes everything beyond.
+- **The median** is weighted by time: the first bar whose time, with all below it, reaches half. It is exact while bars are 1 MU wide, and otherwise known to its bar, such as "4 to 7".
+- **The fewest MUs** is the fewest held for any length of time, or held now, so emptying and refilling at one instant doesn't count.
+- **Cost:** one comparison on a Buffer's events, as for `StatisticsKeeper`. Nothing for other objects.
+- **Stored:** `mean_mus`, `min_mus`, `max_mus`, `median_mus` (the fewest MUs of the median's bar) and, with a limit, `full_share` among a Buffer's statistics, and the bars with any time in a `histograms` table. `run_results` gives a named Buffer's histogram as mean shares, merging observations whose automatic widths differ to the widest.
+
 ### Finding a bottleneck
 
 No bottleneck figure is stored. Walk along the flow and compare blocked and starved shares. The bottleneck is where upstream objects are mostly blocked or full, and downstream objects are mostly starved. The catalogue's rule, which the window's Results tab and `find_bottleneck` share, ranks Stations by busy and full plus stopped time, so a Station with capacity that works half empty isn't taken for one.

@@ -6,7 +6,7 @@ use crate::error::OperationError;
 use crate::jobs::{run_number, RunState};
 use crate::{entry, Catalogue, Effect, Entry, Operation};
 use crabsim::time::format_time_exact;
-use crabsim::{ObjectStatistics, SimTime};
+use crabsim::{ObjectKind, ObjectState, SimTime};
 use rusqlite::{params, OptionalExtension};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -17,7 +17,7 @@ pub(crate) fn entries() -> Vec<Entry> {
 }
 
 /// Every statistic the store keeps, in the order results show them.
-pub const STATISTICS: [&str; 14] = [
+pub const STATISTICS: [&str; 19] = [
     "mus_in",
     "mus_out",
     "working_share",
@@ -32,6 +32,11 @@ pub const STATISTICS: [&str; 14] = [
     "availability",
     "throughput_per_hour",
     "mean_lead_time_s",
+    "mean_mus",
+    "min_mus",
+    "max_mus",
+    "median_mus",
+    "full_share",
 ];
 
 /// How many of the busiest, the most blocked and the most failed objects a summary shows.
@@ -46,9 +51,11 @@ const BLOCKED_FLOOR: f64 = 0.01;
 
 /// An object's figures at the end of an observation, by their names in the store. A figure that
 /// doesn't exist, such as a share before any time was measured, is left out, and so are the three
-/// parts of working but for a Station with a capacity above 1, `with_capacity`: for any other
-/// object working is all full.
-pub(crate) fn figures(statistics: &ObjectStatistics, now: SimTime, with_capacity: bool) -> Vec<(&'static str, f64)> {
+/// parts of working but for a Station with a capacity above 1: for any other object working is
+/// all full. Only a Buffer has how full it was.
+pub(crate) fn figures(object: &ObjectState, now: SimTime) -> Vec<(&'static str, f64)> {
+    let statistics = &object.statistics;
+    let with_capacity = object.kind == ObjectKind::Station && object.capacity.limit() > 1;
     let mut figures = vec![("mus_in", statistics.mus_in as f64), ("mus_out", statistics.mus_out as f64)];
     let measured = statistics.measured_time().as_millis() as f64;
     if measured > 0.0 {
@@ -80,6 +87,20 @@ pub(crate) fn figures(statistics: &ObjectStatistics, now: SimTime, with_capacity
     }
     if let Some(lead_time) = statistics.lead_time_mean() {
         figures.push(("mean_lead_time_s", lead_time.as_secs_f64()));
+    }
+    if let Some(fill) = &object.fill {
+        if let Some(mean) = statistics.average_contents() {
+            figures.push(("mean_mus", mean));
+        }
+        figures.push(("min_mus", fill.lowest as f64));
+        figures.push(("max_mus", statistics.max_contents as f64));
+        // The fewest MUs of the bar holding the median: exact while bars are 1 MU wide.
+        if let Some((from, _)) = fill.median() {
+            figures.push(("median_mus", from as f64));
+        }
+        if object.capacity != crabsim::Capacity::Unlimited && measured > 0.0 {
+            figures.push(("full_share", statistics.time_full.as_millis() as f64 / measured));
+        }
     }
     figures
 }
@@ -169,10 +190,53 @@ pub struct ObjectResults {
     /// Why it's in these results.
     pub why: Vec<Why>,
     /// By statistic: mus_in, mus_out, working_share, blocked_share, idle_share, failed_share,
-    /// paused_share, failures, availability, and for Drains throughput_per_hour and
-    /// mean_lead_time_s, named as in the store. Shares and availability are from 0 to 1, times in
-    /// seconds. A figure that is 0 in every observation is left out.
+    /// paused_share, failures, availability, for Drains throughput_per_hour and
+    /// mean_lead_time_s, and for Buffers mean_mus, min_mus, max_mus, median_mus and full_share,
+    /// named as in the store. Shares and availability are from 0 to 1, times in seconds. A figure
+    /// that is 0 in every observation is left out.
     pub figures: BTreeMap<String, Figure>,
+    /// For a Buffer named in `objects`: how long it held each number of MUs, as the mean share
+    /// of each observation's measured time, the bars with any time in order.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub histogram: Option<Vec<HistogramBar>>,
+}
+
+/// One bar of a Buffer's fill histogram over a run's observations.
+#[derive(Serialize, JsonSchema, Debug, Clone, PartialEq)]
+pub struct HistogramBar {
+    /// The fewest MUs it covers.
+    pub from_mus: u64,
+    /// The most, or none for the last bar of a set width, which covers everything from `from_mus`.
+    pub to_mus: Option<u64>,
+    /// The mean share of the measured time it held that many, from 0 to 1.
+    pub share: f64,
+}
+
+/// A Buffer's histogram over a run's observations, from each observation's bars as the store
+/// keeps them: (observation, from, to, seconds). An automatic width can differ between
+/// observations, always a power of 2, so every observation's bars are merged to the widest.
+pub(crate) fn mean_histogram(rows: &[(u32, u64, Option<u64>, f64)]) -> Vec<HistogramBar> {
+    let width = rows.iter().filter_map(|&(_, from, to, _)| to.map(|to| to - from + 1)).max().unwrap_or(1);
+    let mut observations: BTreeMap<u32, f64> = BTreeMap::new();
+    for &(observation, _, _, seconds) in rows {
+        *observations.entry(observation).or_default() += seconds;
+    }
+    let mut bars: BTreeMap<u64, (Option<u64>, f64)> = BTreeMap::new();
+    for &(observation, from, to, seconds) in rows {
+        let total = observations[&observation];
+        if total <= 0.0 {
+            continue;
+        }
+        let start = from / width * width;
+        let end = to.map(|_| start + width - 1);
+        let bar = bars.entry(start).or_insert((end, 0.0));
+        if end.is_none() {
+            bar.0 = None;
+        }
+        bar.1 += seconds / total;
+    }
+    let count = observations.values().filter(|&&total| total > 0.0).count().max(1) as f64;
+    bars.into_iter().map(|(from_mus, (to_mus, share))| HistogramBar { from_mus, to_mus, share: shown(share / count) }).collect()
 }
 
 /// One observation of a run.
@@ -358,7 +422,16 @@ impl Operation for RunResults {
                     figures.insert(statistic.to_string(), figure);
                 }
             }
-            objects.push(ObjectResults { name: name.clone(), class, built_in_class: built_in, why: why[name].clone(), figures });
+            let histogram = if built_in == "Buffer" && why[name].contains(&Why::Chosen) {
+                let mut bars = connection.prepare("SELECT observation, from_mus, to_mus, time_s FROM histograms WHERE run = ?1 AND object = ?2")?;
+                let rows = bars
+                    .query_map(params![id, name], |row| Ok((row.get::<_, u32>(0)?, row.get::<_, i64>(1)? as u64, row.get::<_, Option<i64>>(2)?.map(|to| to as u64), row.get::<_, f64>(3)?)))?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Some(mean_histogram(&rows))
+            } else {
+                None
+            };
+            objects.push(ObjectResults { name: name.clone(), class, built_in_class: built_in, why: why[name].clone(), figures, histogram });
         }
 
         Ok(RunResultsOutput {
@@ -574,7 +647,26 @@ impl Operation for ForgetRun {
         }
         transaction.execute("DELETE FROM observations WHERE run = ?1", [&input.run])?;
         transaction.execute("DELETE FROM statistics WHERE run = ?1", [&input.run])?;
+        transaction.execute("DELETE FROM histograms WHERE run = ?1", [&input.run])?;
         transaction.commit()?;
         Ok(ForgetRunOutput { forgotten: input.run })
+    }
+}
+
+#[cfg(test)]
+mod histogram_tests {
+    use super::*;
+
+    #[test]
+    fn observations_with_different_automatic_widths_merge_to_the_widest() {
+        // Observation 1 held 3 MUs 10 s and 4 MUs 30 s, one MU a bar. Observation 2 needed bars of
+        // 2: 2 and 3 for 20 s, 4 and 5 for 20 s.
+        let rows = [(1, 3, Some(3), 10.0), (1, 4, Some(4), 30.0), (2, 2, Some(3), 20.0), (2, 4, Some(5), 20.0)];
+        assert_eq!(
+            mean_histogram(&rows),
+            [HistogramBar { from_mus: 2, to_mus: Some(3), share: 0.375 }, HistogramBar { from_mus: 4, to_mus: Some(5), share: 0.625 }]
+        );
+        let open = [(1, 0, Some(4), 30.0), (1, 315, None, 10.0)];
+        assert_eq!(mean_histogram(&open)[1], HistogramBar { from_mus: 315, to_mus: None, share: 0.25 }, "a set width's last bar stays open");
     }
 }

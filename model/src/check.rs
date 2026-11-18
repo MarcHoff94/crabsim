@@ -267,6 +267,9 @@ impl<'m> Checker<'m> {
         if built_in == "Buffer" && attributes.starting_mus.is_some_and(|count| count > MOST_STARTING_MUS) {
             self.problem(owner, "/attributes/starting_mus", "a Buffer can start with at most 1,000,000 MUs");
         }
+        if built_in == "Buffer" && attributes.histogram_bar_width == Some(0) {
+            self.problem(owner, "/attributes/histogram_bar_width", "a histogram's bars must each cover at least 1 MU: leave it out for automatic");
+        }
         if built_in == "Station" && attributes.capacity == Some(Capacity::Limited(0)) {
             self.problem(owner, "/attributes/capacity", "a Station's capacity must be at least 1");
         }

@@ -125,6 +125,9 @@ fn attribute_properties(attributes: &Attributes, has: impl Fn(Attribute) -> bool
     if let Some(time) = attributes.dwelling_time.filter(|_| has(Attribute::DwellingTime)) {
         properties.push(("dwelling_time_s", seconds(time)));
     }
+    if let Some(width) = attributes.histogram_bar_width.filter(|_| has(Attribute::HistogramBarWidth)) {
+        properties.push(("histogram_bar_width", Value::Long(width)));
+    }
     if let Some(strategy) = attributes.exit_strategy.filter(|_| has(Attribute::ExitStrategy)) {
         properties.push(("exit_strategy", Value::Text(crabsim_model::exit_strategy_name(strategy).to_string())));
     }

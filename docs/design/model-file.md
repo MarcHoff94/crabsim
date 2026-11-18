@@ -94,6 +94,7 @@ Which attributes an instance has depends on its built-in class at the root of it
 | `start` | Station | `"individual"` | `"individual"`, each MU starting on entry, or `"batch"`, work beginning once the Station is full, its entrance closed until it is empty |
 | `dwelling_time` | Buffer | 0 | A time, 0 or more: how long each MU stays before it may leave, counted from its own entry |
 | `exit_strategy` | Buffer | `"first_in_first_out"` | That or `"last_in_first_out"`: which of the MUs whose dwelling time is over it passes on next |
+| `histogram_bar_width` | Buffer | automatic | A whole number from 1: how many MUs each of its fill histogram's 64 bars covers, the last bar then taking everything beyond, such as 315 or more with 5. Left out, one MU a bar, doubling whenever more MUs come than the bars reach |
 | `dimensions` | all | by type: Station 2 × 1.5 × 1.5 m, Buffer 2 × 1 × 1 m, Source and Drain 1 m each way | `length`, `width`, `height` above 0, `rotation_degrees` optional, 0 by default |
 | `description` | all | none | Free text |
 | `state_notes` | all | none | A note per state, see below |

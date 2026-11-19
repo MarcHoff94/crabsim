@@ -218,8 +218,8 @@ pub struct ViewState {
     selection: Vec<u32>,
     /// The connection selected, from and to, instead of an object.
     selected_connection: Option<(u32, u32)>,
-    /// Whether the Results tab is open, which wants full states as a selection does.
-    results_open: bool,
+    /// Whether the statistics window is open, which wants full states as a selection does.
+    statistics_open: bool,
     /// Instances something other than the selection is watching, such as an object window, by id.
     watched: Vec<u32>,
     /// The last full state, for what only a full state says, such as statistics.
@@ -310,7 +310,7 @@ pub struct Details {
     pub fill: Option<FillStatistics>,
 }
 
-/// A fill histogram's median as the inspector and Results say it: one number while bars are 1 MU
+/// A fill histogram's median as the inspector and the statistics window say it: one number while bars are 1 MU
 /// wide, otherwise the bar it lies in, such as "4 to 7" or "315 or more".
 pub fn median_text(fill: &FillStatistics) -> String {
     match fill.median() {
@@ -480,7 +480,7 @@ impl Change {
     }
 }
 
-/// A Drain's line in the Results tab.
+/// A Drain's line in the statistics window.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DrainResult {
     pub id: u32,
@@ -492,7 +492,7 @@ pub struct DrainResult {
     pub throughput_interval: Option<Interval>,
 }
 
-/// A Buffer's line in the Results tab: how full it was.
+/// A Buffer's line in the statistics window: how full it was.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BufferResult {
     pub id: u32,
@@ -504,7 +504,7 @@ pub struct BufferResult {
     pub full: Option<f64>,
 }
 
-/// A Station's line in the Results tab: its shares of the time measured, from 0 to 1.
+/// A Station's line in the statistics window: its shares of the time measured, from 0 to 1.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StationResult {
     pub id: u32,
@@ -547,7 +547,7 @@ impl Interval {
     }
 }
 
-/// A Station's shares of time as intervals, as the Results tab's columns have them.
+/// A Station's shares of time as intervals, as the statistics window's columns have them.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct StationIntervals {
     pub busy: Interval,
@@ -567,7 +567,7 @@ pub struct PeriodsSoFar {
     pub complete: u64,
 }
 
-/// How many measuring periods have to be complete before the Results tab gives intervals. Fewer
+/// How many measuring periods have to be complete before the statistics window gives intervals. Fewer
 /// give intervals too wide to say much, and too few samples to trust their spread.
 pub const MIN_PERIODS: u64 = 5;
 
@@ -579,7 +579,7 @@ pub const PERIOD_FAILURE_FACTOR: u64 = 5;
 /// The measuring period runs use until the user sets another: an hour of simulated time.
 pub const DEFAULT_MEASURING_PERIOD: SimTime = SimTime::from_secs(3_600);
 
-/// What the Results tab shows, from the run's full state at `as_of`.
+/// What the statistics window shows, from the run's full state at `as_of`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Results {
     pub as_of: SimTime,
@@ -675,7 +675,7 @@ impl ViewState {
             trip_ended: false,
             longest_failure_time: model.longest_failure_time(),
             animate: true,
-            results_open: false,
+            statistics_open: false,
             watched: Vec::new(),
         }
     }
@@ -1309,7 +1309,7 @@ impl ViewState {
     pub fn wants_state(&self, wall: Duration) -> bool {
         let out_of_date = self.details_stale
             || self.details.as_ref().is_none_or(|state| state.time != self.picture.shown() || !state.initialised);
-        (self.selected().is_some() || !self.watched.is_empty() || self.results_open)
+        (self.selected().is_some() || !self.watched.is_empty() || self.statistics_open)
             && self.initialised
             && out_of_date
             && self.last_request.is_none_or(|last| wall >= last + DETAILS_INTERVAL)
@@ -1352,12 +1352,12 @@ impl ViewState {
         self.watched.extend_from_slice(ids);
     }
 
-    /// Notes whether the Results tab is open, so full states are asked for while it is.
-    pub fn set_results_open(&mut self, open: bool) {
-        self.results_open = open;
+    /// Notes whether the statistics window is open, so full states are asked for while it is.
+    pub fn set_statistics_open(&mut self, open: bool) {
+        self.statistics_open = open;
     }
 
-    /// What the Results tab shows: each Drain's throughput and lead time, every Station's shares
+    /// What the statistics window shows: each Drain's throughput and lead time, every Station's shares
     /// of time, and the likely bottleneck, from the last full state of the run. `None` until one
     /// has arrived after Init.
     pub fn results(&self) -> Option<Results> {
@@ -1456,7 +1456,7 @@ impl ViewState {
         })
     }
 
-    /// When the results are from, as the Results tab says it: whole seconds while the run is
+    /// When the results are from, as the statistics window says it: whole seconds while the run is
     /// advancing, and to the millisecond once it stands still.
     pub fn results_time(&self, results: &Results) -> String {
         match self.status {

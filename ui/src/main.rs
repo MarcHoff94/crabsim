@@ -152,6 +152,7 @@ fn main() {
             keep_changes: false,
             confirm_reset: None,
             results_sort: SortBy::Model,
+            statistics_open: false,
             confirm_building: None,
             new_model: None,
             duplicating: None,
@@ -281,8 +282,10 @@ struct Ui {
     /// A Reset waiting for the user: to drop the changes it names, or to keep them anyway while an
     /// agent holds the file.
     confirm_reset: Option<ResetAsk>,
-    /// How the Results tab sorts its Stations.
+    /// How the statistics window sorts its Stations.
     results_sort: SortBy,
+    /// Whether the statistics window is open.
+    statistics_open: bool,
     /// A building action refused because an agent holds the file or it changed outside crabsim,
     /// waiting for the user to make it anyway or leave it, with why it was refused.
     confirm_building: Option<(Building, Refusal)>,
@@ -579,12 +582,11 @@ impl Moving {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tab {
     Inspector,
-    Results,
     Paths,
     Agents,
 }
 
-/// What the Results tab's Stations are sorted by, most first, or model order.
+/// What the statistics window's Stations are sorted by, most first, or model order.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SortBy {
     Model,
@@ -1276,8 +1278,8 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
     }
     let mut request = None;
     let top = egui::Panel::top("top bar").show(&mut root, |panel| {
-        let Ui { view, workspace, jump_text, seed_text, period_text, end_text, keep_changes, .. } = &mut *ui;
-        request = top_bar(panel, view, workspace, jump_text, seed_text, period_text, end_text, keep_changes)
+        let Ui { view, workspace, jump_text, seed_text, period_text, end_text, keep_changes, statistics_open, .. } = &mut *ui;
+        request = top_bar(panel, view, workspace, jump_text, seed_text, period_text, end_text, keep_changes, statistics_open)
     });
     let mut bottom_of_bars = top.response.rect.bottom();
     // An agent's claim on the open model, whichever tab is open.
@@ -1328,7 +1330,6 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
     let mut dock_asked = None;
     let mut editors_action = None;
     let mut history_clicked = None;
-    let mut results_chosen = None;
     let mut several_asked = None;
     // The values shared by several selected objects, read again when the selection changes.
     let several: Vec<u32> = ui.view.selection().to_vec();
@@ -1373,8 +1374,7 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
     let inspector_left = inspector_panel(&mut root, |panel| {
         panel.horizontal(|row| {
             for (tab, label, hint) in [
-                (Tab::Inspector, "Inspector", "The object clicked on the canvas: its state, statistics and attributes (t1)"),
-                (Tab::Results, "Results", "The run so far: each Drain's throughput, every Station's shares of time, and the likely bottleneck (t2)"),
+                (Tab::Inspector, "Inspector", "A summary of the object clicked on the canvas. Double-click it for a window with everything about it (t1)"),
                 (Tab::Paths, "Paths", "See the model's routes, weights and distribution strategies on the canvas. Values change in the inspector (t3)"),
                 (Tab::Agents, "Agents", "The AI agents changing this folder's models, what they're doing, and your control of them (t4)"),
             ] {
@@ -1408,10 +1408,6 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
                 }
                 _ => dock_asked = dock_summary(panel, inspection.as_ref(), ui.dock.as_ref()),
             },
-            Tab::Results => {
-                let results = ui.view.results().map(|results| (ui.view.results_time(&results), results));
-                results_chosen = results_tab(panel, results.as_ref().map(|(at, results)| (at.as_str(), results)), &mut ui.results_sort);
-            }
             Tab::Paths => paths_tab(panel, &mut ui.paths, ui.view.objects(), ui.view.live_figure("mus_in").is_some()),
             Tab::Agents => {
                 editors_action = agents_tab(panel, ui.workspace.opened(), ui.editors.as_ref(), ui.editors_note.as_deref());
@@ -1419,9 +1415,10 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
             }
         });
     }).1;
-    // Full states are asked for while results are shown, or the Paths tab weighs the live run.
+    // Full states are asked for while the statistics window is open, or the Paths tab weighs the
+    // live run.
     let live_paths = ui.tab == Tab::Paths && matches!(ui.paths.weigh, Weigh::Figure(_));
-    ui.view.set_results_open(ui.tab == Tab::Results || live_paths);
+    ui.view.set_statistics_open(ui.statistics_open || live_paths);
     // Open object windows are watched too, so one full state serves them all.
     let watched = ui.windows.follow(&ui.view);
     ui.view.watch(&watched);
@@ -1432,9 +1429,18 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
         _ => {}
     }
     find_paths(ui);
-    if let Some(id) = results_chosen {
-        ui.view.select(Some(id));
-        ui.view.commanded(wall);
+    let results_chosen = statistics_window(&ctx, ui);
+    match results_chosen {
+        Some(Chosen::Select(id)) => {
+            ui.view.select(Some(id));
+            ui.view.commanded(wall);
+        }
+        Some(Chosen::Open(id)) => {
+            ui.view.select(Some(id));
+            ui.view.commanded(wall);
+            open_window(ui, id);
+        }
+        None => {}
     }
     // A click on a change goes back, or on, to the model as it was after it, asking first.
     if let Some(number) = history_clicked {
@@ -2667,6 +2673,7 @@ fn top_bar(
     period_text: &mut String,
     end_text: &mut String,
     keep_changes: &mut bool,
+    statistics_open: &mut bool,
 ) -> Option<Request> {
     let mut request = None;
     // Two rows, each narrower than the window's minimum width, so neither wraps or loses a
@@ -2807,6 +2814,12 @@ fn top_bar(
                 request = Some(Request::TimeMode(mode));
             }
         }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let hint = "The run so far in a window of its own: each Drain's throughput, every Station's shares of time, the Buffers and the likely bottleneck (t2)";
+            if ui.selectable_label(*statistics_open, "Statistics").on_hover_text(hint).clicked() {
+                *statistics_open = !*statistics_open;
+            }
+        });
     });
     if !view.marks().is_empty() {
         timeline(ui, view);
@@ -2908,7 +2921,7 @@ fn confirm_long_trip(ctx: &egui::Context, ui: &mut Ui) -> Option<Request> {
     answer
 }
 
-const PERIOD_HINT: &str = "The measuring period: a stretch of simulated time whose figures count as one sample, such as 1:00:00. The Results tab gives intervals from the spread between periods once 5 are complete. Make it long against the time between failures.";
+const PERIOD_HINT: &str = "The measuring period: a stretch of simulated time whose figures count as one sample, such as 1:00:00. The statistics window gives intervals from the spread between periods once 5 are complete. Make it long against the time between failures.";
 
 const SEED_HINT: &str = "The number every random value in a run follows from, such as when a Station fails. The same seed gives the same result.";
 
@@ -3574,7 +3587,7 @@ fn confirm_taking(ctx: &egui::Context, claim: &Claim) -> Option<bool> {
     answer
 }
 
-/// A share from 0 to 1 as the Results tab writes it.
+/// A share from 0 to 1 as the statistics window writes it.
 fn percent(share: f64) -> String {
     format!("{:.1} %", share * 100.0)
 }
@@ -3590,18 +3603,51 @@ const NOTE_COLOUR: egui::Color32 = egui::Color32::from_rgb(240, 200, 80);
 /// The run so far: each Drain's throughput and lead time, the likely bottleneck with its
 /// neighbours as evidence, and every Station's shares of time, sorted by a column clicked.
 /// Returns an object whose name was clicked, to select it.
-fn results_tab(ui: &mut egui::Ui, results: Option<(&str, &crabsim_ui::view::Results)>, sort: &mut SortBy) -> Option<u32> {
-    ui.heading("Results");
+/// A name clicked in the statistics window: once to select its object, twice for its window.
+#[derive(Clone, Copy)]
+enum Chosen {
+    Select(u32),
+    Open(u32),
+}
+
+/// The statistics window: what a run has measured so far, at shown time, in a resizable window
+/// that the top bar's Statistics button and `t2` open (spec issue 116). Returns a name clicked.
+fn statistics_window(ctx: &egui::Context, ui: &mut Ui) -> Option<Chosen> {
+    if !ui.statistics_open {
+        return None;
+    }
+    let results = ui.view.results().map(|results| (ui.view.results_time(&results), results));
+    let mut open = true;
+    let mut chosen = None;
+    // At the canvas's top left, away from the object windows at its top right.
+    let place = ui.canvas.map_or(egui::pos2(220.0, 80.0), |canvas| canvas.min + egui::vec2(8.0, 8.0));
+    egui::Window::new("Statistics")
+        .id(egui::Id::new("statistics window"))
+        .open(&mut open)
+        .default_pos(place)
+        .default_size(egui::vec2(640.0, 420.0))
+        .resizable(true)
+        .scroll([true, true])
+        .show(ctx, |window| {
+            chosen = results_view(window, results.as_ref().map(|(at, results)| (at.as_str(), results)), &mut ui.results_sort);
+        });
+    ui.statistics_open = open;
+    chosen
+}
+
+fn results_view(ui: &mut egui::Ui, results: Option<(&str, &crabsim_ui::view::Results)>, sort: &mut SortBy) -> Option<Chosen> {
     let Some((at, results)) = results else {
         ui.label(egui::RichText::new("Start the model, or go to a time such as 8:00:00, and its results show here.").weak());
         return None;
     };
     let mut chosen = None;
-    let pick = |ui: &mut egui::Ui, id: u32, name: &str, chosen: &mut Option<u32>| {
-        let link = ui.link(name).on_hover_text("Select it on the canvas");
-        focus_if_wanted(ui, &link, "tab");
-        if link.clicked() {
-            *chosen = Some(id);
+    let pick = |ui: &mut egui::Ui, id: u32, name: &str, chosen: &mut Option<Chosen>| {
+        let link = ui.link(name).on_hover_text("Click to select it on the canvas, double-click for its window");
+        focus_if_wanted(ui, &link, "statistics");
+        if link.double_clicked() {
+            *chosen = Some(Chosen::Open(id));
+        } else if link.clicked() {
+            *chosen = Some(Chosen::Select(id));
         }
     };
     ui.label(egui::RichText::new(format!("At {at}, measured since {}", format_time(results.since))).weak());
@@ -4545,7 +4591,16 @@ fn run_key(ctx: &egui::Context, ui: &mut Ui, session: &Session, command: Command
         }
         Command::CloseAllWindows => ui.windows.close_all(),
         Command::Tab(place) => {
-            ui.tab = [Tab::Inspector, Tab::Results, Tab::Paths, Tab::Agents][place.clamp(1, 4) - 1];
+            // t2 opens the statistics window, which took the place of the Results tab, so t3 and t4 stay put.
+            match place.clamp(1, 4) {
+                1 => ui.tab = Tab::Inspector,
+                2 => {
+                    ui.statistics_open = true;
+                    want_focus(ctx, "statistics");
+                }
+                3 => ui.tab = Tab::Paths,
+                _ => ui.tab = Tab::Agents,
+            }
         }
         // With an instance selected, Enter opens its window at its first field.
         Command::Edit if ui.view.selected().is_some() && ui.view.selected_connection().is_none() => {
@@ -4966,7 +5021,7 @@ fn keys_help(ctx: &egui::Context, ui: &mut Ui) {
                 ("u  Ctrl+R", "undo the last change to the model, redo it: 3u undoes three. The Agents tab lists the changes"),
             ],
         ),
-        ("Panels", &[("t1 to t4", "Inspector, Results, Paths, Agents"), ("Enter", "into the selection's first field, in its window, or else the open tab's first control, then Tab on"), ("o", "open a model file")]),
+        ("Panels", &[("t1 t3 t4", "the Inspector, Paths and Agents tabs"), ("t2", "the statistics window"), ("Enter", "into the selection's first field, in its window, or else the open tab's first control, then Tab on"), ("o", "open a model file")]),
         ("Find", &[("/", "search by name, then n and N for the next and previous"), ("e", "go to a value, such as proc or Station 3.proc")]),
         ("Help", &[("?", "this list")]),
     ];

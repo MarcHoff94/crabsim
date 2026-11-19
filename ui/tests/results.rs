@@ -1,4 +1,4 @@
-//! The Results tab: each Drain's throughput and lead time, every Station's shares of time, and
+//! The statistics window: each Drain's throughput and lead time, every Station's shares of time, and
 //! the likely bottleneck by the catalogue's own rule, from the run's full state at shown time. No
 //! window.
 
@@ -11,16 +11,16 @@ use crabsim_ui::view::{Results, ViewState, MIN_PERIODS};
 use std::time::Duration;
 
 #[test]
-fn results_come_only_once_a_full_state_is_there_and_are_asked_for_while_the_tab_is_open() {
+fn results_come_only_once_a_full_state_is_there_and_are_asked_for_while_the_window_is_open() {
     let mut watched = Watched::demo();
     assert!(watched.view.results().is_none(), "nothing before Init");
     watched.session.start().unwrap();
     watched.at(600);
     watched.session.halt().unwrap();
     watched.frame();
-    assert!(!watched.view.wants_state(watched.wall()), "nothing selected and the tab closed");
-    watched.view.set_results_open(true);
-    assert!(watched.view.wants_state(watched.wall()), "the tab open wants the state at shown time");
+    assert!(!watched.view.wants_state(watched.wall()), "nothing selected and the statistics window closed");
+    watched.view.set_statistics_open(true);
+    assert!(watched.view.wants_state(watched.wall()), "the statistics window open wants the state at shown time");
     watched.details();
     let results = watched.view.results().expect("a full state at shown time");
     assert_eq!(results.as_of, SimTime::from_secs(600));
@@ -29,7 +29,7 @@ fn results_come_only_once_a_full_state_is_there_and_are_asked_for_while_the_tab_
 #[test]
 fn results_give_every_drain_and_station_and_the_likely_bottleneck_by_the_catalogues_rule() {
     let mut watched = Watched::demo();
-    watched.view.set_results_open(true);
+    watched.view.set_statistics_open(true);
     watched.session.start().unwrap();
     watched.at(4 * 3_600);
     watched.session.halt().unwrap();
@@ -77,7 +77,7 @@ fn results_say_whole_seconds_while_running_and_milliseconds_when_halted() {
 
 const HOUR: SimTime = SimTime::from_secs(3_600);
 
-/// What the Results tab shows for `model` run headless to `at`, measuring in periods of `period`.
+/// What the statistics window shows for `model` run headless to `at`, measuring in periods of `period`.
 fn results_of(model: &ModelDescription, period: Option<SimTime>, at: SimTime) -> Results {
     let mut view = ViewState::new(model);
     let mut run = model.build(5);
@@ -126,7 +126,7 @@ fn intervals_come_once_five_measuring_periods_are_complete() {
 }
 
 #[test]
-fn without_periods_the_tab_gives_no_intervals_and_asks_for_none() {
+fn without_periods_the_window_gives_no_intervals_and_asks_for_none() {
     let results = results_of(&demo::model(), None, HOUR.times(12));
     assert_eq!(results.periods, None);
     assert!(results.stations.iter().all(|station| station.intervals.is_none()));

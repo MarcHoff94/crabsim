@@ -116,7 +116,8 @@ pub enum Command {
     Animate,
     /// Into the Go to field.
     GoTo,
-    /// To the tab at this place, from 1: Inspector, Results, Paths, Agents.
+    /// To the tab at this place, from 1: Inspector, the statistics window (which was the Results
+    /// tab), Paths, Agents.
     Tab(usize),
     /// Into the selected object's first field.
     Edit,

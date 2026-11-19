@@ -1,4 +1,4 @@
-//! A Station with capacity in the view: the inspector's three parts of busy and the Results tab's
+//! A Station with capacity in the view: the inspector's three parts of busy and the statistics window's
 //! Full column, with a real session on a fake clock and no window (spec issue 110, PR 2).
 
 mod common;
@@ -64,7 +64,7 @@ fn the_inspector_splits_a_station_with_capacitys_busy_time_into_three() {
 #[test]
 fn results_show_a_full_column_and_rank_the_bottleneck_by_it() {
     let mut watched = halted_at_30();
-    watched.view.set_results_open(true);
+    watched.view.set_statistics_open(true);
     watched.details();
     let results = watched.view.results().unwrap();
     assert!(results.with_capacity);

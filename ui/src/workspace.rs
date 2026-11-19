@@ -1076,7 +1076,7 @@ impl Workspace {
     }
 
     /// The measuring period every run from now on uses, whose figures each count as one sample
-    /// for the Results tab's intervals. It stays for the window, whatever model is open.
+    /// for the statistics window's intervals. It stays for the window, whatever model is open.
     pub fn set_measuring_period(&mut self, length: SimTime) {
         self.measuring_period = length;
     }

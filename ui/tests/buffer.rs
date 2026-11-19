@@ -107,7 +107,7 @@ fn the_inspector_and_results_say_how_full_a_buffer_was_with_its_histogram() {
     let shown: Vec<(&str, String)> = bars.iter().map(|bar| (bar.mus.as_str(), format!("{:.3}", bar.share))).collect();
     assert_eq!(shown, [("0", "0.167".to_string()), ("1", "0.167".to_string()), ("2", "0.250".to_string()), ("3", "0.417".to_string())]);
 
-    watched.view.set_results_open(true);
+    watched.view.set_statistics_open(true);
     watched.details();
     let results = watched.view.results().unwrap();
     assert_eq!(results.buffers.len(), 1);

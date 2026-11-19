@@ -32,6 +32,9 @@ pub struct ObjectView {
     pub id: u32,
     pub kind: ObjectKind,
     pub name: String,
+    /// The instance's stream, which a model file keeps through every edit (ADR 0012), so it
+    /// names the instance across renames, moves and the ids shifting when another is removed.
+    pub stream: u64,
     pub centre: Point,
     /// Along the object's own x axis, before rotation.
     pub length: f64,
@@ -217,6 +220,8 @@ pub struct ViewState {
     selected_connection: Option<(u32, u32)>,
     /// Whether the Results tab is open, which wants full states as a selection does.
     results_open: bool,
+    /// Instances something other than the selection is watching, such as an object window, by id.
+    watched: Vec<u32>,
     /// The last full state, for what only a full state says, such as statistics.
     details: Option<RunState>,
     /// Whether something since the last full state may have changed it at the same shown time.
@@ -415,6 +420,31 @@ impl Inspection {
     }
 }
 
+impl Inspection {
+    /// The three figures the docked panel's summary shows, by type: a Station's Busy, Blocked and
+    /// Idle, with Busy full instead of Busy when it has a capacity above 1; a Buffer's mean and
+    /// most MUs and its Full, or Empty with no limit; a Source's MUs out and Blocked; a Drain's
+    /// MUs in, throughput and lead time. Empty until a full state has arrived.
+    pub fn key_figures(&self) -> Vec<(&'static str, String)> {
+        let rows = self.statistics_rows();
+        let find = |label: &str| rows.iter().find(|(name, _)| *name == label).map(|(_, value)| value.clone());
+        let pick = |wanted: &[(&'static str, &str)]| -> Vec<(&'static str, String)> {
+            wanted.iter().filter_map(|&(shown, label)| find(label).map(|value| (shown, value))).collect()
+        };
+        let Some(details) = &self.details else { return Vec::new() };
+        match self.kind {
+            ObjectKind::Station if details.capacity > 1 => {
+                pick(&[("Busy, full", "  every place in work"), ("Blocked", "Blocked"), ("Idle", "Idle")])
+            }
+            ObjectKind::Station => pick(&[("Busy", "Busy"), ("Blocked", "Blocked"), ("Idle", "Idle")]),
+            ObjectKind::Buffer if details.limited => pick(&[("Mean MUs", "Mean MUs"), ("Most MUs", "Most MUs"), ("Full", "Full")]),
+            ObjectKind::Buffer => pick(&[("Mean MUs", "Mean MUs"), ("Most MUs", "Most MUs"), ("Empty", "Empty")]),
+            ObjectKind::Source => pick(&[("MUs out", "MUs out"), ("Blocked", "Blocked")]),
+            ObjectKind::Drain => pick(&[("Throughput", "Throughput"), ("Lead time", "Mean lead time")]),
+        }
+    }
+}
+
 impl Details {
     /// The process time in force, with the configured one beside it only when they differ, such as
     /// "00:00:20 (configured 00:00:10)". `None` for an object without one.
@@ -600,6 +630,7 @@ impl ViewState {
                     id,
                     kind,
                     name: model.name(id).map_or_else(|| format!("{kind:?} {id}"), str::to_owned),
+                    stream: model.stream(id),
                     centre,
                     length: size.length,
                     width: size.width,
@@ -645,6 +676,7 @@ impl ViewState {
             longest_failure_time: model.longest_failure_time(),
             animate: true,
             results_open: false,
+            watched: Vec::new(),
         }
     }
 
@@ -1173,6 +1205,11 @@ impl ViewState {
         }
     }
 
+    /// The id of the object with this stream, if the model has one.
+    pub fn id_of_stream(&self, stream: u64) -> Option<u32> {
+        self.objects.iter().find(|object| object.stream == stream).map(|object| object.id)
+    }
+
     /// The object selected, when exactly one is.
     pub fn selected(&self) -> Option<u32> {
         match self.selection.as_slice() {
@@ -1190,8 +1227,13 @@ impl ViewState {
 
     /// What the inspector says about the selected object.
     pub fn inspection(&self) -> Option<Inspection> {
-        let id = self.selected()?;
-        let object = &self.objects[id as usize];
+        self.inspection_of(self.selected()?)
+    }
+
+    /// What the inspector says about any object, by id, selected or not. `None` for an id the
+    /// model doesn't have.
+    pub fn inspection_of(&self, id: u32) -> Option<Inspection> {
+        let object = self.objects.get(id as usize)?;
         let pictured = self.picture.object(id);
         let state = match pictured {
             None => "No state yet",
@@ -1261,12 +1303,13 @@ impl ViewState {
     }
 
     /// Whether the window should ask the session for a full state at wall time `wall`: only while
-    /// something is selected, at most twice a second, and only when the last one may be out of
-    /// date. So a halted window asks once, and again only after something changes.
+    /// something is watched (the selection, an instance in `watch`, or the results), at most twice
+    /// a second, and only when the last one may be out of date. Everything watched shares the one
+    /// request. So a halted window asks once, and again only after something changes.
     pub fn wants_state(&self, wall: Duration) -> bool {
         let out_of_date = self.details_stale
             || self.details.as_ref().is_none_or(|state| state.time != self.picture.shown() || !state.initialised);
-        (self.selected().is_some() || self.results_open)
+        (self.selected().is_some() || !self.watched.is_empty() || self.results_open)
             && self.initialised
             && out_of_date
             && self.last_request.is_none_or(|last| wall >= last + DETAILS_INTERVAL)
@@ -1299,6 +1342,14 @@ impl ViewState {
             }
         }
         Some(values)
+    }
+
+    /// Sets which instances are being watched besides the selection, such as by an object window,
+    /// so full states are asked for while there are any. It replaces the earlier set, so it is
+    /// called with what is open each frame.
+    pub fn watch(&mut self, ids: &[u32]) {
+        self.watched.clear();
+        self.watched.extend_from_slice(ids);
     }
 
     /// Notes whether the Results tab is open, so full states are asked for while it is.

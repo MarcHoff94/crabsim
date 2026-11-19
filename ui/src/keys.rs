@@ -120,6 +120,12 @@ pub enum Command {
     Tab(usize),
     /// Into the selected object's first field.
     Edit,
+    /// `w`: the selection's window, opened or brought forward.
+    OpenWindow,
+    /// `W`: closes the selection's window.
+    CloseWindow,
+    /// `gW`: closes every object window.
+    CloseAllWindows,
     /// A prompt's text changed, or it opened.
     Prompted(PromptKind, String),
     /// Tab in a prompt: complete, or go to the next candidate.
@@ -227,6 +233,7 @@ impl Keys {
             return match (first, key) {
                 ('g', Key::Char('g')) => vec![Command::First],
                 ('g', Key::Char('t')) => vec![Command::GoTo],
+                ('g', Key::Char('W')) => vec![Command::CloseAllWindows],
                 ('z', Key::Char('z')) => vec![Command::Centre],
                 // A digit alone begins a count, so a tab is `t` and its place.
                 ('t', Key::Char(tab @ '1'..='4')) => vec![Command::Tab(tab.to_digit(10).expect("a digit") as usize)],
@@ -265,6 +272,8 @@ impl Keys {
             Key::Char('>') => vec![Command::Successor(place)],
             Key::Char('<') => vec![Command::Predecessor(place)],
             Key::Char('G') => vec![Command::Last],
+            Key::Char('w') => vec![Command::OpenWindow],
+            Key::Char('W') => vec![Command::CloseWindow],
             // q stops a recording at once.
             Key::Char('q') if self.recording => {
                 self.recording = false;

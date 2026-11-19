@@ -32,6 +32,9 @@ pub struct ObjectView {
     pub id: u32,
     pub kind: ObjectKind,
     pub name: String,
+    /// The instance's stream, which a model file keeps through every edit (ADR 0012), so it
+    /// names the instance across renames, moves and the ids shifting when another is removed.
+    pub stream: u64,
     pub centre: Point,
     /// Along the object's own x axis, before rotation.
     pub length: f64,
@@ -417,6 +420,31 @@ impl Inspection {
     }
 }
 
+impl Inspection {
+    /// The three figures the docked panel's summary shows, by type: a Station's Busy, Blocked and
+    /// Idle, with Busy full instead of Busy when it has a capacity above 1; a Buffer's mean and
+    /// most MUs and its Full, or Empty with no limit; a Source's MUs out and Blocked; a Drain's
+    /// MUs in, throughput and lead time. Empty until a full state has arrived.
+    pub fn key_figures(&self) -> Vec<(&'static str, String)> {
+        let rows = self.statistics_rows();
+        let find = |label: &str| rows.iter().find(|(name, _)| *name == label).map(|(_, value)| value.clone());
+        let pick = |wanted: &[(&'static str, &str)]| -> Vec<(&'static str, String)> {
+            wanted.iter().filter_map(|&(shown, label)| find(label).map(|value| (shown, value))).collect()
+        };
+        let Some(details) = &self.details else { return Vec::new() };
+        match self.kind {
+            ObjectKind::Station if details.capacity > 1 => {
+                pick(&[("Busy, full", "  every place in work"), ("Blocked", "Blocked"), ("Idle", "Idle")])
+            }
+            ObjectKind::Station => pick(&[("Busy", "Busy"), ("Blocked", "Blocked"), ("Idle", "Idle")]),
+            ObjectKind::Buffer if details.limited => pick(&[("Mean MUs", "Mean MUs"), ("Most MUs", "Most MUs"), ("Full", "Full")]),
+            ObjectKind::Buffer => pick(&[("Mean MUs", "Mean MUs"), ("Most MUs", "Most MUs"), ("Empty", "Empty")]),
+            ObjectKind::Source => pick(&[("MUs out", "MUs out"), ("Blocked", "Blocked")]),
+            ObjectKind::Drain => pick(&[("Throughput", "Throughput"), ("Lead time", "Mean lead time")]),
+        }
+    }
+}
+
 impl Details {
     /// The process time in force, with the configured one beside it only when they differ, such as
     /// "00:00:20 (configured 00:00:10)". `None` for an object without one.
@@ -602,6 +630,7 @@ impl ViewState {
                     id,
                     kind,
                     name: model.name(id).map_or_else(|| format!("{kind:?} {id}"), str::to_owned),
+                    stream: model.stream(id),
                     centre,
                     length: size.length,
                     width: size.width,
@@ -1174,6 +1203,11 @@ impl ViewState {
                 Some(Deletion::Instances { names: ids.into_iter().map(name).collect(), connections })
             }
         }
+    }
+
+    /// The id of the object with this stream, if the model has one.
+    pub fn id_of_stream(&self, stream: u64) -> Option<u32> {
+        self.objects.iter().find(|object| object.stream == stream).map(|object| object.id)
     }
 
     /// The object selected, when exactly one is.

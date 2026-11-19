@@ -35,6 +35,7 @@ use crabsim_ui::paths::{Paths, Strategy, Weigh};
 use crabsim_ui::attributes::{Form, RepairKind};
 use crabsim_ui::editing::{ActRefusal, Claim, EditAction, Editors};
 use crabsim_ui::help;
+use crabsim_ui::inspector::{AttributeChange, Inspector, Inspectors, Section};
 use crabsim_ui::history::{Entry, History, Jump};
 use crabsim_ui::workspace::{AttributeView, ClassEntry, ConnectionView, End, ModelChange, Refusal, ValueFrom, Workspace};
 use std::collections::HashMap;
@@ -129,7 +130,6 @@ fn main() {
             canvas: None,
             jump_text: String::new(),
             press: None,
-            process_time_text: (None, String::new()),
             pending: None,
             long_trip: None,
             workspace,
@@ -138,9 +138,9 @@ fn main() {
             end_text: String::new(),
             replacing: None,
             rebuild_scene: false,
-            attributes: None,
-            forms: HashMap::new(),
-            refused: None,
+            dock: None,
+            windows: Inspectors::default(),
+            last_click: None,
             tab: Tab::Inspector,
             editors: None,
             editors_stamp: None,
@@ -151,14 +151,12 @@ fn main() {
             confirm_move: None,
             keep_changes: false,
             confirm_reset: None,
-            help_open: false,
             results_sort: SortBy::Model,
             confirm_building: None,
             new_model: None,
             duplicating: None,
             class_selected: None,
             placing: None,
-            name_text: (None, String::new()),
             select_name: None,
             connecting: None,
             pointer_floor: None,
@@ -234,8 +232,6 @@ struct Ui {
     /// Where the left button went down on the canvas, and how far the pointer has moved since,
     /// in logical pixels. A short enough press is a click, which selects.
     press: Option<(Vec2, f32)>,
-    /// What has been typed into the inspector's process time field, and for which object.
-    process_time_text: (Option<u32>, String),
     /// Going back that drops interventions, waiting for the user to confirm it.
     pending: Option<GoingBack>,
     /// Going on to a later time that would take long animated, waiting for the user to choose
@@ -253,13 +249,14 @@ struct Ui {
     replacing: Option<String>,
     /// The view changed model or seed, so the objects are drawn afresh.
     rebuild_scene: bool,
-    /// The selected instance's attributes, read from the model file, and for which object.
-    attributes: Option<(u32, Result<Vec<AttributeView>, String>)>,
-    /// The fields for each attribute of the selected instance, by attribute.
-    forms: HashMap<String, Form>,
-    /// The last change refused, for its attribute: why, and the change to make anyway if an agent
-    /// holds the file.
-    refused: Option<(String, Refusal, Option<AttributeChange>)>,
+    /// What the docked panel keeps about the selected instance: its attributes, as read from the
+    /// model file, for the summary. Made again when the selection changes.
+    dock: Option<Inspector>,
+    /// The object windows that are open (spec issue 116), each with what it keeps about its
+    /// instance, named by the instance's stream.
+    windows: Inspectors,
+    /// The object last clicked and when, so a second click on it soon after is a double-click.
+    last_click: Option<(u32, Duration)>,
     /// Which tab the right-hand column shows.
     tab: Tab,
     /// Who holds each model file, as last read, while the Agents tab shows it.
@@ -283,8 +280,6 @@ struct Ui {
     /// A Reset waiting for the user: to drop the changes it names, or to keep them anyway while an
     /// agent holds the file.
     confirm_reset: Option<ResetAsk>,
-    /// Whether the help on the selected object's states is open.
-    help_open: bool,
     /// How the Results tab sorts its Stations.
     results_sort: SortBy,
     /// A building action refused because an agent holds the file or it changed outside crabsim,
@@ -299,8 +294,6 @@ struct Ui {
     class_selected: Option<(String, Result<Vec<AttributeView>, String>)>,
     /// The class being dragged from the Classes panel to place an instance of it.
     placing: Option<String>,
-    /// What has been typed into the inspector's name field, and for which object.
-    name_text: (Option<u32>, String),
     /// An instance to select once the model it was just saved into is drawn, by name.
     select_name: Option<String>,
     /// The object a connection is being dragged from, by its connect handle.
@@ -596,21 +589,6 @@ enum SortBy {
     Blocked,
     Idle,
     Failed,
-}
-
-/// A change to one attribute of the selected instance, asked for in the inspector.
-#[derive(Clone)]
-enum AttributeChange {
-    Set(String, serde_json::Value),
-    Restore(String),
-}
-
-impl AttributeChange {
-    fn attribute(&self) -> &str {
-        match self {
-            AttributeChange::Set(attribute, _) | AttributeChange::Restore(attribute) => attribute,
-        }
-    }
 }
 
 /// A way of going back that waits for confirmation, and the time it goes to.
@@ -948,7 +926,17 @@ fn canvas_input(
         } else if travelled < CLICK_SLOP {
             let pointer = floor(at);
             match ui.view.object_at(pointer) {
-                Some(id) => ui.view.select(Some(id)),
+                Some(id) => {
+                    ui.view.select(Some(id));
+                    // A second click on the same object soon after opens its window.
+                    let now = time.elapsed();
+                    if ui.last_click.is_some_and(|(last, at)| last == id && now.saturating_sub(at) < DOUBLE_CLICK) {
+                        open_window(ui, id);
+                        ui.last_click = None;
+                    } else {
+                        ui.last_click = Some((id, now));
+                    }
+                }
                 // Off every object, a click near a connection's line selects the connection.
                 None => match ui.view.connection_at(pointer, within(CLICK_PIXELS)) {
                     Some(connection) => ui.view.select_connection(Some(connection)),
@@ -1230,6 +1218,12 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
     } else {
         None
     };
+    // Esc in a field gives the keyboard back to the canvas.
+    if !keyboard_free && ctx.input(|input| input.key_pressed(egui::Key::Escape)) && !dialog_open {
+        if let Some(focused) = ctx.memory(|memory| memory.focused()) {
+            ctx.memory_mut(|memory| memory.surrender_focus(focused));
+        }
+    }
     // Steps asked for with a count go one a frame, each once the one before allows it.
     let key_request = key_request.or_else(|| pending_step(ui));
     // The next line of a macro that holds window commands.
@@ -1311,37 +1305,23 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
             .show(&mut root, |panel| error_banner(panel, error, ui.view.run_failed()));
         bottom_of_bars = banner.response.rect.bottom();
     }
-    // What has been typed for a process time belongs to the object it was typed for.
-    if ui.process_time_text.0 != ui.view.selected() {
-        ui.process_time_text = (ui.view.selected(), String::new());
-    }
     let inspection = ui.view.inspection();
-    // The selected instance's attributes, read again when the selection or the model changes.
     let selected = ui.view.selected();
-    if selected.is_none() {
-        ui.attributes = None;
+    // The docked panel's inspector follows the selection, by its stream.
+    let selected_stream = selected.map(|id| ui.view.objects()[id as usize].stream);
+    if ui.dock.as_ref().map(Inspector::stream) != selected_stream {
+        ui.dock = selected_stream.map(Inspector::new);
     }
-    if let Some(id) = selected.filter(|&id| ui.attributes.as_ref().is_none_or(|(read, _)| *read != id)) {
-        let name = ui.view.objects()[id as usize].name.clone();
-        let read = if ui.workspace.opened().is_some() { ui.workspace.attributes(&name) } else { Err("No model file is open".to_string()) };
-        if let Ok(attributes) = &read {
-            let states = crabsim_model::State::of(help::built_in(ui.view.objects()[id as usize].kind));
-            let drains = ui.workspace.drains();
-            ui.forms = attributes
-                .iter()
-                .map(|view| (view.attribute.clone(), Form::for_attribute(&view.attribute, view.value.as_ref(), states, &drains)))
-                .collect();
-        }
-        ui.attributes = Some((id, read));
-        ui.refused = None;
+    if let (Some(id), Some(dock)) = (selected, ui.dock.as_mut()) {
+        let object = &ui.view.objects()[id as usize];
+        dock.read(&ui.workspace, &object.name, help::built_in(object.kind));
     }
     let editable = ui.view.reloads_now();
     let mut intervention = None;
-    let mut attribute_change = None;
+    let mut dock_asked = None;
     let mut editors_action = None;
     let mut history_clicked = None;
     let mut results_chosen = None;
-    let mut renamed = None;
     let mut several_asked = None;
     // The values shared by several selected objects, read again when the selection changes.
     let several: Vec<u32> = ui.view.selection().to_vec();
@@ -1366,7 +1346,6 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
         ui.class_forms.0 = Some(class.clone());
     }
     let mut connection_asked = None;
-    let mut instance_asked = None;
     // What has been typed for a description belongs to the connection it was typed for.
     let shown_connection = ui.view.selected_connection();
     if ui.description_text.0 != shown_connection {
@@ -1380,11 +1359,6 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
     }
     if shown_connection.is_some() {
         ui.class_selected = None;
-    }
-    // What has been typed for a name belongs to the object it was typed for.
-    if ui.name_text.0 != selected {
-        let name = selected.map_or_else(String::new, |id| ui.view.objects()[id as usize].name.clone());
-        ui.name_text = (selected, name);
     }
     if selected.is_some() {
         ui.class_selected = None;
@@ -1425,16 +1399,7 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
                     let names: Vec<String> = ui.view.selection().iter().map(|&id| ui.view.objects()[id as usize].name.clone()).collect();
                     several_asked = several_view(panel, &names, &ui.several, &mut ui.several_forms, editable);
                 }
-                _ => {
-                    intervention = inspector(panel, inspection.as_ref(), &mut ui.process_time_text.1, &mut ui.help_open);
-                    if let Some(id) = selected {
-                        renamed = name_field(panel, &ui.view.objects()[id as usize].name, &mut ui.name_text.1, editable);
-                        instance_asked = instance_actions(panel, editable);
-                    }
-                    if let Some((_, attributes)) = &ui.attributes {
-                        attribute_change = attributes_section(panel, attributes, &mut ui.forms, editable, ui.refused.as_ref());
-                    }
-                }
+                _ => dock_asked = dock_summary(panel, inspection.as_ref(), ui.dock.as_ref()),
             },
             Tab::Results => {
                 let results = ui.view.results().map(|results| (ui.view.results_time(&results), results));
@@ -1450,6 +1415,15 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
     // Full states are asked for while results are shown, or the Paths tab weighs the live run.
     let live_paths = ui.tab == Tab::Paths && matches!(ui.paths.weigh, Weigh::Figure(_));
     ui.view.set_results_open(ui.tab == Tab::Results || live_paths);
+    // Open object windows are watched too, so one full state serves them all.
+    let watched = ui.windows.follow(&ui.view);
+    ui.view.watch(&watched);
+    match (dock_asked, selected) {
+        (Some(DockAsk::Intervention(asked)), _) => intervention = Some(asked),
+        (Some(DockAsk::OpenWindow), Some(id)) => open_window(ui, id),
+        (Some(DockAsk::OpenAt(field)), Some(id)) => open_window_at(&ctx, ui, id, &field),
+        _ => {}
+    }
     find_paths(ui);
     if let Some(id) = results_chosen {
         ui.view.select(Some(id));
@@ -1507,27 +1481,6 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
             ui.view.show_error(format!("{name} wasn't moved: {refusal}"));
         }
     }
-    if let (Some((change, take_over)), Some(id)) = (attribute_change, selected) {
-        let name = ui.view.objects()[id as usize].name.clone();
-        let done = match &change {
-            AttributeChange::Set(attribute, value) => ui.workspace.set_attribute(&name, attribute, value.clone(), take_over),
-            AttributeChange::Restore(attribute) => ui.workspace.restore(&name, attribute, take_over),
-        };
-        ui.refused = match done {
-            // The window picks up the saved file next frame and rebuilds the model.
-            Ok(()) => None,
-            Err(refusal) => {
-                let again = matches!(refusal, Refusal::NotEditor(_)).then(|| change.clone());
-                Some((change.attribute().to_string(), refusal, again))
-            }
-        };
-        ui.view.commanded(wall);
-    }
-    if let (Some(to), Some(id)) = (renamed, selected) {
-        let name = ui.view.objects()[id as usize].name.clone();
-        ui.view.commanded(wall);
-        build(ui, Building::RenameInstance { name, to }, false);
-    }
     if let Some(asked) = several_asked {
         let names: Vec<String> = ui.view.selection().iter().map(|&id| ui.view.objects()[id as usize].name.clone()).collect();
         match asked {
@@ -1557,14 +1510,6 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
         };
         ui.view.commanded(wall);
         build(ui, building, false);
-    }
-    match (instance_asked, selected) {
-        (Some(InstanceAsk::Remove), Some(_)) => delete_selected(ui),
-        (Some(InstanceAsk::MakeClass), Some(id)) => {
-            let instance = ui.view.objects()[id as usize].name.clone();
-            ui.asking = Some(Asking { for_what: AskFor::MakeClass { instance }, typed: String::new() });
-        }
-        _ => {}
     }
     // Delete removes what is selected, unless a field is being typed in or a dialog is open.
     let dialog_open = ui.asking.is_some() || ui.confirm_removal.is_some() || ui.confirm_building.is_some() || ui.new_model.is_some() || ui.duplicating.is_some();
@@ -1689,7 +1634,7 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
         ui.view.commanded(wall);
     }
     hover_tooltip(&ctx, ui, canvas);
-    help_window(&ctx, ui, canvas);
+    object_windows(&ctx, ui, &session, canvas, wall);
     canvas_menu(&ctx, ui);
     if let Some((line, unseen)) = ui.confirm_macro.clone()
         && let Some(run) = confirm_macro(&ctx, &unseen)
@@ -1743,18 +1688,7 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
     }
 
     if let (Some(intervention), Some(id)) = (intervention, ui.view.selected()) {
-        let session = session.0.lock().expect("the session lock is never poisoned");
-        let sent = match intervention {
-            Intervention::Pause => session.pause(id),
-            Intervention::Resume => session.resume(id),
-            Intervention::ForceFailure => session.force_failure(id),
-            Intervention::EndForcedFailure => session.end_forced_failure(id),
-            Intervention::SetProcessTime(time) => session.set_process_time(id, time),
-        };
-        match sent {
-            Ok(()) => ui.view.intervened(id, intervention, wall),
-            Err(error) => ui.view.observe(&crabsim::SessionOutput::Error(error), wall),
-        }
+        send_intervention(ui, &session, id, intervention, wall);
     }
 
     let request = request.or(key_request);
@@ -1977,9 +1911,8 @@ fn replace_session(ui: &mut Ui, session: &Session, new_model: bool, wall: Durati
     *session.0.lock().expect("the session lock is never poisoned") = fresh;
     ui.view = view;
     ui.pending = None;
-    ui.attributes = None;
-    ui.forms.clear();
-    ui.refused = None;
+    ui.dock = None;
+    ui.windows.forget_values();
     ui.seed_text = ui.workspace.seed().to_string();
     ui.period_text = format_time(ui.workspace.measuring_period());
     if new_model {
@@ -2354,12 +2287,12 @@ fn class_view(
         "Its values reach every instance of it that doesn't set its own. Drag it onto the canvas to place one."
     };
     ui.label(egui::RichText::new(reach).weak());
-    attributes_section(ui, values, forms, editable, None)
+    attributes_section(ui, values, forms, editable, None, "")
 }
 
 /// The selected instance's name, which can be changed with no run in progress. Returns a new name
 /// once typed and confirmed with Enter or by leaving the field.
-fn name_field(ui: &mut egui::Ui, name: &str, text: &mut String, editable: bool) -> Option<String> {
+fn name_field(ui: &mut egui::Ui, name: &str, text: &mut String, editable: bool, salt: &str) -> Option<String> {
     if !editable {
         return None;
     }
@@ -2368,7 +2301,7 @@ fn name_field(ui: &mut egui::Ui, name: &str, text: &mut String, editable: bool) 
     ui.horizontal(|row| {
         row.label("Name").on_hover_text("The instance's name in the model file. Its connections keep it.");
         let field = row.add(egui::TextEdit::singleline(text).desired_width(170.0));
-        focus_if_wanted(row, &field, "name");
+        focus_if_wanted(row, &field, &format!("{salt}name"));
         if field.lost_focus() {
             let typed = text.trim().to_string();
             if !typed.is_empty() && typed != name {
@@ -3013,55 +2946,428 @@ fn swatch(ui: &mut egui::Ui, shade: Shade) {
     ui.painter().rect_filled(rect, 2.0, shade_colour32(shade));
 }
 
-/// What the selected object's states mean: each state its type can be in, with its colour,
-/// crabsim's meaning and the model's own note, if it has one. It follows the selection.
-fn help_window(ctx: &egui::Context, ui: &mut Ui, canvas: egui::Rect) {
-    if !ui.help_open {
+/// How soon a second click on the same object is a double-click.
+const DOUBLE_CLICK: Duration = Duration::from_millis(400);
+
+/// How wide an object window opens.
+const WINDOW_WIDTH: f32 = 340.0;
+
+/// What the docked panel's summary of the selection asks for.
+enum DockAsk {
+    Intervention(Intervention),
+    /// Open the selection's window.
+    OpenWindow,
+    /// Open the selection's window at this attribute.
+    OpenAt(String),
+}
+
+/// What an object window asks for, about its own instance.
+enum WindowAsk {
+    Intervention(Intervention),
+    Change(AttributeChange, bool),
+    Rename(String),
+    Remove,
+    MakeClass,
+}
+
+/// Opens the window of the object with this id, or brings forward the one open.
+fn open_window(ui: &mut Ui, id: u32) {
+    let stream = ui.view.objects()[id as usize].stream;
+    ui.windows.open(stream);
+}
+
+/// Opens the object's window with the section holding `field` open, and sends the keyboard to
+/// the field, which names an attribute, `name`, or an intervention.
+fn open_window_at(ctx: &egui::Context, ui: &mut Ui, id: u32, field: &str) {
+    let stream = ui.view.objects()[id as usize].stream;
+    ui.windows.open(stream);
+    if let Some(window) = ui.windows.get_mut(stream) {
+        window.show(Section::of_field(field));
+    }
+    want_focus(ctx, &Section::focus_key(stream, field));
+}
+
+/// Sends an intervention on the object to the session and notes it in the view, or shows why the
+/// session refused.
+fn send_intervention(ui: &mut Ui, session: &Session, id: u32, intervention: Intervention, wall: Duration) {
+    let session = session.0.lock().expect("the session lock is never poisoned");
+    let sent = match intervention {
+        Intervention::Pause => session.pause(id),
+        Intervention::Resume => session.resume(id),
+        Intervention::ForceFailure => session.force_failure(id),
+        Intervention::EndForcedFailure => session.end_forced_failure(id),
+        Intervention::SetProcessTime(time) => session.set_process_time(id, time),
+    };
+    match sent {
+        Ok(()) => ui.view.intervened(id, intervention, wall),
+        Err(error) => ui.view.observe(&crabsim::SessionOutput::Error(error), wall),
+    }
+}
+
+/// Pause and forced failure, as buttons. `window` is the stream of the window they are in, so
+/// the keyboard can be sent to them there. Returns the intervention asked for.
+fn intervention_buttons(ui: &mut egui::Ui, offered: crabsim_ui::view::Offered, window: Option<u64>) -> Option<Intervention> {
+    let mut asked = None;
+    let key = |field: &str| window.map(|stream| Section::focus_key(stream, field));
+    ui.horizontal_wrapped(|row| {
+        let (pause, pause_label) = if offered.paused { (Intervention::Resume, "Resume") } else { (Intervention::Pause, "Pause") };
+        let pause_hint = if offered.paused { "End the Pause: the work carries on where it stopped" } else { "Stop this Station until you resume it. The work on its MU waits" };
+        let pause_button = row.button(pause_label).on_hover_text(pause_hint);
+        if let Some(key) = key("pause") {
+            focus_if_wanted(row, &pause_button, &key);
+        }
+        if pause_button.clicked() {
+            asked = Some(pause);
+        }
+        let (force, force_label) = if offered.forced { (Intervention::EndForcedFailure, "End forced failure") } else { (Intervention::ForceFailure, "Force failure") };
+        let force_hint = if offered.forced {
+            "End the forced failure: the Station carries on, unless something else still stops it"
+        } else {
+            "Stop this Station as a failure until you end it. It counts as a failure in the statistics"
+        };
+        let force_button = row.button(force_label).on_hover_text(force_hint);
+        if let Some(key) = key("forced_failure") {
+            focus_if_wanted(row, &force_button, &key);
+        }
+        if force_button.clicked() {
+            asked = Some(force);
+        }
+    });
+    asked
+}
+
+/// The docked panel's summary of the selected object: its name, state, what it holds, three key
+/// figures and each attribute as one line, which opens the object's window at that field. The
+/// window has everything else.
+fn dock_summary(ui: &mut egui::Ui, inspection: Option<&Inspection>, dock: Option<&Inspector>) -> Option<DockAsk> {
+    ui.heading("Inspector");
+    let Some(inspection) = inspection else {
+        ui.label("Click an object to see a summary of it, or double-click it for a window of its own.");
+        return None;
+    };
+    let mut asked = None;
+    ui.horizontal(|row| {
+        row.label(egui::RichText::new(&inspection.name).strong().size(16.0));
+        if row.button("Open in window").on_hover_text("Everything about it in a window of its own. Double-click it on the canvas, or press w").clicked() {
+            asked = Some(DockAsk::OpenWindow);
+        }
+    });
+    ui.label(egui::RichText::new(format!("{:?}, id {}", inspection.kind, inspection.id)).weak());
+    ui.add_space(4.0);
+    egui::Grid::new("summary").num_columns(2).spacing([12.0, 4.0]).show(ui, |grid| {
+        grid.label("State");
+        grid.label(inspection.state);
+        grid.end_row();
+        grid.label("Holds");
+        let holds = match inspection.contents.len() {
+            0 => "nothing".to_string(),
+            1 => format!("MU {}", inspection.contents[0]),
+            several => format!("{several} MUs"),
+        };
+        grid.label(holds);
+        grid.end_row();
+        if let Some(remaining) = inspection.remaining {
+            grid.label("Work left");
+            grid.label(format_time_exact(remaining));
+            grid.end_row();
+        }
+    });
+    if let Some(offered) = inspection.interventions {
+        ui.add_space(4.0);
+        if let Some(intervention) = intervention_buttons(ui, offered, None) {
+            asked = Some(DockAsk::Intervention(intervention));
+        }
+    }
+    let figures = inspection.key_figures();
+    if !figures.is_empty() {
+        ui.add_space(6.0);
+        egui::Grid::new("key figures").num_columns(2).spacing([12.0, 2.0]).striped(true).show(ui, |grid| {
+            for (label, value) in figures {
+                grid.label(label);
+                grid.label(value);
+                grid.end_row();
+            }
+        });
+    }
+    if let Some(Ok(attributes)) = dock.and_then(|dock| dock.attributes.as_ref()) {
+        ui.add_space(6.0);
+        ui.separator();
+        for view in attributes {
+            let Some(value) = &view.value else { continue };
+            ui.horizontal(|row| {
+                row.label(egui::RichText::new(attribute_label(&view.attribute)).strong());
+                let line = row.add(egui::Label::new(crabsim_ui::attributes::summary(value)).truncate().sense(egui::Sense::click()));
+                if line.on_hover_text("Open its window at this field").clicked() {
+                    asked = Some(DockAsk::OpenAt(view.attribute.clone()));
+                }
+            });
+        }
+    }
+    asked
+}
+
+/// One collapsible section of an object window. Returns whether its header was clicked, which
+/// the window remembers as the user's choice.
+fn section_header(ui: &mut egui::Ui, section: Section, open: bool, add: impl FnOnce(&mut egui::Ui)) -> bool {
+    let shown = egui::CollapsingHeader::new(egui::RichText::new(section.title()).strong())
+        .id_salt(section.title())
+        .open(Some(open))
+        .show(ui, add);
+    shown.header_response.clicked()
+}
+
+/// Draws every open object window, each with its own instance's values, and carries out what
+/// they asked for, each on its own instance. A window that was asked to come forward does.
+fn object_windows(ctx: &egui::Context, ui: &mut Ui, session: &Session, canvas: egui::Rect, wall: Duration) {
+    if ui.windows.is_empty() {
         return;
     }
-    let mut open = true;
-    let selected = ui.view.selected().map(|id| (ui.view.objects()[id as usize].name.clone(), ui.view.objects()[id as usize].kind));
-    let notes = match &ui.attributes {
-        Some((_, Ok(attributes))) => attributes.iter().find(|view| view.attribute == "state_notes").and_then(|view| view.value.clone()),
+    let editable = ui.view.reloads_now();
+    let running = !editable;
+    let raise = ui.windows.take_raise();
+    let mut asked: Vec<(u32, u64, WindowAsk)> = Vec::new();
+    let mut closed = Vec::new();
+    for (index, stream) in ui.windows.streams().into_iter().enumerate() {
+        let Some(id) = ui.view.id_of_stream(stream) else { continue };
+        let Ui { view, workspace, windows, .. } = &mut *ui;
+        let Some(inspector) = windows.get_mut(stream) else { continue };
+        let object = &view.objects()[id as usize];
+        inspector.read(workspace, &object.name, help::built_in(object.kind));
+        let inspection = view.inspection_of(id);
+        let (dx, dy) = (-24.0 * (index % 8) as f32, 28.0 * (index % 8) as f32);
+        let mut open = true;
+        let shown = egui::Window::new(egui::RichText::new(&object.name).strong())
+            .id(egui::Id::new(("object window", stream)))
+            .open(&mut open)
+            .default_width(WINDOW_WIDTH)
+            .default_pos(egui::pos2(canvas.right() - WINDOW_WIDTH - 16.0 + dx, canvas.top() + 8.0 + dy))
+            .resizable(true)
+            .vscroll(true)
+            .show(ctx, |window| {
+                for ask in object_window_contents(window, stream, inspector, inspection.as_ref(), editable, running) {
+                    asked.push((id, stream, ask));
+                }
+            });
+        if raise == Some(stream)
+            && let Some(shown) = &shown
+        {
+            ctx.move_to_top(shown.response.layer_id);
+        }
+        if !open {
+            closed.push(stream);
+        }
+    }
+    for stream in closed {
+        ui.windows.close(stream);
+    }
+    for (id, stream, ask) in asked {
+        let name = ui.view.objects()[id as usize].name.clone();
+        ui.view.commanded(wall);
+        match ask {
+            WindowAsk::Intervention(intervention) => send_intervention(ui, session, id, intervention, wall),
+            WindowAsk::Change(change, take_over) => {
+                let done = match &change {
+                    AttributeChange::Set(attribute, value) => ui.workspace.set_attribute(&name, attribute, value.clone(), take_over),
+                    AttributeChange::Restore(attribute) => ui.workspace.restore(&name, attribute, take_over),
+                };
+                if let Some(window) = ui.windows.get_mut(stream) {
+                    match done {
+                        // The window picks up the saved file next frame and rebuilds the model.
+                        Ok(()) => window.refused = None,
+                        Err(refusal) => window.refuse(&change, refusal),
+                    }
+                }
+            }
+            WindowAsk::Rename(to) => build(ui, Building::RenameInstance { name, to }, false),
+            WindowAsk::Remove => {
+                ui.view.select(Some(id));
+                delete_selected(ui);
+            }
+            WindowAsk::MakeClass => ui.asking = Some(Asking { for_what: AskFor::MakeClass { instance: name }, typed: String::new() }),
+        }
+    }
+}
+
+/// What an object window shows, in its sections, in order. Returns what it was asked for.
+fn object_window_contents(
+    window: &mut egui::Ui,
+    stream: u64,
+    inspector: &mut Inspector,
+    inspection: Option<&Inspection>,
+    editable: bool,
+    running: bool,
+) -> Vec<WindowAsk> {
+    let mut asked = Vec::new();
+    let Some(inspection) = inspection else {
+        window.label("This object isn't in the model any more.");
+        return asked;
+    };
+    window.label(egui::RichText::new(format!("{:?}, id {}", inspection.kind, inspection.id)).weak());
+    window.horizontal(|row| {
+        row.label("State");
+        row.label(egui::RichText::new(inspection.state).strong());
+    });
+    inspector.sync_name(&inspection.name);
+    let notes = match &inspector.attributes {
+        Some(Ok(attributes)) => attributes.iter().find(|view| view.attribute == "state_notes").and_then(|view| view.value.clone()),
         _ => None,
     };
-    // It opens at the canvas's right edge, beside the inspector, clear of the top bar and models.
-    const WIDTH: f32 = 320.0;
-    egui::Window::new("What the states mean")
-        .open(&mut open)
-        .resizable(false)
-        .default_width(WIDTH)
-        .default_pos(egui::pos2(canvas.right() - WIDTH - 16.0, canvas.top() + 8.0))
-        .show(ctx, |window| {
-        let Some((name, kind)) = selected else {
-            window.label("Click an object to see what its states mean.");
-            return;
-        };
-        window.label(egui::RichText::new(format!("{name}, a {}", help::built_in(kind))).strong());
-        window.add_space(4.0);
-        for state in help::states(kind, notes.as_ref()) {
-            window.horizontal(|row| {
+
+    let open = inspector.is_open(Section::States, running);
+    if section_header(window, Section::States, open, |section| {
+        for state in help::states(inspection.kind, notes.as_ref()) {
+            section.horizontal(|row| {
                 swatch(row, Shade::of(state.state));
                 row.label(egui::RichText::new(state.state.label()).strong());
             });
             if let Some(note) = &state.note {
-                window.label(egui::RichText::new(format!("In this model: {note}")).italics());
+                section.label(egui::RichText::new(format!("In this model: {note}")).italics());
             }
-            window.label(state.meaning);
-            window.add_space(4.0);
+            section.label(state.meaning);
+            section.add_space(4.0);
         }
-        window.horizontal(|row| {
-            swatch(row, Shade::Unknown);
-            row.label(egui::RichText::new("Before Init, an object has no state yet.").weak());
-        });
-        window.add_space(4.0);
-        window.label(
-            egui::RichText::new("A model can add its own note to a state, under State notes in the attributes, set on a class or an instance.")
+        section.label(
+            egui::RichText::new("Before Init, an object has no state yet. A model can add its own note to a state, under State notes in the attributes.")
                 .weak()
                 .small(),
         );
-    });
-    ui.help_open = open;
+    }) {
+        inspector.set_open(Section::States, !open);
+    }
+
+    let open = inspector.is_open(Section::Now, running);
+    if section_header(window, Section::Now, open, |section| {
+        egui::Grid::new("now").num_columns(2).spacing([12.0, 4.0]).show(section, |grid| {
+            grid.label("Holds");
+            grid.add(egui::Label::new(holds(&inspection.contents)).wrap());
+            grid.end_row();
+            if let Some(remaining) = inspection.remaining {
+                grid.label("Work left");
+                grid.label(format_time_exact(remaining));
+                grid.end_row();
+            }
+            if let Some(details) = &inspection.details {
+                grid.label("Waiting for it");
+                grid.label(if details.waiting.is_empty() { "nothing".to_string() } else { details.waiting.join(", ") });
+                grid.end_row();
+            }
+        });
+        if let Some(blocked) = &inspection.blocked {
+            section.label(egui::RichText::new("Why it's blocked").strong());
+            section.label(blocked);
+        }
+        if !inspection.stopped.is_empty() {
+            section.label(egui::RichText::new("Why it's stopped").strong());
+            for interruption in &inspection.stopped {
+                section.label(interruption);
+            }
+        }
+    }) {
+        inspector.set_open(Section::Now, !open);
+    }
+
+    if inspection.kind == crabsim::ObjectKind::Station {
+        let open = inspector.is_open(Section::Interventions, running);
+        let toggled = {
+            let process_time_text = &mut inspector.process_time_text;
+            section_header(window, Section::Interventions, open, |section| {
+                let Some(offered) = inspection.interventions else {
+                    section.label("Interventions are offered during a run, from Init on.");
+                    return;
+                };
+                if let Some(intervention) = intervention_buttons(section, offered, Some(stream)) {
+                    asked.push(WindowAsk::Intervention(intervention));
+                }
+                // The process time in force shows once, here, with the configured one only if it differs.
+                if let Some(text) = inspection.details.as_ref().and_then(Details::process_time_text) {
+                    section.horizontal(|row| {
+                        row.label("Process time");
+                        row.label(egui::RichText::new(text).strong());
+                    });
+                }
+                section.horizontal(|row| {
+                    row.label("Change to");
+                    let field = row.add(egui::TextEdit::singleline(process_time_text).desired_width(80.0).hint_text("such as 25"));
+                    focus_if_wanted(row, &field, &Section::focus_key(stream, "process_time"));
+                    let typed = parse_time(process_time_text).filter(|&time| time > SimTime::ZERO);
+                    let set = row
+                        .add_enabled(typed.is_some(), egui::Button::new("Set"))
+                        .on_hover_text("From the next MU on. The MU in work keeps its time.")
+                        .on_disabled_hover_text("Type a time longer than zero, such as 25 or 1:30");
+                    let entered = field.lost_focus() && row.input(|input| input.key_pressed(egui::Key::Enter));
+                    if let (true, Some(time)) = (set.clicked() || entered, typed) {
+                        asked.push(WindowAsk::Intervention(Intervention::SetProcessTime(time)));
+                        process_time_text.clear();
+                    }
+                });
+            })
+        };
+        if toggled {
+            inspector.set_open(Section::Interventions, !open);
+        }
+    }
+
+    let open = inspector.is_open(Section::Statistics, running);
+    if section_header(window, Section::Statistics, open, |section| {
+        let Some(details) = &inspection.details else {
+            section.label("Statistics come once the model has been through Init.");
+            return;
+        };
+        section.label(egui::RichText::new(format!("Since {}", format_time(details.statistics_since))).weak());
+        egui::Grid::new("statistics").num_columns(2).spacing([12.0, 2.0]).striped(true).show(section, |grid| {
+            for (label, value) in inspection.statistics_rows() {
+                grid.label(label);
+                grid.label(value);
+                grid.end_row();
+            }
+        });
+        if let Some(fill) = &details.fill {
+            fill_histogram(section, fill);
+        }
+        section.label(egui::RichText::new(format!("as of {}", format_time_exact(details.as_of))).weak().small());
+    }) {
+        inspector.set_open(Section::Statistics, !open);
+    }
+
+    let open = inspector.is_open(Section::Attributes, running);
+    let salt = format!("{stream}:");
+    let toggled = {
+        let Inspector { attributes, forms, refused, .. } = &mut *inspector;
+        section_header(window, Section::Attributes, open, |section| {
+            if let Some(attributes) = attributes
+                && let Some(change) = attributes_section(section, attributes, forms, editable, refused.as_ref(), &salt)
+            {
+                asked.push(WindowAsk::Change(change.0, change.1));
+            }
+        })
+    };
+    if toggled {
+        inspector.set_open(Section::Attributes, !open);
+    }
+
+    let open = inspector.is_open(Section::Actions, running);
+    let name = inspection.name.clone();
+    let toggled = {
+        let typed = &mut inspector.name_text.1;
+        section_header(window, Section::Actions, open, |section| {
+            if !editable {
+                section.label("Rename, Remove and Make a class are available before Init or after Reset.");
+                return;
+            }
+            if let Some(renamed) = name_field(section, &name, typed, editable, &salt) {
+                asked.push(WindowAsk::Rename(renamed));
+            }
+            match instance_actions(section, editable) {
+                Some(InstanceAsk::Remove) => asked.push(WindowAsk::Remove),
+                Some(InstanceAsk::MakeClass) => asked.push(WindowAsk::MakeClass),
+                None => {}
+            }
+        })
+    };
+    if toggled {
+        inspector.set_open(Section::Actions, !open);
+    }
+    asked
 }
 
 fn plural(count: usize) -> &'static str {
@@ -3101,129 +3407,6 @@ fn holds(contents: &[u32]) -> String {
             }
         }
     }
-}
-
-/// What the view state says about the selected object, and the interventions it offers. Returns
-/// the intervention asked for, if any. `process_time_text` is what has been typed for a new
-/// process time.
-fn inspector(ui: &mut egui::Ui, inspection: Option<&Inspection>, process_time_text: &mut String, help_open: &mut bool) -> Option<Intervention> {
-    ui.heading("Inspector");
-    let Some(inspection) = inspection else {
-        ui.label("Click an object to inspect it.");
-        return None;
-    };
-    let mut asked = None;
-    ui.horizontal(|row| {
-        row.label(egui::RichText::new(&inspection.name).strong().size(16.0));
-        if row.selectable_label(*help_open, " ? ").on_hover_text("What this object's states and their colours mean").clicked() {
-            *help_open = !*help_open;
-        }
-    });
-    ui.label(egui::RichText::new(format!("{:?}, id {}", inspection.kind, inspection.id)).weak());
-    ui.add_space(4.0);
-    egui::Grid::new("inspection").num_columns(2).spacing([12.0, 4.0]).show(ui, |grid| {
-        grid.label("State");
-        grid.label(inspection.state);
-        grid.end_row();
-        grid.label("Holds");
-        // Cut short to the panel's width, all of it on hover, so a full Buffer can't widen the panel.
-        grid.add(egui::Label::new(holds(&inspection.contents)).truncate());
-        grid.end_row();
-        if let Some(remaining) = inspection.remaining {
-            grid.label("Work left");
-            grid.label(format_time_exact(remaining));
-            grid.end_row();
-        }
-    });
-    if let Some(blocked) = &inspection.blocked {
-        ui.add_space(6.0);
-        ui.label(egui::RichText::new("Why it's blocked").strong());
-        ui.label(blocked);
-    }
-    if !inspection.stopped.is_empty() {
-        ui.add_space(6.0);
-        ui.label(egui::RichText::new("Why it's stopped").strong());
-        for interruption in &inspection.stopped {
-            ui.label(interruption);
-        }
-    }
-
-    if let Some(offered) = inspection.interventions {
-        ui.add_space(8.0);
-        ui.separator();
-        ui.label(egui::RichText::new("Interventions").strong());
-        ui.horizontal_wrapped(|row| {
-            let (pause, pause_label) =
-                if offered.paused { (Intervention::Resume, "Resume") } else { (Intervention::Pause, "Pause") };
-            let pause_hint = if offered.paused { "End the Pause: the work carries on where it stopped" } else { "Stop this Station until you resume it. The work on its MU waits" };
-            let pause_button = row.button(pause_label).on_hover_text(pause_hint);
-            focus_if_wanted(row, &pause_button, "pause");
-            if pause_button.clicked() {
-                asked = Some(pause);
-            }
-            let (force, force_label) = if offered.forced {
-                (Intervention::EndForcedFailure, "End forced failure")
-            } else {
-                (Intervention::ForceFailure, "Force failure")
-            };
-            let force_hint = if offered.forced {
-                "End the forced failure: the Station carries on, unless something else still stops it"
-            } else {
-                "Stop this Station as a failure until you end it. It counts as a failure in the statistics"
-            };
-            let force_button = row.button(force_label).on_hover_text(force_hint);
-            focus_if_wanted(row, &force_button, "forced_failure");
-            if force_button.clicked() {
-                asked = Some(force);
-            }
-        });
-        // The process time in force shows once, here, with the configured one only if it differs.
-        if let Some(text) = inspection.details.as_ref().and_then(Details::process_time_text) {
-            ui.horizontal(|row| {
-                row.label("Process time");
-                row.label(egui::RichText::new(text).strong());
-            });
-        }
-        ui.horizontal(|row| {
-            row.label("Change to");
-            let field = row.add(egui::TextEdit::singleline(process_time_text).desired_width(80.0).hint_text("such as 25"));
-            focus_if_wanted(row, &field, "process_time");
-            let typed = parse_time(process_time_text).filter(|&time| time > SimTime::ZERO);
-            let set = row
-                .add_enabled(typed.is_some(), egui::Button::new("Set"))
-                .on_hover_text("From the next MU on. The MU in work keeps its time.")
-                .on_disabled_hover_text("Type a time longer than zero, such as 25 or 1:30");
-            let entered = field.lost_focus() && row.input(|input| input.key_pressed(egui::Key::Enter));
-            if let (true, Some(time)) = (set.clicked() || entered, typed) {
-                asked = Some(Intervention::SetProcessTime(time));
-                process_time_text.clear();
-            }
-        });
-    }
-
-    if let Some(details) = &inspection.details {
-        ui.add_space(8.0);
-        ui.separator();
-        egui::Grid::new("details").num_columns(2).spacing([12.0, 4.0]).show(ui, |grid| {
-            grid.label("Waiting for it");
-            grid.label(if details.waiting.is_empty() { "nothing".to_string() } else { details.waiting.join(", ") });
-            grid.end_row();
-        });
-        ui.add_space(6.0);
-        ui.label(egui::RichText::new(format!("Statistics since {}", format_time(details.statistics_since))).strong());
-        egui::Grid::new("statistics").num_columns(2).spacing([12.0, 2.0]).striped(true).show(ui, |grid| {
-            for (label, value) in inspection.statistics_rows() {
-                grid.label(label);
-                grid.label(value);
-                grid.end_row();
-            }
-        });
-        if let Some(fill) = &details.fill {
-            fill_histogram(ui, fill);
-        }
-        ui.label(egui::RichText::new(format!("as of {}", format_time_exact(details.as_of))).weak().small());
-    }
-    asked
 }
 
 /// A Buffer's fill histogram as bars, the time at each number of MUs, each named on hover.
@@ -3854,16 +4037,8 @@ fn attributes_section(
     forms: &mut HashMap<String, Form>,
     editable: bool,
     refused: Option<&(String, Refusal, Option<AttributeChange>)>,
+    salt: &str,
 ) -> Option<(AttributeChange, bool)> {
-    ui.add_space(8.0);
-    ui.separator();
-    ui.label(egui::RichText::new("Attributes").strong());
-    // During a run they can't change, and the interventions above show what does, so they fold
-    // away to one line rather than repeating values greyed out.
-    if !editable {
-        ui.label("Attributes change before Init or after Reset.");
-        return None;
-    }
     let attributes = match attributes {
         Ok(attributes) => attributes,
         Err(error) => {
@@ -3871,6 +4046,18 @@ fn attributes_section(
             return None;
         }
     };
+    // During a run they can't change: they show in full, read-only, with a note on when they can.
+    if !editable {
+        ui.label(egui::RichText::new("Attributes change before Init or after Reset.").weak());
+        for view in attributes {
+            let Some(value) = &view.value else { continue };
+            ui.horizontal(|row| {
+                row.label(egui::RichText::new(attribute_label(&view.attribute)).strong());
+                row.label(crabsim_ui::attributes::summary(value));
+            });
+        }
+        return None;
+    }
     let mut asked = None;
     for view in attributes {
         ui.add_space(4.0);
@@ -3894,7 +4081,7 @@ fn attributes_section(
         let mut commit = false;
         ui.scope(|fields| {
             if let Some(choice) = form.distribution.as_mut() {
-                distribution_fields(fields, choice, &view.attribute);
+                distribution_fields(fields, choice, &format!("{salt}{}", view.attribute));
                 return;
             }
             if !form.options.is_empty() {
@@ -3915,7 +4102,7 @@ fn attributes_section(
                     grid.label(part.label);
                     let field = grid.add(egui::TextEdit::singleline(&mut part.text).desired_width(120.0));
                     if place == 0 {
-                        focus_if_wanted(grid, &field, &view.attribute);
+                        focus_if_wanted(grid, &field, &format!("{salt}{}", view.attribute));
                     }
                     commit |= field.lost_focus();
                     grid.end_row();
@@ -4161,10 +4348,16 @@ fn answer_edit(ctx: &egui::Context, ui: &mut Ui, text: &str) {
         return;
     };
     match targets.iter().find(|(name, label)| crabsim_ui::keys::attribute_matches(address.attribute, name, label)) {
-        Some((name, _)) => {
-            ui.tab = Tab::Inspector;
-            want_focus(ctx, name);
-        }
+        Some((name, _)) => match ui.view.selected() {
+            Some(id) => {
+                let name = name.clone();
+                open_window_at(ctx, ui, id, &name);
+            }
+            None => {
+                ui.tab = Tab::Inspector;
+                want_focus(ctx, name);
+            }
+        },
         None => ui.key_note = Some(format!("Nothing here matches {}", address.attribute)),
     }
 }
@@ -4304,8 +4497,30 @@ fn run_key(ctx: &egui::Context, ui: &mut Ui, session: &Session, command: Command
         Command::Slower => return ui.view.has_model().then(|| Request::Speed(ui.view.speed() / 2.0)),
         Command::Animate => return ui.view.has_model().then(|| Request::Animate(!ui.view.animate())),
         Command::GoTo => want_focus(ctx, "goto"),
+        Command::OpenWindow => match ui.view.selected() {
+            Some(id) => open_window(ui, id),
+            None => return needs_object(ui),
+        },
+        Command::CloseWindow => {
+            if let Some(id) = ui.view.selected() {
+                let stream = ui.view.objects()[id as usize].stream;
+                ui.windows.close(stream);
+            }
+        }
+        Command::CloseAllWindows => ui.windows.close_all(),
         Command::Tab(place) => {
             ui.tab = [Tab::Inspector, Tab::Results, Tab::Paths, Tab::Agents][place.clamp(1, 4) - 1];
+        }
+        // With an instance selected, Enter opens its window at its first field.
+        Command::Edit if ui.view.selected().is_some() && ui.view.selected_connection().is_none() => {
+            let id = ui.view.selected().expect("an instance is selected");
+            match edit_targets(ui, id).first() {
+                Some((field, _)) => {
+                    let field = field.clone();
+                    open_window_at(ctx, ui, id, &field);
+                }
+                None => open_window(ui, id),
+            }
         }
         // On another tab, Enter goes to its first control, and Tab on from there.
         Command::Edit if ui.tab != Tab::Inspector => want_focus(ctx, "tab"),
@@ -4688,7 +4903,8 @@ fn keys_help(ctx: &egui::Context, ui: &mut Ui) {
                 ("Tab", "the next object, Shift+Tab the one before"),
                 ("v", "select visually: motions add what they land on, x takes the one under the cursor out"),
                 ("d", "delete what is selected, asking first"),
-                ("Esc", "unselect, or leave a field"),
+                ("Esc", "unselect, or leave a field and give the keyboard back to the canvas"),
+                ("w  W  gW", "open the selection's window, close it, close every object window"),
             ],
         ),
         ("View", &[("arrows", "pan"), ("Ctrl + / -", "zoom"), ("0", "fit the model"), ("zz", "centre on the selection")]),
@@ -4714,7 +4930,7 @@ fn keys_help(ctx: &egui::Context, ui: &mut Ui) {
                 ("u  Ctrl+R", "undo the last change to the model, redo it: 3u undoes three. The Agents tab lists the changes"),
             ],
         ),
-        ("Panels", &[("t1 to t4", "Inspector, Results, Paths, Agents"), ("Enter", "into the selection's first field, or the open tab's first control, then Tab on"), ("o", "open a model file")]),
+        ("Panels", &[("t1 to t4", "Inspector, Results, Paths, Agents"), ("Enter", "into the selection's first field, in its window, or else the open tab's first control, then Tab on"), ("o", "open a model file")]),
         ("Find", &[("/", "search by name, then n and N for the next and previous"), ("e", "go to a value, such as proc or Station 3.proc")]),
         ("Help", &[("?", "this list")]),
     ];
@@ -4908,6 +5124,10 @@ fn canvas_menu(ctx: &egui::Context, ui: &mut Ui) {
     let area = egui::Area::new(egui::Id::new("canvas menu")).fixed_pos(at).order(egui::Order::Foreground).show(ctx, |area| {
         egui::Frame::popup(area.style()).show(area, |menu| {
             menu.label(egui::RichText::new(&ui.view.objects()[id as usize].name).strong());
+            if menu.button("Open in window").on_hover_text("Everything about it in a window of its own").clicked() {
+                open_window(ui, id);
+                close = true;
+            }
             for (label, from) in [("Paths from here", true), ("Paths to here", false)] {
                 if menu.button(label).clicked() {
                     if from {

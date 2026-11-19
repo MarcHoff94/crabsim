@@ -6,6 +6,7 @@ pub mod camera;
 pub mod editing;
 pub mod help;
 pub mod history;
+pub mod inspector;
 pub mod keys;
 pub mod marks;
 pub mod paths;

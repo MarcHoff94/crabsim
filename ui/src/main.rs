@@ -180,6 +180,7 @@ fn main() {
             search: (Vec::new(), 0),
             steps_pending: (0, 0),
             keys_help: false,
+            field_had_keyboard: false,
             cursor: None,
             confirm_line: None,
             macros: Vec::new(),
@@ -346,6 +347,9 @@ struct Ui {
     steps_pending: (u32, u32),
     /// Whether the panel listing every key is open.
     keys_help: bool,
+    /// Whether a widget had the keyboard as the last frame ended. egui gives it up on Escape
+    /// before a frame begins, so this is how Esc in a field is told from Esc on the canvas.
+    field_had_keyboard: bool,
     /// The object the last key move landed on: in visual mode moves go from it.
     cursor: Option<u32>,
     /// A command line that removes something, waiting for the user to confirm it.
@@ -1200,7 +1204,10 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
         || ui.duplicating.is_some()
         || ui.confirm_line.is_some()
         || ui.confirm_undo.is_some();
-    let keyboard_free = !dialog_open && ctx.memory(|memory| memory.focused().is_none());
+    // Esc in a field only gives the keyboard back to the canvas: egui has already taken it from
+    // the field, so the canvas mustn't read that Esc as unselecting too.
+    let left_a_field = ui.field_had_keyboard && ctx.input(|input| input.key_pressed(egui::Key::Escape));
+    let keyboard_free = !dialog_open && !left_a_field && ctx.memory(|memory| memory.focused().is_none());
     let key_request = if keyboard_free {
         let typed = read_keys(&ctx);
         // egui has already read Tab and the arrows as moves of the keyboard to another widget,
@@ -1832,6 +1839,7 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
     if let Some(error) = ui.build_error.take() {
         ui.view.show_error(error);
     }
+    ui.field_had_keyboard = ctx.memory(|memory| memory.focused().is_some());
     Ok(())
 }
 
@@ -2982,7 +2990,7 @@ fn open_window_at(ctx: &egui::Context, ui: &mut Ui, id: u32, field: &str) {
     let stream = ui.view.objects()[id as usize].stream;
     ui.windows.open(stream);
     if let Some(window) = ui.windows.get_mut(stream) {
-        window.show(Section::of_field(field));
+        window.show(Section::of_field(field, !ui.view.reloads_now()));
     }
     want_focus(ctx, &Section::focus_key(stream, field));
 }
@@ -3127,20 +3135,40 @@ fn object_windows(ctx: &egui::Context, ui: &mut Ui, session: &Session, canvas: e
     let raise = ui.windows.take_raise();
     let mut asked: Vec<(u32, u64, WindowAsk)> = Vec::new();
     let mut closed = Vec::new();
-    for (index, stream) in ui.windows.streams().into_iter().enumerate() {
+    let streams = ui.windows.streams();
+    // Where each open window's top left is, as egui remembers it: a window closed and opened
+    // again keeps its place, unless another window now covers it.
+    let first_place = egui::pos2(canvas.right() - WINDOW_WIDTH - 16.0, canvas.top() + 8.0);
+    let window_id = |stream: u64| egui::Id::new(("object window", stream));
+    let mut corners: Vec<(u64, egui::Pos2)> =
+        streams.iter().filter_map(|&stream| ctx.memory(|memory| memory.area_rect(window_id(stream))).map(|rect| (stream, rect.min))).collect();
+    for stream in streams {
         let Some(id) = ui.view.id_of_stream(stream) else { continue };
         let Ui { view, workspace, windows, .. } = &mut *ui;
         let Some(inspector) = windows.get_mut(stream) else { continue };
         let object = &view.objects()[id as usize];
         inspector.read(workspace, &object.name, help::built_in(object.kind));
         let inspection = view.inspection_of(id);
-        let (dx, dy) = (-24.0 * (index % 8) as f32, 28.0 * (index % 8) as f32);
         let mut open = true;
-        let shown = egui::Window::new(egui::RichText::new(&object.name).strong())
-            .id(egui::Id::new(("object window", stream)))
+        let mut window = egui::Window::new(egui::RichText::new(&object.name).strong())
+            .id(window_id(stream))
             .open(&mut open)
-            .default_width(WINDOW_WIDTH)
-            .default_pos(egui::pos2(canvas.right() - WINDOW_WIDTH - 16.0 + dx, canvas.top() + 8.0 + dy))
+            .default_width(WINDOW_WIDTH);
+        if !inspector.placed {
+            inspector.placed = true;
+            let offset = |corner: egui::Pos2| (corner.x - first_place.x, corner.y - first_place.y);
+            let others: Vec<(f32, f32)> = corners.iter().filter(|(other, _)| *other != stream).map(|&(_, corner)| offset(corner)).collect();
+            let remembered = corners.iter().find(|(other, _)| *other == stream).map(|&(_, corner)| offset(corner));
+            let covered = remembered.is_some_and(|mine| others.iter().any(|&other| crabsim_ui::inspector::near(other, mine)));
+            if remembered.is_none() || covered {
+                let (dx, dy) = crabsim_ui::inspector::free_place(&others);
+                let place = first_place + egui::vec2(dx, dy);
+                window = if covered { window.current_pos(place) } else { window.default_pos(place) };
+                corners.retain(|(other, _)| *other != stream);
+                corners.push((stream, place));
+            }
+        }
+        let shown = window
             .resizable(true)
             .vscroll(true)
             .show(ctx, |window| {
@@ -4202,8 +4230,13 @@ fn want_focus(ctx: &egui::Context, key: &str) {
     ctx.data_mut(|data| data.insert_temp(egui::Id::new("focus wanted"), (key.to_string(), now)));
 }
 
-/// Gives `field` the keyboard, scrolled into sight, if it is the one marked by `want_focus`.
+/// Gives `field` the keyboard, scrolled into sight, if it is the one marked by `want_focus`. A
+/// window's first frame is an invisible sizing pass, where focus doesn't hold, so the mark waits
+/// for the frame it is drawn in.
 fn focus_if_wanted(ui: &egui::Ui, field: &egui::Response, key: &str) {
+    if ui.is_sizing_pass() {
+        return;
+    }
     let id = egui::Id::new("focus wanted");
     let wanted: Option<(String, f64)> = ui.data(|data| data.get_temp(id));
     if let Some((wanted, at)) = wanted
@@ -4258,10 +4291,13 @@ fn select_and_follow(ui: &mut Ui, id: u32) {
 fn edit_targets(ui: &Ui, id: u32) -> Vec<(String, String)> {
     let object = &ui.view.objects()[id as usize];
     if ui.view.reloads_now() {
-        let mut targets = vec![("name".to_string(), "Name".to_string())];
-        if let Ok(values) = ui.workspace.attributes(&object.name) {
-            targets.extend(values.iter().map(|view| (view.attribute.clone(), attribute_label(&view.attribute).to_string())));
-        }
+        // In the order an object window shows them: the attributes, then the name in Actions,
+        // so Enter goes to the first field drawn.
+        let mut targets: Vec<(String, String)> = match ui.workspace.attributes(&object.name) {
+            Ok(values) => values.iter().map(|view| (view.attribute.clone(), attribute_label(&view.attribute).to_string())).collect(),
+            Err(_) => Vec::new(),
+        };
+        targets.push(("name".to_string(), "Name".to_string()));
         return targets;
     }
     if object.kind == crabsim::ObjectKind::Station {

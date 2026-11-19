@@ -63,11 +63,13 @@ impl Section {
     }
 
     /// The section a field is in, by the name the keyboard reaches it by: `name`, the
-    /// interventions, or an attribute.
-    pub fn of_field(field: &str) -> Section {
+    /// interventions, or an attribute. The process time is an intervention during a run and an
+    /// attribute otherwise.
+    pub fn of_field(field: &str, running: bool) -> Section {
         match field {
             "name" => Section::Actions,
-            "pause" | "forced_failure" | "process_time" => Section::Interventions,
+            "pause" | "forced_failure" => Section::Interventions,
+            "process_time" if running => Section::Interventions,
             _ => Section::Attributes,
         }
     }
@@ -108,6 +110,8 @@ pub struct Inspector {
     pub refused: Option<Refused>,
     /// Sections the user opened or closed, which stay so.
     chosen: HashMap<Section, bool>,
+    /// Whether the window has been given its place since it opened.
+    pub placed: bool,
 }
 
 impl Inspector {
@@ -120,6 +124,7 @@ impl Inspector {
             forms: HashMap::new(),
             refused: None,
             chosen: HashMap::new(),
+            placed: false,
         }
     }
 
@@ -258,10 +263,28 @@ impl Inspectors {
         }
     }
 
-    /// Where the next window opens, stepped down and to the left of the one before: its offset
-    /// from the canvas's top right, in logical pixels.
-    pub fn stagger(&self, index: usize) -> (f32, f32) {
-        let step = (index % 8) as f32;
-        (-24.0 * step, 28.0 * step)
-    }
+}
+
+/// How far each place a window opens at lies down and to the left of the one before, in logical
+/// pixels.
+pub const STAGGER: (f32, f32) = (-24.0, 28.0);
+
+/// How many places windows open at before they start over at the first.
+pub const PLACES: usize = 8;
+
+/// Where a window opens: the first place, stepping down and to the left from the canvas's top
+/// right, that no other open window's top left is at, so it never opens exactly over one,
+/// whichever order windows were opened and closed in. `taken` holds the other open windows' top
+/// lefts and the result is the new one's, both as offsets from the first place.
+pub fn free_place(taken: &[(f32, f32)]) -> (f32, f32) {
+    let place = |step: usize| (STAGGER.0 * step as f32, STAGGER.1 * step as f32);
+    (0..PLACES)
+        .map(place)
+        .find(|candidate| !taken.iter().any(|other| near(*other, *candidate)))
+        .unwrap_or_else(|| place(taken.len() % PLACES))
+}
+
+/// Whether two windows' top lefts are close enough for one to hide the other.
+pub fn near(a: (f32, f32), b: (f32, f32)) -> bool {
+    (a.0 - b.0).abs() < 4.0 && (a.1 - b.1).abs() < 4.0
 }

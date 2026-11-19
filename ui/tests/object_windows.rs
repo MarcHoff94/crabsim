@@ -7,7 +7,7 @@ mod common;
 use common::{Watched, STATION_1, STATION_2};
 use crabsim::{demo, ObjectKind};
 use crabsim_catalogue::{Catalogue, Settings, Source};
-use crabsim_ui::inspector::{AttributeChange, Inspector, Inspectors, Section};
+use crabsim_ui::inspector::{free_place, near, AttributeChange, Inspector, Inspectors, Section, PLACES, STAGGER};
 use crabsim_ui::keys::{Command, Key, Keys};
 use crabsim_ui::view::ViewState;
 use crabsim_ui::workspace::{Refusal, Workspace};
@@ -78,10 +78,11 @@ fn sections_open_by_situation_and_stay_as_the_user_left_them() {
 
 #[test]
 fn fields_belong_to_their_section_and_their_window() {
-    assert_eq!(Section::of_field("name"), Section::Actions);
-    assert_eq!(Section::of_field("pause"), Section::Interventions);
-    assert_eq!(Section::of_field("process_time"), Section::Interventions);
-    assert_eq!(Section::of_field("capacity"), Section::Attributes);
+    assert_eq!(Section::of_field("name", false), Section::Actions);
+    assert_eq!(Section::of_field("pause", true), Section::Interventions);
+    assert_eq!(Section::of_field("process_time", true), Section::Interventions, "during a run it is an intervention");
+    assert_eq!(Section::of_field("process_time", false), Section::Attributes, "before Init and after Reset an attribute");
+    assert_eq!(Section::of_field("capacity", false), Section::Attributes);
     assert_ne!(Section::focus_key(1, "name"), Section::focus_key(2, "name"), "the same field in two windows is two fields");
 }
 
@@ -180,6 +181,37 @@ fn the_name_field_keeps_what_was_typed_until_the_name_changes() {
     assert_eq!(window.name_text.1, "Gri", "typing carries on");
     window.sync_name("Grinder");
     assert_eq!(window.name_text.1, "Grinder", "renamed elsewhere: the field shows the new name");
+}
+
+#[test]
+fn a_new_window_opens_at_the_first_place_no_open_window_is_at() {
+    let place = |step: f32| (STAGGER.0 * step, STAGGER.1 * step);
+    assert_eq!(free_place(&[]), place(0.0), "the first opens at the canvas's top right");
+    assert_eq!(free_place(&[place(0.0)]), place(1.0), "the next steps down and to the left");
+    // The first was closed while the second stayed: a third opens where the first was, not on
+    // the second, whatever order they were opened in.
+    assert_eq!(free_place(&[place(1.0)]), place(0.0));
+    assert_eq!(free_place(&[place(1.0), place(0.0)]), place(2.0));
+    // A window moved a pixel or two still hides the place under it.
+    assert_eq!(free_place(&[(place(0.0).0 + 2.0, place(0.0).1 - 1.0)]), place(1.0));
+    // Moved well away, it leaves its place free.
+    assert_eq!(free_place(&[(-400.0, 300.0)]), place(0.0));
+    let every: Vec<(f32, f32)> = (0..PLACES).map(|step| place(step as f32)).collect();
+    assert_eq!(free_place(&every), place(0.0), "with every place taken, they start over");
+    assert!(near(place(1.0), (place(1.0).0 + 3.0, place(1.0).1)) && !near(place(0.0), place(1.0)));
+}
+
+#[test]
+fn a_window_is_placed_once_after_it_opens() {
+    let mut windows = Inspectors::default();
+    windows.open(12);
+    assert!(!windows.get(12).unwrap().placed, "a new window still needs its place");
+    windows.get_mut(12).unwrap().placed = true;
+    windows.open(12);
+    assert!(windows.get(12).unwrap().placed, "bringing it forward keeps where it is");
+    windows.close(12);
+    windows.open(12);
+    assert!(!windows.get(12).unwrap().placed, "opened again, it is placed again, so it can't land on another");
 }
 
 // ---------- The dock's summary ----------

@@ -101,6 +101,18 @@ Events that keep happening without simulation time advancing. A simulation run r
 **View**:
 One way of drawing a model and its picture. The 2D view is for building and debugging, and the 3D view is for showing and watching. Both show the same model.
 
+**Inspector**:
+The short summary of the selection docked beside the canvas: what it is, what it's doing and its key figures, each attribute in one line. Everything else about an instance is in its object window.
+_Avoid_: Properties panel
+
+**Object window**:
+A window with everything about one instance: its state, what it holds, its statistics and every attribute, which can be changed there. Any number can be open, one per instance, and each stays with its instance through renames, moves and runs until the instance is removed.
+_Avoid_: Popup, detail view
+
+**Statistics window**:
+A window with a run's results at shown time: each Drain's throughput and lead time, the likely bottleneck, and every Station's and Buffer's figures.
+_Avoid_: Results tab (what it was before it got a window of its own), dashboard
+
 **Layout image**:
 An image of the real site, placed under the model at a known scale, so objects can be positioned on it. It has no effect on results.
 _Avoid_: Picture (what the user knows about a run)

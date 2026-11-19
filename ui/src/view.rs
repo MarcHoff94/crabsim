@@ -217,6 +217,8 @@ pub struct ViewState {
     selected_connection: Option<(u32, u32)>,
     /// Whether the Results tab is open, which wants full states as a selection does.
     results_open: bool,
+    /// Instances something other than the selection is watching, such as an object window, by id.
+    watched: Vec<u32>,
     /// The last full state, for what only a full state says, such as statistics.
     details: Option<RunState>,
     /// Whether something since the last full state may have changed it at the same shown time.
@@ -645,6 +647,7 @@ impl ViewState {
             longest_failure_time: model.longest_failure_time(),
             animate: true,
             results_open: false,
+            watched: Vec::new(),
         }
     }
 
@@ -1190,8 +1193,13 @@ impl ViewState {
 
     /// What the inspector says about the selected object.
     pub fn inspection(&self) -> Option<Inspection> {
-        let id = self.selected()?;
-        let object = &self.objects[id as usize];
+        self.inspection_of(self.selected()?)
+    }
+
+    /// What the inspector says about any object, by id, selected or not. `None` for an id the
+    /// model doesn't have.
+    pub fn inspection_of(&self, id: u32) -> Option<Inspection> {
+        let object = self.objects.get(id as usize)?;
         let pictured = self.picture.object(id);
         let state = match pictured {
             None => "No state yet",
@@ -1261,12 +1269,13 @@ impl ViewState {
     }
 
     /// Whether the window should ask the session for a full state at wall time `wall`: only while
-    /// something is selected, at most twice a second, and only when the last one may be out of
-    /// date. So a halted window asks once, and again only after something changes.
+    /// something is watched (the selection, an instance in `watch`, or the results), at most twice
+    /// a second, and only when the last one may be out of date. Everything watched shares the one
+    /// request. So a halted window asks once, and again only after something changes.
     pub fn wants_state(&self, wall: Duration) -> bool {
         let out_of_date = self.details_stale
             || self.details.as_ref().is_none_or(|state| state.time != self.picture.shown() || !state.initialised);
-        (self.selected().is_some() || self.results_open)
+        (self.selected().is_some() || !self.watched.is_empty() || self.results_open)
             && self.initialised
             && out_of_date
             && self.last_request.is_none_or(|last| wall >= last + DETAILS_INTERVAL)
@@ -1299,6 +1308,14 @@ impl ViewState {
             }
         }
         Some(values)
+    }
+
+    /// Sets which instances are being watched besides the selection, such as by an object window,
+    /// so full states are asked for while there are any. It replaces the earlier set, so it is
+    /// called with what is open each frame.
+    pub fn watch(&mut self, ids: &[u32]) {
+        self.watched.clear();
+        self.watched.extend_from_slice(ids);
     }
 
     /// Notes whether the Results tab is open, so full states are asked for while it is.

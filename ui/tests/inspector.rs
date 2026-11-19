@@ -215,6 +215,40 @@ fn full_states_are_asked_for_only_while_something_is_selected() {
 }
 
 #[test]
+fn full_states_are_asked_for_while_anything_is_watched_and_shared_between_watchers() {
+    let mut watched = halted_at(12, STATION_1);
+    watched.view.select(None);
+    assert!(!watched.view.wants_state(watched.wall()), "nothing selected and nothing watched");
+    watched.view.watch(&[STATION_2]);
+    assert!(watched.view.wants_state(watched.wall()), "a window on an object that isn't selected");
+    watched.view.watch(&[STATION_2, SOURCE]);
+    watched.view.select(Some(STATION_1));
+    watched.details();
+    let later = watched.wall() + Duration::from_secs(10);
+    assert!(!watched.view.wants_state(later), "one state serves the selection and both windows");
+    watched.view.watch(&[]);
+    watched.view.select(None);
+    assert!(!watched.view.wants_state(watched.wall() + Duration::from_secs(20)), "nobody watching again");
+}
+
+#[test]
+fn inspection_of_gives_each_object_its_own_and_none_for_an_unknown_id() {
+    let mut watched = halted_at(12, STATION_1);
+    watched.view.watch(&[STATION_2, SOURCE]);
+    watched.details();
+    let first = watched.view.inspection_of(STATION_1).unwrap();
+    let second = watched.view.inspection_of(STATION_2).unwrap();
+    let source = watched.view.inspection_of(SOURCE).unwrap();
+    assert_eq!((first.name.as_str(), second.name.as_str(), source.name.as_str()), ("Station 1", "Station 2", "Source"));
+    assert_eq!(source.kind, ObjectKind::Source);
+    assert_eq!(first.state, "Busy");
+    assert_eq!(second.state, "Idle", "an unselected object has its own state");
+    assert!(first.details.is_some() && second.details.is_some() && source.details.is_some(), "one full state serves all three");
+    assert_eq!(watched.view.inspection().unwrap().id, STATION_1, "the selection's is the same");
+    assert!(watched.view.inspection_of(999).is_none());
+}
+
+#[test]
 fn while_halted_a_state_is_asked_for_once_and_again_only_after_a_change() {
     let mut watched = halted_at(12, STATION_1);
     watched.details();

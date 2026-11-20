@@ -2566,3 +2566,150 @@ fn an_object_without_a_stream_draws_from_its_id_as_before() {
     assert_eq!(failures_of_a_station_with_stream(false, None), failures_of_a_station_with_stream(false, Some(1)));
     assert_eq!(failures_of_a_station_with_stream(true, None), failures_of_a_station_with_stream(false, Some(2)));
 }
+
+// ---------- Interruptions of Sources, Buffers and Drains (spec issue 122) ----------
+
+#[test]
+fn a_paused_source_creates_its_next_mu_later_by_the_pause() {
+    let mut model = ModelDescription::new();
+    let src = source(&mut model, 10);
+    let dr = drain(&mut model);
+    model.connect(src, dr);
+    let mut run = recorded(model.build(0));
+    run.init().unwrap();
+    pause_at(&mut run, 5, src);
+    resume_at(&mut run, 25, src);
+    let occurrences = run.advance_to(secs(45)).unwrap();
+    assert_eq!(exit_times(&occurrences), vec![30.0, 40.0], "its first interval froze at 5 s for 20 s");
+}
+
+#[test]
+fn a_stopped_source_reports_it_and_keeps_its_interval_frozen() {
+    let mut model = ModelDescription::new();
+    let src = source(&mut model, 10);
+    let dr = drain(&mut model);
+    model.connect(src, dr);
+    let mut run = recorded(model.build(0));
+    run.init().unwrap();
+    stop_at(&mut run, 4, src);
+    run.advance_to(secs(50)).unwrap();
+    let state = run.state();
+    let reported = object(&state, src);
+    assert_eq!(reported.interrupted, Some(Interruption::Stopped));
+    assert_eq!(reported.interruptions, vec![ActiveInterruption { cause: Interruption::Stopped, since: secs(4) }]);
+    assert_eq!(reported.remaining, Some(secs(6)), "6 s of its interval were left when it stopped");
+    assert_eq!(reported.statistics.time_failed, secs(46), "a stop by hand counts as failed");
+}
+
+#[test]
+fn a_paused_drain_refuses_mus_until_the_pause_ends() {
+    let mut model = ModelDescription::new();
+    let st = preloaded_station(&mut model, 10, 1);
+    let dr = drain(&mut model);
+    model.connect(st, dr);
+    let mut run = recorded(model.build(0));
+    run.init().unwrap();
+    pause_at(&mut run, 5, dr);
+    resume_at(&mut run, 30, dr);
+    let mut occurrences = run.advance_to(secs(20)).unwrap();
+    assert_eq!(object(&run.state(), dr).blocked_predecessors, vec![st], "the Station waits for the Drain");
+    occurrences.extend(run.advance_to(secs(40)).unwrap());
+    assert_eq!(exit_times(&occurrences), vec![30.0]);
+    let state = run.state();
+    assert_eq!(object(&state, dr).statistics.time_paused, secs(25));
+}
+
+fn buffer_holding_one(dwelling_secs: u64, freezes: bool) -> (SimulationRun, u32) {
+    let mut model = ModelDescription::new();
+    let buf = model.add_buffer(crabsim::Capacity::Limited(5));
+    let dr = drain(&mut model);
+    model.connect(buf, dr);
+    model.set_dwelling_time(buf, secs(dwelling_secs));
+    model.set_starting_mus(buf, &[1]);
+    model.set_stop_freezes_dwelling(buf, freezes);
+    let mut run = recorded(model.build(0));
+    run.init().unwrap();
+    (run, buf)
+}
+
+#[test]
+fn a_buffers_dwelling_time_runs_on_through_a_pause_by_default() {
+    let (mut run, buf) = buffer_holding_one(20, false);
+    pause_at(&mut run, 5, buf);
+    resume_at(&mut run, 15, buf);
+    assert_eq!(exit_times(&run.advance_to(secs(60)).unwrap()), vec![20.0]);
+
+    // Paused past the end of its dwelling, it releases the MU when the pause ends.
+    let (mut run, buf) = buffer_holding_one(20, false);
+    pause_at(&mut run, 5, buf);
+    resume_at(&mut run, 35, buf);
+    assert_eq!(exit_times(&run.advance_to(secs(60)).unwrap()), vec![35.0]);
+}
+
+#[test]
+fn a_buffer_can_freeze_its_dwelling_time_through_an_interruption() {
+    let (mut run, buf) = buffer_holding_one(20, true);
+    pause_at(&mut run, 5, buf);
+    resume_at(&mut run, 15, buf);
+    assert_eq!(exit_times(&run.advance_to(secs(60)).unwrap()), vec![30.0], "20 s of dwelling plus the 10 s pause");
+}
+
+#[test]
+fn a_paused_buffer_takes_no_mu() {
+    let mut model = ModelDescription::new();
+    let st = preloaded_station(&mut model, 10, 1);
+    let buf = model.add_buffer(crabsim::Capacity::Unlimited);
+    let dr = drain(&mut model);
+    model.connect(st, buf);
+    model.connect(buf, dr);
+    let mut run = recorded(model.build(0));
+    run.init().unwrap();
+    pause_at(&mut run, 5, buf);
+    resume_at(&mut run, 25, buf);
+    let occurrences = run.advance_to(secs(60)).unwrap();
+    assert_eq!(moves_from(&occurrences, st), vec![25.0]);
+    assert_eq!(exit_times(&occurrences), vec![25.0]);
+}
+
+#[test]
+fn a_drain_with_failures_fails_at_random_and_counts_it() {
+    let mut model = ModelDescription::new();
+    let src = source(&mut model, 1);
+    let dr = drain(&mut model);
+    model.connect(src, dr);
+    model.set_failures(dr, Some(FailureProfile::new(0.8, Distribution::CONSTANT { value: 30_000.0 }, 0)));
+    let mut run = model.build(3);
+    run.init().unwrap();
+    run.advance_to(secs(100_000)).unwrap();
+    let state = run.state();
+    let statistics = &object(&state, dr).statistics;
+    assert!(statistics.failures > 100, "{} failures", statistics.failures);
+    let availability = statistics.achieved_availability().unwrap();
+    assert!((availability - 0.8).abs() < 0.03, "achieved availability {availability}");
+}
+
+#[test]
+fn reset_ends_the_interruptions_of_sources_buffers_and_drains() {
+    let mut model = ModelDescription::new();
+    let src = source(&mut model, 10);
+    let buf = model.add_buffer(crabsim::Capacity::Unlimited);
+    let dr = drain(&mut model);
+    model.connect(src, buf);
+    model.connect(buf, dr);
+    let mut run = recorded(model.build(0));
+    run.init().unwrap();
+    for id in [src, buf, dr] {
+        stop_at(&mut run, 5, id);
+    }
+    run.advance_to(secs(20)).unwrap();
+    assert!([src, buf, dr].iter().all(|&id| object(&run.state(), id).interrupted.is_some()));
+    run.reset();
+    let state = run.state();
+    for id in [src, buf, dr] {
+        assert_eq!(object(&state, id).interrupted, None);
+        assert!(object(&state, id).interruptions.is_empty());
+    }
+    // And it runs as if nothing had happened.
+    run.init().unwrap();
+    assert_eq!(exit_times(&run.advance_to(secs(25)).unwrap()), vec![10.0, 20.0]);
+}

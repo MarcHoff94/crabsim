@@ -532,7 +532,8 @@ mod tests {
 		// Every object in a run takes the size of the largest, so a Station with capacity mustn't
 		// grow every object, and the statistics' new fields mustn't grow a SingleStation.
 		assert!(size_of::<MultiStation>() <= size_of::<SingleStation>(), "{} bytes", size_of::<MultiStation>());
-		// 1,280 until a SingleStation's failure profile moved into its boxed `Interruptions`.
-		assert_eq!(size_of::<ModelObject>(), 1_080);
+		// 1,280 until a SingleStation's failure profile moved into its boxed `Interruptions`, and
+		// 1,080 until a Buffer's fill keeper was boxed: a Buffer is the largest object.
+		assert_eq!(size_of::<ModelObject>(), 584);
 	}
 }

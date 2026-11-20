@@ -87,7 +87,7 @@
           "$ref": "#/$defs/Time"
         },
         "failures": {
-          "description": "Station: random failures. Left out, it never fails.",
+          "description": "Any object: random failures. Left out, it never fails.",
           "$ref": "#/$defs/FailuresFile"
         },
         "starting_mus": {
@@ -117,6 +117,10 @@
           "type": "integer",
           "format": "uint64",
           "minimum": 1
+        },
+        "stop_freezes_dwelling": {
+          "description": "Buffer: whether an interruption freezes the dwelling time of the MUs dwelling in it, so they become ready later by its length. False by default: their dwelling time runs on.",
+          "type": "boolean"
         },
         "dimensions": {
           "description": "Any object: its size in metres and rotation in degrees. Visual only.",
@@ -376,22 +380,22 @@
           "minLength": 1
         },
         "failed": {
-          "description": "Station.",
+          "description": "Any object.",
           "type": "string",
           "minLength": 1
         },
         "stopped": {
-          "description": "Station: interrupted by hand.",
+          "description": "Any object: interrupted by hand.",
           "type": "string",
           "minLength": 1
         },
         "forced_failure": {
-          "description": "Station: Stopped's name before ADR 0020, still read.",
+          "description": "Any object: Stopped's name before ADR 0020, still read.",
           "type": "string",
           "minLength": 1
         },
         "paused": {
-          "description": "Station.",
+          "description": "Any object.",
           "type": "string",
           "minLength": 1
         }

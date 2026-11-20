@@ -279,7 +279,7 @@ impl<'m> Checker<'m> {
         if built_in == "Station" && attributes.capacity.is_some_and(|capacity| capacity.limit() > MOST_STATION_CAPACITY) {
             self.problem(owner, "/attributes/capacity", "a Station's capacity can be at most 10,000");
         }
-        if let (Some(failures), "Station") = (&attributes.failures, built_in) {
+        if let Some(failures) = &attributes.failures {
             self.failures(owner, failures);
         }
         if let Some(dimensions) = attributes.dimensions {

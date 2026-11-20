@@ -6,8 +6,9 @@ use crate::materialflow_objects::OtherObjects;
 use crate::report::{Capacity, ObjectKind, ObjectState, OccurrenceKind};
 use crate::statistics::{FillKeeper, MachineState, StatisticsKeeper};
 use crate::time::SimTime;
+use super::interruptions::{Interruptible, Interruptions};
 use super::flows::{
-    list_blocked, relist_blocked, retries_for_blocked, retry_move_to_successor, try_to_move_to_successor, waiting_ids, BaseObject, Distributing, EventInterface,
+    FailureProfile, list_blocked, relist_blocked, retries_for_blocked, retry_move_to_successor, try_to_move_to_successor, waiting_ids, BaseObject, Distributing, EventInterface,
     MaterialFlow, MoveableUnit, ProcessState, SuccessorContainer, Waiting,
 };
 
@@ -55,10 +56,20 @@ pub struct Buffer {
     /// An MU that may leave was refused by every successor, so the Buffer waits in their lines.
     blocked: bool,
     pub statistics: StatisticsKeeper,
-    /// How full it was: only a Buffer keeps this, so no other object grows.
-    fill: FillKeeper,
+    /// How full it was: only a Buffer keeps this, so no other object grows. Boxed, since it is
+    /// half a Buffer's size and every object in a run takes the size of the largest.
+    fill: Box<FillKeeper>,
     /// The width of its histogram's bars, or automatic.
     pub histogram_bar_width: Option<u64>,
+    /// Its failures and pauses (ADR 0020). Interrupted, it takes and releases no MU.
+    pub interruptions: Interruptions,
+    /// An interruption freezes the dwelling time of the MUs dwelling when it began, rather than
+    /// letting it run on, which is the default.
+    pub stop_freezes_dwelling: bool,
+    /// Bumped when an interruption freezes dwelling, so the exits queued before it are stale.
+    stop_count: u32,
+    /// When the interruption in progress began.
+    interrupted_at: SimTime,
 }
 
 impl Buffer {
@@ -76,9 +87,18 @@ impl Buffer {
             blockedlist: Vec::new(),
             blocked: false,
             statistics: StatisticsKeeper::new(capacity.limit()),
-            fill: FillKeeper::new(None),
+            fill: Box::new(FillKeeper::new(None)),
             histogram_bar_width: None,
+            interruptions: Interruptions::new(None),
+            stop_freezes_dwelling: false,
+            stop_count: 0,
+            interrupted_at: SimTime::ZERO,
         }
+    }
+
+    /// Gives it failures, or none with `None`.
+    pub fn set_failures(&mut self, failures: Option<FailureProfile>) {
+        self.interruptions.set_failures(failures);
     }
 
     /// How many MUs it holds.
@@ -101,7 +121,7 @@ impl Buffer {
     }
 
     fn exit_event(&self, mu_id: u32, after: SimTime) -> EventTemplate {
-        EventTemplate { eventtype: EventType::MUExit(ExitTicket::new(mu_id)), exec_time: after, object_id: self.base.object_id }
+        EventTemplate { eventtype: EventType::MUExit(ExitTicket { mu_id, stop_count: self.stop_count }), exec_time: after, object_id: self.base.object_id }
     }
 
     fn handle_event(
@@ -110,7 +130,11 @@ impl Buffer {
         eventtype: &EventType,
         others: &mut OtherObjects<'_>,
     ) -> Result<Option<Vec<EventTemplate>>, RunTimeError> {
+        let interrupted = self.interruptions.is_interrupted();
         match *eventtype {
+            // Interrupted, it releases nothing: every MU that became ready meanwhile is passed on
+            // when the interruption ends. An exit queued before dwelling froze is stale.
+            EventType::MUExit(ticket) if interrupted || ticket.stop_count != self.stop_count => Ok(None),
             // An MU's dwelling time is over. A blocked Buffer already waits in line with an
             // earlier MU and keeps that place, so there is nothing to try.
             EventType::MUExit(_) if self.blocked => Ok(None),
@@ -118,8 +142,15 @@ impl Buffer {
             // Only a Buffer that was refused is waiting. A retry can also arrive after its MU
             // went elsewhere, and then an MU that became ready since must take its own turn.
             EventType::BlockedRetry { .. } if !self.blocked => Ok(None),
+            // Interrupted, it keeps its place in the line, as if refused (spec issue 122).
+            EventType::BlockedRetry { from } if interrupted => {
+                if let Some(since) = self.offered_since(context.time) {
+                    others.get_mut(from).add_blocked(self.base.object_id, since, true);
+                }
+                Ok(None)
+            }
             EventType::BlockedRetry { from } => self.pass_on(context, others, Some(from)),
-            _ => Err(RunTimeError {}),
+            _ => self.handle_interruption(eventtype, context, others).unwrap_or(Err(RunTimeError {})),
         }
     }
 
@@ -174,7 +205,7 @@ impl Buffer {
 
     /// Tells the statistics what the Buffer ended up doing.
     fn update_statistics(&mut self, now: SimTime) {
-        let state = MachineState::of(None, &self.process_state());
+        let state = MachineState::of(self.interruptions.most_serious(), &self.process_state());
         if let Some((held, time)) = self.statistics.observe_stretch(now, state, self.content.len() as u64) {
             self.fill.add(held, time);
         }
@@ -188,13 +219,14 @@ impl Buffer {
 
 impl MaterialFlow for Buffer {
     fn is_entrance_allowed(&self) -> bool {
-        match self.capacity {
+        let room = match self.capacity {
             Capacity::Unlimited => true,
             Capacity::Limited(limit) => (self.content.len() as u64) < limit,
-        }
+        };
+        room && !self.interruptions.is_interrupted()
     }
     fn is_exit_allowed(&self) -> bool {
-        self.blocked
+        self.blocked && !self.interruptions.is_interrupted()
     }
     /// Takes the MU and schedules the end of its dwelling time, when it tries to leave.
     fn process_mu_entrance(&mut self, mu: MoveableUnit, context: &mut EventContext) -> Result<Option<EventTemplate>, MaterialflowError> {
@@ -252,8 +284,10 @@ impl EventInterface for Buffer {
             self.statistics.count_mu_in();
         }
         self.update_statistics(context.time);
+        let mut events: Vec<EventTemplate> = self.interruptions.first_failure(self.base.object_id).into_iter().collect();
         // One exit is enough: it passes on every MU that may leave by then.
-        Ok(self.content.front().map(|held| self.exit_event(held.mu.id, self.dwelling_time)).into_iter().collect())
+        events.extend(self.content.front().map(|held| self.exit_event(held.mu.id, self.dwelling_time)));
+        Ok(events)
     }
     fn reset(&mut self) {
         self.set_starting_mus(self.starting_mus.clone());
@@ -262,6 +296,9 @@ impl EventInterface for Buffer {
         self.blocked = false;
         self.statistics.reset();
         self.fill.clear();
+        self.interruptions.reset();
+        self.stop_count = 0;
+        self.interrupted_at = SimTime::ZERO;
     }
     fn clear_statistics(&mut self, now: SimTime) {
         self.statistics.clear(now);
@@ -273,9 +310,8 @@ impl EventInterface for Buffer {
             kind: ObjectKind::Buffer,
             contents: self.content.iter().map(|held| held.mu.id).collect(),
             process: self.process_state(),
-            // A Buffer can't be interrupted yet: its stops aren't built.
-            interrupted: None,
-            interruptions: Vec::new(),
+            interrupted: self.interruptions.most_serious(),
+            interruptions: self.interruptions.list(),
             remaining: None,
             work: Vec::new(),
             blocked_predecessors: waiting_ids(&self.blockedlist),
@@ -295,6 +331,7 @@ impl EventInterface for Buffer {
     }
     fn set_random_seed(&mut self, seed: u64) {
         self.base.random_seed = seed;
+        self.interruptions.reseed(seed);
     }
     fn execute_event(
         &mut self,
@@ -332,5 +369,40 @@ impl Buffer {
         for held in &mut self.content {
             held.ready_at = dwelling_time;
         }
+    }
+}
+
+impl Interruptible for Buffer {
+    fn interruption_parts(&mut self) -> (&mut Interruptions, &mut StatisticsKeeper, u32) {
+        (&mut self.interruptions, &mut self.statistics, self.base.object_id)
+    }
+    /// It takes and releases nothing, which its entrance and exit rules already say. Freezing
+    /// dwelling voids the exits queued, which the end of the interruption schedules afresh.
+    fn stop_began(&mut self, context: &mut EventContext) {
+        self.interrupted_at = context.time;
+        if self.stop_freezes_dwelling {
+            self.stop_count += 1;
+        }
+    }
+    /// With dwelling frozen, every MU still dwelling when the interruption began becomes ready
+    /// later by its length, each with an exit then. Every MU that may leave now is passed on,
+    /// and those waiting for room hear of it.
+    fn stop_ended(&mut self, context: &mut EventContext, others: &mut OtherObjects<'_>, events: &mut Vec<EventTemplate>) -> Result<(), RunTimeError> {
+        if self.stop_freezes_dwelling {
+            let (began, now) = (self.interrupted_at, context.time);
+            let length = now.saturating_sub(began);
+            for at in 0..self.content.len() {
+                if self.content[at].ready_at > began {
+                    self.content[at].ready_at = self.content[at].ready_at + length;
+                    let (mu_id, ready_at) = (self.content[at].mu.id, self.content[at].ready_at);
+                    events.push(self.exit_event(mu_id, ready_at.saturating_sub(now)));
+                }
+            }
+        }
+        events.extend(self.pass_on(context, others, None)?.unwrap_or_default());
+        if self.is_entrance_allowed() {
+            events.extend(retries_for_blocked(&mut self.blockedlist, self.base.object_id).unwrap_or_default());
+        }
+        Ok(())
     }
 }

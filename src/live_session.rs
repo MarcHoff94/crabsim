@@ -164,7 +164,7 @@ pub enum SessionError {
     ResetRequired,
     /// A speed has to be positive and finite.
     InvalidSpeed(f64),
-    /// Only a Station can be paused, stopped or have its process time changed, so far.
+    /// Only a Station has a process time to change.
     NotAStation(u32),
     /// Going back goes to shown time or earlier.
     NotInThePast { to: SimTime, shown: SimTime },
@@ -1178,8 +1178,11 @@ impl<'a, C: Clock> SessionThread<'a, C> {
         | Action::Stop(id)
         | Action::EndStop(id) = action
         {
+            // Every object can be paused or stopped (spec issue 122), but only a Station has a
+            // process time.
+            let station_only = matches!(action, Action::SetProcessTime(..));
             match self.run.object(id) {
-                Some(object) if object.is_station() => {}
+                Some(object) if object.is_station() || !station_only => {}
                 Some(_) => {
                     self.observe(SessionOutput::Error(SessionError::NotAStation(id)));
                     return;

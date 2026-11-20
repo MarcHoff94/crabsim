@@ -72,12 +72,16 @@ impl ModelObject {
         }
     }
 
-    /// A Station's failures, whatever its capacity.
+    /// The object's failures, if it has any.
     pub fn failure_profile(&self) -> Option<&FailureProfile> {
         match self {
             ModelObject::Station(station) => station.interruptions.failure_profile(),
             ModelObject::MultiStation(station) => station.interruptions.failure_profile(),
-            _ => None,
+            ModelObject::Source(source) => source.interruptions.failure_profile(),
+            ModelObject::Buffer(buffer) => buffer.interruptions.failure_profile(),
+            ModelObject::Drain(drain) => drain.interruptions.failure_profile(),
+            #[cfg(test)]
+            ModelObject::RecordsThenFails(_) => None,
         }
     }
 

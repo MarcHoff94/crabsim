@@ -67,6 +67,12 @@ impl Interruptions {
         self.failures.as_deref()
     }
 
+    /// Gives the object failures, or none with `None`. Part of its configuration, so it is set
+    /// before a run, not during one.
+    pub fn set_failures(&mut self, failures: Option<FailureProfile>) {
+        self.failures = failures.map(Box::new);
+    }
+
     pub fn reseed(&mut self, seed: u64) {
         if let Some(failures) = &mut self.failures {
             failures.reseed(seed);
@@ -101,6 +107,10 @@ impl Interruptions {
         context: &mut EventContext,
         statistics: &mut StatisticsKeeper,
     ) -> Option<(Change, Vec<EventTemplate>)> {
+        // A random failure means nothing for an object with no failure profile.
+        if matches!(eventtype, EventType::StartFailure | EventType::EndFailure) && self.failures.is_none() {
+            return None;
+        }
         let mut events = Vec::new();
         let change = match *eventtype {
             EventType::StartFailure => {
@@ -109,7 +119,8 @@ impl Interruptions {
                 } else {
                     let change = self.begin(Interruption::Failed, object_id, context, statistics);
                     statistics.count_failure();
-                    let repair = self.failures.as_mut().map_or(SimTime::ZERO, |failures| SimTime::from_millis_f64(failures.dist_sampler_mttr.sample()));
+                    let failures = self.failures.as_mut().expect("checked above");
+                    let repair = SimTime::from_millis_f64(failures.dist_sampler_mttr.sample());
                     events.push(EventTemplate { eventtype: EventType::EndFailure, exec_time: repair, object_id });
                     change
                 }

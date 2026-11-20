@@ -156,7 +156,7 @@ pub struct Attributes {
     pub interval: Option<SimTime>,
     /// A Station's time working on each MU. 0 by default: a dummy Station.
     pub process_time: Option<SimTime>,
-    /// A Station's random failures. None by default: it never fails.
+    /// Random failures, for any object. None by default: it never fails.
     pub failures: Option<Failures>,
     /// How many MUs a Station or Buffer holds from Init. 0 by default, and at most its capacity.
     pub starting_mus: Option<u64>,
@@ -173,6 +173,9 @@ pub struct Attributes {
     /// How many MUs each bar of a Buffer's fill histogram covers, from 1. Automatic by default:
     /// one each, doubling whenever more MUs come than the 64 bars reach.
     pub histogram_bar_width: Option<u64>,
+    /// Whether an interruption of a Buffer freezes the dwelling time of the MUs dwelling in it.
+    /// No by default: their dwelling time runs on.
+    pub stop_freezes_dwelling: Option<bool>,
     /// The object's size and rotation. Visual only. A default size by type.
     pub dimensions: Option<Dimensions>,
     /// Free text saying what the object is. Visual only.
@@ -237,6 +240,7 @@ impl Attributes {
             Attribute::DwellingTime => self.dwelling_time.is_some(),
             Attribute::ExitStrategy => self.exit_strategy.is_some(),
             Attribute::HistogramBarWidth => self.histogram_bar_width.is_some(),
+            Attribute::StopFreezesDwelling => self.stop_freezes_dwelling.is_some(),
             Attribute::Dimensions => self.dimensions.is_some(),
             Attribute::Description => self.description.is_some(),
             Attribute::StateNotes => self.state_notes.is_some(),
@@ -256,6 +260,7 @@ impl Attributes {
             Attribute::DwellingTime => self.dwelling_time = from.dwelling_time,
             Attribute::ExitStrategy => self.exit_strategy = from.exit_strategy,
             Attribute::HistogramBarWidth => self.histogram_bar_width = from.histogram_bar_width,
+            Attribute::StopFreezesDwelling => self.stop_freezes_dwelling = from.stop_freezes_dwelling,
             Attribute::Dimensions => self.dimensions = from.dimensions,
             Attribute::Description => self.description = from.description.clone(),
             Attribute::StateNotes => self.state_notes = from.state_notes.clone(),
@@ -276,6 +281,7 @@ pub enum Attribute {
     DwellingTime,
     ExitStrategy,
     HistogramBarWidth,
+    StopFreezesDwelling,
     Dimensions,
     Description,
     StateNotes,
@@ -283,7 +289,7 @@ pub enum Attribute {
 }
 
 impl Attribute {
-    pub const ALL: [Attribute; 13] = [
+    pub const ALL: [Attribute; 14] = [
         Attribute::Interval,
         Attribute::ProcessTime,
         Attribute::Failures,
@@ -293,6 +299,7 @@ impl Attribute {
         Attribute::DwellingTime,
         Attribute::ExitStrategy,
         Attribute::HistogramBarWidth,
+        Attribute::StopFreezesDwelling,
         Attribute::Dimensions,
         Attribute::Description,
         Attribute::StateNotes,
@@ -311,6 +318,7 @@ impl Attribute {
             Attribute::DwellingTime => "dwelling_time",
             Attribute::ExitStrategy => "exit_strategy",
             Attribute::HistogramBarWidth => "histogram_bar_width",
+            Attribute::StopFreezesDwelling => "stop_freezes_dwelling",
             Attribute::Dimensions => "dimensions",
             Attribute::Description => "description",
             Attribute::StateNotes => "state_notes",
@@ -322,10 +330,18 @@ impl Attribute {
     pub fn applies_to(self, built_in: &str) -> bool {
         matches!(
             (built_in, self),
-            (_, Attribute::Dimensions | Attribute::Description | Attribute::StateNotes)
+            (_, Attribute::Dimensions | Attribute::Description | Attribute::StateNotes | Attribute::Failures)
                 | ("Source", Attribute::Interval | Attribute::Distribution)
-                | ("Station", Attribute::ProcessTime | Attribute::Failures | Attribute::StartingMus | Attribute::Capacity | Attribute::Start | Attribute::Distribution)
-                | ("Buffer", Attribute::StartingMus | Attribute::Capacity | Attribute::DwellingTime | Attribute::ExitStrategy | Attribute::HistogramBarWidth)
+                | ("Station", Attribute::ProcessTime | Attribute::StartingMus | Attribute::Capacity | Attribute::Start | Attribute::Distribution)
+                | (
+                    "Buffer",
+                    Attribute::StartingMus
+                        | Attribute::Capacity
+                        | Attribute::DwellingTime
+                        | Attribute::ExitStrategy
+                        | Attribute::HistogramBarWidth
+                        | Attribute::StopFreezesDwelling
+                )
         )
     }
 }
@@ -386,15 +402,15 @@ impl State {
     }
 
     /// The states an object of this built-in class can be in. A Source is always making its next
-    /// MU or waiting to pass one on, and a Drain takes MUs at once, so it is only ever idle. A
-    /// Buffer does no work, so it is holding rather than busy, and idle when empty. Only Stations
-    /// stop, so far.
+    /// MU or waiting to pass one on, and a Drain takes MUs at once, so it is otherwise only ever
+    /// idle. A Buffer does no work, so it is holding rather than busy, and idle when empty. Every
+    /// object can be interrupted (spec issue 122).
     pub fn of(built_in: &str) -> &'static [State] {
         match built_in {
-            "Source" => &[State::Busy, State::Blocked],
+            "Source" => &[State::Busy, State::Blocked, State::Failed, State::Stopped, State::Paused],
             "Station" => &[State::Busy, State::Blocked, State::Idle, State::Failed, State::Stopped, State::Paused],
-            "Buffer" => &[State::Holding, State::Blocked, State::Idle],
-            "Drain" => &[State::Idle],
+            "Buffer" => &[State::Holding, State::Blocked, State::Idle, State::Failed, State::Stopped, State::Paused],
+            "Drain" => &[State::Idle, State::Failed, State::Stopped, State::Paused],
             _ => &[],
         }
     }

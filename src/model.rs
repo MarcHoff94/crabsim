@@ -165,6 +165,24 @@ impl ModelDescription {
         self.buffer_mut(id).exit_strategy = exit_strategy;
     }
 
+    /// Makes an interruption of a Buffer freeze the dwelling time of its MUs, rather than let it
+    /// run on, which is the default.
+    pub fn set_stop_freezes_dwelling(&mut self, id: u32, freezes: bool) {
+        self.buffer_mut(id).stop_freezes_dwelling = freezes;
+    }
+
+    /// Gives a Source, Buffer or Drain failures, or none with `None`. A Station gets its failures
+    /// when it is added.
+    pub fn set_failures(&mut self, id: u32, failures: Option<FailureProfile>) {
+        match self.objects.get_mut(id as usize) {
+            Some(ModelObject::Source(source)) => source.set_failures(failures),
+            Some(ModelObject::Buffer(buffer)) => buffer.set_failures(failures),
+            Some(ModelObject::Drain(drain)) => drain.set_failures(failures),
+            Some(_) => panic!("object {id} is a Station, whose failures come with it"),
+            None => panic!("object {id} is not in the model"),
+        }
+    }
+
     fn buffer_mut(&mut self, id: u32) -> &mut Buffer {
         match self.objects.get_mut(id as usize) {
             Some(ModelObject::Buffer(buffer)) => buffer,

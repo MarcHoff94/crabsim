@@ -154,7 +154,9 @@ pub fn find(names: &[&str], wanted: &str, what: &str) -> Result<String, String> 
 }
 
 /// The attribute `wanted` names: exactly, or by a part only one attribute's name holds,
-/// ignoring case, spaces and underscores, such as `proc` for `process_time`.
+/// ignoring case, spaces and underscores, such as `proc` for `process_time`. Where several hold
+/// it but only one begins with it, that one: `dwell` is `dwelling_time`, not
+/// `stop_freezes_dwelling`.
 pub fn attribute(wanted: &str) -> Result<Attribute, String> {
     let plain = |text: &str| text.to_lowercase().replace([' ', '_'], "");
     let wanted = plain(wanted);
@@ -162,6 +164,10 @@ pub fn attribute(wanted: &str) -> Result<Attribute, String> {
         return Ok(exact);
     }
     let holding: Vec<Attribute> = Attribute::ALL.into_iter().filter(|attribute| !wanted.is_empty() && plain(attribute.name()).contains(&wanted)).collect();
+    let beginning: Vec<Attribute> = holding.iter().copied().filter(|attribute| plain(attribute.name()).starts_with(&wanted)).collect();
+    if let ([_, _, ..], [only]) = (holding.as_slice(), beginning.as_slice()) {
+        return Ok(*only);
+    }
     match holding.as_slice() {
         [only] => Ok(*only),
         [] => Err(format!(

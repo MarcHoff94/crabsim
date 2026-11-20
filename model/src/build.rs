@@ -39,6 +39,7 @@ pub(crate) fn build(model: &Model) -> ModelDescription {
                 description.set_dwelling_time(buffer, attributes.dwelling_time.unwrap_or(SimTime::ZERO));
                 description.set_exit_strategy(buffer, attributes.exit_strategy.unwrap_or_default());
                 description.set_histogram_bar_width(buffer, attributes.histogram_bar_width);
+                description.set_stop_freezes_dwelling(buffer, attributes.stop_freezes_dwelling.unwrap_or(false));
                 let starting = attributes.starting_mus.unwrap_or(0) as u32;
                 description.set_starting_mus(buffer, &(next_mu..next_mu + starting).collect::<Vec<u32>>());
                 next_mu += starting;
@@ -47,6 +48,10 @@ pub(crate) fn build(model: &Model) -> ModelDescription {
             "Drain" => description.add_drain(),
             other => unreachable!("checked: `{other}` is a built-in class"),
         };
+        // A Station gets its failures when it is added. Others only need them when they fail.
+        if resolved.built_in != "Station" && attributes.failures.is_some() {
+            description.set_failures(id, Some(failure_profile(attributes.failures.as_ref())));
+        }
         description.set_name(id, instance.name.clone());
         description.set_stream(id, instance.stream.unwrap_or(index as u64));
         if let Some(position) = instance.position {

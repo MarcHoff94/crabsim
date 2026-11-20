@@ -112,6 +112,9 @@ pub(crate) fn attributes(attributes: &Attributes) -> Value {
     if let Some(width) = attributes.histogram_bar_width {
         fields.insert("histogram_bar_width".into(), json!(width));
     }
+    if let Some(freezes) = attributes.stop_freezes_dwelling {
+        fields.insert("stop_freezes_dwelling".into(), json!(freezes));
+    }
     if let Some(dimensions) = attributes.dimensions {
         let mut size = Map::new();
         size.insert("length".into(), json!(dimensions.length));

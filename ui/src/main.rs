@@ -3307,7 +3307,9 @@ fn object_window_contents(
         inspector.set_open(Section::Now, !open);
     }
 
-    if inspection.kind == crabsim::ObjectKind::Station {
+    // Every object can be paused and stopped, and a Station's process time changed too.
+    {
+        let is_station = inspection.kind == crabsim::ObjectKind::Station;
         let open = inspector.is_open(Section::Interventions, running);
         let toggled = {
             let process_time_text = &mut inspector.process_time_text;
@@ -3318,6 +3320,9 @@ fn object_window_contents(
                 };
                 if let Some(intervention) = intervention_buttons(section, offered, Some(stream)) {
                     asked.push(WindowAsk::Intervention(intervention));
+                }
+                if !is_station {
+                    return;
                 }
                 // The process time in force shows once, here, with the configured one only if it differs.
                 if let Some(text) = inspection.details.as_ref().and_then(Details::process_time_text) {
@@ -4092,6 +4097,7 @@ fn attribute_label(attribute: &str) -> &str {
         "dwelling_time" => "Dwelling time",
         "exit_strategy" => "Exit strategy",
         "histogram_bar_width" => "Histogram bar width",
+        "stop_freezes_dwelling" => "Dwelling in a stop",
         "start" => "Start",
         "dimensions" => "Dimensions",
         "description" => "Description",
@@ -4350,6 +4356,10 @@ fn edit_targets(ui: &Ui, id: u32) -> Vec<(String, String)> {
         return [("process_time", "Process time"), ("pause", "Pause"), ("stop", "Stop")]
             .map(|(name, label)| (name.to_string(), label.to_string()))
             .to_vec();
+    }
+    // Every other object can be paused and stopped too.
+    if ui.view.inspection_of(id).is_some_and(|inspection| inspection.interventions.is_some()) {
+        return [("pause", "Pause"), ("stop", "Stop")].map(|(name, label)| (name.to_string(), label.to_string())).to_vec();
     }
     Vec::new()
 }

@@ -4,7 +4,7 @@
 mod common;
 
 use common::Setup;
-use crabsim_catalogue::commands::{complete, find, parse, Context, Parsed, WindowCommand};
+use crabsim_catalogue::commands::{attribute, complete, find, parse, Context, Parsed, WindowCommand};
 use serde_json::{json, Value};
 
 /// A Source feeding two Mills of one class, which feed a Drain, all placed.
@@ -316,4 +316,13 @@ impl Agent {
     fn err(&self, name: &str, input: Value) -> Value {
         self.0.call(name, input).expect_err("should fail").to_json()
     }
+}
+
+#[test]
+fn an_attribute_beginning_with_what_was_typed_wins_over_others_holding_it() {
+    use crabsim_model::Attribute;
+    assert_eq!(attribute("dwell"), Ok(Attribute::DwellingTime), "stop_freezes_dwelling holds it too, but doesn't begin with it");
+    assert_eq!(attribute("freez"), Ok(Attribute::StopFreezesDwelling));
+    assert_eq!(attribute("proc"), Ok(Attribute::ProcessTime));
+    assert!(attribute("t").is_err(), "several begin with it, or none does and several hold it");
 }

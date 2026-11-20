@@ -90,7 +90,7 @@ fn the_inspector_names_the_object_and_says_what_it_is_doing() {
     // Its first MU came at 5 s and takes 10 s.
     assert_eq!(inspection.remaining, Some(secs(3)));
     assert_eq!(inspection.blocked, None);
-    assert!(inspection.stopped.is_empty());
+    assert!(inspection.interrupted_by.is_empty());
 }
 
 #[test]
@@ -121,8 +121,8 @@ fn a_stopped_object_lists_every_interruption_and_since_when() {
     watched.at(15);
     watched.view.select(Some(STATION_1));
     let inspection = watched.view.inspection().unwrap();
-    assert_eq!(inspection.state, "Stopped");
-    assert_eq!(inspection.stopped, vec!["Stop since 00:00:14", "Pause since 00:00:12"]);
+    assert_eq!(inspection.state, "Interrupted");
+    assert_eq!(inspection.interrupted_by, vec!["Stop since 00:00:14", "Pause since 00:00:12"]);
     // The work froze at 12 s, 3 s before its MU was done.
     assert_eq!(inspection.remaining, Some(secs(3)));
 }

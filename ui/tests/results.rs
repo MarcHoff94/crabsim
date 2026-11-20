@@ -120,7 +120,7 @@ fn intervals_come_once_five_measuring_periods_are_complete() {
         let figures = figures[station.id as usize];
         assert_eq!(intervals.busy.mean, figures.busy.mean().unwrap());
         assert_eq!(intervals.busy.half_width, figures.busy.half_width().unwrap());
-        assert_eq!(intervals.stopped.half_width, figures.failed.half_width().unwrap(), "the demo has no pauses");
+        assert_eq!(intervals.interrupted.half_width, figures.failed.half_width().unwrap(), "the demo has no pauses");
     }
     assert!(later.stations.iter().any(|station| station.intervals.unwrap().busy.half_width > 0.0));
 }

@@ -3297,9 +3297,9 @@ fn object_window_contents(
             section.label(egui::RichText::new("Why it's blocked").strong());
             section.label(blocked);
         }
-        if !inspection.stopped.is_empty() {
-            section.label(egui::RichText::new("Why it's stopped").strong());
-            for interruption in &inspection.stopped {
+        if !inspection.interrupted_by.is_empty() {
+            section.label(egui::RichText::new("Why it's interrupted").strong());
+            for interruption in &inspection.interrupted_by {
                 section.label(interruption);
             }
         }
@@ -3714,7 +3714,7 @@ fn results_view(ui: &mut egui::Ui, results: Option<(&str, &crabsim_ui::view::Res
             if let Some(runner_up) = &results.too_close {
                 ui.colored_label(
                     NOTE_COLOUR,
-                    format!("Too close to call: {} and {runner_up} can't be told apart yet, since their busy-or-stopped intervals overlap.", likely.instance),
+                    format!("Too close to call: {} and {runner_up} can't be told apart yet, since their busy-or-interrupted intervals overlap.", likely.instance),
                 );
             }
             for (name, blocked) in &likely.upstream {
@@ -3766,7 +3766,7 @@ fn results_view(ui: &mut egui::Ui, results: Option<(&str, &crabsim_ui::view::Res
                 pick(grid, station.id, &station.name, &mut chosen);
                 match station.intervals {
                     Some(intervals) => {
-                        let shown = [Some(intervals.busy), full.then_some(intervals.busy_full), Some(intervals.blocked), Some(intervals.idle), Some(intervals.stopped)];
+                        let shown = [Some(intervals.busy), full.then_some(intervals.busy_full), Some(intervals.blocked), Some(intervals.idle), Some(intervals.interrupted)];
                         for interval in shown.into_iter().flatten() {
                             grid.label(percent_interval(interval));
                         }

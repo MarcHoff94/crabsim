@@ -1762,7 +1762,7 @@ fn a_failure_counts_its_time_once_and_failed_beats_everything_else() {
     assert_eq!(s.time_failed, secs(5));
     assert_eq!(s.time_busy, secs(60));
     assert_eq!(s.time_idle, secs(10));
-    assert_eq!(s.mu_time_stopped, secs(5));
+    assert_eq!(s.mu_time_interrupted, secs(5));
     assert_eq!(s.mu_time_busy, secs(60));
     assert_eq!((s.failures, s.stops), (1, 1));
     assert_times_add_up(&run);
@@ -1793,7 +1793,7 @@ fn a_failure_while_blocked_counts_as_failed_rather_than_blocked() {
     let s = statistics_of(&run, st);
     assert_eq!(s.time_blocked, secs(10), "from t=10 to the failure");
     assert_eq!(s.time_failed, secs(20));
-    assert_eq!(s.mu_time_stopped, secs(20));
+    assert_eq!(s.mu_time_interrupted, secs(20));
     assert_times_add_up(&run);
 }
 
@@ -2081,7 +2081,7 @@ fn a_pause_is_not_a_failure_and_counts_as_paused_time() {
     assert_eq!(s.time_paused, secs(30));
     assert_eq!(s.time_failed, SimTime::ZERO);
     assert_eq!((s.pauses, s.failures, s.stops), (1, 0, 1));
-    assert_eq!(s.mu_time_stopped, secs(30));
+    assert_eq!(s.mu_time_interrupted, secs(30));
     assert_eq!(s.achieved_availability(), Some(1.0), "a pause doesn't count against availability");
     assert_times_add_up(&run);
 }

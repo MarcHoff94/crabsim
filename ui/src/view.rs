@@ -279,12 +279,12 @@ pub struct Inspection {
     /// Busy, Blocked, Idle or Stopped.
     pub state: &'static str,
     pub contents: Vec<u32>,
-    /// Time left on the work in progress, frozen while stopped.
+    /// Time left on the work in progress, frozen while interrupted.
     pub remaining: Option<SimTime>,
     /// Why it's blocked: the MU it holds and what each successor is doing.
     pub blocked: Option<String>,
-    /// Why it's stopped: each active interruption and since when, most serious first.
-    pub stopped: Vec<String>,
+    /// Why it's interrupted: each active interruption and since when, most serious first.
+    pub interrupted_by: Vec<String>,
     /// What only a full state says. `None` until the session has sent one.
     pub details: Option<Details>,
     /// The interventions on offer, and which are on. `None` where there are none.
@@ -555,7 +555,7 @@ pub struct StationIntervals {
     pub blocked: Interval,
     pub idle: Interval,
     /// Failed or paused.
-    pub stopped: Interval,
+    pub interrupted: Interval,
     /// Busy and full or interrupted, which the likely-bottleneck rule ranks by.
     pub full_or_interrupted: Interval,
 }
@@ -596,7 +596,7 @@ pub struct Results {
     pub bottleneck: Option<LikelyBottleneck>,
     /// How far measuring periods have got, when the run measures in them.
     pub periods: Option<PeriodsSoFar>,
-    /// The runner-up the likely bottleneck can't be told from: their full-or-stopped intervals
+    /// The runner-up the likely bottleneck can't be told from: their full-or-interrupted intervals
     /// overlap. Only once intervals are given.
     pub too_close: Option<String>,
     /// The model's longest mean time between failures or repair time, when the measuring period
@@ -1237,7 +1237,7 @@ impl ViewState {
         let pictured = self.picture.object(id);
         let state = match pictured {
             None => "No state yet",
-            Some(pictured) if pictured.is_interrupted() => "Stopped",
+            Some(pictured) if pictured.is_interrupted() => "Interrupted",
             Some(pictured) => match pictured.process() {
                 ProcessState::Processing if object.kind == ObjectKind::Buffer => "Holding",
                 ProcessState::Processing => "Busy",
@@ -1262,7 +1262,7 @@ impl ViewState {
                 .collect();
             format!("{holding}: {}", successors.join(", "))
         });
-        let stopped = pictured
+        let interrupted_by = pictured
             .map(|pictured| pictured.interruptions())
             .unwrap_or_default()
             .iter()
@@ -1277,7 +1277,7 @@ impl ViewState {
             contents: pictured.map(|pictured| pictured.contents().to_vec()).unwrap_or_default(),
             remaining: pictured.and_then(|pictured| pictured.remaining(self.picture.shown())),
             blocked,
-            stopped,
+            interrupted_by,
             details: self.details_of(id),
             interventions: pictured.filter(|_| offered).map(|pictured| {
                 let on = |cause| pictured.interruptions().iter().any(|interruption| interruption.cause == cause);
@@ -1419,7 +1419,7 @@ impl ViewState {
                             busy_full: Interval::of(figures.busy_full)?,
                             blocked: Interval::of(figures.blocked)?,
                             idle: Interval::of(figures.idle)?,
-                            stopped: Interval::of(figures.stopped)?,
+                            interrupted: Interval::of(figures.interrupted)?,
                             full_or_interrupted: Interval::of(figures.full_or_interrupted)?,
                         })
                     }),

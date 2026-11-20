@@ -34,8 +34,8 @@ enum Work {
 	At(SimTime),
 	/// In work, stopped with this much left.
 	Interrupted(SimTime),
-	/// Finished, ready to leave since this time: when its work finished, or when the stop that
-	/// kept it from leaving ended.
+	/// Finished, ready to leave since this time, when its work finished. An interruption doesn't
+	/// change it, so the Station keeps its place in line (spec issue 122).
 	ReadySince(SimTime),
 }
 
@@ -205,9 +205,15 @@ impl MultiStation {
 				self.pass_on(context, others, None)
 			}
 			EventType::BlockedRetry { from } => {
-				// A retry finding it stopped is used up, as for a SingleStation: it lists itself
-				// again when the stop ends.
-				if !self.waiting || self.is_interrupted() {
+				if !self.waiting {
+					return Ok(None);
+				}
+				// Interrupted, it can't take the room now, but keeps its place in the line, as if
+				// refused (spec issue 122).
+				if self.is_interrupted() {
+					if let Some(since) = self.offered_since(context.time) {
+						others.get_mut(from).add_blocked(self.base.object_id, since, true);
+					}
 					return Ok(None);
 				}
 				self.pass_on(context, others, Some(from))
@@ -294,17 +300,15 @@ impl MultiStation {
 						exits.push((left, place.mu.id));
 					}
 				}
-				Work::ReadySince(_) => {
-					place.work = Work::ReadySince(context.time);
-					finished = true;
-				}
+				// Ready to leave since its work finished, which the stop doesn't change.
+				Work::ReadySince(_) => finished = true,
 				Work::At(_) | Work::Waiting => {}
 			}
 		}
 		events.extend(exits.into_iter().map(|(left, mu_id)| self.exit_event(mu_id, left)));
 		if finished {
-			// A stopped Station released nothing, so it tries afresh, as a SingleStation does. Where
-			// it is still listed it keeps its place.
+			// An interrupted Station released nothing, so it tries afresh, as a SingleStation does,
+			// keeping its place wherever it is listed.
 			if let Some(passed) = self.pass_on(context, others, None)? {
 				events.extend(passed);
 			}

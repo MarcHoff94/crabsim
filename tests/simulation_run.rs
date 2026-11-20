@@ -915,6 +915,35 @@ fn the_longest_waiting_predecessor_retries_first() {
 }
 
 #[test]
+fn an_interrupted_predecessor_keeps_its_place_in_line() {
+    // Spec issue 122: an interruption costs a waiting Station the repair time, not its place.
+    let mut model = ModelDescription::new();
+    let first = preloaded_station(&mut model, 10, 1);
+    let second = preloaded_station(&mut model, 20, 2);
+    let third = preloaded_station(&mut model, 30, 3);
+    let contested = preloaded_station(&mut model, 100, 4);
+    let dr = drain(&mut model);
+    for waiting in [first, second, third] {
+        model.connect(waiting, contested);
+    }
+    model.connect(contested, dr);
+    let mut run = recorded(model.build(0));
+    run.init().unwrap();
+    pause_at(&mut run, 50, first);
+    resume_at(&mut run, 150, first);
+
+    // Contested frees up at t=100 while the first is paused: the second takes the room, and the
+    // first stays at the front of the line rather than going to the back.
+    let mut occurrences = run.advance_to(secs(120)).unwrap();
+    assert_eq!(object(&run.state(), contested).blocked_predecessors, vec![first, third]);
+
+    occurrences.extend(run.advance_to(secs(300)).unwrap());
+    assert_eq!(moves_from(&occurrences, second), vec![100.0]);
+    assert_eq!(moves_from(&occurrences, first), vec![200.0], "its MU has waited since t=10");
+    assert_eq!(moves_from(&occurrences, third), vec![300.0]);
+}
+
+#[test]
 fn a_predecessor_refused_on_every_retry_is_listed_once() {
     let mut model = ModelDescription::new();
     let early = preloaded_station(&mut model, 5, 1);

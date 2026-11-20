@@ -21,8 +21,8 @@ enum Finish {
 	At(SimTime),
 	/// Stopped mid-work, with this much work left.
 	Interrupted(SimTime),
-	/// Holding a finished MU, ready to leave since this time: when its work finished, or when the
-	/// stop ended that kept it from leaving.
+	/// Holding a finished MU, ready to leave since this time, when its work finished. An
+	/// interruption doesn't change it, so the Station keeps its place in line (spec issue 122).
 	ReadySince(SimTime),
 }
 
@@ -149,7 +149,16 @@ impl SingleStation {
 			&EventType::BlockedRetry { from } => {
 				// An empty station can still get a retry already queued when its MU left. It
 				// has nothing to move, so it must not list itself as waiting.
-				if !self.is_exit_allowed() || self.content.is_none() {
+				if self.content.is_none() {
+					return Ok(None);
+				}
+				// Interrupted with a finished MU, it can't take the room now, but it keeps its
+				// place in the line, as if refused (spec issue 122).
+				if let (true, Finish::ReadySince(since)) = (self.is_interrupted(), self.finish) {
+					others.get_mut(from).add_blocked(self.base.object_id, since, true);
+					return Ok(None);
+				}
+				if !self.is_exit_allowed() {
 					return Ok(None);
 				}
 				match retry_move_to_successor(self, context, others, from) {
@@ -221,10 +230,9 @@ impl SingleStation {
 				events.push(self.exit_event(mu_id, remain));
 			}
 		} else if self.content.is_some() {
-			// Blocked when the stop began (MU done, waiting to exit): retry the move. A stopped
-			// Station releases no MU, so its MU is ready to leave again from now. Where it is
-			// still listed it keeps its place.
-			self.finish = Finish::ReadySince(context.time);
+			// Blocked when the stop began (MU done, waiting to exit): retry the move. Its MU has
+			// been ready to leave since its work finished, so it keeps its place in every line it
+			// was in, and joins any other by that time too.
 			match try_to_move_to_successor(self, context, others) {
 				Ok(Some(evt)) => {
 					self.entrancelocked = false;

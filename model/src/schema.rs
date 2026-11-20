@@ -122,7 +122,7 @@ pub struct AttributesFile {
     pub interval: Option<Time>,
     /// Station: the time it works on each MU. 0 by default, a dummy Station that takes no time.
     pub process_time: Option<Time>,
-    /// Station: random failures. Left out, it never fails.
+    /// Any object: random failures. Left out, it never fails.
     pub failures: Option<FailuresFile>,
     /// Station, Buffer: how many MUs it holds from the start of a run, at most its capacity, in
     /// the order they count as having entered. 0 by default.
@@ -144,6 +144,9 @@ pub struct AttributesFile {
     /// collects everything beyond, such as 315 or more with a width of 5.
     #[schemars(range(min = 1))]
     pub histogram_bar_width: Option<u64>,
+    /// Buffer: whether an interruption freezes the dwelling time of the MUs dwelling in it, so they
+    /// become ready later by its length. False by default: their dwelling time runs on.
+    pub stop_freezes_dwelling: Option<bool>,
     /// Any object: its size in metres and rotation in degrees. Visual only.
     pub dimensions: Option<DimensionsFile>,
     /// Any object: free text saying what it is. Visual only.
@@ -276,16 +279,16 @@ pub struct StateNotesFile {
     /// Station, Buffer, Drain.
     #[schemars(length(min = 1))]
     pub idle: Option<String>,
-    /// Station.
+    /// Any object.
     #[schemars(length(min = 1))]
     pub failed: Option<String>,
-    /// Station: interrupted by hand.
+    /// Any object: interrupted by hand.
     #[schemars(length(min = 1))]
     pub stopped: Option<String>,
-    /// Station: Stopped's name before ADR 0020, still read.
+    /// Any object: Stopped's name before ADR 0020, still read.
     #[schemars(length(min = 1))]
     pub forced_failure: Option<String>,
-    /// Station.
+    /// Any object.
     #[schemars(length(min = 1))]
     pub paused: Option<String>,
 }

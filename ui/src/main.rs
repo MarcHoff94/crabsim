@@ -4092,6 +4092,7 @@ fn attribute_label(attribute: &str) -> &str {
         "dwelling_time" => "Dwelling time",
         "exit_strategy" => "Exit strategy",
         "histogram_bar_width" => "Histogram bar width",
+        "stop_freezes_dwelling" => "Dwelling in a stop",
         "start" => "Start",
         "dimensions" => "Dimensions",
         "description" => "Description",

@@ -27,6 +27,9 @@ pub fn summary(value: &Value) -> String {
     if let Some((_, label)) = EXIT_STRATEGIES.iter().chain(&STARTS).find(|(name, _)| value == *name) {
         return label.to_lowercase();
     }
+    if let Value::Bool(freezes) = value {
+        return if *freezes { "freezes" } else { "runs on" }.to_string();
+    }
     let Value::Object(fields) = value else {
         return text(value);
     };
@@ -115,6 +118,10 @@ pub const EXIT_STRATEGIES: [(&str, &str); 2] = [("first_in_first_out", "First in
 /// When a Station with capacity begins work, by name in a model file, with its label in the window.
 pub const STARTS: [(&str, &str); 2] = [("individual", "Each MU on entry"), ("batch", "Batch, when full")];
 
+/// What an interruption does to a Buffer's dwelling time, as a model file writes it, with its
+/// label in the window.
+pub const DWELLING_IN_A_STOP: [(&str, &str); 2] = [("false", "Runs on"), ("true", "Freezes")];
+
 /// What can be weighed, by name in a model file, with its label in the window.
 pub const WEIGHABLE: [(&str, &str); 4] = [("process_time", "Process time"), ("interval", "Interval"), ("starting_mus", "Starting MUs"), ("capacity", "Capacity")];
 
@@ -180,11 +187,13 @@ impl Form {
             }
             "exit_strategy" => (vec![part("", value.and_then(Value::as_str).unwrap_or(EXIT_STRATEGIES[0].0))], None),
             "start" => (vec![part("", value.and_then(Value::as_str).unwrap_or(STARTS[0].0))], None),
+            "stop_freezes_dwelling" => (vec![part("", if value.and_then(Value::as_bool) == Some(true) { "true" } else { "false" })], None),
             _ => (vec![part("", text_of(value))], None),
         };
         let options: &[(&str, &str)] = match attribute {
             "exit_strategy" => &EXIT_STRATEGIES,
             "start" => &STARTS,
+            "stop_freezes_dwelling" => &DWELLING_IN_A_STOP,
             _ => &[],
         };
         Form { attribute: attribute.to_string(), parts, repair, distribution: None, options }
@@ -327,6 +336,7 @@ impl Form {
                 }
                 Ok(Value::Object(size))
             }
+            "stop_freezes_dwelling" => Ok(json!(text(0) == "true")),
             _ => Ok(json!(text(0))),
         }
     }

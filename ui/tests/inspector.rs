@@ -165,6 +165,14 @@ fn each_type_shows_only_the_statistics_that_can_vary_for_it() {
 }
 
 #[test]
+fn a_source_buffer_or_drain_shows_its_interruptions_once_it_has_had_some() {
+    let mut watched = halted_at(600, STATION_1);
+    intervene(&mut watched, SOURCE, Intervention::Pause);
+    assert_eq!(statistics_labels(&mut watched, SOURCE), ["MUs out", "Blocked", "Failed", "Paused", "Failures", "Pauses", "Availability"]);
+    assert_eq!(watched.view.inspection().unwrap().state, "Interrupted");
+}
+
+#[test]
 fn process_time_names_the_configured_one_only_when_it_differs() {
     let mut watched = halted_at(12, STATION_1);
     watched.details();
@@ -293,7 +301,7 @@ fn a_state_asked_for_doesnt_restart_measuring_the_speed_reached() {
 // ---------- Interventions ----------
 
 #[test]
-fn interventions_are_offered_on_stations_once_initialised() {
+fn interventions_are_offered_on_every_object_once_initialised() {
     let mut watched = Watched::demo();
     watched.view.select(Some(STATION_1));
     assert!(watched.view.inspection().unwrap().interventions.is_none(), "Init first");
@@ -302,7 +310,7 @@ fn interventions_are_offered_on_stations_once_initialised() {
     let offered = watched.view.inspection().unwrap().interventions.unwrap();
     assert!(!offered.paused && !offered.stopped);
     watched.view.select(Some(SOURCE));
-    assert!(watched.view.inspection().unwrap().interventions.is_none(), "only a Station so far");
+    assert!(watched.view.inspection().unwrap().interventions.is_some(), "a Source can be paused and stopped too");
 }
 
 #[test]

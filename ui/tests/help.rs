@@ -15,11 +15,11 @@ fn the_help_lists_the_states_an_objects_type_can_be_in_each_with_what_it_means()
     let station: Vec<&str> = states(ObjectKind::Station, None).iter().map(|help| help.state.label()).collect();
     assert_eq!(station, ["Busy", "Blocked", "Idle", "Failed", "Stopped", "Paused"]);
     let source: Vec<State> = states(ObjectKind::Source, None).iter().map(|help| help.state).collect();
-    assert_eq!(source, [State::Busy, State::Blocked]);
+    assert_eq!(source, [State::Busy, State::Blocked, State::Failed, State::Stopped, State::Paused], "every object can be interrupted");
     let drain: Vec<State> = states(ObjectKind::Drain, None).iter().map(|help| help.state).collect();
-    assert_eq!(drain, [State::Idle]);
+    assert_eq!(drain, [State::Idle, State::Failed, State::Stopped, State::Paused]);
     let buffer: Vec<&str> = states(ObjectKind::Buffer, None).iter().map(|help| help.state.label()).collect();
-    assert_eq!(buffer, ["Holding", "Blocked", "Idle"], "a Buffer does no work, so it is holding rather than busy");
+    assert_eq!(buffer, ["Holding", "Blocked", "Idle", "Failed", "Stopped", "Paused"], "a Buffer does no work, so it is holding rather than busy");
     for kind in [ObjectKind::Source, ObjectKind::Station, ObjectKind::Buffer, ObjectKind::Drain] {
         assert!(states(kind, None).iter().all(|help| !help.meaning.is_empty() && help.note.is_none()), "{kind:?}");
     }

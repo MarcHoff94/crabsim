@@ -976,14 +976,14 @@ fn a_note_on_forced_failure_reads_as_stopped_and_is_saved_as_stopped() {
 #[test]
 fn a_state_note_must_name_a_state_its_object_can_be_in_and_say_something() {
     let text = file(json!([
-        { "name": "In", "class": "Source", "successors": ["Out"], "attributes": { "interval": "5", "state_notes": { "failed": "never", "blokked": "typo" } } },
+        { "name": "In", "class": "Source", "successors": ["Out"], "attributes": { "interval": "5", "state_notes": { "holding": "never", "blokked": "typo" } } },
         { "name": "Out", "class": "Drain", "attributes": { "state_notes": { "idle": "", "busy": 3 } } },
     ]));
     assert_eq!(
         found(&text),
         vec![
             "/instances/0/attributes/state_notes/blokked: unknown state `blokked`: did you mean `blocked`?",
-            "/instances/0/attributes/state_notes/failed: a Source is never failed",
+            "/instances/0/attributes/state_notes/holding: a Source is never holding",
             "/instances/1/attributes/state_notes/busy: this should be text",
             "/instances/1/attributes/state_notes/idle: a note can't be empty: leave the state out instead",
         ]
@@ -1118,6 +1118,51 @@ fn a_buffers_histogram_bar_width_is_read_saved_built_and_checked() {
     assert_found(&buffer(json!({ "histogram_bar_width": "wide" })), "/instances/0/attributes/histogram_bar_width", "whole number");
     let station = file(json!([{ "name": "S", "class": "Station", "attributes": { "histogram_bar_width": 2 } }]));
     assert_found(&station, "/instances/0/attributes/histogram_bar_width", "a Station has no attribute");
+}
+
+// ---------- Interruptions of every type (spec issue 122) ----------
+
+#[test]
+fn a_source_buffer_or_drain_can_have_failures_and_they_fail() {
+    let failures = json!({ "availability": 0.8, "repair_time": { "constant": "0:30" } });
+    let text = file(json!([
+        { "name": "In", "class": "Source", "successors": ["Store"], "attributes": { "interval": "1", "failures": failures } },
+        { "name": "Store", "class": "Buffer", "successors": ["Out"], "attributes": { "failures": failures } },
+        { "name": "Out", "class": "Drain", "attributes": { "failures": failures } },
+    ]));
+    let model = load(&text).unwrap();
+    assert_eq!(load(&model.save()).unwrap(), model, "saved and read again");
+    let mut run = model.to_description().build(2);
+    run.init().unwrap();
+    run.advance_to(secs(100_000)).unwrap();
+    let state = run.state();
+    for object in &state.objects {
+        assert!(object.statistics.failures > 100, "object {} failed {} times", object.id, object.statistics.failures);
+    }
+    let bad = file(json!([{ "name": "Out", "class": "Drain", "attributes": { "failures": { "availability": 1.5, "repair_time": { "constant": "0:30" } } } }]));
+    assert_found(&bad, "/instances/0/attributes/failures/availability", "above 0 and below 1");
+}
+
+#[test]
+fn a_buffers_dwelling_in_a_stop_is_read_saved_built_and_checked() {
+    let buffer = |attributes: Value| file(json!([{ "name": "B", "class": "Buffer", "attributes": attributes }]));
+    let model = load(&buffer(json!({ "stop_freezes_dwelling": true }))).unwrap();
+    assert_eq!(model.resolve(0).unwrap().attributes.stop_freezes_dwelling, Some(true));
+    let saved = model.save();
+    assert!(saved.contains(r#""stop_freezes_dwelling": true"#), "{saved}");
+    assert_eq!(load(&saved).unwrap(), model);
+    assert_found(&buffer(json!({ "stop_freezes_dwelling": "yes" })), "/instances/0/attributes/stop_freezes_dwelling", "true or false");
+    let station = file(json!([{ "name": "S", "class": "Station", "attributes": { "stop_freezes_dwelling": true } }]));
+    assert_found(&station, "/instances/0/attributes/stop_freezes_dwelling", "a Station has no attribute");
+}
+
+#[test]
+fn every_type_has_notes_for_its_interruptions() {
+    let text = file(json!([
+        { "name": "In", "class": "Source", "successors": ["Out"], "attributes": { "interval": "5", "state_notes": { "paused": "the supplier's break" } } },
+        { "name": "Out", "class": "Drain", "attributes": { "state_notes": { "failed": "the dock is jammed", "stopped": "loading by hand" } } },
+    ]));
+    assert!(load(&text).is_ok(), "{:?}", load(&text).err());
 }
 
 // ---------- Station capacity ----------

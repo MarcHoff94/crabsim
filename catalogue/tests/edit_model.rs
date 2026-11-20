@@ -440,8 +440,8 @@ fn state_notes_are_set_on_a_class_and_checked_against_its_built_in_class() {
     assert_eq!(state_notes, json!({ "attribute": "state_notes", "value": notes, "from": "class", "class": "Mill" }));
 
     let error = edit_err(&setup, json!([
-        { "change": "set_attribute", "target": { "instance": "Out" }, "attribute": "state_notes", "value": { "failed": "never" } } ]));
-    assert_eq!(error["problems"][0]["message"], "a Drain is never failed");
+        { "change": "set_attribute", "target": { "instance": "Out" }, "attribute": "state_notes", "value": { "busy": "never" } } ]));
+    assert_eq!(error["problems"][0]["message"], "a Drain is never busy");
 }
 
 #[test]

@@ -359,13 +359,32 @@ impl Inspection {
             total => format!("{:.1} %", time.as_millis() as f64 * 100.0 / total as f64),
         };
         let lead_time = statistics.lead_time_mean().map(|mean| ("Mean lead time", format_time_exact(mean)));
+        // Every object can be interrupted, but a Source, Buffer or Drain seldom is, so its
+        // interruptions show only once there have been some.
+        let interrupted = statistics.failures > 0 || statistics.pauses > 0;
+        let mut interruption_rows = vec![
+            ("Failed", share(statistics.time_failed)),
+            ("Paused", share(statistics.time_paused)),
+            ("Failures", statistics.failures.to_string()),
+            ("Pauses", statistics.pauses.to_string()),
+        ];
+        if let Some(availability) = statistics.achieved_availability() {
+            interruption_rows.push(("Availability", format!("{:.1} %", availability * 100.0)));
+        }
+        let unless_never = |rows: Vec<(&'static str, String)>| if interrupted { rows } else { Vec::new() };
         match self.kind {
-            ObjectKind::Source => vec![("MUs out", statistics.mus_out.to_string()), ("Blocked", share(statistics.time_blocked))],
+            ObjectKind::Source => {
+                let mut rows = vec![("MUs out", statistics.mus_out.to_string()), ("Blocked", share(statistics.time_blocked))];
+                rows.extend(unless_never(interruption_rows));
+                rows
+            }
             ObjectKind::Drain => {
                 let throughput = statistics.mus_per_hour(details.as_of).map_or_else(|| "–".to_string(), |per_hour| format!("{per_hour:.1} an hour"));
-                [("MUs in", statistics.mus_in.to_string()), ("Throughput", throughput)].into_iter().chain(lead_time).collect()
+                let mut rows: Vec<_> = [("MUs in", statistics.mus_in.to_string()), ("Throughput", throughput)].into_iter().chain(lead_time).collect();
+                rows.extend(unless_never(interruption_rows));
+                rows
             }
-            // A Buffer does no work and doesn't stop yet, so it shows how full it was instead.
+            // A Buffer does no work, so it shows how full it was instead.
             ObjectKind::Buffer => {
                 let mut rows = vec![
                     ("MUs in", statistics.mus_in.to_string()),
@@ -387,6 +406,7 @@ impl Inspection {
                 if details.limited {
                     rows.push(("Full", share(statistics.time_full)));
                 }
+                rows.extend(unless_never(interruption_rows));
                 rows
             }
             ObjectKind::Station => {
@@ -403,17 +423,8 @@ impl Inspection {
                         ("  partly blocked", share(statistics.time_busy_partly_blocked)),
                     ]);
                 }
-                rows.extend([
-                    ("Blocked", share(statistics.time_blocked)),
-                    ("Idle", share(statistics.time_idle)),
-                    ("Failed", share(statistics.time_failed)),
-                    ("Paused", share(statistics.time_paused)),
-                    ("Failures", statistics.failures.to_string()),
-                    ("Pauses", statistics.pauses.to_string()),
-                ]);
-                if let Some(availability) = statistics.achieved_availability() {
-                    rows.push(("Availability", format!("{:.1} %", availability * 100.0)));
-                }
+                rows.extend([("Blocked", share(statistics.time_blocked)), ("Idle", share(statistics.time_idle))]);
+                rows.extend(interruption_rows);
                 rows
             }
         }
@@ -1268,7 +1279,7 @@ impl ViewState {
             .iter()
             .map(|interruption| format!("{} since {}", cause_name(interruption.cause), format_time(interruption.since)))
             .collect();
-        let offered = self.initialised && !self.run_failed() && object.kind == ObjectKind::Station;
+        let offered = self.initialised && !self.run_failed();
         Some(Inspection {
             id,
             kind: object.kind,

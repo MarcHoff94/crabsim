@@ -5,7 +5,7 @@ use crate::statistics::StatisticsKeeper;
 use crate::time::SimTime;
 use super::flows::BaseObject;
 use crate::materialflow_objects::OtherObjects;
-use crate::flows::{list_blocked, relist_blocked, waiting_ids, Waiting, EventInterface, InterruptionState, MaterialFlow, MoveableUnit, ProcessState, StopCtrl};
+use crate::flows::{list_blocked, relist_blocked, waiting_ids, Waiting, EventInterface, MaterialFlow, MoveableUnit, ProcessState};
 
 #[derive(Clone)]
 pub struct Drain {
@@ -72,15 +72,6 @@ impl EventInterface for Drain {
     }
     fn set_random_seed(&mut self, seed: u64) {
         self.base.random_seed = seed;
-    }
-}
-
-impl StopCtrl for Drain {
-    fn set_stop(&mut self, _failure_start: &SimTime, _reason: InterruptionState) -> Result<Option<EventTemplate>, MaterialflowError> {
-        todo!("StopCtrl is not implemented for Drain yet")
-    }
-    fn remove_stop(&mut self) -> Result<Option<EventTemplate>, MaterialflowError> {
-        todo!("StopCtrl is not implemented for Drain yet")
     }
 }
 

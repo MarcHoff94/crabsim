@@ -96,8 +96,8 @@ impl ModelDescription {
         assert!(capacity >= 1, "a Station's capacity is at least 1");
         let object = self.objects.get_mut(id as usize).unwrap_or_else(|| panic!("object {id} is not in the model"));
         let (proc_time, failures, succ, mus) = match object {
-            ModelObject::Station(station) => (station.configured_proc_time, station.failure_profile.clone(), station.succ.clone(), station.starting_content.iter().map(|mu| mu.id).collect()),
-            ModelObject::MultiStation(station) => (station.configured_proc_time, (*station.failure_profile).clone(), station.succ.clone(), station.starting_mus.clone()),
+            ModelObject::Station(station) => (station.configured_proc_time, station.interruptions.failure_profile().cloned().expect("a Station has a failure profile"), station.succ.clone(), station.starting_content.iter().map(|mu| mu.id).collect()),
+            ModelObject::MultiStation(station) => (station.configured_proc_time, station.interruptions.failure_profile().cloned().expect("a Station has a failure profile"), station.succ.clone(), station.starting_mus.clone()),
             _ => panic!("object {id} is not a Station"),
         };
         *object = if capacity == 1 {
@@ -118,7 +118,7 @@ impl ModelDescription {
         let mut model = self.clone();
         for object in &mut model.objects {
             if let ModelObject::Station(station) = object {
-                let mut general = MultiStation::new(station.base.object_id, station.configured_proc_time, station.failure_profile.clone(), 1, StartMode::Individual);
+                let mut general = MultiStation::new(station.base.object_id, station.configured_proc_time, station.interruptions.failure_profile().cloned().expect("a Station has a failure profile"), 1, StartMode::Individual);
                 general.succ = station.succ.clone();
                 general.set_starting_mus(station.starting_content.iter().map(|mu| mu.id).collect());
                 *object = ModelObject::MultiStation(general);

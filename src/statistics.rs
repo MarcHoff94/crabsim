@@ -1,7 +1,8 @@
 //! The fixed-size numbers every material-flow object keeps about a run. They are always on, need
 //! no allocation and don't depend on occurrences. See `docs/design/statistics.md`.
 
-use crate::flows::{InterruptionState, ProcessState};
+use crate::flows::ProcessState;
+use crate::report::StopCause;
 use crate::time::SimTime;
 
 /// What a material-flow object has done since statistics began, in raw whole numbers, so that
@@ -116,13 +117,13 @@ pub enum MachineState {
 
 impl MachineState {
     /// For a Station or Source: failed, paused, busy, blocked, idle.
-    pub fn of(interruption: &InterruptionState, process: &ProcessState) -> MachineState {
+    pub fn of(interruption: Option<StopCause>, process: &ProcessState) -> MachineState {
         match (interruption, process) {
-            (InterruptionState::Failed | InterruptionState::ForcedFailed, _) => MachineState::Failed,
-            (InterruptionState::Paused, _) => MachineState::Paused,
-            (InterruptionState::None, ProcessState::Processing) => MachineState::Busy,
-            (InterruptionState::None, ProcessState::Blocked) => MachineState::Blocked,
-            (InterruptionState::None, ProcessState::Idle) => MachineState::Idle,
+            (Some(StopCause::Failure | StopCause::ForcedFailure), _) => MachineState::Failed,
+            (Some(StopCause::Pause), _) => MachineState::Paused,
+            (None, ProcessState::Processing) => MachineState::Busy,
+            (None, ProcessState::Blocked) => MachineState::Blocked,
+            (None, ProcessState::Idle) => MachineState::Idle,
         }
     }
 }

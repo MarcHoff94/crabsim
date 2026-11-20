@@ -1,5 +1,6 @@
 pub mod drain;
 pub mod flows;
+pub mod interruptions;
 pub mod model_object;
 pub mod multi_station;
 #[cfg(test)]
@@ -11,6 +12,7 @@ pub mod buffer;
 pub use drain::Drain;
 pub use flows::{Distributing, DistributionStrategy, LowestIndexStrategy, MoveableUnit, Ranked, RoundRobinStrategy, ProcessState};
 pub use self::flows::BaseObject;
+pub use interruptions::{Change, Interruptible, Interruptions};
 pub use model_object::{ModelObject, OtherObjects};
 pub use station::SingleStation;
 pub use multi_station::{MultiStation, StartMode};

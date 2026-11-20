@@ -1,11 +1,11 @@
 use crate::error::{InitError, MaterialflowError, RunTimeError};
 use crate::event::{EventContext, EventTemplate, EventType, ExitTicket};
-use crate::report::{Capacity, ObjectKind, ObjectState, OccurrenceKind};
+use crate::report::{Capacity, ObjectKind, ObjectState, OccurrenceKind, StopCause};
 use crate::statistics::{MachineState, StatisticsKeeper};
 use crate::time::SimTime;
 use crate::materialflow_objects::OtherObjects;
 use crate::flows::{
-	EventInterface, InterruptionState, MaterialFlow, MoveableUnit, ProcessState, StopCtrl, SuccessorContainer, Distributing, retry_move_to_successor, try_to_move_to_successor,
+	EventInterface, MaterialFlow, MoveableUnit, ProcessState, SuccessorContainer, Distributing, retry_move_to_successor, try_to_move_to_successor,
 };
 use super::flows::BaseObject;
 
@@ -54,7 +54,7 @@ pub struct Source {
 	/// How it picks the successor for its MU. Set by the run, which ranks the successors.
 	pub distribution: Distributing,
 	pub state: ProcessState,
-	pub interruption: InterruptionState,
+	pub interruption: Option<StopCause>,
 	pub statistics: StatisticsKeeper,
 }
 impl Source {
@@ -73,7 +73,7 @@ impl Source {
 			succ_pointer: 0,
 			distribution: Distributing::RoundRobin,
 			state: ProcessState::Idle,
-			interruption: InterruptionState::None,
+			interruption: None,
 			statistics: StatisticsKeeper::new(0),
 		}
 	}
@@ -143,7 +143,7 @@ impl Source {
 	}
 	/// Tells the statistics what the Source ended up doing. It has no MU-level statistics.
 	fn update_statistics(&mut self, now: SimTime) {
-		self.statistics.observe(now, MachineState::of(&self.interruption, &self.state), 0);
+		self.statistics.observe(now, MachineState::of(self.interruption, &self.state), 0);
 	}
 	fn become_blocked(&mut self, context: &mut EventContext) {
 		if self.state != ProcessState::Blocked {
@@ -179,7 +179,7 @@ impl EventInterface for Source {
 		self.ready_since = SimTime::ZERO;
 		self.succ_pointer = 0;
 		self.state = ProcessState::Idle;
-		self.interruption = InterruptionState::None;
+		self.interruption = None;
 		self.statistics.reset();
 	}
 	fn clear_statistics(&mut self, now: SimTime) {
@@ -191,7 +191,7 @@ impl EventInterface for Source {
 			kind: ObjectKind::Source,
 			contents: self.content.iter().map(|mu| mu.id).collect(),
 			process: self.state.clone(),
-			stop: self.interruption.cause(),
+			stop: self.interruption,
 			// A Source can't be interrupted yet: its stops aren't built.
 			interruptions: Vec::new(),
 			remaining: self.completion_time.map(|completion| completion.saturating_sub(now)),
@@ -215,15 +215,6 @@ impl EventInterface for Source {
 		self.base.random_seed = seed;
 	}
 }
-impl StopCtrl for Source {
-	fn set_stop(&mut self, _failure_start: &SimTime, _reason: InterruptionState) -> Result<Option<EventTemplate>, MaterialflowError> {
-		todo!("StopCtrl is not implemented for Source yet")
-	}
-	fn remove_stop(&mut self) -> Result<Option<EventTemplate>, MaterialflowError> {
-		todo!("StopCtrl is not implemented for Source yet")
-	}
-}
-
 impl MaterialFlow for Source {
 	/// Only an MU whose interval has ended may leave. A retry can arrive during the interval,
 	/// from a successor that listed the Source before its last MU went elsewhere.

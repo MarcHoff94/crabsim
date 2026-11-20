@@ -1,11 +1,13 @@
-use crate::error::MaterialflowError;
+use crate::error::{InitError, MaterialflowError, RunTimeError};
 use crate::event::{EventContext, EventTemplate, EventType};
 use crate::report::{Capacity, ObjectKind, ObjectState, OccurrenceKind};
-use crate::statistics::StatisticsKeeper;
+use crate::statistics::{MachineState, StatisticsKeeper};
+use super::flows::FailureProfile;
+use super::interruptions::{Interruptible, Interruptions};
 use crate::time::SimTime;
 use super::flows::BaseObject;
 use crate::materialflow_objects::OtherObjects;
-use crate::flows::{list_blocked, relist_blocked, waiting_ids, Waiting, EventInterface, MaterialFlow, MoveableUnit, ProcessState};
+use crate::flows::{list_blocked, relist_blocked, retries_for_blocked, waiting_ids, Waiting, EventInterface, MaterialFlow, MoveableUnit, ProcessState};
 
 #[derive(Clone)]
 pub struct Drain {
@@ -13,6 +15,8 @@ pub struct Drain {
     pub statistics: StatisticsKeeper,
     pub entrance_locked: bool,
     pub blockedlist: Vec<Waiting>,
+    /// Its failures and pauses (ADR 0020). Interrupted, it refuses MUs.
+    pub interruptions: Interruptions,
 }
 impl Drain {
     pub fn new(object_id: u32) -> Drain {
@@ -21,26 +25,41 @@ impl Drain {
             statistics: StatisticsKeeper::for_drain(),
             entrance_locked: false,
             blockedlist: Vec::new(),
+            interruptions: Interruptions::new(None),
         }
+    }
+
+    /// Gives it failures, or none with `None`.
+    pub fn set_failures(&mut self, failures: Option<FailureProfile>) {
+        self.interruptions.set_failures(failures);
+    }
+
+    /// Tells the statistics what it ended up doing: idle, or interrupted.
+    fn update_statistics(&mut self, now: SimTime) {
+        self.statistics.observe(now, MachineState::of(self.interruptions.most_serious(), &ProcessState::Idle), 0);
     }
 }
 
 impl EventInterface for Drain {
-    fn init(&mut self, _context: &mut EventContext) -> Result<Vec<EventTemplate>, crate::error::InitError> {
-        Ok(Vec::new())
+    fn init(&mut self, _context: &mut EventContext) -> Result<Vec<EventTemplate>, InitError> {
+        Ok(self.interruptions.first_failure(self.base.object_id).into_iter().collect())
     }
+    /// Only interruptions are events for a Drain: it takes MUs as they are offered.
     fn execute_event(
         &mut self,
-        _context: &mut EventContext,
-        _eventtype: &EventType,
-        _others: &mut OtherObjects<'_>,
-    ) -> Result<Option<Vec<EventTemplate>>, crate::error::RunTimeError> {
-        Err(crate::error::RunTimeError {})
+        context: &mut EventContext,
+        eventtype: &EventType,
+        others: &mut OtherObjects<'_>,
+    ) -> Result<Option<Vec<EventTemplate>>, RunTimeError> {
+        let outcome = self.handle_interruption(eventtype, context, others).unwrap_or(Err(RunTimeError {}));
+        self.update_statistics(context.time);
+        outcome
     }
     fn reset(&mut self) {
         self.statistics.reset();
         self.entrance_locked = false;
         self.blockedlist.clear();
+        self.interruptions.reset();
     }
     fn clear_statistics(&mut self, now: SimTime) {
         self.statistics.clear(now);
@@ -51,8 +70,8 @@ impl EventInterface for Drain {
             kind: ObjectKind::Drain,
             contents: Vec::new(),
             process: ProcessState::Idle,
-            interrupted: None,
-            interruptions: Vec::new(),
+            interrupted: self.interruptions.most_serious(),
+            interruptions: self.interruptions.list(),
             remaining: None,
             work: Vec::new(),
             blocked_predecessors: waiting_ids(&self.blockedlist),
@@ -72,12 +91,13 @@ impl EventInterface for Drain {
     }
     fn set_random_seed(&mut self, seed: u64) {
         self.base.random_seed = seed;
+        self.interruptions.reseed(seed);
     }
 }
 
 impl MaterialFlow for Drain {
     fn is_entrance_allowed(&self) -> bool {
-        !self.entrance_locked
+        !self.entrance_locked && !self.interruptions.is_interrupted()
     }
     fn is_exit_allowed(&self) -> bool {
         !self.entrance_locked
@@ -105,7 +125,19 @@ impl MaterialFlow for Drain {
         relist_blocked(&mut self.blockedlist, id_blocked, next);
     }
     fn notify_blocked_predecessors(&mut self) -> Result<Option<Vec<EventTemplate>>, MaterialflowError> {
-        //predecessors do not get notified from drain because drain is never blocking them
-        Ok(None)
+        Ok(retries_for_blocked(&mut self.blockedlist, self.base.object_id))
+    }
+}
+
+impl Interruptible for Drain {
+    fn interruption_parts(&mut self) -> (&mut Interruptions, &mut StatisticsKeeper, u32) {
+        (&mut self.interruptions, &mut self.statistics, self.base.object_id)
+    }
+    /// It refuses MUs while interrupted, which `is_entrance_allowed` already says.
+    fn stop_began(&mut self, _context: &mut EventContext) {}
+    /// Back, it has room for those that waited for it, longest-waiting first.
+    fn stop_ended(&mut self, _context: &mut EventContext, _others: &mut OtherObjects<'_>, events: &mut Vec<EventTemplate>) -> Result<(), RunTimeError> {
+        events.extend(retries_for_blocked(&mut self.blockedlist, self.base.object_id).unwrap_or_default());
+        Ok(())
     }
 }

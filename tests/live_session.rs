@@ -1607,7 +1607,7 @@ fn pausing_what_is_already_paused_does_nothing() {
 }
 
 #[test]
-fn only_a_station_can_be_paused_so_far() {
+fn every_object_can_be_paused_and_only_an_unknown_one_is_refused() {
     let mut watched = Watched::new(line_with_random_failures);
     watched.session.start().unwrap();
     watched.look();
@@ -1615,15 +1615,7 @@ fn only_a_station_can_be_paused_so_far() {
     watched.session.pause(2).unwrap();
     watched.session.resume(0).unwrap();
     watched.session.pause(99).unwrap();
-    assert_eq!(
-        watched.look().errors,
-        vec![
-            SessionError::NotAStation(0),
-            SessionError::NotAStation(2),
-            SessionError::NotAStation(0),
-            SessionError::Run(RunError::UnknownObject(99)),
-        ]
-    );
+    assert_eq!(watched.look().errors, vec![SessionError::Run(RunError::UnknownObject(99))]);
 }
 
 #[test]
@@ -1687,17 +1679,14 @@ fn stopping_what_is_already_stopped_does_nothing_in_a_session() {
 }
 
 #[test]
-fn only_a_station_can_be_stopped_by_hand_so_far() {
+fn every_object_can_be_stopped_by_hand_and_only_an_unknown_one_is_refused() {
     let mut watched = Watched::new(line_with_random_failures);
     watched.session.start().unwrap();
     watched.look();
     watched.session.stop_object(0).unwrap();
     watched.session.end_stop(2).unwrap();
     watched.session.stop_object(99).unwrap();
-    assert_eq!(
-        watched.look().errors,
-        vec![SessionError::NotAStation(0), SessionError::NotAStation(2), SessionError::Run(RunError::UnknownObject(99))]
-    );
+    assert_eq!(watched.look().errors, vec![SessionError::Run(RunError::UnknownObject(99))]);
 }
 
 #[test]

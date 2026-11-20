@@ -1,13 +1,14 @@
 use crate::error::{InitError, MaterialflowError, RunTimeError};
 use crate::event::{EventContext, EventTemplate, EventType, ExitTicket};
-use crate::report::{Capacity, ObjectKind, ObjectState, OccurrenceKind, Interruption};
+use crate::report::{Capacity, ObjectKind, ObjectState, OccurrenceKind};
 use crate::statistics::{MachineState, StatisticsKeeper};
 use crate::time::SimTime;
 use crate::materialflow_objects::OtherObjects;
 use crate::flows::{
 	EventInterface, MaterialFlow, MoveableUnit, ProcessState, SuccessorContainer, Distributing, retry_move_to_successor, try_to_move_to_successor,
 };
-use super::flows::BaseObject;
+use super::flows::{BaseObject, FailureProfile};
+use super::interruptions::{Interruptible, Interruptions};
 
 pub fn handle_source_mu_exit(
 	source: &mut Source,
@@ -16,28 +17,27 @@ pub fn handle_source_mu_exit(
 ) -> Result<Option<Vec<EventTemplate>>, RunTimeError> {
 	// Its interval has ended, so its MU is ready to leave from now.
 	source.ready_since = context.time;
-	let event_template_result = try_to_move_to_successor(source, context, others);
-	match event_template_result {
-		Ok(opt_evt) => {
-			if source.content.is_none() {
-				let next_mu_event = match source.create_mu(context) {
-					Ok(v) => v,
-					Err(_) => return Err(RunTimeError {}),
-				};
-				if let Some(ev) = opt_evt {
-					return Ok(Some(vec![next_mu_event, ev]));
-				} else {
-					return Ok(Some(vec![next_mu_event]));
-				}
-			}
-			if let Some(ev) = opt_evt {
-				Ok(Some(vec![ev]))
-			} else {
-				source.become_blocked(context);
+	source.pass_on(context, others)
+}
+
+impl Source {
+	/// Offers its MU to its successors, and starts the next interval once it has gone.
+	fn pass_on(&mut self, context: &mut EventContext, others: &mut OtherObjects<'_>) -> Result<Option<Vec<EventTemplate>>, RunTimeError> {
+		let moved = try_to_move_to_successor(self, context, others).map_err(|_| RunTimeError {})?;
+		if self.content.is_none() {
+			let next_mu_event = self.create_mu(context).map_err(|_| RunTimeError {})?;
+			return Ok(Some(match moved {
+				Some(ev) => vec![next_mu_event, ev],
+				None => vec![next_mu_event],
+			}));
+		}
+		match moved {
+			Some(ev) => Ok(Some(vec![ev])),
+			None => {
+				self.become_blocked(context);
 				Ok(None)
 			}
 		}
-		Err(_) => Err(RunTimeError {}),
 	}
 }
 
@@ -54,7 +54,12 @@ pub struct Source {
 	/// How it picks the successor for its MU. Set by the run, which ranks the successors.
 	pub distribution: Distributing,
 	pub state: ProcessState,
-	pub interruption: Option<Interruption>,
+	/// Its failures and pauses (ADR 0020). Interrupted, it creates no MUs and releases none.
+	pub interruptions: Interruptions,
+	/// Bumped when an interruption freezes its interval, so the exit queued for it is stale.
+	stop_count: u32,
+	/// What was left of its interval when an interruption froze it.
+	frozen: Option<SimTime>,
 	pub statistics: StatisticsKeeper,
 }
 impl Source {
@@ -73,9 +78,18 @@ impl Source {
 			succ_pointer: 0,
 			distribution: Distributing::RoundRobin,
 			state: ProcessState::Idle,
-			interruption: None,
+			interruptions: Interruptions::new(None),
+			stop_count: 0,
+			frozen: None,
 			statistics: StatisticsKeeper::new(0),
 		}
+	}
+	/// Gives it failures, or none with `None`.
+	pub fn set_failures(&mut self, failures: Option<FailureProfile>) {
+		self.interruptions.set_failures(failures);
+	}
+	fn exit_event(&self, mu_id: u32, after: SimTime) -> EventTemplate {
+		EventTemplate { eventtype: EventType::MUExit(ExitTicket { mu_id, stop_count: self.stop_count }), exec_time: after, object_id: self.base.object_id }
 	}
 	pub fn create_mu(&mut self, context: &mut EventContext) -> Result<EventTemplate, MaterialflowError> {
 		if self.content.is_some() {
@@ -95,11 +109,7 @@ impl Source {
 		}
 		self.state = ProcessState::Processing;
 		self.completion_time = Some(context.time + self.proc_time);
-		Ok(EventTemplate {
-			eventtype: EventType::MUExit(ExitTicket::new(mu_id)),
-			exec_time: self.proc_time,
-			object_id: self.base.object_id,
-		})
+		Ok(self.exit_event(mu_id, self.proc_time))
 	}
 	fn handle_event(
 		&mut self,
@@ -108,8 +118,16 @@ impl Source {
 		others: &mut OtherObjects<'_>,
 	) -> Result<Option<Vec<EventTemplate>>, RunTimeError> {
 		match eventtype {
+			// An exit queued before an interruption froze the interval is stale.
+			&EventType::MUExit(ticket) if self.interruptions.is_interrupted() || ticket.stop_count != self.stop_count => Ok(None),
 			&EventType::MUExit(_) => handle_source_mu_exit(self, context, others),
 			&EventType::BlockedRetry { from } => {
+				// Interrupted while its MU waits, it keeps its place in the line, as if refused
+				// (spec issue 122).
+				if self.interruptions.is_interrupted() && self.content.is_some() && self.state != ProcessState::Processing {
+					others.get_mut(from).add_blocked(self.base.object_id, self.ready_since, true);
+					return Ok(None);
+				}
 				// successor notified that it became available; attempt to move
 				if !self.is_exit_allowed() {
 					return Ok(None);
@@ -138,12 +156,12 @@ impl Source {
 					Err(_) => Err(RunTimeError {}),
 				}
 			}
-			_ => Err(RunTimeError {}),
+			_ => self.handle_interruption(eventtype, context, others).unwrap_or(Err(RunTimeError {})),
 		}
 	}
 	/// Tells the statistics what the Source ended up doing. It has no MU-level statistics.
 	fn update_statistics(&mut self, now: SimTime) {
-		self.statistics.observe(now, MachineState::of(self.interruption, &self.state), 0);
+		self.statistics.observe(now, MachineState::of(self.interruptions.most_serious(), &self.state), 0);
 	}
 	fn become_blocked(&mut self, context: &mut EventContext) {
 		if self.state != ProcessState::Blocked {
@@ -156,8 +174,12 @@ impl Source {
 
 impl EventInterface for Source {
 	fn init(&mut self, context: &mut EventContext) -> Result<Vec<EventTemplate>, InitError> {
+		let mut events: Vec<EventTemplate> = self.interruptions.first_failure(self.base.object_id).into_iter().collect();
 		let outcome = match self.create_mu(context) {
-			Ok(e) => Ok(vec![e]),
+			Ok(e) => {
+				events.push(e);
+				Ok(events)
+			}
 			Err(_) => Err(InitError {}),
 		};
 		self.update_statistics(context.time);
@@ -179,7 +201,9 @@ impl EventInterface for Source {
 		self.ready_since = SimTime::ZERO;
 		self.succ_pointer = 0;
 		self.state = ProcessState::Idle;
-		self.interruption = None;
+		self.interruptions.reset();
+		self.stop_count = 0;
+		self.frozen = None;
 		self.statistics.reset();
 	}
 	fn clear_statistics(&mut self, now: SimTime) {
@@ -191,10 +215,9 @@ impl EventInterface for Source {
 			kind: ObjectKind::Source,
 			contents: self.content.iter().map(|mu| mu.id).collect(),
 			process: self.state.clone(),
-			interrupted: self.interruption,
-			// A Source can't be interrupted yet: its stops aren't built.
-			interruptions: Vec::new(),
-			remaining: self.completion_time.map(|completion| completion.saturating_sub(now)),
+			interrupted: self.interruptions.most_serious(),
+			interruptions: self.interruptions.list(),
+			remaining: self.frozen.or(self.completion_time.map(|completion| completion.saturating_sub(now))),
 			work: Vec::new(),
 			blocked_predecessors: Vec::new(),
 			successors: self.succ.clone(),
@@ -213,13 +236,14 @@ impl EventInterface for Source {
 	}
 	fn set_random_seed(&mut self, seed: u64) {
 		self.base.random_seed = seed;
+		self.interruptions.reseed(seed);
 	}
 }
 impl MaterialFlow for Source {
 	/// Only an MU whose interval has ended may leave. A retry can arrive during the interval,
 	/// from a successor that listed the Source before its last MU went elsewhere.
 	fn is_exit_allowed(&self) -> bool {
-		self.state != ProcessState::Processing
+		self.state != ProcessState::Processing && !self.interruptions.is_interrupted()
 	}
 	fn is_entrance_allowed(&self) -> bool {
 		false
@@ -270,5 +294,32 @@ impl SuccessorContainer for Source {
 	}
 	fn statistics_mut(&mut self) -> &mut StatisticsKeeper {
 		&mut self.statistics
+	}
+}
+
+impl Interruptible for Source {
+	fn interruption_parts(&mut self) -> (&mut Interruptions, &mut StatisticsKeeper, u32) {
+		(&mut self.interruptions, &mut self.statistics, self.base.object_id)
+	}
+	/// Its interval freezes, so its next creation moves later by the interruption's length.
+	fn stop_began(&mut self, context: &mut EventContext) {
+		if self.state == ProcessState::Processing {
+			self.frozen = self.completion_time.map(|completion| completion.saturating_sub(context.time));
+			self.completion_time = None;
+			self.stop_count += 1;
+		}
+	}
+	/// Its interval carries on where it froze, or its waiting MU is offered again, keeping the
+	/// ready time it had.
+	fn stop_ended(&mut self, context: &mut EventContext, others: &mut OtherObjects<'_>, events: &mut Vec<EventTemplate>) -> Result<(), RunTimeError> {
+		if let Some(left) = self.frozen.take() {
+			self.completion_time = Some(context.time + left);
+			if let Some(mu_id) = self.content.as_ref().map(|mu| mu.id) {
+				events.push(self.exit_event(mu_id, left));
+			}
+		} else if self.content.is_some() {
+			events.extend(self.pass_on(context, others)?.unwrap_or_default());
+		}
+		Ok(())
 	}
 }

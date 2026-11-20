@@ -8,7 +8,7 @@ use crate::statistics::{FillKeeper, MachineState, StatisticsKeeper};
 use crate::time::SimTime;
 use super::flows::{
     list_blocked, relist_blocked, retries_for_blocked, retry_move_to_successor, try_to_move_to_successor, waiting_ids, BaseObject, Distributing, EventInterface,
-    InterruptionState, MaterialFlow, MoveableUnit, ProcessState, StopCtrl, SuccessorContainer, Waiting,
+    MaterialFlow, MoveableUnit, ProcessState, SuccessorContainer, Waiting,
 };
 
 /// Which of the MUs that may leave a Buffer it passes on next. The Buffer picks, and the code
@@ -174,7 +174,7 @@ impl Buffer {
 
     /// Tells the statistics what the Buffer ended up doing.
     fn update_statistics(&mut self, now: SimTime) {
-        let state = MachineState::of(&InterruptionState::None, &self.process_state());
+        let state = MachineState::of(None, &self.process_state());
         if let Some((held, time)) = self.statistics.observe_stretch(now, state, self.content.len() as u64) {
             self.fill.add(held, time);
         }
@@ -183,15 +183,6 @@ impl Buffer {
     /// About how much memory its MUs take, for a checkpoint holding them.
     pub(crate) fn content_bytes(&self) -> usize {
         self.content.len() * size_of::<Held>()
-    }
-}
-
-impl StopCtrl for Buffer {
-    fn set_stop(&mut self, _failure_start: &SimTime, _reason: InterruptionState) -> Result<Option<EventTemplate>, MaterialflowError> {
-        todo!("StopCtrl is not implemented for Buffer yet")
-    }
-    fn remove_stop(&mut self) -> Result<Option<EventTemplate>, MaterialflowError> {
-        todo!("StopCtrl is not implemented for Buffer yet")
     }
 }
 
@@ -283,7 +274,7 @@ impl EventInterface for Buffer {
             contents: self.content.iter().map(|held| held.mu.id).collect(),
             process: self.process_state(),
             // A Buffer can't be interrupted yet: its stops aren't built.
-            stop: None,
+            interrupted: None,
             interruptions: Vec::new(),
             remaining: None,
             work: Vec::new(),

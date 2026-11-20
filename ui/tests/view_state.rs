@@ -176,13 +176,13 @@ fn a_stop_shows_its_most_serious_interruption() {
     watched.session.pause(STATION_1).unwrap();
     watched.frame();
     assert_eq!(watched.view.shade(STATION_1), Shade::Paused);
-    watched.session.force_failure(STATION_1).unwrap();
+    watched.session.stop_object(STATION_1).unwrap();
     watched.frame();
-    assert_eq!(watched.view.shade(STATION_1), Shade::ForcedFailure);
+    assert_eq!(watched.view.shade(STATION_1), Shade::Stopped);
     watched.session.resume(STATION_1).unwrap();
     watched.frame();
-    assert_eq!(watched.view.shade(STATION_1), Shade::ForcedFailure);
-    watched.session.end_forced_failure(STATION_1).unwrap();
+    assert_eq!(watched.view.shade(STATION_1), Shade::Stopped);
+    watched.session.end_stop(STATION_1).unwrap();
     watched.frame();
     assert_eq!(watched.view.shade(STATION_1), Shade::Busy);
 }

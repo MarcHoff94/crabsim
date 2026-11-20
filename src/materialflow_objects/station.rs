@@ -1,12 +1,13 @@
 use crate::error::{InitError, MaterialflowError, RunTimeError};
 use crate::event::{EventContext, EventTemplate, EventType, ExitTicket};
-use crate::report::{Capacity, Interruption, ObjectKind, ObjectState, OccurrenceKind, StopCause, WorkLeft};
+use crate::report::{Capacity, ObjectKind, ObjectState, OccurrenceKind, Interruption, WorkLeft};
 use crate::statistics::{MachineState, StatisticsKeeper};
 use crate::time::SimTime;
 use super::flows::BaseObject;
 use crate::materialflow_objects::OtherObjects;
+use super::interruptions::{Interruptible, Interruptions};
 use crate::flows::{
-	EventInterface, StopCtrl, FailureProfile, InterruptionState, MaterialFlow, MoveableUnit, ProcessState, SuccessorContainer, Distributing, Waiting, list_blocked, relist_blocked, waiting_ids, retries_for_blocked, retry_move_to_successor, try_to_move_to_successor
+	EventInterface, FailureProfile, MaterialFlow, MoveableUnit, ProcessState, SuccessorContainer, Distributing, Waiting, list_blocked, relist_blocked, waiting_ids, retries_for_blocked, retry_move_to_successor, try_to_move_to_successor
 };
 
 /// When a Station's work ends, or ended, or how much is left of it. One field for all three, since
@@ -20,8 +21,8 @@ enum Finish {
 	At(SimTime),
 	/// Stopped mid-work, with this much work left.
 	Interrupted(SimTime),
-	/// Holding a finished MU, ready to leave since this time: when its work finished, or when the
-	/// stop ended that kept it from leaving.
+	/// Holding a finished MU, ready to leave since this time, when its work finished. An
+	/// interruption doesn't change it, so the Station keeps its place in line (spec issue 122).
 	ReadySince(SimTime),
 }
 
@@ -33,7 +34,8 @@ pub struct SingleStation {
 	pub configured_proc_time: SimTime,
 	finish: Finish,
 	pub stop_count: u32,
-	pub failure_profile: FailureProfile,
+	/// Its failures and pauses (ADR 0020).
+	pub interruptions: Interruptions,
 	pub starting_content: Option<MoveableUnit>,
 	pub content: Option<MoveableUnit>,
 	pub succ: Vec<u32>,
@@ -44,14 +46,6 @@ pub struct SingleStation {
 	pub entrancelocked: bool,
 	pub exitlocked: bool,
 	pub state: ProcessState,
-	failed: bool,
-	/// Forced to fail by the user. Kept apart from `failed`, so random failures carry on
-	/// underneath: each random failure schedules the next only when it ends.
-	forced: bool,
-	paused: bool,
-	/// When each kind of interruption last began, by `StopCause::index`. Read only while it is
-	/// active.
-	interrupted_since: [SimTime; 3],
 	pub statistics: StatisticsKeeper,
 }
 
@@ -70,7 +64,7 @@ impl SingleStation {
 			configured_proc_time: proc_time,
 			finish: Finish::Unknown,
 			stop_count: 0,
-			failure_profile,
+			interruptions: Interruptions::new(Some(failure_profile)),
 			starting_content: content.clone(),
 			content,
 			succ,
@@ -80,10 +74,6 @@ impl SingleStation {
 			entrancelocked: false,
 			exitlocked: false,
 			state: ProcessState::Idle,
-			failed: false,
-			forced: false,
-			paused: false,
-			interrupted_since: [SimTime::ZERO; 3],
 			statistics: StatisticsKeeper::new(1),
 		}
 	}
@@ -116,7 +106,7 @@ impl SingleStation {
 	) -> Result<Option<Vec<EventTemplate>>, RunTimeError> {
 		match eventtype {
 			&EventType::MUExit(ticket) => {
-				if self.is_stopped() || self.is_stale_exit(ticket) {
+				if self.is_interrupted() || self.is_stale_exit(ticket) {
 					return Ok(None);
 				}
 				self.finish = Finish::ReadySince(context.time);
@@ -159,7 +149,16 @@ impl SingleStation {
 			&EventType::BlockedRetry { from } => {
 				// An empty station can still get a retry already queued when its MU left. It
 				// has nothing to move, so it must not list itself as waiting.
-				if !self.is_exit_allowed() || self.content.is_none() {
+				if self.content.is_none() {
+					return Ok(None);
+				}
+				// Interrupted with a finished MU, it can't take the room now, but it keeps its
+				// place in the line, as if refused (spec issue 122).
+				if let (true, Finish::ReadySince(since)) = (self.is_interrupted(), self.finish) {
+					others.get_mut(from).add_blocked(self.base.object_id, since, true);
+					return Ok(None);
+				}
+				if !self.is_exit_allowed() {
 					return Ok(None);
 				}
 				match retry_move_to_successor(self, context, others, from) {
@@ -198,89 +197,15 @@ impl SingleStation {
 					Err(_) => Err(RunTimeError {}),
 				}
 			}
-			&EventType::StartFailure => {
-				if self.failed {
-					return Ok(None);
-				}
-				self.begin_interruption(StopCause::Failure, context);
-				self.failed = true;
-				self.statistics.count_failure();
-				let mttr = SimTime::from_millis_f64(self.failure_profile.dist_sampler_mttr.sample());
-				Ok(Some(vec![EventTemplate {
-					eventtype: EventType::EndFailure,
-					exec_time: mttr,
-					object_id: self.base.object_id,
-				}]))
-			}
-			&EventType::EndFailure => {
-				self.failed = false;
-				context.record(OccurrenceKind::InterruptionEnded { object_id: self.base.object_id, cause: StopCause::Failure });
-				let mut events: Vec<EventTemplate> = Vec::new();
-				// Schedule next failure
-				if let Ok(Some(ttf)) = self.failure_profile.get_time_to_next_failure() {
-					events.push(EventTemplate {
-						eventtype: EventType::StartFailure,
-						exec_time: ttf,
-						object_id: self.base.object_id,
-					});
-				}
-				if !self.is_stopped() {
-					self.end_stop(context, others, &mut events)?;
-				}
-				if events.is_empty() { Ok(None) } else { Ok(Some(events)) }
-			}
-			&EventType::ForceFailureOn => {
-				if !self.forced {
-					self.begin_interruption(StopCause::ForcedFailure, context);
-					self.forced = true;
-					self.statistics.count_failure();
-				}
-				Ok(None)
-			}
-			&EventType::ForceFailureOff => {
-				if !self.forced {
-					return Ok(None);
-				}
-				self.forced = false;
-				context.record(OccurrenceKind::InterruptionEnded { object_id: self.base.object_id, cause: StopCause::ForcedFailure });
-				let mut events: Vec<EventTemplate> = Vec::new();
-				if !self.is_stopped() {
-					self.end_stop(context, others, &mut events)?;
-				}
-				if events.is_empty() { Ok(None) } else { Ok(Some(events)) }
-			}
-			&EventType::PauseOn => {
-				if !self.paused {
-					self.begin_interruption(StopCause::Pause, context);
-					self.paused = true;
-					self.statistics.count_pause();
-				}
-				Ok(None)
-			}
-			&EventType::PauseOff => {
-				if !self.paused {
-					return Ok(None);
-				}
-				self.paused = false;
-				context.record(OccurrenceKind::InterruptionEnded { object_id: self.base.object_id, cause: StopCause::Pause });
-				let mut events: Vec<EventTemplate> = Vec::new();
-				if !self.is_stopped() {
-					self.end_stop(context, others, &mut events)?;
-				}
-				if events.is_empty() { Ok(None) } else { Ok(Some(events)) }
-			}
-			_ => Err(RunTimeError {}),
+			_ => match self.handle_interruption(eventtype, context, others) {
+				Some(outcome) => outcome,
+				None => Err(RunTimeError {}),
+			},
 		}
 	}
-	/// Starts a failure or pause. Only the first interruption of a stop freezes the work, so
-	/// time spent stopped counts once however many overlap.
-	fn begin_interruption(&mut self, cause: StopCause, context: &mut EventContext) {
-		context.record(OccurrenceKind::InterruptionBegan { object_id: self.base.object_id, cause });
-		self.interrupted_since[cause.index()] = context.time;
-		if self.is_stopped() {
-			return;
-		}
-		self.statistics.count_stop();
+	/// The first interruption of a stop freezes the work, so time spent stopped counts once
+	/// however many overlap.
+	fn freeze_work(&mut self, context: &mut EventContext) {
 		if matches!(self.state, ProcessState::Processing) {
 			let completion = match self.finish {
 				Finish::At(completion) => completion,
@@ -291,7 +216,7 @@ impl SingleStation {
 		}
 	}
 	/// The last interruption has ended, so the station picks up from where it was stopped.
-	fn end_stop(
+	fn resume(
 		&mut self,
 		context: &mut EventContext,
 		others: &mut OtherObjects<'_>,
@@ -305,10 +230,9 @@ impl SingleStation {
 				events.push(self.exit_event(mu_id, remain));
 			}
 		} else if self.content.is_some() {
-			// Blocked when the stop began (MU done, waiting to exit): retry the move. A stopped
-			// Station releases no MU, so its MU is ready to leave again from now. Where it is
-			// still listed it keeps its place.
-			self.finish = Finish::ReadySince(context.time);
+			// Blocked when the stop began (MU done, waiting to exit): retry the move. Its MU has
+			// been ready to leave since its work finished, so it keeps its place in every line it
+			// was in, and joins any other by that time too.
 			match try_to_move_to_successor(self, context, others) {
 				Ok(Some(evt)) => {
 					self.entrancelocked = false;
@@ -340,36 +264,15 @@ impl SingleStation {
 		}
 		Ok(())
 	}
-	pub fn is_stopped(&self) -> bool {
-		self.failed || self.forced || self.paused
+	pub fn is_interrupted(&self) -> bool {
+		self.interruptions.is_interrupted()
 	}
 	pub fn is_paused(&self) -> bool {
-		self.paused
-	}
-	/// What the station reports while stopped: the most serious active interruption, so a
-	/// failure, random or forced, wins over a pause, as in the statistics.
-	fn interruption(&self) -> InterruptionState {
-		if self.failed {
-			InterruptionState::Failed
-		} else if self.forced {
-			InterruptionState::ForcedFailed
-		} else if self.paused {
-			InterruptionState::Paused
-		} else {
-			InterruptionState::None
-		}
-	}
-	/// Every active interruption, most serious first, with when it began.
-	fn interruptions(&self) -> Vec<Interruption> {
-		[(self.failed, StopCause::Failure), (self.forced, StopCause::ForcedFailure), (self.paused, StopCause::Pause)]
-			.into_iter()
-			.filter(|&(active, _)| active)
-			.map(|(_, cause)| Interruption { cause, since: self.interrupted_since[cause.index()] })
-			.collect()
+		self.interruptions.is_active(Interruption::Paused)
 	}
 	/// Tells the statistics what the station ended up doing.
 	fn update_statistics(&mut self, now: SimTime) {
-		let state = MachineState::of(&self.interruption(), &self.state);
+		let state = MachineState::of(self.interruptions.most_serious(), &self.state);
 		self.statistics.observe(now, state, self.content.is_some() as u64);
 	}
 	/// Changes the process state, reporting when blocking begins or ends.
@@ -390,7 +293,7 @@ impl MaterialFlow for SingleStation {
 			return false;
 		}
 		match self.state {
-			ProcessState::Idle => !self.is_stopped(),
+			ProcessState::Idle => !self.is_interrupted(),
 			ProcessState::Processing | ProcessState::Blocked => false,
 		}
 	}
@@ -400,11 +303,11 @@ impl MaterialFlow for SingleStation {
 		}
 		match self.state {
 			// Idle: allow exit when not interrupted
-			ProcessState::Idle => !self.is_stopped(),
+			ProcessState::Idle => !self.is_interrupted(),
 			// Processing: actively working on an MU, do not allow exit
 			ProcessState::Processing => false,
 			// Blocked: allow exit when not interrupted
-			ProcessState::Blocked => !self.is_stopped(),
+			ProcessState::Blocked => !self.is_interrupted(),
 		}
 	}
 	fn process_mu_entrance(
@@ -433,16 +336,7 @@ impl MaterialFlow for SingleStation {
 
 impl EventInterface for SingleStation {
 	fn init(&mut self, context: &mut EventContext) -> Result<Vec<EventTemplate>, InitError> {
-		let mut events = Vec::new();
-		if self.failure_profile.active {
-			if let Ok(Some(ttf)) = self.failure_profile.get_time_to_next_failure() {
-				events.push(EventTemplate {
-					eventtype: EventType::StartFailure,
-					exec_time: ttf,
-					object_id: self.base.object_id,
-				});
-			}
-		}
+		let mut events: Vec<EventTemplate> = self.interruptions.first_failure(self.base.object_id).into_iter().collect();
 		if let Some(mu_id) = self.content.as_ref().map(|mu| mu.id) {
 			self.statistics.count_mu_in();
 			events.push(self.start_work(mu_id, context));
@@ -470,10 +364,7 @@ impl EventInterface for SingleStation {
 		self.entrancelocked = false;
 		self.exitlocked = false;
 		self.state = ProcessState::Idle;
-		self.failed = false;
-		self.forced = false;
-		self.paused = false;
-		self.interrupted_since = [SimTime::ZERO; 3];
+		self.interruptions.reset();
 		self.statistics.reset();
 	}
 	fn clear_statistics(&mut self, now: SimTime) {
@@ -490,8 +381,8 @@ impl EventInterface for SingleStation {
 			kind: ObjectKind::Station,
 			contents: self.content.iter().map(|mu| mu.id).collect(),
 			process: self.state.clone(),
-			stop: self.interruption().cause(),
-			interruptions: self.interruptions(),
+			interrupted: self.interruptions.most_serious(),
+			interruptions: self.interruptions.list(),
 			remaining,
 			work: self.content.iter().zip(remaining).map(|(mu, left)| WorkLeft { mu_id: mu.id, left }).collect(),
 			blocked_predecessors: waiting_ids(&self.blockedlist),
@@ -511,15 +402,18 @@ impl EventInterface for SingleStation {
 	}
 	fn set_random_seed(&mut self, seed: u64) {
 		self.base.random_seed = seed;
-		self.failure_profile.reseed(seed);
+		self.interruptions.reseed(seed);
 	}
 }
-impl StopCtrl for SingleStation{
-	fn set_stop(&mut self, _failure_start: &SimTime, _reason: InterruptionState) -> Result<Option<EventTemplate>, MaterialflowError> {
-		todo!("not fully implemented yet")
+impl Interruptible for SingleStation {
+	fn interruption_parts(&mut self) -> (&mut Interruptions, &mut StatisticsKeeper, u32) {
+		(&mut self.interruptions, &mut self.statistics, self.base.object_id)
 	}
-	fn remove_stop(&mut self) -> Result<Option<EventTemplate>, MaterialflowError> {
-		todo!("not fully implemented yet")
+	fn stop_began(&mut self, context: &mut EventContext) {
+		self.freeze_work(context);
+	}
+	fn stop_ended(&mut self, context: &mut EventContext, others: &mut OtherObjects<'_>, events: &mut Vec<EventTemplate>) -> Result<(), RunTimeError> {
+		self.resume(context, others, events)
 	}
 }
 impl SuccessorContainer for SingleStation {

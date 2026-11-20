@@ -1,7 +1,7 @@
 //! How a run holds its objects: one `Vec` of this enum, indexed by object id, with successors
 //! stored as ids. See ADR 0005.
 
-use super::flows::{BaseObject, EventInterface, InterruptionState, MaterialFlow, MoveableUnit, StopCtrl};
+use super::flows::{BaseObject, EventInterface, MaterialFlow, MoveableUnit};
 #[cfg(test)]
 use super::records_then_fails::RecordsThenFails;
 use super::{Buffer, Drain, MultiStation, SingleStation, Source};
@@ -75,8 +75,8 @@ impl ModelObject {
     /// A Station's failures, whatever its capacity.
     pub fn failure_profile(&self) -> Option<&FailureProfile> {
         match self {
-            ModelObject::Station(station) => Some(&station.failure_profile),
-            ModelObject::MultiStation(station) => Some(&*station.failure_profile),
+            ModelObject::Station(station) => station.interruptions.failure_profile(),
+            ModelObject::MultiStation(station) => station.interruptions.failure_profile(),
             _ => None,
         }
     }
@@ -146,15 +146,6 @@ impl EventInterface for ModelObject {
     }
     fn set_random_seed(&mut self, seed: u64) {
         on_the_object!(self, object => object.set_random_seed(seed))
-    }
-}
-
-impl StopCtrl for ModelObject {
-    fn set_stop(&mut self, failure_start: &SimTime, reason: InterruptionState) -> Result<Option<EventTemplate>, MaterialflowError> {
-        on_the_object!(self, object => object.set_stop(failure_start, reason))
-    }
-    fn remove_stop(&mut self) -> Result<Option<EventTemplate>, MaterialflowError> {
-        on_the_object!(self, object => object.remove_stop())
     }
 }
 

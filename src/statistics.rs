@@ -1,7 +1,8 @@
 //! The fixed-size numbers every material-flow object keeps about a run. They are always on, need
 //! no allocation and don't depend on occurrences. See `docs/design/statistics.md`.
 
-use crate::flows::{InterruptionState, ProcessState};
+use crate::flows::ProcessState;
+use crate::report::Interruption;
 use crate::time::SimTime;
 
 /// What a material-flow object has done since statistics began, in raw whole numbers, so that
@@ -35,7 +36,7 @@ pub struct ObjectStatistics {
     pub mu_time_busy: SimTime,
     pub mu_time_blocked: SimTime,
     pub mu_time_waiting: SimTime,
-    pub mu_time_stopped: SimTime,
+    pub mu_time_interrupted: SimTime,
     /// Only a Drain has these.
     pub drain: Option<DrainStatistics>,
 }
@@ -66,7 +67,7 @@ impl ObjectStatistics {
 
     /// How many MUs the object held on average. None until any time has been measured.
     pub fn average_contents(&self) -> Option<f64> {
-        let mu_time = self.mu_time_busy + self.mu_time_blocked + self.mu_time_waiting + self.mu_time_stopped;
+        let mu_time = self.mu_time_busy + self.mu_time_blocked + self.mu_time_waiting + self.mu_time_interrupted;
         ratio(mu_time.as_millis() as f64, self.measured_time().as_millis() as f64)
     }
 
@@ -116,13 +117,13 @@ pub enum MachineState {
 
 impl MachineState {
     /// For a Station or Source: failed, paused, busy, blocked, idle.
-    pub fn of(interruption: &InterruptionState, process: &ProcessState) -> MachineState {
+    pub fn of(interruption: Option<Interruption>, process: &ProcessState) -> MachineState {
         match (interruption, process) {
-            (InterruptionState::Failed | InterruptionState::ForcedFailed, _) => MachineState::Failed,
-            (InterruptionState::Paused, _) => MachineState::Paused,
-            (InterruptionState::None, ProcessState::Processing) => MachineState::Busy,
-            (InterruptionState::None, ProcessState::Blocked) => MachineState::Blocked,
-            (InterruptionState::None, ProcessState::Idle) => MachineState::Idle,
+            (Some(Interruption::Failed | Interruption::Stopped), _) => MachineState::Failed,
+            (Some(Interruption::Paused), _) => MachineState::Paused,
+            (None, ProcessState::Processing) => MachineState::Busy,
+            (None, ProcessState::Blocked) => MachineState::Blocked,
+            (None, ProcessState::Idle) => MachineState::Idle,
         }
     }
 }
@@ -277,8 +278,8 @@ fn add_time(statistics: &mut ObjectStatistics, state: MachineState, contents: u6
         }
         MachineState::Blocked => (&mut statistics.time_blocked, &mut statistics.mu_time_blocked),
         MachineState::Idle => (&mut statistics.time_idle, &mut statistics.mu_time_waiting),
-        MachineState::Failed => (&mut statistics.time_failed, &mut statistics.mu_time_stopped),
-        MachineState::Paused => (&mut statistics.time_paused, &mut statistics.mu_time_stopped),
+        MachineState::Failed => (&mut statistics.time_failed, &mut statistics.mu_time_interrupted),
+        MachineState::Paused => (&mut statistics.time_paused, &mut statistics.mu_time_interrupted),
     };
     *machine += time;
     *mu += time.times(contents);
@@ -514,10 +515,10 @@ pub struct PeriodFigures {
     pub failed: Spread,
     pub paused: Spread,
     /// Failed or paused.
-    pub stopped: Spread,
-    /// Busy and full, failed or paused: what the likely-bottleneck rule ranks by, so a Station
+    pub interrupted: Spread,
+    /// Busy and full, or interrupted (failed, stopped or paused): what the likely-bottleneck rule ranks by, so a Station
     /// that works half empty doesn't look like a bottleneck.
-    pub full_or_stopped: Spread,
+    pub full_or_interrupted: Spread,
 }
 
 impl PeriodFigures {
@@ -535,8 +536,8 @@ impl PeriodFigures {
         self.idle.add(share(|s| s.time_idle));
         self.failed.add(failed);
         self.paused.add(paused);
-        self.stopped.add(failed + paused);
-        self.full_or_stopped.add(busy_full + failed + paused);
+        self.interrupted.add(failed + paused);
+        self.full_or_interrupted.add(busy_full + failed + paused);
     }
 }
 
@@ -708,14 +709,14 @@ mod tests {
     }
 
     #[test]
-    fn stopped_time_goes_to_the_cause_and_mu_time_to_stopped() {
+    fn interrupted_time_goes_to_the_cause_and_mu_time_to_interrupted() {
         let mut keeper = StatisticsKeeper::new(1);
         keeper.observe(SimTime::ZERO, MachineState::Failed, 1);
         keeper.observe(SimTime::from_secs(10), MachineState::Paused, 1);
         let statistics = keeper.read(SimTime::from_secs(15));
         assert_eq!(statistics.time_failed, SimTime::from_secs(10));
         assert_eq!(statistics.time_paused, SimTime::from_secs(5));
-        assert_eq!(statistics.mu_time_stopped, SimTime::from_secs(15));
+        assert_eq!(statistics.mu_time_interrupted, SimTime::from_secs(15));
     }
 
     #[test]

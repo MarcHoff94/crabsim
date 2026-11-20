@@ -28,7 +28,7 @@ fn the_likely_bottleneck_is_the_station_busy_or_stopped_most_with_its_neighbours
     let edges = connections(&[("In", "Saw"), ("Saw", "Press"), ("Press", "Pack"), ("Pack", "Out")]);
     let found = likely_bottleneck(&objects, &edges).expect("Stations ran");
     assert_eq!(found.instance, "Press");
-    assert!((found.full_or_stopped_share - 0.95).abs() < 1e-9, "busy plus stopped: {}", found.full_or_stopped_share);
+    assert!((found.full_or_interrupted_share - 0.95).abs() < 1e-9, "busy plus stopped: {}", found.full_or_interrupted_share);
     assert_eq!(found.upstream, vec![("Saw".to_string(), 0.65)], "upstream mostly blocked");
     assert_eq!(found.downstream, vec![("Pack".to_string(), 0.75)], "downstream mostly starved");
     let edges = connections(&[("In", "Saw"), ("Saw", "Press"), ("Press", "Pack"), ("Press", "Out"), ("Pack", "Out")]);
@@ -76,7 +76,7 @@ fn find_bottleneck_names_it_for_a_run_from_the_means_over_its_observations() {
     common::assert_fits_its_schema(&setup.catalogue, "find_bottleneck", &found);
     assert_eq!(found["run"], run);
     assert_eq!(found["likely"]["instance"], "Slow", "{found:#}");
-    assert!(found["likely"]["full_or_stopped_share"].as_f64().unwrap() > 0.99, "{found:#}");
+    assert!(found["likely"]["full_or_interrupted_share"].as_f64().unwrap() > 0.99, "{found:#}");
     assert_eq!(found["likely"]["upstream"][0]["instance"], "Fast");
     assert!(found["likely"]["upstream"][0]["blocked_share"].as_f64().unwrap() > 0.5, "Fast waits for Slow: {found:#}");
     assert_eq!(found["likely"]["downstream"][0]["instance"], "After");
@@ -108,7 +108,7 @@ fn find_bottleneck_counts_only_the_time_a_station_with_capacity_was_full() {
     common::assert_fits_its_schema(&setup.catalogue, "find_bottleneck", &found);
     assert_eq!(found["likely"]["instance"], "Slow", "{found:#}");
     assert_eq!(found["ranking"][1]["instance"], "Oven", "{found:#}");
-    assert!(found["ranking"][1]["full_or_stopped_share"].as_f64().unwrap() < 0.01, "{found:#}");
+    assert!(found["ranking"][1]["full_or_interrupted_share"].as_f64().unwrap() < 0.01, "{found:#}");
 
     // Only the Station with capacity has the parts of its working share stored.
     let results = setup.ok("run_results", json!({ "run": run, "objects": ["Oven", "Slow"] }));

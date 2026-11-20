@@ -53,7 +53,7 @@ fn results_give_every_drain_and_station_and_the_likely_bottleneck_by_the_catalog
     assert!(!results.with_capacity, "the demo's Stations have capacity 1");
     assert!(results.stations.iter().all(|station| station.busy_full == station.busy), "so all their busy time is full");
     let most = results.stations.iter().map(|station| station.busy_full + station.failed + station.paused).fold(0.0, f64::max);
-    assert!((likely.full_or_stopped_share - most).abs() < 1e-12, "the Station busy and full or stopped most");
+    assert!((likely.full_or_interrupted_share - most).abs() < 1e-12, "the Station busy and full or stopped most");
     assert!(results.stations.iter().any(|station| station.name == likely.instance));
     assert!(!likely.upstream.is_empty(), "with its neighbours upstream as evidence");
 }
@@ -120,7 +120,7 @@ fn intervals_come_once_five_measuring_periods_are_complete() {
         let figures = figures[station.id as usize];
         assert_eq!(intervals.busy.mean, figures.busy.mean().unwrap());
         assert_eq!(intervals.busy.half_width, figures.busy.half_width().unwrap());
-        assert_eq!(intervals.stopped.half_width, figures.failed.half_width().unwrap(), "the demo has no pauses");
+        assert_eq!(intervals.interrupted.half_width, figures.failed.half_width().unwrap(), "the demo has no pauses");
     }
     assert!(later.stations.iter().any(|station| station.intervals.unwrap().busy.half_width > 0.0));
 }

@@ -9,7 +9,7 @@ use crabsim_catalogue::bottleneck::{likely_bottleneck, LikelyBottleneck, Shares}
 use crabsim_model::State;
 use crabsim::{
     ModelDescription, ObjectKind, ObjectStatistics, SessionOutput, Picture, ProcessState, RunState, SessionStatus,
-    SimTime, Spread, StopCause, TimeMode, FillStatistics};
+    SimTime, Spread, Interruption, TimeMode, FillStatistics};
 use std::collections::VecDeque;
 use std::time::Duration;
 
@@ -64,7 +64,7 @@ pub enum Shade {
     Blocked,
     Paused,
     Failed,
-    ForcedFailure,
+    Stopped,
 }
 
 /// The run controls in the top bar.
@@ -279,12 +279,12 @@ pub struct Inspection {
     /// Busy, Blocked, Idle or Stopped.
     pub state: &'static str,
     pub contents: Vec<u32>,
-    /// Time left on the work in progress, frozen while stopped.
+    /// Time left on the work in progress, frozen while interrupted.
     pub remaining: Option<SimTime>,
     /// Why it's blocked: the MU it holds and what each successor is doing.
     pub blocked: Option<String>,
-    /// Why it's stopped: each active interruption and since when, most serious first.
-    pub stopped: Vec<String>,
+    /// Why it's interrupted: each active interruption and since when, most serious first.
+    pub interrupted_by: Vec<String>,
     /// What only a full state says. `None` until the session has sent one.
     pub details: Option<Details>,
     /// The interventions on offer, and which are on. `None` where there are none.
@@ -555,9 +555,9 @@ pub struct StationIntervals {
     pub blocked: Interval,
     pub idle: Interval,
     /// Failed or paused.
-    pub stopped: Interval,
-    /// Busy and full or stopped, which the likely-bottleneck rule ranks by.
-    pub full_or_stopped: Interval,
+    pub interrupted: Interval,
+    /// Busy and full or interrupted, which the likely-bottleneck rule ranks by.
+    pub full_or_interrupted: Interval,
 }
 
 /// How far measuring periods have got.
@@ -596,7 +596,7 @@ pub struct Results {
     pub bottleneck: Option<LikelyBottleneck>,
     /// How far measuring periods have got, when the run measures in them.
     pub periods: Option<PeriodsSoFar>,
-    /// The runner-up the likely bottleneck can't be told from: their full-or-stopped intervals
+    /// The runner-up the likely bottleneck can't be told from: their full-or-interrupted intervals
     /// overlap. Only once intervals are given.
     pub too_close: Option<String>,
     /// The model's longest mean time between failures or repair time, when the measuring period
@@ -608,7 +608,7 @@ pub struct Results {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Offered {
     pub paused: bool,
-    pub forced: bool,
+    pub stopped: bool,
 }
 
 /// How often, in wall time, a full state is asked for while one is wanted.
@@ -940,10 +940,10 @@ impl ViewState {
 
     pub fn shade(&self, id: u32) -> Shade {
         let Some(object) = self.picture.object(id) else { return Shade::Unknown };
-        match object.stop() {
-            Some(StopCause::Failure) => Shade::Failed,
-            Some(StopCause::ForcedFailure) => Shade::ForcedFailure,
-            Some(StopCause::Pause) => Shade::Paused,
+        match object.interrupted() {
+            Some(Interruption::Failed) => Shade::Failed,
+            Some(Interruption::Stopped) => Shade::Stopped,
+            Some(Interruption::Paused) => Shade::Paused,
             None => match object.process() {
                 // A Buffer does no work: with MUs in it, it is holding.
                 ProcessState::Processing if object.kind() == ObjectKind::Buffer => Shade::Holding,
@@ -1237,7 +1237,7 @@ impl ViewState {
         let pictured = self.picture.object(id);
         let state = match pictured {
             None => "No state yet",
-            Some(pictured) if pictured.is_stopped() => "Stopped",
+            Some(pictured) if pictured.is_interrupted() => "Interrupted",
             Some(pictured) => match pictured.process() {
                 ProcessState::Processing if object.kind == ObjectKind::Buffer => "Holding",
                 ProcessState::Processing => "Busy",
@@ -1262,7 +1262,7 @@ impl ViewState {
                 .collect();
             format!("{holding}: {}", successors.join(", "))
         });
-        let stopped = pictured
+        let interrupted_by = pictured
             .map(|pictured| pictured.interruptions())
             .unwrap_or_default()
             .iter()
@@ -1277,11 +1277,11 @@ impl ViewState {
             contents: pictured.map(|pictured| pictured.contents().to_vec()).unwrap_or_default(),
             remaining: pictured.and_then(|pictured| pictured.remaining(self.picture.shown())),
             blocked,
-            stopped,
+            interrupted_by,
             details: self.details_of(id),
             interventions: pictured.filter(|_| offered).map(|pictured| {
                 let on = |cause| pictured.interruptions().iter().any(|interruption| interruption.cause == cause);
-                Offered { paused: on(StopCause::Pause), forced: on(StopCause::ForcedFailure) }
+                Offered { paused: on(Interruption::Paused), stopped: on(Interruption::Stopped) }
             }),
         })
     }
@@ -1419,8 +1419,8 @@ impl ViewState {
                             busy_full: Interval::of(figures.busy_full)?,
                             blocked: Interval::of(figures.blocked)?,
                             idle: Interval::of(figures.idle)?,
-                            stopped: Interval::of(figures.stopped)?,
-                            full_or_stopped: Interval::of(figures.full_or_stopped)?,
+                            interrupted: Interval::of(figures.interrupted)?,
+                            full_or_interrupted: Interval::of(figures.full_or_interrupted)?,
                         })
                     }),
                 }),
@@ -1433,10 +1433,10 @@ impl ViewState {
             .map(|connection| (self.objects[connection.from as usize].name.clone(), self.objects[connection.to as usize].name.clone()))
             .collect();
         let bottleneck = likely_bottleneck(&shares, &connections);
-        let full_or_stopped = |name: &str| stations.iter().find(|station| station.name == name)?.intervals.map(|intervals| intervals.full_or_stopped);
+        let full_or_interrupted = |name: &str| stations.iter().find(|station| station.name == name)?.intervals.map(|intervals| intervals.full_or_interrupted);
         let too_close = bottleneck.as_ref().and_then(|likely| {
             let (runner_up, _) = likely.ranking.get(1)?;
-            full_or_stopped(&likely.instance)?.overlaps(&full_or_stopped(runner_up)?).then(|| runner_up.clone())
+            full_or_interrupted(&likely.instance)?.overlaps(&full_or_interrupted(runner_up)?).then(|| runner_up.clone())
         });
         let short_against = periods
             .and_then(|periods| Some((periods.length, self.longest_failure_time?)))
@@ -1488,7 +1488,7 @@ impl ViewState {
     }
 
     /// What Reset would keep or drop: each object's last process time set during the run, where it
-    /// differs from the one configured, in id order. Pauses and forced failures are momentary, so
+    /// differs from the one configured, in id order. Pauses and stops are momentary, so
     /// they are never among them. The marks mirror the session's log, so this holds at shown time.
     pub fn changes(&self) -> Vec<Change> {
         let mut last: std::collections::BTreeMap<u32, SimTime> = std::collections::BTreeMap::new();
@@ -1516,8 +1516,8 @@ impl ViewState {
         let what = match mark.intervention {
             Intervention::Pause => "Pause".to_string(),
             Intervention::Resume => "Resume".to_string(),
-            Intervention::ForceFailure => "Forced failure".to_string(),
-            Intervention::EndForcedFailure => "End of forced failure".to_string(),
+            Intervention::Stop => "Stop".to_string(),
+            Intervention::EndStop => "End of stop".to_string(),
             Intervention::SetProcessTime(time) => format!("Process time {}", format_time_exact(time)),
         };
         let name = self.objects.get(mark.object as usize).map_or("an unknown object", |object| object.name.as_str());
@@ -1580,12 +1580,12 @@ impl Shade {
             State::Blocked => Shade::Blocked,
             State::Idle => Shade::Idle,
             State::Failed => Shade::Failed,
-            State::ForcedFailure => Shade::ForcedFailure,
+            State::Stopped => Shade::Stopped,
             State::Paused => Shade::Paused,
         }
     }
 
-    /// The state it shows, such as "Forced failure", or that there is none before Init.
+    /// The state it shows, such as "Stopped", or that there is none before Init.
     pub fn label(self) -> &'static str {
         match self {
             Shade::Unknown => "no state yet, before Init",
@@ -1595,7 +1595,7 @@ impl Shade {
             Shade::Blocked => State::Blocked.label(),
             Shade::Paused => State::Paused.label(),
             Shade::Failed => State::Failed.label(),
-            Shade::ForcedFailure => State::ForcedFailure.label(),
+            Shade::Stopped => State::Stopped.label(),
         }
     }
 }
@@ -1612,7 +1612,7 @@ pub fn rgb(shade: Shade) -> [f32; 3] {
         Shade::Blocked => [0.95, 0.60, 0.10],
         Shade::Paused => [0.25, 0.45, 0.95],
         Shade::Failed => [0.90, 0.15, 0.15],
-        Shade::ForcedFailure => [0.55, 0.08, 0.08],
+        Shade::Stopped => [0.55, 0.08, 0.08],
     }
 }
 
@@ -1625,15 +1625,15 @@ fn doing(shade: Shade) -> &'static str {
         Shade::Blocked => "is blocked",
         Shade::Paused => "is paused",
         Shade::Failed => "has failed",
-        Shade::ForcedFailure => "has a forced failure",
+        Shade::Stopped => "is stopped",
     }
 }
 
-fn cause_name(cause: StopCause) -> &'static str {
+fn cause_name(cause: Interruption) -> &'static str {
     match cause {
-        StopCause::Failure => "Failure",
-        StopCause::ForcedFailure => "Forced failure",
-        StopCause::Pause => "Pause",
+        Interruption::Failed => "Failure",
+        Interruption::Stopped => "Stop",
+        Interruption::Paused => "Pause",
     }
 }
 

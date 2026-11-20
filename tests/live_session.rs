@@ -6,8 +6,8 @@
 //! a hang into a failure, so an extremely overloaded machine could fail a test that is fine.
 
 use crabsim::{
-    Clock, FailureProfile, Interruption, LiveSession, Picture, ModelDescription, SessionOutput, Occurrence, OccurrenceKind, Recording, RunState,
-    EventType, RunError, SessionError, SessionSettings, SessionStatus, SimTime, SimulationRun, StopCause,
+    Clock, FailureProfile, ActiveInterruption, LiveSession, Picture, ModelDescription, SessionOutput, Occurrence, OccurrenceKind, Recording, RunState,
+    EventType, RunError, SessionError, SessionSettings, SessionStatus, SimTime, SimulationRun, Interruption,
     TimeMode, WallClock, OUTPUT_BACKLOG_LIMIT, ZERO_TIME_EVENT_LIMIT,
 };
 use crabsim::random_numbers::Distribution;
@@ -1186,8 +1186,8 @@ enum Done {
     Resume(u32),
     Clear,
     SetProcessTime(u32, SimTime),
-    ForceFailure(u32),
-    EndForcedFailure(u32),
+    Stop(u32),
+    EndStop(u32),
 }
 
 fn direct_state(done: &[(u64, Done)], t: u64) -> RunState {
@@ -1210,8 +1210,8 @@ fn direct_at(done: &[(u64, Done)], t: SimTime) -> (Vec<Occurrence>, RunState) {
             Done::Resume(id) => run.schedule_event(secs(*at), EventType::PauseOff, *id).unwrap(),
             Done::Clear => run.clear_statistics(),
             Done::SetProcessTime(id, time) => run.set_process_time(*id, *time).unwrap(),
-            Done::ForceFailure(id) => run.schedule_event(secs(*at), EventType::ForceFailureOn, *id).unwrap(),
-            Done::EndForcedFailure(id) => run.schedule_event(secs(*at), EventType::ForceFailureOff, *id).unwrap(),
+            Done::Stop(id) => run.schedule_event(secs(*at), EventType::StopOn, *id).unwrap(),
+            Done::EndStop(id) => run.schedule_event(secs(*at), EventType::StopOff, *id).unwrap(),
         }
     }
     occurrences.extend(run.advance_to(t).unwrap());
@@ -1274,7 +1274,7 @@ fn a_state_asked_for_straight_after_an_intervention_includes_it() {
     watched.session.pause(STATION).unwrap();
     let state = watched.state_now();
     let station = &state.objects[STATION as usize];
-    assert_eq!(station.stop, Some(StopCause::Pause));
+    assert_eq!(station.interrupted, Some(Interruption::Paused));
     assert_eq!(station.statistics.pauses, 1);
 }
 
@@ -1510,7 +1510,7 @@ fn a_pause_takes_effect_at_shown_time_without_a_halt() {
     watched.session.pause(STATION).unwrap();
     let seen = watched.look();
     assert_eq!(seen.statuses, vec![], "still advancing");
-    let paused = Occurrence { time: secs(1_000), kind: OccurrenceKind::InterruptionBegan { object_id: STATION, cause: StopCause::Pause } };
+    let paused = Occurrence { time: secs(1_000), kind: OccurrenceKind::InterruptionBegan { object_id: STATION, cause: Interruption::Paused } };
     assert!(seen.occurrences.contains(&paused), "{:?}", seen.occurrences);
 
     watched.at(1_100);
@@ -1528,7 +1528,7 @@ fn a_pause_while_halted_shows_at_once() {
     watched.look();
     watched.session.pause(STATION).unwrap();
     let seen = watched.look();
-    assert!(seen.occurrences.iter().any(|o| o.kind == OccurrenceKind::InterruptionBegan { object_id: STATION, cause: StopCause::Pause }));
+    assert!(seen.occurrences.iter().any(|o| o.kind == OccurrenceKind::InterruptionBegan { object_id: STATION, cause: Interruption::Paused }));
     assert_eq!(watched.shown, secs(1_000));
 }
 
@@ -1650,21 +1650,21 @@ fn a_process_time_change_takes_effect_at_shown_time_and_replays() {
 }
 
 #[test]
-fn a_forced_failure_takes_effect_at_shown_time_and_replays() {
+fn a_stop_by_hand_takes_effect_at_shown_time_and_replays() {
     let mut watched = Watched::new(line_with_random_failures);
     watched.session.start().unwrap();
     watched.at(1_000);
     watched.look();
-    watched.session.force_failure(STATION).unwrap();
+    watched.session.stop_object(STATION).unwrap();
     let seen = watched.look();
-    let forced = Occurrence { time: secs(1_000), kind: OccurrenceKind::InterruptionBegan { object_id: STATION, cause: StopCause::ForcedFailure } };
+    let forced = Occurrence { time: secs(1_000), kind: OccurrenceKind::InterruptionBegan { object_id: STATION, cause: Interruption::Stopped } };
     assert!(seen.occurrences.contains(&forced), "{:?}", seen.occurrences);
     watched.at(1_500);
     watched.look();
-    watched.session.end_forced_failure(STATION).unwrap();
+    watched.session.end_stop(STATION).unwrap();
     watched.at(2_000);
     watched.look_without_errors();
-    let done = [(1_000, Done::ForceFailure(STATION)), (1_500, Done::EndForcedFailure(STATION))];
+    let done = [(1_000, Done::Stop(STATION)), (1_500, Done::EndStop(STATION))];
     assert_eq!(watched.state_now(), direct_state(&done, 2_000));
 
     watched.session.go_back(secs(1_200)).unwrap();
@@ -1673,27 +1673,27 @@ fn a_forced_failure_takes_effect_at_shown_time_and_replays() {
 }
 
 #[test]
-fn forcing_what_is_already_forced_does_nothing_in_a_session() {
+fn stopping_what_is_already_stopped_does_nothing_in_a_session() {
     let mut watched = Watched::new(line_with_random_failures);
     watched.session.start().unwrap();
     watched.at(1_000);
     watched.look();
-    watched.session.end_forced_failure(STATION).unwrap();
-    watched.session.force_failure(STATION).unwrap();
-    watched.session.force_failure(STATION).unwrap();
+    watched.session.end_stop(STATION).unwrap();
+    watched.session.stop_object(STATION).unwrap();
+    watched.session.stop_object(STATION).unwrap();
     watched.at(1_100);
     watched.look_without_errors();
-    assert_eq!(watched.state_now(), direct_state(&[(1_000, Done::ForceFailure(STATION))], 1_100));
+    assert_eq!(watched.state_now(), direct_state(&[(1_000, Done::Stop(STATION))], 1_100));
 }
 
 #[test]
-fn only_a_station_can_be_forced_to_fail_so_far() {
+fn only_a_station_can_be_stopped_by_hand_so_far() {
     let mut watched = Watched::new(line_with_random_failures);
     watched.session.start().unwrap();
     watched.look();
-    watched.session.force_failure(0).unwrap();
-    watched.session.end_forced_failure(2).unwrap();
-    watched.session.force_failure(99).unwrap();
+    watched.session.stop_object(0).unwrap();
+    watched.session.end_stop(2).unwrap();
+    watched.session.stop_object(99).unwrap();
     assert_eq!(
         watched.look().errors,
         vec![SessionError::NotAStation(0), SessionError::NotAStation(2), SessionError::Run(RunError::UnknownObject(99))]
@@ -1739,7 +1739,7 @@ fn reset_can_keep_a_changed_process_time_and_drops_the_rest() {
     watched.look();
     watched.session.set_process_time(STATION, secs(3)).unwrap();
     watched.session.pause(STATION).unwrap();
-    watched.session.force_failure(STATION).unwrap();
+    watched.session.stop_object(STATION).unwrap();
     watched.at(1_100);
     watched.look_without_errors();
     watched.session.reset().unwrap();
@@ -2039,7 +2039,7 @@ fn the_time_mode_changes_no_results() {
 struct Drawn {
     contents: Vec<u32>,
     process: crabsim::ProcessState,
-    interruptions: Vec<Interruption>,
+    interruptions: Vec<ActiveInterruption>,
     remaining: Option<SimTime>,
     successors: Vec<u32>,
 }
@@ -2048,7 +2048,7 @@ struct Drawn {
 #[derive(Clone, Copy)]
 enum Toggle {
     Pause,
-    ForcedFailure,
+    Stopped,
 }
 
 /// Plays a session through `steps`, with the picture fed from everything it reports but the
@@ -2072,8 +2072,8 @@ fn assert_picture_rebuilds(build: fn() -> SimulationRun, steps: &[u64], actions:
             match (toggle, paused) {
                 (Toggle::Pause, false) => watched.session.pause(id).unwrap(),
                 (Toggle::Pause, true) => watched.session.resume(id).unwrap(),
-                (Toggle::ForcedFailure, false) => watched.session.force_failure(id).unwrap(),
-                (Toggle::ForcedFailure, true) => watched.session.end_forced_failure(id).unwrap(),
+                (Toggle::Stopped, false) => watched.session.stop_object(id).unwrap(),
+                (Toggle::Stopped, true) => watched.session.end_stop(id).unwrap(),
             }
             paused = !paused;
             next_action = pending.next();
@@ -2132,12 +2132,12 @@ fn the_picture_rebuilds_from_occurrences_with_pauses_overlapping_failures() {
 }
 
 #[test]
-fn the_picture_rebuilds_from_occurrences_with_forced_failures_overlapping_random_ones() {
+fn the_picture_rebuilds_from_occurrences_with_stops_by_hand_overlapping_random_ones() {
     assert_picture_rebuilds(
         line_with_random_failures,
         &[100, 300, 700, 1_000, 1_001, 2_500, 4_000, 8_000],
         &[(200, STATION), (250, STATION), (600, STATION), (1_500, STATION), (3_000, STATION), (6_000, STATION)],
-        Toggle::ForcedFailure,
+        Toggle::Stopped,
     );
 }
 
@@ -2154,13 +2154,13 @@ fn reliable_line() -> SimulationRun {
 
 #[test]
 fn a_picture_taken_while_interruptions_overlap_keeps_them_all() {
-    // Going back lands where a forced failure and a pause overlap. The state reports the
+    // Going back lands where a stop by hand and a pause overlap. The state reports the
     // failure as its stop, but the picture must know about the pause too.
     let mut watched = Watched::new(reliable_line);
     watched.session.start().unwrap();
     watched.at(100);
     watched.look();
-    watched.session.force_failure(STATION).unwrap();
+    watched.session.stop_object(STATION).unwrap();
     watched.at(110);
     watched.look();
     watched.session.pause(STATION).unwrap();
@@ -2173,16 +2173,16 @@ fn a_picture_taken_while_interruptions_overlap_keeps_them_all() {
     assert_eq!(
         watched.picture.object(STATION).unwrap().interruptions(),
         vec![
-            Interruption { cause: StopCause::ForcedFailure, since: secs(100) },
-            Interruption { cause: StopCause::Pause, since: secs(110) },
+            ActiveInterruption { cause: Interruption::Stopped, since: secs(100) },
+            ActiveInterruption { cause: Interruption::Paused, since: secs(110) },
         ]
     );
 
-    watched.session.end_forced_failure(STATION).unwrap();
+    watched.session.end_stop(STATION).unwrap();
     watched.look_without_errors();
-    let pictured = watched.picture.object(STATION).unwrap().stop();
-    assert_eq!(pictured, Some(StopCause::Pause));
-    assert_eq!(watched.state_now().objects[STATION as usize].stop, Some(StopCause::Pause));
+    let pictured = watched.picture.object(STATION).unwrap().interrupted();
+    assert_eq!(pictured, Some(Interruption::Paused));
+    assert_eq!(watched.state_now().objects[STATION as usize].interrupted, Some(Interruption::Paused));
 }
 
 /// A blocking model: Source -> slow Station -> slower Station -> Drain, all with failures.
@@ -2274,11 +2274,11 @@ fn going_back_to_the_very_time_of_an_intervention_keeps_it() {
     watched.session.go_back(secs(1_000)).unwrap();
     watched.look();
     assert_eq!(watched.state.as_ref().unwrap(), &direct_state(&[(1_000, Done::Pause(STATION))], 1_000));
-    assert_eq!(object_stop(watched.state.as_ref().unwrap()), Some(StopCause::Pause));
+    assert_eq!(object_stop(watched.state.as_ref().unwrap()), Some(Interruption::Paused));
 }
 
-fn object_stop(state: &RunState) -> Option<StopCause> {
-    state.objects.iter().find(|o| o.id == STATION).unwrap().stop
+fn object_stop(state: &RunState) -> Option<Interruption> {
+    state.objects.iter().find(|o| o.id == STATION).unwrap().interrupted
 }
 
 // ---------- End time ----------

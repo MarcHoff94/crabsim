@@ -2,7 +2,7 @@
 use crate::time::SimTime;
 use crate::error::{InitError, MaterialflowError, RunTimeError};
 use crate::event::{EventContext, EventTemplate, EventType};
-use crate::report::{ObjectState, OccurrenceKind, StopCause};
+use crate::report::{ObjectState, OccurrenceKind};
 use crate::materialflow_objects::OtherObjects;
 use crate::random_numbers::{Distribution, DistributionSampler};
 use crate::statistics::StatisticsKeeper;
@@ -86,24 +86,6 @@ pub enum ProcessState {
 	Blocked,
 	Idle,
 }
-#[derive(Debug,Clone)]
-pub enum InterruptionState {
-	None,
-	Failed,
-	ForcedFailed,
-	Paused,
-}
-impl InterruptionState {
-	pub fn cause(&self) -> Option<StopCause> {
-		match self {
-			InterruptionState::None => None,
-			InterruptionState::Failed => Some(StopCause::Failure),
-			InterruptionState::ForcedFailed => Some(StopCause::ForcedFailure),
-			InterruptionState::Paused => Some(StopCause::Pause),
-		}
-	}
-}
-
 pub trait EventInterface {
 	/// Prepares the object for a run and returns its first events. Called from the default state.
 	fn init(&mut self, context: &mut EventContext) -> Result<Vec<EventTemplate>, InitError>;
@@ -124,12 +106,8 @@ pub trait EventInterface {
 	fn set_object_id(&mut self, id: u32);
 	fn set_random_seed(&mut self, seed: u64);
 }
-pub trait StopCtrl {
-	fn set_stop(&mut self, failure_start: &SimTime, reason: InterruptionState) -> Result<Option<EventTemplate>, MaterialflowError>;
-	fn remove_stop(&mut self) -> Result<Option<EventTemplate>, MaterialflowError>;
-}
 
-pub trait MaterialFlow: EventInterface + StopCtrl {
+pub trait MaterialFlow: EventInterface {
 	fn is_entrance_allowed(&self) -> bool;
 	fn is_exit_allowed(&self) -> bool;
 	fn process_mu_entrance(&mut self, mu: MoveableUnit, context: &mut EventContext) -> Result<Option<EventTemplate>, MaterialflowError>;

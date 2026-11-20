@@ -80,7 +80,7 @@ fn shade_colour32(shade: Shade) -> egui::Color32 {
 }
 
 const SHADES: [Shade; 8] =
-    [Shade::Unknown, Shade::Idle, Shade::Busy, Shade::Holding, Shade::Blocked, Shade::Paused, Shade::Failed, Shade::ForcedFailure];
+    [Shade::Unknown, Shade::Idle, Shade::Busy, Shade::Holding, Shade::Blocked, Shade::Paused, Shade::Failed, Shade::Stopped];
 
 fn main() {
     let opts = Opts::parse();
@@ -3015,8 +3015,8 @@ fn send_intervention(ui: &mut Ui, session: &Session, id: u32, intervention: Inte
     let sent = match intervention {
         Intervention::Pause => session.pause(id),
         Intervention::Resume => session.resume(id),
-        Intervention::ForceFailure => session.force_failure(id),
-        Intervention::EndForcedFailure => session.end_forced_failure(id),
+        Intervention::Stop => session.stop_object(id),
+        Intervention::EndStop => session.end_stop(id),
         Intervention::SetProcessTime(time) => session.set_process_time(id, time),
     };
     match sent {
@@ -3025,7 +3025,7 @@ fn send_intervention(ui: &mut Ui, session: &Session, id: u32, intervention: Inte
     }
 }
 
-/// Pause and forced failure, as buttons. `window` is the stream of the window they are in, so
+/// Pause and Stop, as buttons. `window` is the stream of the window they are in, so
 /// the keyboard can be sent to them there. Returns the intervention asked for.
 fn intervention_buttons(ui: &mut egui::Ui, offered: crabsim_ui::view::Offered, window: Option<u64>) -> Option<Intervention> {
     let mut asked = None;
@@ -3040,14 +3040,14 @@ fn intervention_buttons(ui: &mut egui::Ui, offered: crabsim_ui::view::Offered, w
         if pause_button.clicked() {
             asked = Some(pause);
         }
-        let (force, force_label) = if offered.forced { (Intervention::EndForcedFailure, "End forced failure") } else { (Intervention::ForceFailure, "Force failure") };
-        let force_hint = if offered.forced {
-            "End the forced failure: the Station carries on, unless something else still stops it"
+        let (force, force_label) = if offered.stopped { (Intervention::EndStop, "End stop") } else { (Intervention::Stop, "Stop") };
+        let force_hint = if offered.stopped {
+            "End the stop: the Station carries on, unless something else still interrupts it"
         } else {
             "Stop this Station as a failure until you end it. It counts as a failure in the statistics"
         };
         let force_button = row.button(force_label).on_hover_text(force_hint);
-        if let Some(key) = key("forced_failure") {
+        if let Some(key) = key("stop") {
             focus_if_wanted(row, &force_button, &key);
         }
         if force_button.clicked() {
@@ -3297,9 +3297,9 @@ fn object_window_contents(
             section.label(egui::RichText::new("Why it's blocked").strong());
             section.label(blocked);
         }
-        if !inspection.stopped.is_empty() {
-            section.label(egui::RichText::new("Why it's stopped").strong());
-            for interruption in &inspection.stopped {
+        if !inspection.interrupted_by.is_empty() {
+            section.label(egui::RichText::new("Why it's interrupted").strong());
+            for interruption in &inspection.interrupted_by {
                 section.label(interruption);
             }
         }
@@ -3709,12 +3709,12 @@ fn results_view(ui: &mut egui::Ui, results: Option<(&str, &crabsim_ui::view::Res
                         row.label(&likely.instance);
                     }
                 }
-                row.label(format!("busy and full or stopped {}", percent(likely.full_or_stopped_share)));
+                row.label(format!("busy and full or interrupted {}", percent(likely.full_or_interrupted_share)));
             });
             if let Some(runner_up) = &results.too_close {
                 ui.colored_label(
                     NOTE_COLOUR,
-                    format!("Too close to call: {} and {runner_up} can't be told apart yet, since their busy-or-stopped intervals overlap.", likely.instance),
+                    format!("Too close to call: {} and {runner_up} can't be told apart yet, since their busy-or-interrupted intervals overlap.", likely.instance),
                 );
             }
             for (name, blocked) in &likely.upstream {
@@ -3753,7 +3753,7 @@ fn results_view(ui: &mut egui::Ui, results: Option<(&str, &crabsim_ui::view::Res
                 (SortBy::Full, "Full", Shade::Busy, "Working with every place in work, which the likely bottleneck counts. Click to sort"),
                 (SortBy::Blocked, "Blocked", Shade::Blocked, "Holding a finished MU no successor can take, with nothing in work. Click to sort"),
                 (SortBy::Idle, "Idle", Shade::Idle, "Waiting for an MU. Click to sort"),
-                (SortBy::Failed, "Stop", Shade::Failed, "Stopped: failed, under a forced failure or paused. Click to sort"),
+                (SortBy::Failed, "Interrupted", Shade::Failed, "Interrupted: failed, stopped or paused. Click to sort"),
             ];
             for (by, label, shade, hint) in columns.into_iter().filter(|&(by, ..)| full || by != SortBy::Full) {
                 let text = egui::RichText::new(label).color(shade_colour32(shade));
@@ -3766,7 +3766,7 @@ fn results_view(ui: &mut egui::Ui, results: Option<(&str, &crabsim_ui::view::Res
                 pick(grid, station.id, &station.name, &mut chosen);
                 match station.intervals {
                     Some(intervals) => {
-                        let shown = [Some(intervals.busy), full.then_some(intervals.busy_full), Some(intervals.blocked), Some(intervals.idle), Some(intervals.stopped)];
+                        let shown = [Some(intervals.busy), full.then_some(intervals.busy_full), Some(intervals.blocked), Some(intervals.idle), Some(intervals.interrupted)];
                         for interval in shown.into_iter().flatten() {
                             grid.label(percent_interval(interval));
                         }
@@ -4347,7 +4347,7 @@ fn edit_targets(ui: &Ui, id: u32) -> Vec<(String, String)> {
         return targets;
     }
     if object.kind == crabsim::ObjectKind::Station {
-        return [("process_time", "Process time"), ("pause", "Pause"), ("forced_failure", "Forced failure")]
+        return [("process_time", "Process time"), ("pause", "Pause"), ("stop", "Stop")]
             .map(|(name, label)| (name.to_string(), label.to_string()))
             .to_vec();
     }

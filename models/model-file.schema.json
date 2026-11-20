@@ -380,8 +380,13 @@
           "type": "string",
           "minLength": 1
         },
+        "stopped": {
+          "description": "Station: interrupted by hand.",
+          "type": "string",
+          "minLength": 1
+        },
         "forced_failure": {
-          "description": "Station.",
+          "description": "Station: Stopped's name before ADR 0020, still read.",
           "type": "string",
           "minLength": 1
         },

@@ -2,26 +2,26 @@
 //! its own log, which these mirror: going back drops the interventions after the time gone back
 //! to, and Reset drops them all.
 
-use crabsim::{Occurrence, OccurrenceKind, SimTime, StopCause};
+use crabsim::{Occurrence, OccurrenceKind, SimTime, Interruption};
 
 /// Something the user does to an object during a run, at shown time.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Intervention {
     Pause,
     Resume,
-    ForceFailure,
-    EndForcedFailure,
+    Stop,
+    EndStop,
     SetProcessTime(SimTime),
 }
 
 impl Intervention {
     /// The occurrence that says when it took effect, if it records one.
-    fn shows_as(self) -> Option<(bool, StopCause)> {
+    fn shows_as(self) -> Option<(bool, Interruption)> {
         match self {
-            Intervention::Pause => Some((true, StopCause::Pause)),
-            Intervention::Resume => Some((false, StopCause::Pause)),
-            Intervention::ForceFailure => Some((true, StopCause::ForcedFailure)),
-            Intervention::EndForcedFailure => Some((false, StopCause::ForcedFailure)),
+            Intervention::Pause => Some((true, Interruption::Paused)),
+            Intervention::Resume => Some((false, Interruption::Paused)),
+            Intervention::Stop => Some((true, Interruption::Stopped)),
+            Intervention::EndStop => Some((false, Interruption::Stopped)),
             Intervention::SetProcessTime(_) => None,
         }
     }

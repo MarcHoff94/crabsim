@@ -25,10 +25,10 @@ pub enum OccurrenceKind {
     WorkFinished { mu_id: u32, at: u32 },
     Blocked { object_id: u32 },
     Unblocked { object_id: u32 },
-    /// A failure or pause began. The object is stopped while any interruption is active, so
+    /// A failure, stop or pause began. The object is interrupted while any interruption is active, so
     /// overlapping ones are one stop.
-    InterruptionBegan { object_id: u32, cause: StopCause },
-    InterruptionEnded { object_id: u32, cause: StopCause },
+    InterruptionBegan { object_id: u32, cause: Interruption },
+    InterruptionEnded { object_id: u32, cause: Interruption },
 }
 
 /// The kinds of occurrence, for choosing which to record.
@@ -83,20 +83,21 @@ impl Recording {
     }
 }
 
-/// Why a material-flow object is stopped: one kind of interruption. Listed from most to least
-/// serious, which is how state picks one to report when several are active.
+/// Why a material-flow object is interrupted: one kind of interruption (ADR 0020). Listed from
+/// most to least serious, which is how state picks one to report when several are active.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum StopCause {
+pub enum Interruption {
     /// A random failure.
-    Failure,
-    /// A failure the user started and ends by hand. It counts as a failure in statistics.
-    ForcedFailure,
-    Pause,
+    Failed,
+    /// Stopped by hand, and ended by hand. It counts as a failure in statistics.
+    Stopped,
+    /// A planned interruption, which doesn't count against availability.
+    Paused,
 }
 
-impl StopCause {
+impl Interruption {
     /// Every cause, most serious first.
-    pub const ALL: [StopCause; 3] = [StopCause::Failure, StopCause::ForcedFailure, StopCause::Pause];
+    pub const ALL: [Interruption; 3] = [Interruption::Failed, Interruption::Stopped, Interruption::Paused];
 
     /// The cause's place in `ALL`.
     pub const fn index(self) -> usize {
@@ -106,8 +107,8 @@ impl StopCause {
 
 /// One active interruption of an object, and when it began.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Interruption {
-    pub cause: StopCause,
+pub struct ActiveInterruption {
+    pub cause: Interruption,
     pub since: SimTime,
 }
 
@@ -154,11 +155,11 @@ pub struct ObjectState {
     /// What it is doing. A Buffer is `Idle` when empty, `Processing` while it holds MUs, and
     /// `Blocked` when an MU that may leave can't.
     pub process: ProcessState,
-    /// The most serious active interruption, if the object is stopped.
-    pub stop: Option<StopCause>,
+    /// The most serious active interruption, if the object is interrupted.
+    pub interrupted: Option<Interruption>,
     /// Every active interruption, most serious first, with when it began. A view needs them all,
-    /// so that it still knows the object is stopped after the most serious one ends.
-    pub interruptions: Vec<Interruption>,
+    /// so that it still knows the object is interrupted after the most serious one ends.
+    pub interruptions: Vec<ActiveInterruption>,
     /// Time left until the object's current work completes, frozen during a stop. For a Station
     /// with several MUs in work, the soonest.
     pub remaining: Option<SimTime>,

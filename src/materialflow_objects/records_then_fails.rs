@@ -1,6 +1,6 @@
 //! A material-flow object for tests, since no real object fails part way through an event.
 
-use super::flows::{BaseObject, EventInterface, InterruptionState, MaterialFlow, MoveableUnit, ProcessState, StopCtrl};
+use super::flows::{BaseObject, EventInterface, MaterialFlow, MoveableUnit, ProcessState};
 use crate::error::{InitError, MaterialflowError, RunTimeError};
 use crate::event::{EventContext, EventTemplate, EventType};
 use crate::report::{ObjectKind, ObjectState, OccurrenceKind};
@@ -40,7 +40,7 @@ impl EventInterface for RecordsThenFails {
             kind: ObjectKind::Drain,
             contents: Vec::new(),
             process: ProcessState::Idle,
-            stop: None,
+            interrupted: None,
             interruptions: Vec::new(),
             remaining: None,
             work: Vec::new(),
@@ -61,15 +61,6 @@ impl EventInterface for RecordsThenFails {
         self.base.object_id = id;
     }
     fn set_random_seed(&mut self, _seed: u64) {}
-}
-
-impl StopCtrl for RecordsThenFails {
-    fn set_stop(&mut self, _at: &SimTime, _reason: InterruptionState) -> Result<Option<EventTemplate>, MaterialflowError> {
-        Ok(None)
-    }
-    fn remove_stop(&mut self) -> Result<Option<EventTemplate>, MaterialflowError> {
-        Ok(None)
-    }
 }
 
 impl MaterialFlow for RecordsThenFails {

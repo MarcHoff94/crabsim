@@ -17,7 +17,7 @@ The control that begins or continues advancing time, doing Init first if it has 
 
 **Halt**:
 The control that stops shown time advancing while everything the user sees stays exactly as it is. Start continues from there.
-_Avoid_: Pause, Stop (those happen to a material-flow object)
+_Avoid_: Pause, Stop (Paused and Stopped are interruptions of a material-flow object)
 
 **Reset**:
 The control that returns every object to its default state, ready for a new simulation run. The objects stay in the model. If the user chose to keep changes, settings changed by interventions, such as a process time, first become the new default state, while momentary interventions such as a Pause are dropped. This fixed part cannot be changed, and users may later add their own behaviour after it.
@@ -76,7 +76,7 @@ How far a live session has released results to the user. Everything the user exp
 
 **End time**:
 A simulation time set on a live session at which the run halts by itself, exactly there, such as 30d. Start is refused there until it is moved or cleared. It isn't an intervention: it changes when a run stops, not what happens in it.
-_Avoid_: Stop time (a stop is an object's state when interrupted)
+_Avoid_: Stop time (Stopped is an interruption by hand)
 
 **Time mode**:
 How shown time passes between instants: continuously at the session's speed, or skipping, where shown time jumps over the rest of a long gap. It changes nothing in the simulation run.
@@ -124,7 +124,7 @@ An object's real size in metres: length, width and height, plus its rotation aro
 The state a material-flow object is in before a simulation run's Init, as configured by the user, including any starting MUs.
 
 **Occurrence**:
-Something that happened in the model at a point in simulation time, such as an MU moving or a stop beginning.
+Something that happened in the model at a point in simulation time, such as an MU moving or an interruption beginning.
 _Avoid_: Event (events are the simulator's internal schedule)
 
 ### Material flow
@@ -225,41 +225,45 @@ Something in a model that can run but is probably a mistake, such as an object n
 How long a station needs to work on one MU if nothing interrupts it.
 
 **Completion time**:
-The moment a station finishes working on an MU: its entry time plus the process time, moved later by the time the station spends stopped during that work.
+The moment a station finishes working on an MU: its entry time plus the process time, moved later by the time the station spends interrupted during that work.
 _Avoid_: Exit time (an MU can finish but still have to wait before it can leave)
 
 **Dwelling time**:
-How long a Buffer holds each MU, counted individually from that MU's entry. By default a stop of the Buffer does not affect it, and this can be configured.
+How long a Buffer holds each MU, counted individually from that MU's entry. By default it keeps running while the Buffer is interrupted, and `stop_freezes_dwelling` freezes it instead.
 _Avoid_: Process time (a Buffer does no work)
 
 ### Interruptions
 
 **Interruption**:
-A cause that stops a material-flow object: a failure or a pause. Interruptions can overlap.
+A cause that interrupts a material-flow object: a failure, a stop by hand or a pause, from most to least serious. Interruptions can overlap. Every type of object can be interrupted (ADR 0020).
 
 **Failure**:
-An unplanned interruption whose timing is random, unless the user forces it. Failures and pauses are independent of each other.
+An unplanned interruption whose timing is random, drawn from one of the object's failure profiles. Its state is Failed. Failures, stops and pauses are independent of each other.
 _Avoid_: Breakdown, fault
 
-**Forced failure**:
-A failure the user starts and ends by hand, as an intervention, to see what happens if an object breaks down now. It counts as a failure against availability, and random failures carry on underneath it.
-_Avoid_: Pause (planned, and does not count against availability)
+**Failure profile**:
+One named source of failures on an object, such as "Tool wear" or "Jam", with its own availability, repair time, time basis and random stream. An object can have several, each name unique within it, and they are independent: their clocks and their failures don't affect each other.
+
+**Stopped**:
+An interruption a person starts and ends by hand, as an intervention, to see what happens if an object breaks down now. It counts as a failure against availability and in the statistics, and random failures carry on underneath it.
+_Avoid_: Forced failure (its old name), Pause (planned, and does not count against availability)
 
 **Pause**:
 A planned interruption commanded from outside, such as a shift break or scheduled maintenance. It does not count against availability.
 _Avoid_: Planned failure
 
-**Stop**:
-The state of a material-flow object while at least one interruption is active. A whole Station stops at once, whatever its capacity.
+**Interrupted**:
+The state of a material-flow object while at least one interruption is active. A whole Station is interrupted at once, whatever its capacity. A Station's work freezes, a Source's next creation moves later, a Buffer takes and releases nothing, and a Drain refuses MUs.
+_Avoid_: Stop, Down
 
 **Availability**:
-The share of time an object is not failed, counting only time on its time basis plus time failed. Pauses do not count against it.
+The share of time an object is not failed, counting only time on its time basis plus time failed, for each failure profile on its own basis. Stopped time counts as failed, and pauses do not count against it.
 
 **Achieved availability**:
 The availability a simulation run actually produced, as opposed to the value configured for the object.
 
 **Time basis**:
-The kind of time that counts down to an object's next failure: simulation time, working time or processing time. Not every object needs all three.
+The kind of time that counts down to a failure profile's next failure: simulation time, working time or processing time. Stations and Sources offer all three, Buffers and Drains simulation and working time.
 
 **Simulation time**:
 The default time basis: all time counts, whatever the object is doing.
@@ -268,7 +272,7 @@ The default time basis: all time counts, whatever the object is doing.
 A time basis where all time counts except while the object is paused, including time spent idle or blocked.
 
 **Processing time**:
-A time basis where only time spent actively working on at least one MU counts, once however many MUs are in work.
+A time basis where only time spent busy counts, once however many MUs are in work. A Source is busy while it waits out its interval.
 _Avoid_: Process time (how long one MU takes, not a basis for failures)
 
 ### Measuring
@@ -293,10 +297,10 @@ A model's own explanation of what one state means for a class or instance, such 
 The state of an object holding an MU that is ready to leave but that no successor can accept. It waits in line at each of its successors, and the line is ordered by how long each predecessor's MU has been ready to leave, whichever object holds it (ADR 0018).
 
 **Idle**:
-The state of an object that is not busy, blocked or stopped. A partly filled batch start Station waiting to start is idle.
+The state of an object that is not busy, blocked or interrupted. A partly filled batch start Station waiting to start is idle.
 
 **MU time**:
-MU count multiplied by time, kept per MU state: busy, blocked, waiting to start or stopped. Unlike an object's state, which is one at a time, it shows what each MU in a multi-MU object is doing. Judge utilisation and bottlenecks from it.
+MU count multiplied by time, kept per MU state: busy, blocked, waiting to start or interrupted. Unlike an object's state, which is one at a time, it shows what each MU in a multi-MU object is doing. Judge utilisation and bottlenecks from it.
 
 **Bottleneck**:
 The object limiting a material flow: what is upstream of it is mostly blocked, and what is downstream of it is mostly starved.

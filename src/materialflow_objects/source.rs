@@ -1,6 +1,6 @@
 use crate::error::{InitError, MaterialflowError, RunTimeError};
 use crate::event::{EventContext, EventTemplate, EventType, ExitTicket};
-use crate::report::{Capacity, ObjectKind, ObjectState, OccurrenceKind, StopCause};
+use crate::report::{Capacity, ObjectKind, ObjectState, OccurrenceKind, Interruption};
 use crate::statistics::{MachineState, StatisticsKeeper};
 use crate::time::SimTime;
 use crate::materialflow_objects::OtherObjects;
@@ -54,7 +54,7 @@ pub struct Source {
 	/// How it picks the successor for its MU. Set by the run, which ranks the successors.
 	pub distribution: Distributing,
 	pub state: ProcessState,
-	pub interruption: Option<StopCause>,
+	pub interruption: Option<Interruption>,
 	pub statistics: StatisticsKeeper,
 }
 impl Source {
@@ -191,7 +191,7 @@ impl EventInterface for Source {
 			kind: ObjectKind::Source,
 			contents: self.content.iter().map(|mu| mu.id).collect(),
 			process: self.state.clone(),
-			stop: self.interruption,
+			interrupted: self.interruption,
 			// A Source can't be interrupted yet: its stops aren't built.
 			interruptions: Vec::new(),
 			remaining: self.completion_time.map(|completion| completion.saturating_sub(now)),

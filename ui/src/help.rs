@@ -51,9 +51,9 @@ pub fn meaning(kind: ObjectKind, state: State) -> &'static str {
         (ObjectKind::Drain, State::Idle) => "Ready to take MUs out of the model. It takes each one at once, so it is always idle.",
         (_, State::Busy) => "Working on an MU.",
         (_, State::Blocked) => "Holding an MU whose work is done, but no successor can take it.",
-        (_, State::Idle) => "Not busy, blocked or stopped: waiting for an MU to arrive.",
+        (_, State::Idle) => "Not busy, blocked or interrupted: waiting for an MU to arrive.",
         (_, State::Failed) => "Stopped by a random failure until its repair is done. The work on its MU waits.",
-        (_, State::ForcedFailure) => "Stopped by a failure someone started, until they end it. It counts as a failure in the statistics.",
+        (_, State::Stopped) => "Stopped by a failure someone started, until they end it. It counts as a failure in the statistics.",
         (_, State::Paused) => "Stopped by a Pause until someone resumes it. The work on its MU waits.",
     }
 }

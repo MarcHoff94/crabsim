@@ -279,7 +279,10 @@ pub struct StateNotesFile {
     /// Station.
     #[schemars(length(min = 1))]
     pub failed: Option<String>,
-    /// Station.
+    /// Station: interrupted by hand.
+    #[schemars(length(min = 1))]
+    pub stopped: Option<String>,
+    /// Station: Stopped's name before ADR 0020, still read.
     #[schemars(length(min = 1))]
     pub forced_failure: Option<String>,
     /// Station.

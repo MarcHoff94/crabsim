@@ -40,7 +40,7 @@ impl EventInterface for RecordsThenFails {
             kind: ObjectKind::Drain,
             contents: Vec::new(),
             process: ProcessState::Idle,
-            stop: None,
+            interrupted: None,
             interruptions: Vec::new(),
             remaining: None,
             work: Vec::new(),

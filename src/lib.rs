@@ -26,7 +26,7 @@ pub use crate::live_session::{
 pub use crate::materialflow_objects::{Buffer, Drain, ExitStrategy, ModelObject, MultiStation, OtherObjects, SingleStation, Source, StartMode};
 pub use crate::model::{Dimensions, ModelDescription, Position};
 pub use crate::picture::{ObjectPicture, Picture};
-pub use crate::report::{Capacity, Interruption, ObjectKind, ObjectState, Occurrence, OccurrenceKind, OccurrenceType, Recording, RunState, StopCause};
+pub use crate::report::{Capacity, ActiveInterruption, ObjectKind, ObjectState, Occurrence, OccurrenceKind, OccurrenceType, Recording, RunState, Interruption};
 pub use crate::simulation_run::{BoundedAdvance, SimulationRun, ZERO_TIME_EVENT_LIMIT};
 pub use crate::statistics::{DrainStatistics, FillStatistics, Histogram, MeasuringPeriods, ObjectStatistics, PeriodFigures, Spread, HISTOGRAM_BARS};
 pub use crate::time::SimTime;

@@ -274,7 +274,7 @@ impl EventInterface for Buffer {
             contents: self.content.iter().map(|held| held.mu.id).collect(),
             process: self.process_state(),
             // A Buffer can't be interrupted yet: its stops aren't built.
-            stop: None,
+            interrupted: None,
             interruptions: Vec::new(),
             remaining: None,
             work: Vec::new(),

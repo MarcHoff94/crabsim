@@ -13,7 +13,7 @@ use serde_json::json;
 #[test]
 fn the_help_lists_the_states_an_objects_type_can_be_in_each_with_what_it_means() {
     let station: Vec<&str> = states(ObjectKind::Station, None).iter().map(|help| help.state.label()).collect();
-    assert_eq!(station, ["Busy", "Blocked", "Idle", "Failed", "Forced failure", "Paused"]);
+    assert_eq!(station, ["Busy", "Blocked", "Idle", "Failed", "Stopped", "Paused"]);
     let source: Vec<State> = states(ObjectKind::Source, None).iter().map(|help| help.state).collect();
     assert_eq!(source, [State::Busy, State::Blocked]);
     let drain: Vec<State> = states(ObjectKind::Drain, None).iter().map(|help| help.state).collect();
@@ -38,16 +38,16 @@ fn the_models_own_notes_sit_beside_crabsims_meaning_never_instead_of_it() {
 }
 
 #[test]
-fn every_state_has_its_own_colour_and_a_forced_failure_is_a_darker_red_than_a_failure() {
-    let shades = [Shade::Unknown, Shade::Idle, Shade::Busy, Shade::Holding, Shade::Blocked, Shade::Paused, Shade::Failed, Shade::ForcedFailure];
+fn every_state_has_its_own_colour_and_stopped_is_a_darker_red_than_failed() {
+    let shades = [Shade::Unknown, Shade::Idle, Shade::Busy, Shade::Holding, Shade::Blocked, Shade::Paused, Shade::Failed, Shade::Stopped];
     for (i, a) in shades.iter().enumerate() {
         for b in &shades[i + 1..] {
             assert_ne!(rgb(*a), rgb(*b), "{a:?} and {b:?}");
         }
     }
     let [failed_r, failed_g, failed_b] = rgb(Shade::Failed);
-    let [forced_r, forced_g, forced_b] = rgb(Shade::ForcedFailure);
-    assert!(forced_r < failed_r && forced_r > 2.0 * forced_g && forced_r > 2.0 * forced_b, "dark red");
+    let [stopped_r, stopped_g, stopped_b] = rgb(Shade::Stopped);
+    assert!(stopped_r < failed_r && stopped_r > 2.0 * stopped_g && stopped_r > 2.0 * stopped_b, "dark red");
     assert!(failed_r > 2.0 * failed_g && failed_r > 2.0 * failed_b, "red");
     for state in State::ALL {
         assert_ne!(Shade::of(state), Shade::Unknown);
@@ -62,7 +62,7 @@ fn hovering_an_object_names_it_and_its_state() {
     watched.session.start().unwrap();
     watched.at(12);
     assert_eq!(watched.view.hover_text(STATION_1), "Station 1: Busy");
-    watched.session.force_failure(STATION_1).unwrap();
+    watched.session.stop_object(STATION_1).unwrap();
     watched.frame();
-    assert_eq!(watched.view.hover_text(STATION_1), "Station 1: Forced failure");
+    assert_eq!(watched.view.hover_text(STATION_1), "Station 1: Stopped");
 }

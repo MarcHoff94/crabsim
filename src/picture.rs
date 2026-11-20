@@ -8,7 +8,7 @@
 
 use crate::flows::ProcessState;
 use crate::live_session::SessionOutput;
-use crate::report::{Interruption, ObjectKind, ObjectState, OccurrenceKind, RunState, StopCause};
+use crate::report::{ActiveInterruption, ObjectKind, ObjectState, OccurrenceKind, RunState, Interruption};
 use crate::time::SimTime;
 
 /// What the user knows about a run at shown time. Feed it every output a session sends, in
@@ -28,7 +28,7 @@ pub struct ObjectPicture {
     successors: Vec<u32>,
     contents: Vec<u32>,
     process: ProcessState,
-    /// When each active interruption began, by `StopCause::index`.
+    /// When each active interruption began, by `Interruption::index`.
     interrupted_since: [Option<SimTime>; 3],
     /// Each MU in work, in the order it came in, with when its work completes, or while
     /// stopped the work left on it, frozen. A Station with capacity has several, a Source the
@@ -140,7 +140,7 @@ impl Picture {
             OccurrenceKind::InterruptionBegan { object_id, cause } => {
                 let object = &mut objects[object_id as usize];
                 // Only the first interruption of a stop freezes the work.
-                if !object.is_stopped() {
+                if !object.is_interrupted() {
                     for (_, time) in &mut object.work {
                         *time = time.saturating_sub(now);
                     }
@@ -151,7 +151,7 @@ impl Picture {
                 let object = &mut objects[object_id as usize];
                 object.interrupted_since[cause.index()] = None;
                 // Only the last interruption of a stop to end resumes the work.
-                if !object.is_stopped() {
+                if !object.is_interrupted() {
                     for (_, time) in &mut object.work {
                         *time = now + *time;
                     }
@@ -163,14 +163,14 @@ impl Picture {
 
 impl ObjectPicture {
     fn from_state(state: &ObjectState, now: SimTime) -> ObjectPicture {
-        let stopped = state.stop.is_some();
+        let stopped = state.interrupted.is_some();
         ObjectPicture {
             id: state.id,
             kind: state.kind,
             successors: state.successors.clone(),
             contents: state.contents.clone(),
             process: state.process.clone(),
-            interrupted_since: StopCause::ALL.map(|cause| {
+            interrupted_since: Interruption::ALL.map(|cause| {
                 state.interruptions.iter().find(|interruption| interruption.cause == cause).map(|i| i.since)
             }),
             work: if state.work.is_empty() {
@@ -214,33 +214,33 @@ impl ObjectPicture {
         self.process.clone()
     }
 
-    pub fn is_stopped(&self) -> bool {
+    pub fn is_interrupted(&self) -> bool {
         self.interrupted_since.iter().any(Option::is_some)
     }
 
     /// Every active interruption, most serious first, with when it began.
-    pub fn interruptions(&self) -> Vec<Interruption> {
-        StopCause::ALL
+    pub fn interruptions(&self) -> Vec<ActiveInterruption> {
+        Interruption::ALL
             .into_iter()
-            .filter_map(|cause| Some(Interruption { cause, since: self.interrupted_since[cause.index()]? }))
+            .filter_map(|cause| Some(ActiveInterruption { cause, since: self.interrupted_since[cause.index()]? }))
             .collect()
     }
 
-    /// Why the object is stopped: its most serious active interruption, as a run's state reports.
-    pub fn stop(&self) -> Option<StopCause> {
-        StopCause::ALL.into_iter().find(|cause| self.interrupted_since[cause.index()].is_some())
+    /// Why the object is interrupted: its most serious active interruption, as a run's state reports.
+    pub fn interrupted(&self) -> Option<Interruption> {
+        Interruption::ALL.into_iter().find(|cause| self.interrupted_since[cause.index()].is_some())
     }
 
     /// Time left until the object's current work completes at `now`, frozen during a stop. For a
     /// Station with several MUs in work, the soonest.
     pub fn remaining(&self, now: SimTime) -> Option<SimTime> {
         let soonest = self.work.iter().map(|&(_, time)| time).min()?;
-        Some(if self.is_stopped() { soonest } else { soonest.saturating_sub(now) })
+        Some(if self.is_interrupted() { soonest } else { soonest.saturating_sub(now) })
     }
 
     /// Each MU in work and the time left on it at `now`, in the order they came in.
     pub fn work(&self, now: SimTime) -> Vec<(u32, SimTime)> {
-        let stopped = self.is_stopped();
+        let stopped = self.is_interrupted();
         self.work.iter().map(|&(mu_id, time)| (mu_id, if stopped { time } else { time.saturating_sub(now) })).collect()
     }
 }

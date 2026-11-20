@@ -39,7 +39,7 @@ pub enum Section {
     States,
     /// The MUs held, work left and waiting predecessors.
     Now,
-    /// Pause, forced failure and process time, during a run.
+    /// Pause, Stop and process time, during a run.
     Interventions,
     Statistics,
     Attributes,
@@ -68,7 +68,7 @@ impl Section {
     pub fn of_field(field: &str, running: bool) -> Section {
         match field {
             "name" => Section::Actions,
-            "pause" | "forced_failure" => Section::Interventions,
+            "pause" | "stop" => Section::Interventions,
             "process_time" if running => Section::Interventions,
             _ => Section::Attributes,
         }

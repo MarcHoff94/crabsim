@@ -1,7 +1,7 @@
 //! The likely bottleneck, by one rule for everyone: the window applies it to a live run's state,
 //! and `find_bottleneck` to a run in the results store, so a person and an agent never disagree.
 //!
-//! The rule: among Stations, the one busy and full or stopped (failed or paused) the largest share
+//! The rule: among Stations, the one busy and full or interrupted (failed, stopped or paused) the largest share
 //! of the time. A Station with capacity working with free places isn't what limits the flow. The glossary's bottleneck is what limits the flow, with what is upstream of it mostly
 //! blocked and what is downstream mostly starved, so its direct neighbours' shares come with it as
 //! evidence. It is likely, not certain: changing it and comparing runs settles it.
@@ -23,7 +23,7 @@ pub(crate) fn entries() -> Vec<Entry> {
 const RANKING_LENGTH: usize = 5;
 
 /// What the rule says, for anyone reading its answer.
-pub const RULE: &str = "The likely bottleneck is the Station busy and full or stopped (failed or paused) the largest share of the time: a Station with a capacity above 1 counts only the time every place was in work, not time working with free places or while a finished MU couldn't leave. It is likely, not certain: what is upstream of a bottleneck is mostly blocked and what is downstream mostly idle, waiting for MUs, so check its neighbours, and settle it by running the model with it faster and comparing the runs.";
+pub const RULE: &str = "The likely bottleneck is the Station busy and full or interrupted (failed, stopped or paused) the largest share of the time: a Station with a capacity above 1 counts only the time every place was in work, not time working with free places or while a finished MU couldn't leave. It is likely, not certain: what is upstream of a bottleneck is mostly blocked and what is downstream mostly idle, waiting for MUs, so check its neighbours, and settle it by running the model with it faster and comparing the runs.";
 
 /// One object's shares of the time measured, from 0 to 1, for judging the bottleneck.
 #[derive(Debug, Clone, PartialEq)]
@@ -41,8 +41,8 @@ pub struct Shares {
 }
 
 impl Shares {
-    /// Busy and full, or stopped: the share of time it worked at its limit or was kept from it.
-    pub fn full_or_stopped(&self) -> f64 {
+    /// Busy and full, or interrupted: the share of time it worked at its limit or was kept from it.
+    pub fn full_or_interrupted(&self) -> f64 {
         self.working_full + self.failed + self.paused
     }
 }
@@ -52,7 +52,7 @@ impl Shares {
 pub struct LikelyBottleneck {
     pub instance: String,
     /// Busy and full plus failed plus paused.
-    pub full_or_stopped_share: f64,
+    pub full_or_interrupted_share: f64,
     pub working_share: f64,
     pub working_full_share: f64,
     pub failed_share: f64,
@@ -61,7 +61,7 @@ pub struct LikelyBottleneck {
     pub upstream: Vec<(String, f64)>,
     /// Each direct successor but a Drain with its idle share: waiting for MUs.
     pub downstream: Vec<(String, f64)>,
-    /// The Stations most busy or stopped, most first, at most five, with that share.
+    /// The Stations most busy or interrupted, most first, at most five, with that share.
     pub ranking: Vec<(String, f64)>,
 }
 
@@ -70,7 +70,7 @@ pub struct LikelyBottleneck {
 pub fn likely_bottleneck(objects: &[Shares], connections: &[(String, String)]) -> Option<LikelyBottleneck> {
     let mut stations: Vec<&Shares> = objects.iter().filter(|object| object.built_in == "Station").collect();
     // Stable, so a tie keeps the order the objects were listed in.
-    stations.sort_by(|a, b| b.full_or_stopped().total_cmp(&a.full_or_stopped()));
+    stations.sort_by(|a, b| b.full_or_interrupted().total_cmp(&a.full_or_interrupted()));
     let found = *stations.first()?;
     let shares_of = |name: &str| objects.iter().find(|object| object.name == name);
     let upstream = connections
@@ -86,14 +86,14 @@ pub fn likely_bottleneck(objects: &[Shares], connections: &[(String, String)]) -
         .collect();
     Some(LikelyBottleneck {
         instance: found.name.clone(),
-        full_or_stopped_share: found.full_or_stopped(),
+        full_or_interrupted_share: found.full_or_interrupted(),
         working_share: found.working,
         working_full_share: found.working_full,
         failed_share: found.failed,
         paused_share: found.paused,
         upstream,
         downstream,
-        ranking: stations.iter().take(RANKING_LENGTH).map(|station| (station.name.clone(), station.full_or_stopped())).collect(),
+        ranking: stations.iter().take(RANKING_LENGTH).map(|station| (station.name.clone(), station.full_or_interrupted())).collect(),
     })
 }
 
@@ -126,7 +126,7 @@ pub struct Downstream {
 pub struct Likely {
     pub instance: String,
     /// Busy and full plus failed plus paused, from 0 to 1.
-    pub full_or_stopped_share: f64,
+    pub full_or_interrupted_share: f64,
     pub working_share: f64,
     /// Working with every place in work: the same as working_share for a Station of capacity 1.
     pub working_full_share: f64,
@@ -142,7 +142,7 @@ pub struct Likely {
 #[derive(Serialize, JsonSchema)]
 pub struct Ranked {
     pub instance: String,
-    pub full_or_stopped_share: f64,
+    pub full_or_interrupted_share: f64,
 }
 
 #[derive(Serialize, JsonSchema)]
@@ -152,13 +152,13 @@ pub struct FindBottleneckOutput {
     pub rule: String,
     /// None when the model has no Station, or no observation has ended yet.
     pub likely: Option<Likely>,
-    /// The Stations most busy and full or stopped, most first, at most five.
+    /// The Stations most busy and full or interrupted, most first, at most five.
     pub ranking: Vec<Ranked>,
 }
 
 impl Operation for FindBottleneck {
     const NAME: &'static str = "find_bottleneck";
-    const DESCRIPTION: &'static str = "Names a run's likely bottleneck: the Station busy and full or stopped (failed or paused) the largest share of the time, from the means over its observations (a Station with a capacity above 1 counts only the time every place was in work), with its direct predecessors' blocked shares and direct successors' idle shares as evidence (a bottleneck's upstream is mostly blocked and its downstream mostly idle), and the five Stations most busy and full or stopped. Shares are from 0 to 1, to 4 significant digits. It is likely, not certain: settle it by running the model with that Station faster and comparing the runs with compare_runs. The window's Results tab uses the same rule.";
+    const DESCRIPTION: &'static str = "Names a run's likely bottleneck: the Station busy and full or interrupted (failed, stopped or paused) the largest share of the time, from the means over its observations (a Station with a capacity above 1 counts only the time every place was in work), with its direct predecessors' blocked shares and direct successors' idle shares as evidence (a bottleneck's upstream is mostly blocked and its downstream mostly idle), and the five Stations most busy and full or interrupted. Shares are from 0 to 1, to 4 significant digits. It is likely, not certain: settle it by running the model with that Station faster and comparing the runs with compare_runs. The window's statistics window uses the same rule.";
     const EFFECT: Effect = Effect::ReadOnly;
     type Input = FindBottleneckInput;
     type Output = FindBottleneckOutput;
@@ -219,11 +219,11 @@ impl Operation for FindBottleneck {
         let found = likely_bottleneck(&objects, &connections);
         let ranking = found
             .as_ref()
-            .map(|found| found.ranking.iter().map(|(instance, share)| Ranked { instance: instance.clone(), full_or_stopped_share: shown(*share) }).collect())
+            .map(|found| found.ranking.iter().map(|(instance, share)| Ranked { instance: instance.clone(), full_or_interrupted_share: shown(*share) }).collect())
             .unwrap_or_default();
         let likely = found.map(|found| Likely {
             instance: found.instance,
-            full_or_stopped_share: shown(found.full_or_stopped_share),
+            full_or_interrupted_share: shown(found.full_or_interrupted_share),
             working_share: shown(found.working_share),
             working_full_share: shown(found.working_full_share),
             failed_share: shown(found.failed_share),

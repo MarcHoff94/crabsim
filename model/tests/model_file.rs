@@ -1,7 +1,7 @@
 //! Model files at their seam: text in, a model, its problems or a run out.
 
 use crabsim::{demo, ModelDescription, OccurrenceKind, Recording, SimTime, SimulationRun};
-use crabsim_model::{load, Attribute, Capacity, Class, ExitStrategy, Instance, Model, Origin, Problem, StartMode};
+use crabsim_model::{load, Attribute, Capacity, Class, ExitStrategy, Instance, Model, Origin, Problem, StartMode, State};
 use serde_json::{json, Value};
 
 fn secs(s: u64) -> SimTime {
@@ -959,6 +959,18 @@ fn state_notes_survive_saving_and_change_no_result() {
     let plain = robots().replace(r#","state_notes":{"blocked":"the pallet store is full"}"#, "");
     assert_ne!(plain, robots(), "the note was taken out");
     assert_eq!(run_for(&built(&robots()), 3, secs(3_600)), run_for(&built(&plain), 3, secs(3_600)));
+}
+
+#[test]
+fn a_note_on_forced_failure_reads_as_stopped_and_is_saved_as_stopped() {
+    // "forced_failure" was Stopped's name before ADR 0020, so files written then keep working.
+    let old = robots().replace(r#""failed":"the gripper needs changing""#, r#""forced_failure":"someone pressed the red button""#);
+    assert_ne!(old, robots(), "the note was replaced");
+    let model = load(&old).unwrap();
+    let notes = model.resolve(1).unwrap().attributes.state_notes.clone().unwrap_or_default();
+    assert_eq!(notes.get(&State::Stopped).map(String::as_str), Some("someone pressed the red button"));
+    let saved = model.save();
+    assert!(saved.contains(r#""stopped""#) && !saved.contains("forced_failure"), "{saved}");
 }
 
 #[test]

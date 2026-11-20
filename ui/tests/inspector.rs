@@ -32,8 +32,8 @@ fn intervene(watched: &mut Watched, id: u32, intervention: Intervention) {
     match intervention {
         Intervention::Pause => watched.session.pause(id),
         Intervention::Resume => watched.session.resume(id),
-        Intervention::ForceFailure => watched.session.force_failure(id),
-        Intervention::EndForcedFailure => watched.session.end_forced_failure(id),
+        Intervention::Stop => watched.session.stop_object(id),
+        Intervention::EndStop => watched.session.end_stop(id),
         Intervention::SetProcessTime(time) => watched.session.set_process_time(id, time),
     }
     .unwrap();
@@ -102,11 +102,11 @@ fn a_blocked_object_names_the_mu_it_holds_and_what_each_successor_is_doing() {
     assert_eq!(inspection.state, "Blocked");
     assert_eq!(inspection.blocked.as_deref(), Some(format!("Holding MU {held}: Station 1 is busy").as_str()));
 
-    intervene(&mut watched, STATION_1, Intervention::ForceFailure);
+    intervene(&mut watched, STATION_1, Intervention::Stop);
     let inspection = watched.view.inspection().unwrap();
     assert_eq!(
         inspection.blocked.as_deref(),
-        Some(format!("Holding MU {held}: Station 1 has a forced failure").as_str())
+        Some(format!("Holding MU {held}: Station 1 is stopped").as_str())
     );
 }
 
@@ -117,12 +117,12 @@ fn a_stopped_object_lists_every_interruption_and_since_when() {
     watched.at(12);
     intervene(&mut watched, STATION_1, Intervention::Pause);
     watched.at(14);
-    intervene(&mut watched, STATION_1, Intervention::ForceFailure);
+    intervene(&mut watched, STATION_1, Intervention::Stop);
     watched.at(15);
     watched.view.select(Some(STATION_1));
     let inspection = watched.view.inspection().unwrap();
     assert_eq!(inspection.state, "Stopped");
-    assert_eq!(inspection.stopped, vec!["Forced failure since 00:00:14", "Pause since 00:00:12"]);
+    assert_eq!(inspection.stopped, vec!["Stop since 00:00:14", "Pause since 00:00:12"]);
     // The work froze at 12 s, 3 s before its MU was done.
     assert_eq!(inspection.remaining, Some(secs(3)));
 }
@@ -300,7 +300,7 @@ fn interventions_are_offered_on_stations_once_initialised() {
     watched.session.step_forward().unwrap();
     watched.frame();
     let offered = watched.view.inspection().unwrap().interventions.unwrap();
-    assert!(!offered.paused && !offered.forced);
+    assert!(!offered.paused && !offered.stopped);
     watched.view.select(Some(SOURCE));
     assert!(watched.view.inspection().unwrap().interventions.is_none(), "only a Station so far");
 }
@@ -310,7 +310,7 @@ fn the_inspector_shows_which_interventions_are_on() {
     let mut watched = halted_at(12, STATION_2);
     intervene(&mut watched, STATION_2, Intervention::Pause);
     let offered = watched.view.inspection().unwrap().interventions.unwrap();
-    assert!(offered.paused && !offered.forced);
+    assert!(offered.paused && !offered.stopped);
 }
 
 #[test]

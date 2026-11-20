@@ -105,7 +105,7 @@ impl MultiStation {
 		self.starting_mus = mus;
 	}
 
-	pub fn is_stopped(&self) -> bool {
+	pub fn is_interrupted(&self) -> bool {
 		self.interruptions.is_interrupted()
 	}
 
@@ -183,7 +183,7 @@ impl MultiStation {
 	fn handle_event(&mut self, context: &mut EventContext, eventtype: &EventType, others: &mut OtherObjects<'_>) -> Result<Option<Vec<EventTemplate>>, RunTimeError> {
 		match *eventtype {
 			EventType::MUExit(ticket) => {
-				if self.is_stopped() || ticket.stop_count != self.stop_count {
+				if self.is_interrupted() || ticket.stop_count != self.stop_count {
 					return Ok(None);
 				}
 				let was_blocked = self.process_state() == ProcessState::Blocked;
@@ -207,7 +207,7 @@ impl MultiStation {
 			EventType::BlockedRetry { from } => {
 				// A retry finding it stopped is used up, as for a SingleStation: it lists itself
 				// again when the stop ends.
-				if !self.waiting || self.is_stopped() {
+				if !self.waiting || self.is_interrupted() {
 					return Ok(None);
 				}
 				self.pass_on(context, others, Some(from))
@@ -322,10 +322,10 @@ impl MultiStation {
 
 impl MaterialFlow for MultiStation {
 	fn is_entrance_allowed(&self) -> bool {
-		!self.is_stopped() && !self.batch_closed && self.held() < self.capacity
+		!self.is_interrupted() && !self.batch_closed && self.held() < self.capacity
 	}
 	fn is_exit_allowed(&self) -> bool {
-		self.waiting && !self.is_stopped()
+		self.waiting && !self.is_interrupted()
 	}
 	fn process_mu_entrance(&mut self, mu: MoveableUnit, context: &mut EventContext) -> Result<Option<EventTemplate>, MaterialflowError> {
 		log::info!("MU {} entered Station {}", mu.id, self.base.object_id);
@@ -405,7 +405,7 @@ impl EventInterface for MultiStation {
 			kind: ObjectKind::Station,
 			contents: self.places.iter().map(|place| place.mu.id).collect(),
 			process: self.process_state(),
-			stop: self.interruptions.most_serious(),
+			interrupted: self.interruptions.most_serious(),
 			interruptions: self.interruptions.list(),
 			remaining: work.iter().map(|work| work.left).min(),
 			work,
@@ -494,13 +494,13 @@ mod tests {
 		let at = |secs| SimTime::from_secs(secs);
 		for (time, event, id) in [
 			(at(3_600), EventType::PauseOn, 1),
-			(at(3_700), EventType::ForceFailureOn, 1),
+			(at(3_700), EventType::StopOn, 1),
 			(at(3_800), EventType::PauseOff, 1),
-			(at(4_000), EventType::ForceFailureOff, 1),
+			(at(4_000), EventType::StopOff, 1),
 			(at(7_000), EventType::PauseOn, 2),
 			(at(7_000), EventType::PauseOff, 2),
-			(at(9_000), EventType::ForceFailureOn, 9),
-			(at(12_000), EventType::ForceFailureOff, 9),
+			(at(9_000), EventType::StopOn, 9),
+			(at(12_000), EventType::StopOff, 9),
 		] {
 			occurrences.extend(run.advance_to(time).map_err(|failure| failure.error).unwrap());
 			run.schedule_event(time, event, id).unwrap();

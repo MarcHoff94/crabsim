@@ -112,7 +112,7 @@ Which attributes an instance has depends on its built-in class at the root of it
   ```json
   "state_notes": { "blocked": "waits for the conveyor to clear", "failed": "the gripper needs changing" }
   ```
-  The states are `busy`, `holding`, `blocked`, `idle`, `failed`, `forced_failure` and `paused`, and a note may name only states its built-in class can be in: a Source is busy or blocked, a Station any of them but holding, a Buffer holding, blocked or idle, and a Drain only idle. A note can't be empty. Like every attribute, the notes are inherited as a whole, so an instance that sets its own replaces its class's. A note never changes what is measured or a state's colour.
+  The states are `busy`, `holding`, `blocked`, `idle`, `failed`, `stopped` and `paused` (`forced_failure`, its name before ADR 0020, is still read as `stopped`), and a note may name only states its built-in class can be in: a Source is busy or blocked, a Station any of them but holding, a Buffer holding, blocked or idle, and a Drain only idle. A note can't be empty. Like every attribute, the notes are inherited as a whole, so an instance that sets its own replaces its class's. A note never changes what is measured or a state's colour.
 - **Distribution** says which successor receives the MU an object passes on (ADR 0016): `"round_robin"`, each successor in turn, or weighted:
   ```json
   "distribution": { "weighted": { "by": "process_time", "order": "smallest", "rank": "route", "drains": ["Out"] } }

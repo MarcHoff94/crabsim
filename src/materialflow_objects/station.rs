@@ -1,6 +1,6 @@
 use crate::error::{InitError, MaterialflowError, RunTimeError};
 use crate::event::{EventContext, EventTemplate, EventType, ExitTicket};
-use crate::report::{Capacity, ObjectKind, ObjectState, OccurrenceKind, StopCause, WorkLeft};
+use crate::report::{Capacity, ObjectKind, ObjectState, OccurrenceKind, Interruption, WorkLeft};
 use crate::statistics::{MachineState, StatisticsKeeper};
 use crate::time::SimTime;
 use super::flows::BaseObject;
@@ -106,7 +106,7 @@ impl SingleStation {
 	) -> Result<Option<Vec<EventTemplate>>, RunTimeError> {
 		match eventtype {
 			&EventType::MUExit(ticket) => {
-				if self.is_stopped() || self.is_stale_exit(ticket) {
+				if self.is_interrupted() || self.is_stale_exit(ticket) {
 					return Ok(None);
 				}
 				self.finish = Finish::ReadySince(context.time);
@@ -256,11 +256,11 @@ impl SingleStation {
 		}
 		Ok(())
 	}
-	pub fn is_stopped(&self) -> bool {
+	pub fn is_interrupted(&self) -> bool {
 		self.interruptions.is_interrupted()
 	}
 	pub fn is_paused(&self) -> bool {
-		self.interruptions.is_active(StopCause::Pause)
+		self.interruptions.is_active(Interruption::Paused)
 	}
 	/// Tells the statistics what the station ended up doing.
 	fn update_statistics(&mut self, now: SimTime) {
@@ -285,7 +285,7 @@ impl MaterialFlow for SingleStation {
 			return false;
 		}
 		match self.state {
-			ProcessState::Idle => !self.is_stopped(),
+			ProcessState::Idle => !self.is_interrupted(),
 			ProcessState::Processing | ProcessState::Blocked => false,
 		}
 	}
@@ -295,11 +295,11 @@ impl MaterialFlow for SingleStation {
 		}
 		match self.state {
 			// Idle: allow exit when not interrupted
-			ProcessState::Idle => !self.is_stopped(),
+			ProcessState::Idle => !self.is_interrupted(),
 			// Processing: actively working on an MU, do not allow exit
 			ProcessState::Processing => false,
 			// Blocked: allow exit when not interrupted
-			ProcessState::Blocked => !self.is_stopped(),
+			ProcessState::Blocked => !self.is_interrupted(),
 		}
 	}
 	fn process_mu_entrance(
@@ -373,7 +373,7 @@ impl EventInterface for SingleStation {
 			kind: ObjectKind::Station,
 			contents: self.content.iter().map(|mu| mu.id).collect(),
 			process: self.state.clone(),
-			stop: self.interruptions.most_serious(),
+			interrupted: self.interruptions.most_serious(),
 			interruptions: self.interruptions.list(),
 			remaining,
 			work: self.content.iter().zip(remaining).map(|(mu, left)| WorkLeft { mu_id: mu.id, left }).collect(),

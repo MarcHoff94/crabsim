@@ -340,7 +340,8 @@ pub enum State {
     Blocked,
     Idle,
     Failed,
-    ForcedFailure,
+    /// Interrupted by hand, called "forced failure" before ADR 0020.
+    Stopped,
     Paused,
 }
 
@@ -348,7 +349,7 @@ pub enum State {
 pub type StateNotes = std::collections::BTreeMap<State, String>;
 
 impl State {
-    pub const ALL: [State; 7] = [State::Busy, State::Holding, State::Blocked, State::Idle, State::Failed, State::ForcedFailure, State::Paused];
+    pub const ALL: [State; 7] = [State::Busy, State::Holding, State::Blocked, State::Idle, State::Failed, State::Stopped, State::Paused];
 
     /// Its name in a file.
     pub fn name(self) -> &'static str {
@@ -358,16 +359,20 @@ impl State {
             State::Blocked => "blocked",
             State::Idle => "idle",
             State::Failed => "failed",
-            State::ForcedFailure => "forced_failure",
+            State::Stopped => "stopped",
             State::Paused => "paused",
         }
     }
 
+    /// Also reads "forced_failure", Stopped's name before ADR 0020, so older files keep working.
     pub fn from_name(name: &str) -> Option<State> {
+        if name == "forced_failure" {
+            return Some(State::Stopped);
+        }
         State::ALL.into_iter().find(|state| state.name() == name)
     }
 
-    /// Its name as people read it, such as "Forced failure".
+    /// Its name as people read it, such as "Stopped".
     pub fn label(self) -> &'static str {
         match self {
             State::Busy => "Busy",
@@ -375,7 +380,7 @@ impl State {
             State::Blocked => "Blocked",
             State::Idle => "Idle",
             State::Failed => "Failed",
-            State::ForcedFailure => "Forced failure",
+            State::Stopped => "Stopped",
             State::Paused => "Paused",
         }
     }
@@ -387,7 +392,7 @@ impl State {
     pub fn of(built_in: &str) -> &'static [State] {
         match built_in {
             "Source" => &[State::Busy, State::Blocked],
-            "Station" => &[State::Busy, State::Blocked, State::Idle, State::Failed, State::ForcedFailure, State::Paused],
+            "Station" => &[State::Busy, State::Blocked, State::Idle, State::Failed, State::Stopped, State::Paused],
             "Buffer" => &[State::Holding, State::Blocked, State::Idle],
             "Drain" => &[State::Idle],
             _ => &[],
@@ -402,7 +407,7 @@ impl State {
             State::Blocked => "blocked",
             State::Idle => "idle",
             State::Failed => "failed",
-            State::ForcedFailure => "under a forced failure",
+            State::Stopped => "stopped",
             State::Paused => "paused",
         }
     }

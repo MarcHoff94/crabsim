@@ -2,7 +2,7 @@
 //! no allocation and don't depend on occurrences. See `docs/design/statistics.md`.
 
 use crate::flows::ProcessState;
-use crate::report::StopCause;
+use crate::report::Interruption;
 use crate::time::SimTime;
 
 /// What a material-flow object has done since statistics began, in raw whole numbers, so that
@@ -117,10 +117,10 @@ pub enum MachineState {
 
 impl MachineState {
     /// For a Station or Source: failed, paused, busy, blocked, idle.
-    pub fn of(interruption: Option<StopCause>, process: &ProcessState) -> MachineState {
+    pub fn of(interruption: Option<Interruption>, process: &ProcessState) -> MachineState {
         match (interruption, process) {
-            (Some(StopCause::Failure | StopCause::ForcedFailure), _) => MachineState::Failed,
-            (Some(StopCause::Pause), _) => MachineState::Paused,
+            (Some(Interruption::Failed | Interruption::Stopped), _) => MachineState::Failed,
+            (Some(Interruption::Paused), _) => MachineState::Paused,
             (None, ProcessState::Processing) => MachineState::Busy,
             (None, ProcessState::Blocked) => MachineState::Blocked,
             (None, ProcessState::Idle) => MachineState::Idle,
@@ -516,9 +516,9 @@ pub struct PeriodFigures {
     pub paused: Spread,
     /// Failed or paused.
     pub stopped: Spread,
-    /// Busy and full, failed or paused: what the likely-bottleneck rule ranks by, so a Station
+    /// Busy and full, or interrupted (failed, stopped or paused): what the likely-bottleneck rule ranks by, so a Station
     /// that works half empty doesn't look like a bottleneck.
-    pub full_or_stopped: Spread,
+    pub full_or_interrupted: Spread,
 }
 
 impl PeriodFigures {
@@ -537,7 +537,7 @@ impl PeriodFigures {
         self.failed.add(failed);
         self.paused.add(paused);
         self.stopped.add(failed + paused);
-        self.full_or_stopped.add(busy_full + failed + paused);
+        self.full_or_interrupted.add(busy_full + failed + paused);
     }
 }
 

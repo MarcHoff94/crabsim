@@ -7,7 +7,7 @@
 use crate::error::RunTimeError;
 use crate::event::{EventContext, EventTemplate, EventType};
 use crate::materialflow_objects::OtherObjects;
-use crate::report::{Interruption, OccurrenceKind, StopCause};
+use crate::report::{ActiveInterruption, Interruption, OccurrenceKind};
 use crate::statistics::StatisticsKeeper;
 use crate::time::SimTime;
 use super::flows::FailureProfile;
@@ -26,9 +26,9 @@ pub enum Change {
 /// An object's interruptions: which are active, since when, and its failure profile.
 #[derive(Clone)]
 pub struct Interruptions {
-    /// Which causes are active, by `StopCause::index`.
+    /// Which causes are active, by `Interruption::index`.
     active: [bool; 3],
-    /// When each cause last began, by `StopCause::index`. Read only while it is active.
+    /// When each cause last began, by `Interruption::index`. Read only while it is active.
     since: [SimTime; 3],
     /// Boxed, so an object pays for it only through a pointer: a profile holds two random number
     /// generators, and every object in a run takes the size of the largest.
@@ -45,21 +45,21 @@ impl Interruptions {
         self.active.iter().any(|&active| active)
     }
 
-    pub fn is_active(&self, cause: StopCause) -> bool {
+    pub fn is_active(&self, cause: Interruption) -> bool {
         self.active[cause.index()]
     }
 
     /// The most serious active cause, which is what the object reports and the statistics count.
-    pub fn most_serious(&self) -> Option<StopCause> {
-        StopCause::ALL.into_iter().find(|&cause| self.is_active(cause))
+    pub fn most_serious(&self) -> Option<Interruption> {
+        Interruption::ALL.into_iter().find(|&cause| self.is_active(cause))
     }
 
     /// Every active interruption, most serious first, with when it began.
-    pub fn list(&self) -> Vec<Interruption> {
-        StopCause::ALL
+    pub fn list(&self) -> Vec<ActiveInterruption> {
+        Interruption::ALL
             .into_iter()
             .filter(|&cause| self.is_active(cause))
-            .map(|cause| Interruption { cause, since: self.since[cause.index()] })
+            .map(|cause| ActiveInterruption { cause, since: self.since[cause.index()] })
             .collect()
     }
 
@@ -104,10 +104,10 @@ impl Interruptions {
         let mut events = Vec::new();
         let change = match *eventtype {
             EventType::StartFailure => {
-                if self.is_active(StopCause::Failure) {
+                if self.is_active(Interruption::Failed) {
                     Change::Unchanged
                 } else {
-                    let change = self.begin(StopCause::Failure, object_id, context, statistics);
+                    let change = self.begin(Interruption::Failed, object_id, context, statistics);
                     statistics.count_failure();
                     let repair = self.failures.as_mut().map_or(SimTime::ZERO, |failures| SimTime::from_millis_f64(failures.dist_sampler_mttr.sample()));
                     events.push(EventTemplate { eventtype: EventType::EndFailure, exec_time: repair, object_id });
@@ -116,15 +116,15 @@ impl Interruptions {
             }
             EventType::EndFailure => {
                 // The failure's own end, so it is always active here.
-                self.active[StopCause::Failure.index()] = false;
-                context.record(OccurrenceKind::InterruptionEnded { object_id, cause: StopCause::Failure });
+                self.active[Interruption::Failed.index()] = false;
+                context.record(OccurrenceKind::InterruptionEnded { object_id, cause: Interruption::Failed });
                 events.extend(self.next_failure(object_id));
                 self.ended()
             }
-            EventType::ForceFailureOn => self.begin_by_hand(StopCause::ForcedFailure, object_id, context, statistics),
-            EventType::PauseOn => self.begin_by_hand(StopCause::Pause, object_id, context, statistics),
-            EventType::ForceFailureOff => self.end_by_hand(StopCause::ForcedFailure, object_id, context),
-            EventType::PauseOff => self.end_by_hand(StopCause::Pause, object_id, context),
+            EventType::StopOn => self.begin_by_hand(Interruption::Stopped, object_id, context, statistics),
+            EventType::PauseOn => self.begin_by_hand(Interruption::Paused, object_id, context, statistics),
+            EventType::StopOff => self.end_by_hand(Interruption::Stopped, object_id, context),
+            EventType::PauseOff => self.end_by_hand(Interruption::Paused, object_id, context),
             _ => return None,
         };
         Some((change, events))
@@ -132,7 +132,7 @@ impl Interruptions {
 
     /// Starts an interruption. Only the first of overlapping ones begins the stop, so time spent
     /// interrupted counts once.
-    fn begin(&mut self, cause: StopCause, object_id: u32, context: &mut EventContext, statistics: &mut StatisticsKeeper) -> Change {
+    fn begin(&mut self, cause: Interruption, object_id: u32, context: &mut EventContext, statistics: &mut StatisticsKeeper) -> Change {
         context.record(OccurrenceKind::InterruptionBegan { object_id, cause });
         self.since[cause.index()] = context.time;
         let was_interrupted = self.is_interrupted();
@@ -145,19 +145,19 @@ impl Interruptions {
         }
     }
 
-    fn begin_by_hand(&mut self, cause: StopCause, object_id: u32, context: &mut EventContext, statistics: &mut StatisticsKeeper) -> Change {
+    fn begin_by_hand(&mut self, cause: Interruption, object_id: u32, context: &mut EventContext, statistics: &mut StatisticsKeeper) -> Change {
         if self.is_active(cause) {
             return Change::Unchanged;
         }
         let change = self.begin(cause, object_id, context, statistics);
         match cause {
-            StopCause::Pause => statistics.count_pause(),
+            Interruption::Paused => statistics.count_pause(),
             _ => statistics.count_failure(),
         }
         change
     }
 
-    fn end_by_hand(&mut self, cause: StopCause, object_id: u32, context: &mut EventContext) -> Change {
+    fn end_by_hand(&mut self, cause: Interruption, object_id: u32, context: &mut EventContext) -> Change {
         if !self.is_active(cause) {
             return Change::Unchanged;
         }
@@ -241,10 +241,10 @@ mod tests {
     fn overlapping_interruptions_begin_and_end_one_stop() {
         let mut fixture = Fixture::new(None);
         assert_eq!(fixture.change(10, EventType::PauseOn), Change::Began);
-        assert_eq!(fixture.change(20, EventType::ForceFailureOn), Change::Unchanged, "already interrupted");
-        assert_eq!(fixture.interruptions.most_serious(), Some(StopCause::ForcedFailure), "the more serious cause wins");
-        assert_eq!(fixture.change(30, EventType::PauseOff), Change::Unchanged, "still forced to fail");
-        assert_eq!(fixture.change(40, EventType::ForceFailureOff), Change::Ended);
+        assert_eq!(fixture.change(20, EventType::StopOn), Change::Unchanged, "already interrupted");
+        assert_eq!(fixture.interruptions.most_serious(), Some(Interruption::Stopped), "the more serious cause wins");
+        assert_eq!(fixture.change(30, EventType::PauseOff), Change::Unchanged, "still stopped by hand");
+        assert_eq!(fixture.change(40, EventType::StopOff), Change::Ended);
         assert!(!fixture.interruptions.is_interrupted());
         let statistics = fixture.statistics.read(SimTime::from_millis(40));
         assert_eq!((statistics.stops, statistics.pauses, statistics.failures), (1, 1, 1), "one stop of two interruptions");
@@ -265,9 +265,9 @@ mod tests {
     fn the_list_says_each_active_cause_and_when_it_began_most_serious_first() {
         let mut fixture = Fixture::new(None);
         fixture.at(10, EventType::PauseOn);
-        fixture.at(25, EventType::ForceFailureOn);
+        fixture.at(25, EventType::StopOn);
         let list = fixture.interruptions.list();
-        assert_eq!(list.iter().map(|interruption| (interruption.cause, interruption.since.as_millis())).collect::<Vec<_>>(), vec![(StopCause::ForcedFailure, 25), (StopCause::Pause, 10)]);
+        assert_eq!(list.iter().map(|interruption| (interruption.cause, interruption.since.as_millis())).collect::<Vec<_>>(), vec![(Interruption::Stopped, 25), (Interruption::Paused, 10)]);
     }
 
     #[test]
@@ -297,7 +297,7 @@ mod tests {
     fn reset_ends_every_interruption() {
         let mut fixture = Fixture::new(None);
         fixture.at(10, EventType::PauseOn);
-        fixture.at(20, EventType::ForceFailureOn);
+        fixture.at(20, EventType::StopOn);
         fixture.interruptions.reset();
         assert!(!fixture.interruptions.is_interrupted());
         assert!(fixture.interruptions.list().is_empty());

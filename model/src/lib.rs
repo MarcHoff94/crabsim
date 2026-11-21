@@ -430,6 +430,22 @@ impl State {
     }
 }
 
+pub use crabsim::TimeBasis;
+
+/// A time basis as a model file writes it.
+pub fn time_basis_name(basis: TimeBasis) -> &'static str {
+    match basis {
+        TimeBasis::Simulation => "simulation",
+        TimeBasis::Working => "working",
+        TimeBasis::Processing => "processing",
+    }
+}
+
+/// The time basis a model file names, if it names one.
+pub fn time_basis_named(name: &str) -> Option<TimeBasis> {
+    [TimeBasis::Simulation, TimeBasis::Working, TimeBasis::Processing].into_iter().find(|basis| time_basis_name(*basis) == name)
+}
+
 /// The name of the only failure profile when a file's single `failures` object is read.
 pub const DEFAULT_FAILURES_NAME: &str = "Failures";
 
@@ -443,6 +459,9 @@ pub struct Failures {
     /// in the list counts as its stream: 0 for the first, which is the object's own random numbers,
     /// as the single profile of an older file had.
     pub stream: Option<u64>,
+    /// What counts down to its next failure: simulation time by default, working time on any
+    /// object, processing time only on a Station or Source.
+    pub time_basis: TimeBasis,
     /// Strictly between 0 and 1.
     pub availability: f64,
     pub repair_time: RepairTime,

@@ -1348,3 +1348,39 @@ fn a_classs_profiles_fail_apart_in_each_instance() {
     let jam = |name: &str| state.objects.iter().find(|object| description.name(object.id) == Some(name)).unwrap().failure_profiles[0].clone();
     assert_ne!(jam("L1").time_failed, jam("L2").time_failed, "each instance's own stream");
 }
+
+// ---------- Time bases ----------
+
+#[test]
+fn a_profiles_time_basis_is_read_saved_only_when_not_simulation_and_reaches_the_run() {
+    let mut wear = profile("Wear", 0.9, Some(0));
+    wear["time_basis"] = json!("processing");
+    let jam = profile("Jam", 0.9, Some(1));
+    let model = load(&mill_with(json!([wear, jam]))).unwrap();
+    let list = model.instances[1].attributes.failures.clone().unwrap();
+    assert_eq!((list[0].time_basis, list[1].time_basis), (crabsim_model::TimeBasis::Processing, crabsim_model::TimeBasis::Simulation));
+    let saved = model.save();
+    assert_eq!(saved.matches("\"time_basis\"").count(), 1, "simulation time is the default, left out: {saved}");
+    let (_, state) = run_for(&model.to_description(), 3, secs(86_400));
+    let mill = state.objects.iter().find(|object| object.failure_profiles.len() == 2).unwrap();
+    assert_eq!(mill.failure_profiles[0].time_basis, crabsim::TimeBasis::Processing);
+}
+
+#[test]
+fn a_time_basis_is_one_of_three_and_a_buffer_or_drain_has_no_processing_time() {
+    let mut odd = profile("Wear", 0.9, None);
+    odd["time_basis"] = json!("calendar");
+    assert_found(&mill_with(json!([odd])), "/instances/1/attributes/failures/0/time_basis", "is not a time basis");
+    let mut processing = profile("Full", 0.9, None);
+    processing["time_basis"] = json!("processing");
+    let text = file(json!([
+        { "name": "In", "class": "Source", "successors": ["Out"], "attributes": { "failures": [processing.clone()] } },
+        { "name": "Out", "class": "Drain", "attributes": { "failures": [processing.clone()] } },
+    ]));
+    let found = found(&text);
+    assert!(found.iter().any(|problem| problem.starts_with("/instances/1/attributes/failures/0/time_basis: a Drain is never busy")), "{found:#?}");
+    assert!(!found.iter().any(|problem| problem.starts_with("/instances/0/")), "a Source has processing time: {found:#?}");
+    let mut working = profile("Full", 0.9, None);
+    working["time_basis"] = json!("working");
+    assert!(load(&file(json!([{ "name": "B", "class": "Buffer", "attributes": { "failures": [working] } }]))).is_ok());
+}

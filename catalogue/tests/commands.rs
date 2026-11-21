@@ -404,3 +404,15 @@ fn a_failure_command_written_wrongly_says_how_to_write_it() {
     assert!(refused("add failure Jam to Mill 1 availability 90% repair soon").contains("isn't a repair time"));
     assert!(refused("rename failure Jam of Mill 1").contains("write it as rename failure"));
 }
+
+#[test]
+fn add_failure_can_name_its_time_basis() {
+    let setup = Setup::new("add-failure-basis");
+    setup.ok("write_model", json!({ "path": "line.json", "text": LINE }));
+    setup.ok("run_commands", json!({ "path": "line.json", "commands": "add failure Wear to Mill 1 availability 90% repair 1:00 on processing time; add failure Jam to Mill 1 availability 95% repair 0:20 on working" }));
+    let list = failures_of(&setup, "Mill 1")["value"].clone();
+    assert_eq!((list[0]["time_basis"].as_str(), list[1]["time_basis"].as_str()), (Some("processing"), Some("working")));
+    let drain = setup.err("run_commands", json!({ "path": "line.json", "commands": "add failure Belt to Out availability 90% repair 1:00 on processing time" }));
+    assert!(drain["problems"][0]["message"].as_str().unwrap().contains("no processing time"), "{drain}");
+    assert!(refused("add failure X to Mill 1 availability 90% repair 1:00 on calendar time").contains("isn't a time basis"));
+}

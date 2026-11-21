@@ -25,7 +25,7 @@ fn a_new_store_has_the_documented_tables() {
     assert_eq!(columns("observations"), ["run", "number", "seed", "events", "wall_time_s", "error", "error_time_s"]);
     assert_eq!(columns("statistics"), ["run", "observation", "object", "class", "built_in_class", "statistic", "value"]);
     assert_eq!(columns("histograms"), ["run", "observation", "object", "from_mus", "to_mus", "time_s"]);
-    assert_eq!(columns("failure_profiles"), ["run", "observation", "object", "profile", "failures", "failed_s"]);
+    assert_eq!(columns("failure_profiles"), ["run", "observation", "object", "profile", "failures", "failed_s", "time_basis", "availability"]);
     let query = setup.catalogue.operations().find(|o| o.name == "query_results").unwrap();
     assert!(query.description.contains("histograms(run, observation, object, from_mus, to_mus"), "documented for agents");
     assert!(query.description.contains("failure_profiles(run, observation, object, profile"), "documented for agents");

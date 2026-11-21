@@ -112,7 +112,7 @@ A Drain keeps its first and last exit time, and shortest and longest exit interv
 | Working time | Total − failed − paused | 700 / 800 = 87.5% |
 | Processing time | Busy time | With busy 400s: 400 / 500 = 80% |
 
-The configured value is set as MTBF / (MTBF + MTTR), so this converges to it on every basis, which tests can check. Time bases aren't built, so only the Simulation time row applies at first.
+The configured value is set as MTBF / (MTBF + MTTR), so this converges to it on every basis, which tests check (`each_time_basis_achieves_the_configured_availability_on_its_own_time`). Each failure profile reports its own up time and achieved availability on its own basis (`FailureProfileState::up`, `availability`), "failed" being that profile's own failures; the object's own availability stays on simulation time, counting every failure and stop. On working time, paused time that overlaps a failure counts as failed, as the statistics count it.
 
 ## Warm-up
 

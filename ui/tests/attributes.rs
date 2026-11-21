@@ -493,3 +493,17 @@ fn an_exit_strategy_is_one_of_two_and_a_dwelling_time_a_time() {
     typed(&mut form, &["a while"]);
     assert!(form.value().unwrap_err().contains("isn't a time"));
 }
+
+#[test]
+fn a_profiles_time_basis_goes_round_and_simulation_time_is_left_out() {
+    let list = json!([
+        { "name": "Wear", "stream": 0, "time_basis": "processing", "availability": 0.9, "repair_time": { "constant": "00:01:00" } },
+        { "name": "Jam", "stream": 1, "availability": 0.8, "repair_time": { "constant": "00:00:20" } },
+    ]);
+    let mut form = Form::new("failures", Some(&list));
+    assert_eq!(form.value(), Ok(list.clone()));
+    form.profiles.as_mut().unwrap()[1].time_basis = "working".into();
+    assert_eq!(form.value().unwrap()[1]["time_basis"], "working");
+    form.add_profile();
+    assert!(form.value().unwrap()[2].get("time_basis").is_none(), "a new one counts simulation time");
+}

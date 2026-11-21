@@ -15,7 +15,7 @@ pub mod statistics;
 pub mod time;
 
 pub use crate::materialflow_objects::flows; // keep single module re-export
-pub use crate::materialflow_objects::flows::{BaseObject, FailureProfile, MoveableUnit, ProcessState};
+pub use crate::materialflow_objects::flows::{BaseObject, FailureProfile, MoveableUnit, ProcessState, TimeBasis};
 
 pub use crate::error::{AdvanceFailure, InitError, MaterialflowError, RunError, RunTimeError};
 pub use crate::event::{EventContext, EventTemplate, EventType, ExitTicket};

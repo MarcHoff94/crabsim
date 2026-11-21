@@ -410,10 +410,19 @@ fn record(store: &mut Store, plan: &Plan, k: u32, outcome: &Outcome) -> rusqlite
             "INSERT INTO statistics (run, observation, object, class, built_in_class, statistic, value) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         )?;
         let mut insert_bar = transaction.prepare("INSERT INTO histograms (run, observation, object, from_mus, to_mus, time_s) VALUES (?1, ?2, ?3, ?4, ?5, ?6)")?;
-        let mut insert_profile = transaction.prepare("INSERT INTO failure_profiles (run, observation, object, profile, failures, failed_s) VALUES (?1, ?2, ?3, ?4, ?5, ?6)")?;
+        let mut insert_profile = transaction.prepare("INSERT INTO failure_profiles (run, observation, object, profile, failures, failed_s, time_basis, availability) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)")?;
         for (object, info) in outcome.state.objects.iter().zip(&plan.objects) {
             for profile in &object.failure_profiles {
-                insert_profile.execute(params![plan.id, k, info.name, profile.name, profile.failures as i64, profile.time_failed.as_secs_f64()])?;
+                insert_profile.execute(params![
+                    plan.id,
+                    k,
+                    info.name,
+                    profile.name,
+                    profile.failures as i64,
+                    profile.time_failed.as_secs_f64(),
+                    crabsim_model::time_basis_name(profile.time_basis),
+                    profile.availability()
+                ])?;
             }
             for (statistic, value) in figures(object, outcome.state.time) {
                 insert.execute(params![plan.id, k, info.name, info.class, info.built_in, statistic, value])?;

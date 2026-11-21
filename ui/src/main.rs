@@ -4140,6 +4140,16 @@ fn profile_fields(ui: &mut egui::Ui, form: &mut Form, salt: &str) -> bool {
                     remove = Some(place);
                 }
             });
+            let chosen = crabsim_ui::attributes::TIME_BASES.iter().find(|(name, _)| *name == profile.time_basis).map_or("Simulation time", |(_, label)| label);
+            egui::ComboBox::from_id_salt(("basis", salt, place)).selected_text(chosen).show_ui(ui, |menu| {
+                for (name, label) in crabsim_ui::attributes::TIME_BASES {
+                    if menu.selectable_label(profile.time_basis == name, label).clicked() {
+                        profile.time_basis = name.to_string();
+                    }
+                }
+            })
+            .response
+            .on_hover_text("What counts down to its next failure: all time, all time but paused, or only time busy, which only a Station or Source has");
             let kind = profile.form.repair.unwrap_or(RepairKind::Constant);
             egui::ComboBox::from_id_salt(("repair", salt, place)).selected_text(kind.name()).show_ui(ui, |menu| {
                 for choice in RepairKind::ALL {

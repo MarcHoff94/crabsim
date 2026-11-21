@@ -447,6 +447,9 @@ fn read_command(command: &str, model: &Model, context: &Context, names: &mut Nam
                 Some((class, name)) => (names.class(class)?, Some(name.trim().to_string())),
                 None => (names.class(rest)?, None),
             };
+            if model.is_mu_class(&class) {
+                return Err(format!("`{class}` is an MU class, which isn't placed: a Source makes its MUs once its mu_class is set to it, such as set In.mu_class {class}"));
+            }
             let name = name.unwrap_or_else(|| next_name(&class, names));
             let length = model.resolve_class(&class).and_then(|resolved| resolved.attributes.dimensions).map_or(1.0, |size| size.length);
             // To the right of the last placed, else of the selection, else where the window says.
@@ -781,7 +784,8 @@ pub fn complete(line: &str, model: &Model, macros: &[String]) -> Vec<String> {
     }
     let classes_first = matches!(*verb, "add" | "derive" | "class rename" | "class duplicate" | "class remove") && start == verb.len() + 1;
     let pool: Vec<&str> = if classes_first {
-        class_names
+        // MU classes aren't placed.
+        class_names.into_iter().filter(|class| *verb != "add" || !model.is_mu_class(class)).collect()
     } else {
         instance_names.extend(class_names);
         instance_names

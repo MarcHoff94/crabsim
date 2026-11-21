@@ -122,8 +122,10 @@ fn the_classes_panel_is_a_tree_by_inheritance() {
             ("Buffer".to_string(), 0, true),
             ("Store".to_string(), 1, false),
             ("Drain".to_string(), 0, true),
+            ("MU".to_string(), 0, true),
         ]
     );
+    assert!(workspace.classes().iter().all(|entry| entry.mu == (entry.name == "MU")), "only MU is an MU class here");
     let mill = workspace.class_attributes("Fast mill").unwrap();
     let process_time = mill.iter().find(|view| view.attribute == "process_time").unwrap();
     assert_eq!(process_time.value, Some(json!("00:00:30")));
@@ -323,7 +325,7 @@ fn a_built_in_classs_values_are_this_models_own_and_reach_everything_built_on_it
     assert_eq!(description.from, crabsim_ui::workspace::ValueFrom::Class("Station".into()), "a Mill inherits it");
     // The panel shows it as the built-in class, once.
     let names: Vec<String> = workspace.classes().into_iter().map(|entry| entry.name).collect();
-    assert_eq!(names, ["Source", "Station", "Mill", "Fast mill", "Buffer", "Store", "Drain"]);
+    assert_eq!(names, ["Source", "Station", "Mill", "Fast mill", "Buffer", "Store", "Drain", "MU"]);
     // Nothing depends on it in a way removing it would take: the built-in is still there.
     assert_eq!(workspace.class_dependents("Station"), Dependents::default());
     // Restoring its last value removes it.
@@ -451,4 +453,24 @@ fn a_buffer_is_placed_from_the_classes_panel_with_no_limit_and_takes_its_values(
     workspace.connect("Station 1", &shelf, false).unwrap();
     workspace.connect(&shelf, "Out", false).unwrap();
     assert!(workspace.problems().is_none(), "the model has no problems");
+}
+
+// ---------- MU classes (ADR 0021) ----------
+
+#[test]
+fn mu_classes_are_a_tree_of_their_own_chosen_for_a_source_and_never_placed() {
+    let folder = Folder::new("mu-classes");
+    let mut workspace = open(&folder);
+
+    workspace.derive_class("MU", "Tote", false).unwrap();
+    picked_up(&mut workspace);
+    let tree: Vec<(String, usize, bool)> = workspace.classes().into_iter().filter(|entry| entry.mu).map(|entry| (entry.name, entry.depth, entry.built_in)).collect();
+    assert_eq!(tree, [("MU".to_string(), 0, true), ("Tote".to_string(), 1, false)]);
+    assert_eq!(workspace.mu_classes(), ["MU", "Tote"]);
+    let tote = workspace.class_attributes("Tote").unwrap();
+    let names: Vec<&str> = tote.iter().map(|view| view.attribute.as_str()).collect();
+    assert_eq!(names, ["description", "length", "width", "booking_point"]);
+
+    let refused = workspace.add_instance("Tote", Position { x: 0.0, y: 8.0, z: 0.0 }, false).unwrap_err();
+    assert!(refused.to_string().contains("`Tote` is an MU class"), "{refused}");
 }

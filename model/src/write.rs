@@ -135,6 +135,28 @@ pub(crate) fn attributes(attributes: &Attributes) -> Value {
     if let Some(strategy) = &attributes.distribution {
         fields.insert("distribution".into(), distribution(strategy));
     }
+    if let Some(class) = &attributes.mu_class {
+        fields.insert("mu_class".into(), json!(class));
+    }
+    if let Some(values) = attributes.mu_values {
+        fields.insert("mu_values".into(), mu_values(values));
+    }
+    for (key, value) in [("length", attributes.length), ("width", attributes.width), ("booking_point", attributes.booking_point)] {
+        if let Some(value) = value {
+            fields.insert(key.into(), json!(value));
+        }
+    }
+    Value::Object(fields)
+}
+
+/// A Source's own values for its MUs, as a file writes them: only those set.
+pub(crate) fn mu_values(values: crate::MuValues) -> Value {
+    let mut fields = Map::new();
+    for (key, value) in [("length", values.length), ("width", values.width), ("booking_point", values.booking_point)] {
+        if let Some(value) = value {
+            fields.insert(key.into(), json!(value));
+        }
+    }
     Value::Object(fields)
 }
 

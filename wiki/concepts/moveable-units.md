@@ -16,9 +16,10 @@ A moveable unit (MU) is whatever travels through the model, such as a part. In c
 ```rust
 pub struct MoveableUnit {
     pub id: u32,
-    pub location_id: u32,
     /// When it left its Source, where its lead time starts.
     pub left_source: SimTime,
+    /// Its MU kind, its place in the model's table of them (ADR 0021).
+    pub kind: MuKindId,
 }
 ```
 

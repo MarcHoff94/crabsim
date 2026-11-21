@@ -11,11 +11,16 @@ use crate::statistics::StatisticsKeeper;
 #[derive(Debug, Clone)]
 pub struct MoveableUnit {
 	pub id: u32,
-	pub location_id: u32,
 	/// When it left its Source, which is where its lead time starts. A starting MU counts from
 	/// Init, and a Source sets this as the MU leaves.
 	pub left_source: SimTime,
+	/// Its MU kind, its place in the model's table of them (ADR 0021): what its MU class and its
+	/// Source make it, such as its footprint. 0, the built-in MU, for starting MUs.
+	pub kind: MuKindId,
 }
+
+/// An MU kind's place in a model's table of them. A small number, so every MU pays little for it.
+pub type MuKindId = u16;
 
 #[derive(Debug, Clone)]
 pub struct BaseObject{
@@ -474,3 +479,15 @@ pub fn try_to_move_to_successor<T: SuccessorContainer + EventInterface>(
 	with_ranked(obj, |obj, ranked| try_to_move_to_successor_with_strategy(obj, context, others, ranked))
 }
 
+
+#[cfg(test)]
+mod size_tests {
+	use super::MoveableUnit;
+
+	/// Every object holding MUs pays for each, so an MU's kind (ADR 0021) costs no room: 16 bytes,
+	/// as before it had one.
+	#[test]
+	fn an_mu_is_16_bytes() {
+		assert_eq!(size_of::<MoveableUnit>(), 16);
+	}
+}

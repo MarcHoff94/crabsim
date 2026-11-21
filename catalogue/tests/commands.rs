@@ -130,6 +130,24 @@ fn completion_offers_commands_names_and_attributes() {
     assert!(complete("add Mill; con", &model, &[]).contains(&"add Mill; connect ".to_string()), "the last command of a line");
 }
 
+#[test]
+fn mu_classes_are_derived_set_and_chosen_but_not_placed() {
+    let none = Context::default();
+    assert_eq!(changes("derive MU as Tote", &none), vec![json!({ "change": "add_class", "name": "Tote", "parent": "MU" })]);
+    assert_eq!(changes("set MU.length 0.8", &none), vec![json!({ "change": "set_attribute", "target": { "class": "MU" }, "attribute": "length", "value": 0.8 })]);
+    assert_eq!(
+        changes("set In.mu_values {\"width\": 0.5}", &none),
+        vec![json!({ "change": "set_attribute", "target": { "instance": "In" }, "attribute": "mu_values", "value": { "width": 0.5 } })]
+    );
+    assert_eq!(changes("derive MU as Tote; set In.mu_class Tote", &none)[1], json!({ "change": "set_attribute", "target": { "instance": "In" }, "attribute": "mu_class", "value": "Tote" }));
+
+    let refusal = refused("add MU");
+    assert!(refusal.contains("`MU` is an MU class") && refusal.contains("mu_class"), "{refusal}");
+    let with_tote = crabsim_model::load(&LINE.replace(r#"{"name":"Mill","parent":"Station""#, r#"{"name":"Tote","parent":"MU"},{"name":"Mill","parent":"Station""#)).unwrap();
+    assert!(!complete("add ", &with_tote, &[]).iter().any(|line| line.contains("Tote") || line.ends_with("MU")), "{:?}", complete("add ", &with_tote, &[]));
+    assert!(complete("derive T", &with_tote, &[]).contains(&"derive Tote".to_string()), "derived from, like any class");
+}
+
 // ---------- run_commands ----------
 
 fn setup(name: &str) -> Setup {

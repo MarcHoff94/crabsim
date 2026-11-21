@@ -97,10 +97,9 @@ impl MultiStation {
 	/// Sets the MUs it holds in its default state, by id, in the order they count as entered. More
 	/// than its capacity is the caller's mistake: a model file is checked for it.
 	pub fn set_starting_mus(&mut self, mus: Vec<u32>) {
-		let object_id = self.base.object_id;
 		self.places = mus
 			.iter()
-			.map(|&id| Place { mu: MoveableUnit { id, location_id: object_id, left_source: SimTime::ZERO }, work: Work::Waiting })
+			.map(|&id| Place { mu: MoveableUnit { id, left_source: SimTime::ZERO, kind: 0 }, work: Work::Waiting })
 			.collect();
 		self.starting_mus = mus;
 	}
@@ -431,9 +430,6 @@ impl EventInterface for MultiStation {
 	}
 	fn set_object_id(&mut self, id: u32) {
 		self.base.object_id = id;
-		for place in &mut self.places {
-			place.mu.location_id = id;
-		}
 	}
 	fn set_random_seed(&mut self, seed: u64) {
 		self.base.random_seed = seed;

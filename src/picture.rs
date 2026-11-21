@@ -93,7 +93,7 @@ impl Picture {
         let objects = &mut self.objects;
         match *kind {
             OccurrenceKind::RunInitialised => {}
-            OccurrenceKind::MuCreated { mu_id, at, duration } => {
+            OccurrenceKind::MuCreated { mu_id, at, duration, .. } => {
                 let object = &mut objects[at as usize];
                 object.contents = vec![mu_id];
                 object.process = ProcessState::Processing;

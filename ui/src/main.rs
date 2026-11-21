@@ -1336,8 +1336,8 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
     if several.len() > 1 && ui.several.0 != several {
         let names: Vec<String> = several.iter().map(|&id| ui.view.objects()[id as usize].name.clone()).collect();
         let shared = shared_values(&ui.workspace, &names);
-        let drains = ui.workspace.drains();
-        ui.several_forms = shared.iter().map(|view| (view.attribute.clone(), Form::for_attribute(&view.attribute, view.value.as_ref(), &[], &drains))).collect();
+        let (drains, mu_classes) = (ui.workspace.drains(), ui.workspace.mu_classes());
+        ui.several_forms = shared.iter().map(|view| (view.attribute.clone(), Form::for_attribute(&view.attribute, view.value.as_ref(), &[], &drains, &mu_classes))).collect();
         ui.several = (several.clone(), shared);
     }
     let mut class_asked_change = None;
@@ -1346,10 +1346,10 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
         && ui.class_forms.0.as_deref() != Some(class.as_str())
     {
         let states = crabsim_model::State::of(ui.workspace.built_in_of(class).unwrap_or("Station"));
-        let drains = ui.workspace.drains();
+        let (drains, mu_classes) = (ui.workspace.drains(), ui.workspace.mu_classes());
         ui.class_forms.1 = values
             .iter()
-            .map(|view| (view.attribute.clone(), Form::for_attribute(&view.attribute, view.value.as_ref(), states, &drains)))
+            .map(|view| (view.attribute.clone(), Form::for_attribute(&view.attribute, view.value.as_ref(), states, &drains, &mu_classes)))
             .collect();
         ui.class_forms.0 = Some(class.clone());
     }
@@ -2203,8 +2203,11 @@ fn several_view(
         if !form.options.is_empty() {
             option_field(ui, form, &view.attribute);
         }
+        if !form.choices.is_empty() {
+            choice_field(ui, form, &view.attribute);
+        }
         egui::Grid::new(("several", &view.attribute)).num_columns(2).spacing([8.0, 2.0]).show(ui, |grid| {
-            for part in form.parts.iter_mut().filter(|part| form.options.is_empty() && (!part.label.is_empty() || form.repair.is_none())) {
+            for part in form.parts.iter_mut().filter(|part| form.options.is_empty() && form.choices.is_empty() && (!part.label.is_empty() || form.repair.is_none())) {
                 grid.label(part.label);
                 commit |= grid.add(egui::TextEdit::singleline(&mut part.text).desired_width(120.0)).lost_focus();
                 grid.end_row();
@@ -2238,20 +2241,30 @@ enum InstanceAsk {
 /// Why a building control is greyed out during a run.
 const RESET_FIRST: &str = "Reset first to change the model";
 
-/// The classes an instance can be placed from, as a tree by inheritance. Clicking one shows its
-/// values in the inspector, and dragging one onto the canvas places an instance of it.
+/// The classes, as a tree by inheritance, the MU classes in one of their own under them. Clicking
+/// one shows its values in the inspector, and dragging an object's class onto the canvas places
+/// an instance of it.
 fn classes_panel(ui: &mut egui::Ui, classes: &[ClassEntry], selected: Option<&str>, building: bool) -> Option<ClassAsk> {
     let mut asked = None;
     ui.add_space(8.0);
     ui.separator();
     ui.heading("Classes");
     for entry in classes {
+        if entry.mu && entry.built_in {
+            ui.add_space(6.0);
+            ui.label(egui::RichText::new("MU classes").strong())
+                .on_hover_text("What the MUs are: a Source makes MUs of the MU class it's set to. Their size and booking point count only on conveyors");
+        }
         ui.horizontal(|row| {
             row.add_space(14.0 * entry.depth as f32);
             let text = egui::RichText::new(&entry.name);
             let text = if entry.built_in { text.strong() } else { text };
             let text = if selected == Some(entry.name.as_str()) { text.background_color(row.visuals().selection.bg_fill) } else { text };
-            let hint = if entry.built_in && building {
+            let hint = if entry.mu && building {
+                "Click to see and change its MUs' size and booking point, or right-click to derive an MU class of your own. A Source makes its MUs once its MU class is set to it"
+            } else if entry.mu {
+                "Click to see its values"
+            } else if entry.built_in && building {
                 "Drag it onto the canvas to place one, click to see and change this model's values for it, or right-click to derive a class of your own from it"
             } else if building {
                 "Drag it onto the canvas to place one, click to see and change its values, or right-click for more"
@@ -2259,12 +2272,12 @@ fn classes_panel(ui: &mut egui::Ui, classes: &[ClassEntry], selected: Option<&st
                 "Click to see its values. Reset first to place one"
             };
             let label = row.add(egui::Label::new(text).selectable(false).sense(egui::Sense::click_and_drag())).on_hover_text(hint);
-            if building && label.drag_started() {
+            if building && !entry.mu && label.drag_started() {
                 asked = Some(ClassAsk::Place(entry.name.clone()));
             } else if label.clicked() {
                 asked = Some(ClassAsk::Select(entry.name.clone()));
             }
-            if label.hovered() && building {
+            if label.hovered() && building && !entry.mu {
                 row.ctx().set_cursor_icon(egui::CursorIcon::Grab);
             }
             label.context_menu(|menu| {
@@ -2301,7 +2314,11 @@ fn class_view(
     if let Some(parent) = entry.and_then(|entry| entry.parent.as_deref()) {
         ui.label(egui::RichText::new(format!("Derived from {parent}")).weak());
     }
-    let reach = if entry.is_some_and(|entry| entry.built_in) {
+    let reach = if entry.is_some_and(|entry| entry.mu && entry.built_in) {
+        "This model's values for every MU class built on it, and for the MUs of every Source not set to another, unless they set their own. Restore takes one back to crabsim's default."
+    } else if entry.is_some_and(|entry| entry.mu) {
+        "Its values reach the MUs of every Source set to it, and every MU class derived from it, unless they set their own."
+    } else if entry.is_some_and(|entry| entry.built_in) {
         "This model's values for every class and instance built on it, unless they set their own. Restore takes one back to crabsim's default. Drag it onto the canvas to place one."
     } else {
         "Its values reach every instance of it that doesn't set its own. Drag it onto the canvas to place one."
@@ -4097,6 +4114,18 @@ fn option_field(ui: &mut egui::Ui, form: &mut Form, attribute: &str) {
     });
 }
 
+/// A value that is one of the model's names, such as a Source's MU class, as a menu of them.
+/// Where the fields differ between several objects, it shows none chosen.
+fn choice_field(ui: &mut egui::Ui, form: &mut Form, attribute: &str) {
+    egui::ComboBox::from_id_salt(("choice", attribute)).selected_text(form.parts[0].text.clone()).show_ui(ui, |menu| {
+        for name in &form.choices {
+            if menu.selectable_label(form.parts[0].text == *name, name).clicked() {
+                form.parts[0].text = name.clone();
+            }
+        }
+    });
+}
+
 /// An attribute's name as people read it.
 fn attribute_label(attribute: &str) -> &str {
     match attribute {
@@ -4114,6 +4143,11 @@ fn attribute_label(attribute: &str) -> &str {
         "description" => "Description",
         "state_notes" => "State notes",
         "distribution" => "Distribution",
+        "mu_class" => "MU class",
+        "mu_values" => "Own MU values",
+        "length" => "Length m",
+        "width" => "Width m",
+        "booking_point" => "Booking point",
         other => other,
     }
 }
@@ -4243,6 +4277,10 @@ fn attributes_section(
                 option_field(fields, form, &view.attribute);
                 return;
             }
+            if !form.choices.is_empty() {
+                choice_field(fields, form, &view.attribute);
+                return;
+            }
             if let Some(kind) = form.repair {
                 egui::ComboBox::from_id_salt(("repair", &view.attribute)).selected_text(kind.name()).show_ui(fields, |menu| {
                     for choice in RepairKind::ALL {
@@ -4269,7 +4307,14 @@ fn attributes_section(
             match form.value() {
                 // Failures at 100 %: none, so whatever was set here comes off.
                 Ok(serde_json::Value::Null) if view.from == ValueFrom::Instance => {
-                    let apply = ui.small_button("Apply").on_hover_text("Takes its own failures off, so it never fails");
+                    let hover = if view.attribute == "failures" { "Takes its own failures off, so it never fails" } else { "Takes its own values off, so it has its class's" };
+                    let apply = ui.small_button("Apply").on_hover_text(hover);
+                    if commit || apply.clicked() {
+                        asked = Some((AttributeChange::Restore(view.attribute.clone()), false));
+                    }
+                }
+                Ok(serde_json::Value::Null) if view.attribute != "failures" => {
+                    let apply = ui.small_button("Apply").on_hover_text("Takes its values off, so it has its parent's");
                     if commit || apply.clicked() {
                         asked = Some((AttributeChange::Restore(view.attribute.clone()), false));
                     }

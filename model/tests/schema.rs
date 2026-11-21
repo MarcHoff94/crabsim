@@ -44,9 +44,11 @@ fn valid_files() -> Vec<Value> {
             { "name": "Store", "parent": "Buffer", "attributes": { "capacity": 4, "dwelling_time": "0:30", "exit_strategy": "last_in_first_out", "starting_mus": 3,
                 "state_notes": { "holding": "cooling down" } } },
             { "name": "Open store", "parent": "Store", "attributes": { "capacity": "unlimited", "exit_strategy": "first_in_first_out" } },
+            { "name": "MU", "attributes": { "width": 0.5 } },
+            { "name": "Pallet", "parent": "MU", "attributes": { "length": 1.2, "width": 0.8, "booking_point": 0, "description": "a pallet" } },
         ],
         "instances": [
-            { "name": "In", "class": "Source", "position": { "x": -1.5, "y": 2, "z": 0.5 }, "attributes": { "interval": "0", "distribution": { "weighted": { "by": "interval" } } } },
+            { "name": "In", "class": "Source", "position": { "x": -1.5, "y": 2, "z": 0.5 }, "attributes": { "interval": "0", "distribution": { "weighted": { "by": "interval" } }, "mu_class": "Pallet", "mu_values": { "length": 1.4, "booking_point": 1 } } },
             { "name": "Plain", "class": "Station", "attributes": { "distribution": "round_robin" } },
             { "name": "A", "class": "Mill" },
             { "name": "B", "class": "Shaky mill", "attributes": { "starting_mus": 0 } },
@@ -146,6 +148,11 @@ fn shape_mistakes_fail_the_schema_as_well_as_the_reader() {
         ("weighing by something that isn't a number", Box::new(|file| file["classes"][0]["attributes"]["distribution"]["weighted"]["by"] = json!("description"))),
         ("a weighted distribution without `by`", Box::new(|file| file["instances"][0]["attributes"]["distribution"] = json!({ "weighted": {} }))),
         ("an empty list of drains", Box::new(|file| file["classes"][0]["attributes"]["distribution"]["weighted"]["drains"] = json!([]))),
+        ("an MU of no length", Box::new(|file| file["classes"][7]["attributes"]["length"] = json!(0))),
+        ("a booking point beyond the rear", Box::new(|file| file["classes"][7]["attributes"]["booking_point"] = json!(1.5))),
+        ("an MU class as a number", Box::new(|file| file["instances"][0]["attributes"]["mu_class"] = json!(3))),
+        ("an MU value there is none of", Box::new(|file| file["instances"][0]["attributes"]["mu_values"]["height"] = json!(1))),
+        ("an MU value that isn't a number", Box::new(|file| file["instances"][0]["attributes"]["mu_values"]["width"] = json!("wide"))),
     ];
     for (what, change) in mistakes {
         let mut file = base();

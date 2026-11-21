@@ -40,7 +40,7 @@ pub struct ModelFile {
     /// What the model is, as a whole.
     pub description: Option<String>,
     /// The model's own classes, in any order. Each derives from a built-in class (Source,
-    /// Station, Buffer, Drain) or from another class here.
+    /// Station, Buffer, Drain, or MU for an MU class) or from another class here.
     pub classes: Option<Vec<ClassFile>>,
     /// The material-flow objects, in the order a run initialises them.
     pub instances: Vec<InstanceFile>,
@@ -74,10 +74,10 @@ pub struct ConnectionFile {
 #[derive(JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ClassFile {
-    /// Unique among classes. Source, Station, Buffer or Drain makes it this model's own values for
-    /// that built-in class.
+    /// Unique among classes. Source, Station, Buffer, Drain or MU makes it this model's own values
+    /// for that built-in class.
     pub name: Name,
-    /// The class it derives from: Source, Station, Buffer, Drain or another class in the file.
+    /// The class it derives from: Source, Station, Buffer, Drain, MU or another class in the file.
     /// Left out only on a class named like a built-in class, and required on every other.
     pub parent: Option<String>,
     /// Only the values this class changes from its parent.
@@ -90,7 +90,7 @@ pub struct ClassFile {
 pub struct InstanceFile {
     /// Unique among instances.
     pub name: Name,
-    /// Source, Station, Buffer, Drain or a class in the file.
+    /// Source, Station, Buffer, Drain or a class in the file derived from one: not an MU class.
     pub class: String,
     /// Its stream: with a run's seed, it gives the instance's random numbers, so runs of two
     /// variants with the same seed draw the same numbers for it. Unique in the model. crabsim
@@ -158,6 +158,36 @@ pub struct AttributesFile {
     /// Source, Station: which successor receives the MU it passes on (ADR 0016). Round robin by
     /// default. Inherited as a whole.
     pub distribution: Option<DistributionFile>,
+    /// Source: the MU class whose MUs it makes, `MU` or a class derived from it. `MU` by default.
+    pub mu_class: Option<String>,
+    /// Source: its own values for the MUs it makes, changing its MU class's. Inherited as a whole.
+    pub mu_values: Option<MuValuesFile>,
+    /// MU class: its footprint's length along the way it travels, in metres. 0.6 by default.
+    #[schemars(extend("exclusiveMinimum" = 0))]
+    pub length: Option<f64>,
+    /// MU class: its footprint's width across the way it travels, in metres. 0.4 by default.
+    #[schemars(extend("exclusiveMinimum" = 0))]
+    pub width: Option<f64>,
+    /// MU class: where its booking point is, as a share of its length from its front, 0 at the
+    /// front and 1 at the rear. Where it is decides when it passes from one object to the next.
+    /// 0.5 by default, its centre.
+    #[schemars(range(min = 0, max = 1))]
+    pub booking_point: Option<f64>,
+}
+
+/// A Source's own values for the MUs it makes, each changing its MU class's when set.
+#[derive(JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MuValuesFile {
+    /// In metres, above 0.
+    #[schemars(extend("exclusiveMinimum" = 0))]
+    pub length: Option<f64>,
+    /// In metres, above 0.
+    #[schemars(extend("exclusiveMinimum" = 0))]
+    pub width: Option<f64>,
+    /// A share of its length from its front, from 0 to 1.
+    #[schemars(range(min = 0, max = 1))]
+    pub booking_point: Option<f64>,
 }
 
 /// A whole number from 1, or `"unlimited"`: it then takes every MU and grows as far as it's

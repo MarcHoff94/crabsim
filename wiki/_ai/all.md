@@ -51,7 +51,7 @@ Discrete-event material-flow simulator in Rust, built for speed. Engine library 
 ### Moveable Units
 
 #### Facts
-- `MoveableUnit { id: u32, location_id: u32, left_source: SimTime }`
+- `MoveableUnit { id: u32, left_source: SimTime, kind: MuKindId }`
 - Ids are unique across the model, from `EventContext::new_mu_id`, starting above the highest configured starting MU id
 - Source holds the MU it is creating (first one at Init); Station holds at most one (`content: Option<MoveableUnit>`), entrance locked while it does; Drain keeps none
 - A Station's starting MU (`add_station_holding`) is part of its default state: worked on from Init, a fresh copy after Reset

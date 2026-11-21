@@ -20,7 +20,7 @@
       "type": "string"
     },
     "classes": {
-      "description": "The model's own classes, in any order. Each derives from a built-in class (Source, Station, Buffer, Drain) or from another class here.",
+      "description": "The model's own classes, in any order. Each derives from a built-in class (Source, Station, Buffer, Drain, or MU for an MU class) or from another class here.",
       "type": "array",
       "items": {
         "$ref": "#/$defs/ClassFile"
@@ -52,11 +52,11 @@
       "type": "object",
       "properties": {
         "name": {
-          "description": "Unique among classes. Source, Station, Buffer or Drain makes it this model's own values for that built-in class.",
+          "description": "Unique among classes. Source, Station, Buffer, Drain or MU makes it this model's own values for that built-in class.",
           "$ref": "#/$defs/Name"
         },
         "parent": {
-          "description": "The class it derives from: Source, Station, Buffer, Drain or another class in the file. Left out only on a class named like a built-in class, and required on every other.",
+          "description": "The class it derives from: Source, Station, Buffer, Drain, MU or another class in the file. Left out only on a class named like a built-in class, and required on every other.",
           "type": "string"
         },
         "attributes": {
@@ -137,6 +137,33 @@
         "distribution": {
           "description": "Source, Station: which successor receives the MU it passes on (ADR 0016). Round robin by default. Inherited as a whole.",
           "$ref": "#/$defs/DistributionFile"
+        },
+        "mu_class": {
+          "description": "Source: the MU class whose MUs it makes, `MU` or a class derived from it. `MU` by default.",
+          "type": "string"
+        },
+        "mu_values": {
+          "description": "Source: its own values for the MUs it makes, changing its MU class's. Inherited as a whole.",
+          "$ref": "#/$defs/MuValuesFile"
+        },
+        "length": {
+          "description": "MU class: its footprint's length along the way it travels, in metres. 0.6 by default.",
+          "type": "number",
+          "format": "double",
+          "exclusiveMinimum": 0
+        },
+        "width": {
+          "description": "MU class: its footprint's width across the way it travels, in metres. 0.4 by default.",
+          "type": "number",
+          "format": "double",
+          "exclusiveMinimum": 0
+        },
+        "booking_point": {
+          "description": "MU class: where its booking point is, as a share of its length from its front, 0 at the front and 1 at the rear. Where it is decides when it passes from one object to the next. 0.5 by default, its centre.",
+          "type": "number",
+          "format": "double",
+          "minimum": 0,
+          "maximum": 1
         }
       },
       "additionalProperties": false
@@ -554,6 +581,32 @@
         "successor"
       ]
     },
+    "MuValuesFile": {
+      "description": "A Source's own values for the MUs it makes, each changing its MU class's when set.",
+      "type": "object",
+      "properties": {
+        "length": {
+          "description": "In metres, above 0.",
+          "type": "number",
+          "format": "double",
+          "exclusiveMinimum": 0
+        },
+        "width": {
+          "description": "In metres, above 0.",
+          "type": "number",
+          "format": "double",
+          "exclusiveMinimum": 0
+        },
+        "booking_point": {
+          "description": "A share of its length from its front, from 0 to 1.",
+          "type": "number",
+          "format": "double",
+          "minimum": 0,
+          "maximum": 1
+        }
+      },
+      "additionalProperties": false
+    },
     "InstanceFile": {
       "description": "One material-flow object.",
       "type": "object",
@@ -563,7 +616,7 @@
           "$ref": "#/$defs/Name"
         },
         "class": {
-          "description": "Source, Station, Buffer, Drain or a class in the file.",
+          "description": "Source, Station, Buffer, Drain or a class in the file derived from one: not an MU class.",
           "type": "string"
         },
         "stream": {

@@ -43,6 +43,10 @@ pub use crate::jobs::{observation_seed, RunState, MAX_OBSERVATIONS};
 pub use crate::results::STATISTICS;
 pub use crate::store::{Store, QUERY_ROW_LIMIT, STORE_FILE};
 
+/// The git commit this crabsim was built from, `-dirty` with uncommitted changes, or `unknown`
+/// outside git. Every run records it.
+pub const BUILD: &str = env!("CRABSIM_BUILD");
+
 use schemars::JsonSchema;
 use serde::Serialize;
 use serde::de::DeserializeOwned;

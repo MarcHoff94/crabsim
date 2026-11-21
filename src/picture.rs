@@ -158,6 +158,13 @@ impl Picture {
             }
             OccurrenceKind::InterruptionEnded { object_id, cause, profile } => {
                 let object = &mut objects[object_id as usize];
+                // A full state can already include an end the run reports only after it, as when
+                // a stop by hand is ended while halted and the window asks for a state: an end of
+                // what isn't active changes nothing, as in the run itself, or the work left would
+                // be counted from now twice.
+                if object.interrupted_since[cause.index()].is_none() {
+                    return;
+                }
                 if let Some(profile) = profile {
                     object.failing.retain(|&failing| failing != profile);
                 }

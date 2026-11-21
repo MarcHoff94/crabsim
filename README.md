@@ -13,7 +13,8 @@ crabsim exists to simulate long periods as fast as possible: a year of the demo 
 - **Undo and redo** take back any change to a model file, yours or an agent's, from a change history kept beside the models.
 - **Buffers** hold MUs between machines, up to a capacity or without limit, for a dwelling time, first in, first out or last in, first out. `models/buffered-line.json` is an example.
 - **Stations** work on one MU at a time, or on several at once with a capacity, each MU starting as it enters or all together once full.
-- **Not yet:** several named failure profiles on one object, and failures that count only working or processing time. The plan is in `docs/agents/handoff.md`.
+- **Failures** come from named failure profiles, several on one object if you like, such as "Tool wear" and "Jam", each with its own availability, repair time and random numbers, counting down on simulation time, working time or only while busy. The statistics show what each one cost.
+- **Not yet:** failure profiles that take turns, so that a failure due while another is being repaired waits for it ([#129](https://github.com/MarcHoff94/crabsim/issues/129)). The plan for what comes next is in `docs/agents/handoff.md`.
 
 ## Requirements
 
@@ -123,7 +124,7 @@ While a window has a models folder open, the command line can read and run there
 cargo build --release -p crabsim-mcp
 ```
 
-Then point your harness, such as Claude Code or VS Code with GitHub Copilot, at `target\release\crabsim-mcp.exe` with the arguments `--models <folder>`. The server refuses a folder that holds source code, so give it a folder of models only. What the operations are and what they may touch is in `docs/design/operation-catalogue.md`.
+Then point your harness, such as Claude Code or VS Code with GitHub Copilot, at `target\release\crabsim-mcp.exe` with the arguments `--models <folder>`. Build it again after pulling, with every harness using it closed, since Windows won't replace a running program: nothing else rebuilds it, and an old one tells agents what crabsim did then. It warns agents itself when it's older than its source. The server refuses a folder that holds source code, so give it a folder of models only. What the operations are and what they may touch is in `docs/design/operation-catalogue.md`.
 
 ## Using it as a library
 
@@ -168,7 +169,7 @@ The same seed always gives the same result. For a run to watch, `LiveSession` ta
 - `cli/` is the command line, `mcp/` the MCP server for agents, and `ui/` the window, a Bevy application.
 - `tests/` holds the behaviour tests, and `benches/reference.rs` the benchmark.
 - `docs/` holds the decisions (`adr/`), design notes and measurements (`design/`), and the handoff for whoever works on it next (`agents/handoff.md`).
-- `GLOSSARY.md` defines the terms, such as Halt, Stop, Pause and Interruption, which mean different things here.
+- `GLOSSARY.md` defines the terms, such as Halt, Interrupted, Stopped and Paused, which mean different things here.
 
 ## More
 

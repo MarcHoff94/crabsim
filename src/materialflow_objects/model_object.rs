@@ -130,7 +130,7 @@ impl EventInterface for ModelObject {
         context: &mut EventContext,
         eventtype: &EventType,
         others: &mut OtherObjects<'_>,
-    ) -> Result<Option<Vec<EventTemplate>>, RunTimeError> {
+    ) -> Result<(), RunTimeError> {
         on_the_object!(self, object => object.execute_event(context, eventtype, others))
     }
     fn reset(&mut self) {
@@ -169,8 +169,8 @@ impl MaterialFlow for ModelObject {
     fn relist_blocked(&mut self, id_blocked: u32, next: Option<SimTime>) {
         on_the_object!(self, object => object.relist_blocked(id_blocked, next))
     }
-    fn notify_blocked_predecessors(&mut self) -> Result<Option<Vec<EventTemplate>>, MaterialflowError> {
-        on_the_object!(self, object => object.notify_blocked_predecessors())
+    fn notify_blocked_predecessors(&mut self, context: &mut EventContext) -> Result<(), MaterialflowError> {
+        on_the_object!(self, object => object.notify_blocked_predecessors(context))
     }
 }
 

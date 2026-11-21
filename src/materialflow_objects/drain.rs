@@ -50,7 +50,7 @@ impl EventInterface for Drain {
         context: &mut EventContext,
         eventtype: &EventType,
         others: &mut OtherObjects<'_>,
-    ) -> Result<Option<Vec<EventTemplate>>, RunTimeError> {
+    ) -> Result<(), RunTimeError> {
         let outcome = self.handle_interruption(eventtype, context, others).unwrap_or(Err(RunTimeError {}));
         self.update_statistics(context.time);
         outcome
@@ -124,8 +124,9 @@ impl MaterialFlow for Drain {
     fn relist_blocked(&mut self, id_blocked: u32, next: Option<SimTime>) {
         relist_blocked(&mut self.blockedlist, id_blocked, next);
     }
-    fn notify_blocked_predecessors(&mut self) -> Result<Option<Vec<EventTemplate>>, MaterialflowError> {
-        Ok(retries_for_blocked(&mut self.blockedlist, self.base.object_id))
+    fn notify_blocked_predecessors(&mut self, context: &mut EventContext) -> Result<(), MaterialflowError> {
+        retries_for_blocked(&mut self.blockedlist, self.base.object_id, context);
+        Ok(())
     }
 }
 
@@ -136,8 +137,8 @@ impl Interruptible for Drain {
     /// It refuses MUs while interrupted, which `is_entrance_allowed` already says.
     fn stop_began(&mut self, _context: &mut EventContext) {}
     /// Back, it has room for those that waited for it, longest-waiting first.
-    fn stop_ended(&mut self, _context: &mut EventContext, _others: &mut OtherObjects<'_>, events: &mut Vec<EventTemplate>) -> Result<(), RunTimeError> {
-        events.extend(retries_for_blocked(&mut self.blockedlist, self.base.object_id).unwrap_or_default());
+    fn stop_ended(&mut self, context: &mut EventContext, _others: &mut OtherObjects<'_>) -> Result<(), RunTimeError> {
+        retries_for_blocked(&mut self.blockedlist, self.base.object_id, context);
         Ok(())
     }
 }

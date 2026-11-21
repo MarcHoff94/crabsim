@@ -180,11 +180,11 @@ impl MultiStation {
 		}
 	}
 
-	fn handle_event(&mut self, context: &mut EventContext, eventtype: &EventType, others: &mut OtherObjects<'_>) -> Result<Option<Vec<EventTemplate>>, RunTimeError> {
+	fn handle_event(&mut self, context: &mut EventContext, eventtype: &EventType, others: &mut OtherObjects<'_>) -> Result<(), RunTimeError> {
 		match *eventtype {
 			EventType::MUExit(ticket) => {
 				if self.is_interrupted() || ticket.stop_count != self.stop_count {
-					return Ok(None);
+					return Ok(());
 				}
 				let was_blocked = self.process_state() == ProcessState::Blocked;
 				let mut finished = false;
@@ -200,13 +200,13 @@ impl MultiStation {
 				self.report_blocking(was_blocked, context);
 				// A Station already waiting in line keeps its place with an earlier MU.
 				if !finished || self.waiting {
-					return Ok(None);
+					return Ok(());
 				}
 				self.pass_on(context, others, None)
 			}
 			EventType::BlockedRetry { from } => {
 				if !self.waiting {
-					return Ok(None);
+					return Ok(());
 				}
 				// Interrupted, it can't take the room now, but keeps its place in the line, as if
 				// refused (spec issue 122).
@@ -214,7 +214,7 @@ impl MultiStation {
 					if let Some(since) = self.offered_since(context.time) {
 						others.get_mut(from).add_blocked(self.base.object_id, since, true);
 					}
-					return Ok(None);
+					return Ok(());
 				}
 				self.pass_on(context, others, Some(from))
 			}
@@ -228,8 +228,7 @@ impl MultiStation {
 	/// Passes on finished MUs, earliest finished first, until one is refused: to any successor, or
 	/// in answer to a retry only to the one that sent it. Then lets waiting predecessors know if
 	/// there is room.
-	fn pass_on(&mut self, context: &mut EventContext, others: &mut OtherObjects<'_>, only: Option<u32>) -> Result<Option<Vec<EventTemplate>>, RunTimeError> {
-		let mut events = Vec::new();
+	fn pass_on(&mut self, context: &mut EventContext, others: &mut OtherObjects<'_>, only: Option<u32>) -> Result<(), RunTimeError> {
 		let mut moved = false;
 		let mut refused = false;
 		while self.offered().is_some() {
@@ -244,7 +243,9 @@ impl MultiStation {
 				break;
 			}
 			moved = true;
-			events.extend(entered);
+			if let Some(entered) = entered {
+				context.schedule(entered);
+			}
 		}
 		// Once, at the end, so passing on one MU and having the next refused isn't reported as
 		// blocking ending and beginning again at one instant.
@@ -254,10 +255,10 @@ impl MultiStation {
 				self.batch_closed = false;
 			}
 			if self.is_entrance_allowed() {
-				events.extend(retries_for_blocked(&mut self.blockedlist, self.base.object_id).unwrap_or_default());
+				retries_for_blocked(&mut self.blockedlist, self.base.object_id, context);
 			}
 		}
-		Ok((!events.is_empty()).then_some(events))
+		Ok(())
 	}
 
 	/// The finished MU it passes on next: earliest finished first, ties by entry order.
@@ -289,7 +290,7 @@ impl MultiStation {
 
 	/// The last interruption has ended: work resumes where it stopped, finished MUs are ready to
 	/// leave again from now, and waiting predecessors hear of any room.
-	fn resume(&mut self, context: &mut EventContext, others: &mut OtherObjects<'_>, events: &mut Vec<EventTemplate>) -> Result<(), RunTimeError> {
+	fn resume(&mut self, context: &mut EventContext, others: &mut OtherObjects<'_>) -> Result<(), RunTimeError> {
 		let mut exits: Vec<(SimTime, u32)> = Vec::new();
 		let mut finished = false;
 		for place in &mut self.places {
@@ -305,15 +306,15 @@ impl MultiStation {
 				Work::At(_) | Work::Waiting => {}
 			}
 		}
-		events.extend(exits.into_iter().map(|(left, mu_id)| self.exit_event(mu_id, left)));
+		for (left, mu_id) in exits {
+			context.schedule(self.exit_event(mu_id, left));
+		}
 		if finished {
 			// An interrupted Station released nothing, so it tries afresh, as a SingleStation does,
 			// keeping its place wherever it is listed.
-			if let Some(passed) = self.pass_on(context, others, None)? {
-				events.extend(passed);
-			}
+			self.pass_on(context, others, None)?;
 		} else if self.is_entrance_allowed() {
-			events.extend(retries_for_blocked(&mut self.blockedlist, self.base.object_id).unwrap_or_default());
+			retries_for_blocked(&mut self.blockedlist, self.base.object_id, context);
 		}
 		Ok(())
 	}
@@ -351,8 +352,9 @@ impl MaterialFlow for MultiStation {
 	fn relist_blocked(&mut self, id_blocked: u32, next: Option<SimTime>) {
 		relist_blocked(&mut self.blockedlist, id_blocked, next);
 	}
-	fn notify_blocked_predecessors(&mut self) -> Result<Option<Vec<EventTemplate>>, MaterialflowError> {
-		Ok(retries_for_blocked(&mut self.blockedlist, self.base.object_id))
+	fn notify_blocked_predecessors(&mut self, context: &mut EventContext) -> Result<(), MaterialflowError> {
+		retries_for_blocked(&mut self.blockedlist, self.base.object_id, context);
+		Ok(())
 	}
 }
 
@@ -375,7 +377,7 @@ impl EventInterface for MultiStation {
 		self.update_statistics(context.time);
 		Ok(events)
 	}
-	fn execute_event(&mut self, context: &mut EventContext, eventtype: &EventType, others: &mut OtherObjects<'_>) -> Result<Option<Vec<EventTemplate>>, RunTimeError> {
+	fn execute_event(&mut self, context: &mut EventContext, eventtype: &EventType, others: &mut OtherObjects<'_>) -> Result<(), RunTimeError> {
 		let outcome = self.handle_event(context, eventtype, others);
 		self.update_statistics(context.time);
 		outcome
@@ -444,8 +446,8 @@ impl Interruptible for MultiStation {
 	fn stop_began(&mut self, context: &mut EventContext) {
 		self.freeze_work(context);
 	}
-	fn stop_ended(&mut self, context: &mut EventContext, others: &mut OtherObjects<'_>, events: &mut Vec<EventTemplate>) -> Result<(), RunTimeError> {
-		self.resume(context, others, events)
+	fn stop_ended(&mut self, context: &mut EventContext, others: &mut OtherObjects<'_>) -> Result<(), RunTimeError> {
+		self.resume(context, others)
 	}
 }
 

@@ -14,30 +14,27 @@ pub fn handle_source_mu_exit(
 	source: &mut Source,
 	context: &mut EventContext,
 	others: &mut OtherObjects<'_>,
-) -> Result<Option<Vec<EventTemplate>>, RunTimeError> {
+) -> Result<(), RunTimeError> {
 	// Its interval has ended, so its MU is ready to leave from now.
 	source.ready_since = context.time;
 	source.pass_on(context, others)
 }
 
 impl Source {
-	/// Offers its MU to its successors, and starts the next interval once it has gone.
-	fn pass_on(&mut self, context: &mut EventContext, others: &mut OtherObjects<'_>) -> Result<Option<Vec<EventTemplate>>, RunTimeError> {
+	/// Offers its MU to its successors, and starts the next interval once it has gone: its next
+	/// MU's exit is scheduled before the successor's event.
+	fn pass_on(&mut self, context: &mut EventContext, others: &mut OtherObjects<'_>) -> Result<(), RunTimeError> {
 		let moved = try_to_move_to_successor(self, context, others).map_err(|_| RunTimeError {})?;
 		if self.content.is_none() {
 			let next_mu_event = self.create_mu(context).map_err(|_| RunTimeError {})?;
-			return Ok(Some(match moved {
-				Some(ev) => vec![next_mu_event, ev],
-				None => vec![next_mu_event],
-			}));
+			context.schedule(next_mu_event);
+		} else if moved.is_none() {
+			self.become_blocked(context);
 		}
-		match moved {
-			Some(ev) => Ok(Some(vec![ev])),
-			None => {
-				self.become_blocked(context);
-				Ok(None)
-			}
+		if let Some(entered) = moved {
+			context.schedule(entered);
 		}
+		Ok(())
 	}
 }
 
@@ -116,45 +113,34 @@ impl Source {
 		context: &mut EventContext,
 		eventtype: &EventType,
 		others: &mut OtherObjects<'_>,
-	) -> Result<Option<Vec<EventTemplate>>, RunTimeError> {
+	) -> Result<(), RunTimeError> {
 		match eventtype {
 			// An exit queued before an interruption froze the interval is stale.
-			&EventType::MUExit(ticket) if self.interruptions.is_interrupted() || ticket.stop_count != self.stop_count => Ok(None),
+			&EventType::MUExit(ticket) if self.interruptions.is_interrupted() || ticket.stop_count != self.stop_count => Ok(()),
 			&EventType::MUExit(_) => handle_source_mu_exit(self, context, others),
 			&EventType::BlockedRetry { from } => {
 				// Interrupted while its MU waits, it keeps its place in the line, as if refused
 				// (spec issue 122).
 				if self.interruptions.is_interrupted() && self.content.is_some() && self.state != ProcessState::Processing {
 					others.get_mut(from).add_blocked(self.base.object_id, self.ready_since, true);
-					return Ok(None);
+					return Ok(());
 				}
 				// successor notified that it became available; attempt to move
 				if !self.is_exit_allowed() {
-					return Ok(None);
+					return Ok(());
 				}
-				match retry_move_to_successor(self, context, others, from) {
-					Ok(Some(ev)) => {
-						// If the MU was moved and the source is now empty, create the next MU
-						if self.content.is_none() {
-							match self.create_mu(context) {
-								Ok(next_ev) => return Ok(Some(vec![next_ev, ev])),
-								Err(_) => return Ok(Some(vec![ev])),
-							}
-						}
-						Ok(Some(vec![ev]))
+				let moved = retry_move_to_successor(self, context, others, from).map_err(|_| RunTimeError {})?;
+				// Once its MU has gone, its next MU's interval starts, scheduled before the
+				// successor's event.
+				if self.content.is_none() {
+					if let Ok(next_ev) = self.create_mu(context) {
+						context.schedule(next_ev);
 					}
-					Ok(None) => {
-						// No immediate event from successor. If the source became empty, create next MU
-						if self.content.is_none() {
-							match self.create_mu(context) {
-								Ok(next_ev) => return Ok(Some(vec![next_ev])),
-								Err(_) => return Ok(None),
-							}
-						}
-						Ok(None)
-					}
-					Err(_) => Err(RunTimeError {}),
 				}
+				if let Some(entered) = moved {
+					context.schedule(entered);
+				}
+				Ok(())
 			}
 			_ => self.handle_interruption(eventtype, context, others).unwrap_or(Err(RunTimeError {})),
 		}
@@ -190,7 +176,7 @@ impl EventInterface for Source {
 		context: &mut EventContext,
 		eventtype: &EventType,
 		others: &mut OtherObjects<'_>,
-	) -> Result<Option<Vec<EventTemplate>>, RunTimeError> {
+	) -> Result<(), RunTimeError> {
 		let outcome = self.handle_event(context, eventtype, others);
 		self.update_statistics(context.time);
 		outcome
@@ -259,9 +245,9 @@ impl MaterialFlow for Source {
 		panic!("Source cannot receive blocked objects")
 	}
 	fn relist_blocked(&mut self, _id_blocked: u32, _next: Option<SimTime>) {}
-	fn notify_blocked_predecessors(&mut self) -> Result<Option<Vec<EventTemplate>>, MaterialflowError> {
+	fn notify_blocked_predecessors(&mut self, _context: &mut EventContext) -> Result<(), MaterialflowError> {
 		//source has no predecessors
-		Ok(None)
+		Ok(())
 	}
 }
 
@@ -311,14 +297,14 @@ impl Interruptible for Source {
 	}
 	/// Its interval carries on where it froze, or its waiting MU is offered again, keeping the
 	/// ready time it had.
-	fn stop_ended(&mut self, context: &mut EventContext, others: &mut OtherObjects<'_>, events: &mut Vec<EventTemplate>) -> Result<(), RunTimeError> {
+	fn stop_ended(&mut self, context: &mut EventContext, others: &mut OtherObjects<'_>) -> Result<(), RunTimeError> {
 		if let Some(left) = self.frozen.take() {
 			self.completion_time = Some(context.time + left);
 			if let Some(mu_id) = self.content.as_ref().map(|mu| mu.id) {
-				events.push(self.exit_event(mu_id, left));
+				context.schedule(self.exit_event(mu_id, left));
 			}
 		} else if self.content.is_some() {
-			events.extend(self.pass_on(context, others)?.unwrap_or_default());
+			self.pass_on(context, others)?;
 		}
 		Ok(())
 	}

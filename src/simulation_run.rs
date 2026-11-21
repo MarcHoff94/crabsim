@@ -405,12 +405,17 @@ impl SimulationRun {
         let (before, from_object) = self.objects.split_at_mut(index);
         let (object, after) = from_object.split_at_mut(1);
         let mut others = OtherObjects::new(before, after);
-        let new_events = object[0]
-            .execute_event(&mut self.context, &event.eventtype, &mut others)
-            .map_err(|_| RunError::ObjectFailed { object_id: event.object_id, time: self.time })?;
-        for new_event in new_events.unwrap_or_default() {
+        let outcome = object[0].execute_event(&mut self.context, &event.eventtype, &mut others);
+        // Taken out and handed back, so the list keeps its memory from event to event.
+        let mut scheduled = self.context.take_scheduled();
+        if outcome.is_err() {
+            self.context.return_scheduled(scheduled);
+            return Err(RunError::ObjectFailed { object_id: event.object_id, time: self.time });
+        }
+        for new_event in scheduled.drain(..) {
             self.push_event(self.time + new_event.exec_time, new_event.eventtype, new_event.object_id);
         }
+        self.context.return_scheduled(scheduled);
         Ok(())
     }
 }

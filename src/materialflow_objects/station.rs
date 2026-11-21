@@ -98,109 +98,75 @@ impl SingleStation {
 		context.record(OccurrenceKind::WorkStarted { mu_id, at: self.base.object_id, duration: self.proc_time });
 		self.exit_event(mu_id, self.proc_time)
 	}
+	/// Schedules what it does through `context`, in the order the queue's ties need.
 	fn handle_event(
 		&mut self,
 		context: &mut EventContext,
 		eventtype: &EventType,
 		others: &mut OtherObjects<'_>,
-	) -> Result<Option<Vec<EventTemplate>>, RunTimeError> {
+	) -> Result<(), RunTimeError> {
 		match eventtype {
 			&EventType::MUExit(ticket) => {
 				if self.is_interrupted() || self.is_stale_exit(ticket) {
-					return Ok(None);
+					return Ok(());
 				}
 				self.finish = Finish::ReadySince(context.time);
 				if let Some(mu_id) = self.content.as_ref().map(|mu| mu.id) {
 					context.record(OccurrenceKind::WorkFinished { mu_id, at: self.base.object_id });
 				}
-				match try_to_move_to_successor(self, context, others) {
-					Ok(Some(event_template)) => {
+				match try_to_move_to_successor(self, context, others).map_err(|_| RunTimeError {})? {
+					Some(entered) => {
 						self.entrancelocked = false;
 						self.set_state(ProcessState::Idle, context);
-						let blocked_events = self.notify_blocked_predecessors();
-						match blocked_events {
-							Ok(Some(mut be)) => {
-								be.push(event_template);
-								Ok(Some(be))
-							}
-							Ok(None) => Ok(Some(vec![event_template])),
-							Err(_e) => Err(RunTimeError {}),
-						}
+						// The retries to those waiting go first, then the successor's own event.
+						self.notify_blocked_predecessors(context).map_err(|_| RunTimeError {})?;
+						context.schedule(entered);
 					}
-					Ok(None) => {
-						if self.content.is_none() {
-							self.entrancelocked = false;
-							self.set_state(ProcessState::Idle, context);
-							let blocked_events = self.notify_blocked_predecessors();
-							match blocked_events {
-								Ok(Some(be)) => Ok(Some(be)),
-								Ok(None) => Ok(None),
-								Err(_e) => Err(RunTimeError {}),
-							}
-						} else {
-							self.set_state(ProcessState::Blocked, context);
-							self.entrancelocked = true;
-							Ok(None)
-						}
+					None if self.content.is_none() => {
+						self.entrancelocked = false;
+						self.set_state(ProcessState::Idle, context);
+						self.notify_blocked_predecessors(context).map_err(|_| RunTimeError {})?;
 					}
-					Err(_) => Err(RunTimeError {}),
+					None => {
+						self.set_state(ProcessState::Blocked, context);
+						self.entrancelocked = true;
+					}
 				}
+				Ok(())
 			}
 			&EventType::BlockedRetry { from } => {
 				// An empty station can still get a retry already queued when its MU left. It
 				// has nothing to move, so it must not list itself as waiting.
 				if self.content.is_none() {
-					return Ok(None);
+					return Ok(());
 				}
 				// Interrupted with a finished MU, it can't take the room now, but it keeps its
 				// place in the line, as if refused (spec issue 122).
 				if let (true, Finish::ReadySince(since)) = (self.is_interrupted(), self.finish) {
 					others.get_mut(from).add_blocked(self.base.object_id, since, true);
-					return Ok(None);
+					return Ok(());
 				}
 				if !self.is_exit_allowed() {
-					return Ok(None);
+					return Ok(());
 				}
-				match retry_move_to_successor(self, context, others, from) {
-					Ok(Some(event_template)) => {
-						if self.content.is_none() {
-							self.entrancelocked = false;
-							self.set_state(ProcessState::Idle, context);
-							let blocked_events = self.notify_blocked_predecessors();
-							match blocked_events {
-								Ok(Some(mut be)) => {
-									be.push(event_template);
-									Ok(Some(be))
-								}
-								Ok(None) => Ok(Some(vec![event_template])),
-								Err(_e) => Err(RunTimeError {}),
-							}
-						} else {
-							Ok(Some(vec![event_template]))
-						}
+				match retry_move_to_successor(self, context, others, from).map_err(|_| RunTimeError {})? {
+					Some(entered) if self.content.is_none() => {
+						self.entrancelocked = false;
+						self.set_state(ProcessState::Idle, context);
+						self.notify_blocked_predecessors(context).map_err(|_| RunTimeError {})?;
+						context.schedule(entered);
 					}
-					Ok(None) => {
-						if self.content.is_none() {
-							self.entrancelocked = false;
-							self.set_state(ProcessState::Idle, context);
-							let blocked_events = self.notify_blocked_predecessors();
-							match blocked_events {
-								Ok(Some(be)) => Ok(Some(be)),
-								Ok(None) => Ok(None),
-								Err(_e) => Err(RunTimeError {}),
-							}
-						} else {
-							self.set_state(ProcessState::Blocked, context);
-							Ok(None)
-						}
+					Some(entered) => context.schedule(entered),
+					None if self.content.is_none() => {
+						self.entrancelocked = false;
+						self.set_state(ProcessState::Idle, context);
+						self.notify_blocked_predecessors(context).map_err(|_| RunTimeError {})?;
 					}
-					Err(_) => Err(RunTimeError {}),
+					None => self.set_state(ProcessState::Blocked, context),
 				}
+				Ok(())
 			}
-			_ => match self.handle_interruption(eventtype, context, others) {
-				Some(outcome) => outcome,
-				None => Err(RunTimeError {}),
-			},
+			_ => self.handle_interruption(eventtype, context, others).unwrap_or(Err(RunTimeError {})),
 		}
 	}
 	/// The first interruption of a stop freezes the work, so time spent stopped counts once
@@ -216,51 +182,37 @@ impl SingleStation {
 		}
 	}
 	/// The last interruption has ended, so the station picks up from where it was stopped.
-	fn resume(
-		&mut self,
-		context: &mut EventContext,
-		others: &mut OtherObjects<'_>,
-		events: &mut Vec<EventTemplate>,
-	) -> Result<(), RunTimeError> {
+	fn resume(&mut self, context: &mut EventContext, others: &mut OtherObjects<'_>) -> Result<(), RunTimeError> {
 		if let Finish::Interrupted(remain) = self.finish {
 			// Resume interrupted processing
 			self.finish = Finish::At(context.time + remain);
 			self.state = ProcessState::Processing;
 			if let Some(mu_id) = self.content.as_ref().map(|mu| mu.id) {
-				events.push(self.exit_event(mu_id, remain));
+				context.schedule(self.exit_event(mu_id, remain));
 			}
 		} else if self.content.is_some() {
 			// Blocked when the stop began (MU done, waiting to exit): retry the move. Its MU has
 			// been ready to leave since its work finished, so it keeps its place in every line it
 			// was in, and joins any other by that time too.
-			match try_to_move_to_successor(self, context, others) {
-				Ok(Some(evt)) => {
+			match try_to_move_to_successor(self, context, others).map_err(|_| RunTimeError {})? {
+				Some(entered) => {
 					self.entrancelocked = false;
 					self.set_state(ProcessState::Idle, context);
-					events.push(evt);
-					if let Ok(Some(be)) = self.notify_blocked_predecessors() {
-						events.extend(be);
-					}
+					// Here the successor's event goes first, then the retries.
+					context.schedule(entered);
+					let _ = self.notify_blocked_predecessors(context);
 				}
-				Ok(None) => {
-					if self.content.is_none() {
-						self.entrancelocked = false;
-						self.set_state(ProcessState::Idle, context);
-						if let Ok(Some(be)) = self.notify_blocked_predecessors() {
-							events.extend(be);
-						}
-					} else {
-						self.set_state(ProcessState::Blocked, context);
-					}
+				None if self.content.is_none() => {
+					self.entrancelocked = false;
+					self.set_state(ProcessState::Idle, context);
+					let _ = self.notify_blocked_predecessors(context);
 				}
-				Err(_) => return Err(RunTimeError {}),
+				None => self.set_state(ProcessState::Blocked, context),
 			}
 		} else {
 			// Idle when the stop began: notify predecessors we're available again
 			self.set_state(ProcessState::Idle, context);
-			if let Ok(Some(be)) = self.notify_blocked_predecessors() {
-				events.extend(be);
-			}
+			let _ = self.notify_blocked_predecessors(context);
 		}
 		Ok(())
 	}
@@ -329,8 +281,9 @@ impl MaterialFlow for SingleStation {
 	fn relist_blocked(&mut self, id_blocked: u32, next: Option<SimTime>) {
 		relist_blocked(&mut self.blockedlist, id_blocked, next);
 	}
-	fn notify_blocked_predecessors(&mut self) -> Result<Option<Vec<EventTemplate>>, MaterialflowError> {
-		Ok(retries_for_blocked(&mut self.blockedlist, self.base.object_id))
+	fn notify_blocked_predecessors(&mut self, context: &mut EventContext) -> Result<(), MaterialflowError> {
+		retries_for_blocked(&mut self.blockedlist, self.base.object_id, context);
+		Ok(())
 	}
 }
 
@@ -349,7 +302,7 @@ impl EventInterface for SingleStation {
 		context: &mut EventContext,
 		eventtype: &EventType,
 		others: &mut OtherObjects<'_>,
-	) -> Result<Option<Vec<EventTemplate>>, RunTimeError> {
+	) -> Result<(), RunTimeError> {
 		let outcome = self.handle_event(context, eventtype, others);
 		self.update_statistics(context.time);
 		outcome
@@ -412,8 +365,8 @@ impl Interruptible for SingleStation {
 	fn stop_began(&mut self, context: &mut EventContext) {
 		self.freeze_work(context);
 	}
-	fn stop_ended(&mut self, context: &mut EventContext, others: &mut OtherObjects<'_>, events: &mut Vec<EventTemplate>) -> Result<(), RunTimeError> {
-		self.resume(context, others, events)
+	fn stop_ended(&mut self, context: &mut EventContext, others: &mut OtherObjects<'_>) -> Result<(), RunTimeError> {
+		self.resume(context, others)
 	}
 }
 impl SuccessorContainer for SingleStation {

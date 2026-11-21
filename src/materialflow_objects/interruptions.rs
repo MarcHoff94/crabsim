@@ -97,21 +97,20 @@ impl Interruptions {
         self.since = [SimTime::ZERO; 3];
     }
 
-    /// Handles a stop event, recording what began or ended, counting it in `statistics`, and
-    /// returning what changed and the events it schedules: a failure's end, or the next failure.
-    /// `None` for an event that isn't about interruptions.
+    /// Handles a stop event, recording what began or ended, counting it in `statistics`,
+    /// scheduling what follows through `context` (a failure's end, or the next failure), and
+    /// returning what changed. `None` for an event that isn't about interruptions.
     pub fn handle(
         &mut self,
         eventtype: &EventType,
         object_id: u32,
         context: &mut EventContext,
         statistics: &mut StatisticsKeeper,
-    ) -> Option<(Change, Vec<EventTemplate>)> {
+    ) -> Option<Change> {
         // A random failure means nothing for an object with no failure profile.
         if matches!(eventtype, EventType::StartFailure | EventType::EndFailure) && self.failures.is_none() {
             return None;
         }
-        let mut events = Vec::new();
         let change = match *eventtype {
             EventType::StartFailure => {
                 if self.is_active(Interruption::Failed) {
@@ -121,7 +120,7 @@ impl Interruptions {
                     statistics.count_failure();
                     let failures = self.failures.as_mut().expect("checked above");
                     let repair = SimTime::from_millis_f64(failures.dist_sampler_mttr.sample());
-                    events.push(EventTemplate { eventtype: EventType::EndFailure, exec_time: repair, object_id });
+                    context.schedule(EventTemplate { eventtype: EventType::EndFailure, exec_time: repair, object_id });
                     change
                 }
             }
@@ -129,7 +128,9 @@ impl Interruptions {
                 // The failure's own end, so it is always active here.
                 self.active[Interruption::Failed.index()] = false;
                 context.record(OccurrenceKind::InterruptionEnded { object_id, cause: Interruption::Failed });
-                events.extend(self.next_failure(object_id));
+                if let Some(next) = self.next_failure(object_id) {
+                    context.schedule(next);
+                }
                 self.ended()
             }
             EventType::StopOn => self.begin_by_hand(Interruption::Stopped, object_id, context, statistics),
@@ -138,7 +139,7 @@ impl Interruptions {
             EventType::PauseOff => self.end_by_hand(Interruption::Paused, object_id, context),
             _ => return None,
         };
-        Some((change, events))
+        Some(change)
     }
 
     /// Starts an interruption. Only the first of overlapping ones begins the stop, so time spent
@@ -191,9 +192,9 @@ pub trait Interruptible {
     /// The object has just been interrupted.
     fn stop_began(&mut self, context: &mut EventContext);
 
-    /// The object's last interruption has just ended. It adds what it schedules to `events`, after
-    /// those already there.
-    fn stop_ended(&mut self, context: &mut EventContext, others: &mut OtherObjects<'_>, events: &mut Vec<EventTemplate>) -> Result<(), RunTimeError>;
+    /// The object's last interruption has just ended. What it schedules comes after what the
+    /// interruption itself scheduled, such as the next failure.
+    fn stop_ended(&mut self, context: &mut EventContext, others: &mut OtherObjects<'_>) -> Result<(), RunTimeError>;
 
     /// Handles a stop event for the object: `None` for any other event.
     fn handle_interruption(
@@ -201,19 +202,17 @@ pub trait Interruptible {
         eventtype: &EventType,
         context: &mut EventContext,
         others: &mut OtherObjects<'_>,
-    ) -> Option<Result<Option<Vec<EventTemplate>>, RunTimeError>> {
+    ) -> Option<Result<(), RunTimeError>> {
         let (interruptions, statistics, object_id) = self.interruption_parts();
-        let (change, mut events) = interruptions.handle(eventtype, object_id, context, statistics)?;
-        match change {
-            Change::Began => self.stop_began(context),
-            Change::Ended => {
-                if let Err(error) = self.stop_ended(context, others, &mut events) {
-                    return Some(Err(error));
-                }
+        let change = interruptions.handle(eventtype, object_id, context, statistics)?;
+        Some(match change {
+            Change::Began => {
+                self.stop_began(context);
+                Ok(())
             }
-            Change::Unchanged => {}
-        }
-        Some(Ok((!events.is_empty()).then_some(events)))
+            Change::Ended => self.stop_ended(context, others),
+            Change::Unchanged => Ok(()),
+        })
     }
 }
 
@@ -237,7 +236,8 @@ mod tests {
         }
         fn at(&mut self, millis: u64, event: EventType) -> (Change, Vec<EventTemplate>) {
             self.context.time = SimTime::from_millis(millis);
-            self.interruptions.handle(&event, ID, &mut self.context, &mut self.statistics).expect("a stop event")
+            let change = self.interruptions.handle(&event, ID, &mut self.context, &mut self.statistics).expect("a stop event");
+            (change, self.context.take_scheduled())
         }
         fn change(&mut self, millis: u64, event: EventType) -> Change {
             self.at(millis, event).0

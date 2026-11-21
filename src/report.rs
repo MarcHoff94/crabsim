@@ -17,7 +17,8 @@ pub struct Occurrence {
 pub enum OccurrenceKind {
     RunInitialised,
     /// `duration` is how long until the MU is ready to leave the Source.
-    MuCreated { mu_id: u32, at: u32, duration: SimTime },
+    /// `kind` is its MU kind, its place in the model's table of them (ADR 0021).
+    MuCreated { mu_id: u32, at: u32, duration: SimTime, kind: crate::flows::MuKindId },
     MuMoved { mu_id: u32, from: u32, to: u32 },
     /// `lead_time` runs from the MU leaving its Source until it entered this Drain.
     MuLeft { mu_id: u32, at: u32, lead_time: SimTime },

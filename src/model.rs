@@ -6,7 +6,7 @@
 //! nothing.
 
 use crate::distribution::{DistributionRule, Ranking};
-use crate::flows::{FailureProfile, MoveableUnit};
+use crate::flows::{FailureProfile, MoveableUnit, MuKindId};
 use crate::materialflow_objects::{Buffer, Drain, ModelObject, MultiStation, SingleStation, Source, StartMode};
 use crate::materialflow_objects::ExitStrategy;
 use crate::random_numbers::Distribution;
@@ -46,6 +46,26 @@ impl Dimensions {
     }
 }
 
+/// What an MU is made like (ADR 0021): its MU class's values, with its Source's changes. Only
+/// geometry-aware objects read it, so for every object today it changes no result.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MuKind {
+    /// Its footprint's length along the way it travels, in metres.
+    pub length: f64,
+    /// Its footprint's width across the way it travels, in metres.
+    pub width: f64,
+    /// Where its booking point is, as a share of its length from its front: 0 at the front, 1 at
+    /// the rear (ADR 0023).
+    pub booking_point: f64,
+}
+
+impl Default for MuKind {
+    /// The built-in MU class's values: a tote of 0.6 by 0.4 m, booked at its centre.
+    fn default() -> MuKind {
+        MuKind { length: 0.6, width: 0.4, booking_point: 0.5 }
+    }
+}
+
 /// What a view needs to know about one object, beyond what the run needs.
 #[derive(Clone, Default)]
 struct Layout {
@@ -57,7 +77,7 @@ struct Layout {
 /// The objects of a model and how they connect. Each `add_` returns the new object's id, which
 /// is also the order Init visits them in. One description can build any number of runs, such as
 /// replications that differ only in their seed.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct ModelDescription {
     objects: Vec<ModelObject>,
     /// One entry per object, by id.
@@ -67,11 +87,67 @@ pub struct ModelDescription {
     streams: Vec<u64>,
     /// Each object's distribution strategy, by id: round robin unless set.
     distributions: Vec<DistributionRule>,
+    /// The kinds of MU in the model, each once, by `MuKindId`. The first is the built-in MU's,
+    /// which starting MUs and every Source not given another have.
+    mu_kinds: Vec<MuKind>,
+}
+
+impl Default for ModelDescription {
+    fn default() -> ModelDescription {
+        ModelDescription { objects: Vec::new(), layout: Vec::new(), streams: Vec::new(), distributions: Vec::new(), mu_kinds: vec![MuKind::default()] }
+    }
 }
 
 impl ModelDescription {
     pub fn new() -> ModelDescription {
         ModelDescription::default()
+    }
+
+    /// The model's kinds of MU, by `MuKindId`: the built-in MU's first.
+    pub fn mu_kinds(&self) -> &[MuKind] {
+        &self.mu_kinds
+    }
+
+    /// Adds a kind of MU, or finds the same one already there, and returns its id. Sets the first,
+    /// the built-in MU's, when the model changes the built-in MU class's values: a kind equal to
+    /// it is it.
+    ///
+    /// # Panics
+    /// Past 65,536 kinds, which an id can't count.
+    pub fn add_mu_kind(&mut self, kind: MuKind) -> MuKindId {
+        if let Some(found) = self.mu_kinds.iter().position(|known| *known == kind) {
+            return found as MuKindId;
+        }
+        assert!(self.mu_kinds.len() <= usize::from(MuKindId::MAX), "a model can have at most 65,536 kinds of MU");
+        self.mu_kinds.push(kind);
+        (self.mu_kinds.len() - 1) as MuKindId
+    }
+
+    /// Changes the built-in MU's values, which starting MUs and every Source not given another
+    /// kind have, as a model does by refining the built-in MU class.
+    pub fn set_built_in_mu_kind(&mut self, kind: MuKind) {
+        self.mu_kinds[0] = kind;
+    }
+
+    /// Makes every MU the Source `id` creates of this kind.
+    ///
+    /// # Panics
+    /// If the model has no such kind, or `id` isn't a Source.
+    pub fn set_mu_kind(&mut self, id: u32, kind: MuKindId) {
+        assert!(usize::from(kind) < self.mu_kinds.len(), "the model has no MU kind {kind}");
+        match self.objects.get_mut(id as usize) {
+            Some(ModelObject::Source(source)) => source.mu_kind = kind,
+            Some(_) => panic!("object {id} is not a Source"),
+            None => panic!("object {id} is not in the model"),
+        }
+    }
+
+    /// The kind of every MU the Source `id` creates.
+    pub fn mu_kind(&self, id: u32) -> MuKindId {
+        match self.object(id) {
+            ModelObject::Source(source) => source.mu_kind,
+            _ => panic!("object {id} is not a Source"),
+        }
     }
 
     /// A Source that creates an MU every `interval`.
@@ -86,7 +162,7 @@ impl ModelDescription {
     /// A Station whose default state holds an MU, which it works on from Init.
     pub fn add_station_holding(&mut self, process_time: SimTime, failures: FailureProfile, mu_id: u32) -> u32 {
         let id = self.next_id();
-        let mu = MoveableUnit { id: mu_id, location_id: id, left_source: SimTime::ZERO };
+        let mu = MoveableUnit { id: mu_id, left_source: SimTime::ZERO, kind: 0 };
         self.add(ModelObject::Station(SingleStation::new(id, process_time, failures, Some(mu), Vec::new())))
     }
 
@@ -103,7 +179,7 @@ impl ModelDescription {
             _ => panic!("object {id} is not a Station"),
         };
         *object = if capacity == 1 {
-            let mu = mus.first().map(|&mu_id| MoveableUnit { id: mu_id, location_id: id, left_source: SimTime::ZERO });
+            let mu = mus.first().map(|&mu_id| MoveableUnit { id: mu_id, left_source: SimTime::ZERO, kind: 0 });
             ModelObject::Station(SingleStation::new(id, proc_time, FailureProfile::new(1.0, Distribution::CONSTANT { value: 0.0 }, 0), mu, succ))
         } else {
             let mut station = MultiStation::new(id, proc_time, FailureProfile::new(1.0, Distribution::CONSTANT { value: 0.0 }, 0), capacity, start);
@@ -145,7 +221,7 @@ impl ModelDescription {
             Some(ModelObject::MultiStation(station)) => station.set_starting_mus(mus.to_vec()),
             Some(ModelObject::Station(station)) => {
                 assert!(mus.len() <= 1, "a Station of capacity 1 holds one MU at most");
-                station.starting_content = mus.first().map(|&mu_id| MoveableUnit { id: mu_id, location_id: id, left_source: SimTime::ZERO });
+                station.starting_content = mus.first().map(|&mu_id| MoveableUnit { id: mu_id, left_source: SimTime::ZERO, kind: 0 });
                 station.content = station.starting_content.clone();
             }
             Some(_) => panic!("object {id} can't hold starting MUs"),

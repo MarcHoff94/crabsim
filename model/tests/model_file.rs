@@ -1384,3 +1384,134 @@ fn a_time_basis_is_one_of_three_and_a_buffer_or_drain_has_no_processing_time() {
     working["time_basis"] = json!("working");
     assert!(load(&file(json!([{ "name": "B", "class": "Buffer", "attributes": { "failures": [working] } }]))).is_ok());
 }
+
+// ---------- MU classes (ADR 0021) ----------
+
+/// A Source called In with these attributes and an interval of 10 s, feeding a Drain called Out.
+fn line_making(mut source_attributes: Value) -> Value {
+    source_attributes["interval"] = json!("10");
+    json!([
+        { "name": "In", "class": "Source", "successors": ["Out"], "attributes": source_attributes },
+        { "name": "Out", "class": "Drain" },
+    ])
+}
+
+#[test]
+fn an_mu_class_derives_from_the_built_in_mu_and_inherits_what_it_doesnt_set() {
+    let text = with_classes(json!([{ "name": "Tote", "parent": "MU", "attributes": { "length": 0.8 } }]), line_making(json!({})));
+    let model = load(&text).unwrap();
+
+    let tote = model.resolve_class("Tote").unwrap();
+    assert_eq!(tote.built_in, "MU");
+    assert_eq!((tote.attributes.length, tote.origin(Attribute::Length)), (Some(0.8), &Origin::Class("Tote".into())));
+    assert_eq!((tote.attributes.width, tote.origin(Attribute::Width)), (Some(0.4), &Origin::BuiltIn));
+    assert_eq!((tote.attributes.booking_point, tote.origin(Attribute::BookingPoint)), (Some(0.5), &Origin::BuiltIn));
+    assert_eq!(model.mu_classes(), vec!["MU", "Tote"]);
+}
+
+#[test]
+fn a_source_makes_built_in_mus_unless_given_an_mu_class() {
+    let model = load(&file(line_making(json!({})))).unwrap();
+
+    let resolved = model.resolve(0).unwrap();
+    assert_eq!((resolved.attributes.mu_class.as_deref(), resolved.origin(Attribute::MuClass)), (Some("MU"), &Origin::BuiltIn));
+    let description = model.to_description();
+    assert_eq!(description.mu_kinds(), &[crabsim::MuKind::default()]);
+    assert_eq!(description.mu_kind(0), 0);
+}
+
+#[test]
+fn a_source_makes_mus_of_its_mu_class_with_its_own_values() {
+    let text = with_classes(
+        json!([{ "name": "Pallet", "parent": "MU", "attributes": { "length": 1.2, "width": 0.8 } }]),
+        json!([
+            { "name": "Pallets", "class": "Source", "successors": ["Out"], "attributes": { "interval": "10", "mu_class": "Pallet" } },
+            { "name": "Long pallets", "class": "Source", "successors": ["Out"], "attributes": { "interval": "10", "mu_class": "Pallet", "mu_values": { "length": 1.6, "booking_point": 0 } } },
+            { "name": "Also pallets", "class": "Source", "successors": ["Out"], "attributes": { "interval": "10", "mu_class": "Pallet" } },
+            { "name": "Out", "class": "Drain" },
+        ]),
+    );
+    let description = load(&text).unwrap().to_description();
+
+    let kind = |source: u32| description.mu_kinds()[usize::from(description.mu_kind(source))];
+    assert_eq!(kind(0), crabsim::MuKind { length: 1.2, width: 0.8, booking_point: 0.5 });
+    assert_eq!(kind(1), crabsim::MuKind { length: 1.6, width: 0.8, booking_point: 0.0 });
+    assert_eq!(description.mu_kind(2), description.mu_kind(0), "the same values are one kind");
+    assert_eq!(description.mu_kinds().len(), 3, "the built-in MU's, and two");
+}
+
+#[test]
+fn a_models_own_values_for_the_built_in_mu_are_every_default_mus() {
+    let text = with_classes(json!([{ "name": "MU", "attributes": { "width": 0.5 } }]), line_making(json!({})));
+    let model = load(&text).unwrap();
+
+    assert!(model.class("MU").unwrap().refines_built_in());
+    let description = model.to_description();
+    assert_eq!(description.mu_kinds()[0], crabsim::MuKind { length: 0.6, width: 0.5, booking_point: 0.5 });
+    assert_eq!(description.mu_kind(0), 0);
+}
+
+#[test]
+fn mu_classes_and_a_sources_mu_values_survive_saving() {
+    let text = with_classes(
+        json!([{ "name": "Tote", "parent": "MU", "attributes": { "length": 0.6, "width": 0.4, "booking_point": 0.25, "description": "A grey tote" } }]),
+        line_making(json!({ "mu_class": "Tote", "mu_values": { "width": 0.45 } })),
+    );
+    let model = load(&text).unwrap();
+    let saved = model.save();
+
+    assert_eq!(load(&saved).unwrap(), model);
+    assert_eq!(load(&saved).unwrap().save(), saved);
+    let written: Value = serde_json::from_str(&saved).unwrap();
+    assert_eq!(written["instances"][0]["attributes"]["mu_values"], json!({ "width": 0.45 }), "only what it sets: {saved}");
+}
+
+#[test]
+fn an_mu_class_cant_be_placed_as_an_instance() {
+    let text = with_classes(
+        json!([{ "name": "Tote", "parent": "MU" }]),
+        json!([{ "name": "A tote", "class": "Tote" }, { "name": "An MU", "class": "MU" }]),
+    );
+    assert_found(&text, "/instances/0/class", "`Tote` is an MU class");
+    assert_found(&text, "/instances/1/class", "`MU` is an MU class");
+}
+
+#[test]
+fn a_sources_mu_class_must_be_an_mu_class() {
+    let unknown = with_classes(json!([{ "name": "Tote", "parent": "MU" }]), line_making(json!({ "mu_class": "Tot" })));
+    assert_found(&unknown, "/instances/0/attributes/mu_class", "no MU class is called `Tot` (did you mean `Tote`?)");
+    let object_class = file(line_making(json!({ "mu_class": "Station" })));
+    assert_found(&object_class, "/instances/0/attributes/mu_class", "`Station` is not an MU class");
+    let on_a_class = with_classes(json!([{ "name": "Feeder", "parent": "Source", "attributes": { "mu_class": "Nothing" } }]), line_making(json!({})));
+    assert_found(&on_a_class, "/classes/0/attributes/mu_class", "no MU class is called `Nothing`");
+}
+
+#[test]
+fn an_mu_class_has_only_an_mus_attributes_and_a_source_alone_has_an_mu_class() {
+    let text = with_classes(
+        json!([{ "name": "Tote", "parent": "MU", "attributes": { "process_time": "10" } }]),
+        json!([
+            { "name": "In", "class": "Source", "successors": ["Mill"] },
+            { "name": "Mill", "class": "Station", "successors": ["Out"], "attributes": { "mu_class": "Tote", "length": 2.0 } },
+            { "name": "Out", "class": "Drain" },
+        ]),
+    );
+    assert_found(&text, "/classes/0/attributes/process_time", "an MU has no attribute `process_time`");
+    assert_found(&text, "/instances/1/attributes/mu_class", "a Station has no attribute `mu_class`");
+    assert_found(&text, "/instances/1/attributes/length", "a Station has no attribute `length`");
+}
+
+#[test]
+fn an_mus_footprint_is_above_0_and_its_booking_point_on_it() {
+    let text = with_classes(
+        json!([{ "name": "Odd", "parent": "MU", "attributes": { "length": 0, "width": -1, "booking_point": 1.5 } }]),
+        line_making(json!({ "mu_class": "Odd", "mu_values": { "booking_point": -0.1, "length": "long" } })),
+    );
+    assert_found(&text, "/classes/0/attributes/length", "a length must be above 0");
+    assert_found(&text, "/classes/0/attributes/width", "a width must be above 0");
+    assert_found(&text, "/classes/0/attributes/booking_point", "from 0 (its front) to 1 (its rear)");
+    assert_found(&text, "/instances/0/attributes/mu_values/booking_point", "from 0 (its front) to 1 (its rear)");
+    assert_found(&text, "/instances/0/attributes/mu_values/length", "should be a number");
+    let unknown = file(line_making(json!({ "mu_values": { "height": 1.0 } })));
+    assert_found(&unknown, "/instances/0/attributes/mu_values/height", "unknown field `height`");
+}

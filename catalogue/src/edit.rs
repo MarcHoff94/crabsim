@@ -237,6 +237,9 @@ pub struct AlsoRemoved {
     pub classes: Vec<String>,
     /// Connections removed with an instance.
     pub connections: Vec<Connection>,
+    /// Instances and classes whose `mu_class` named a removed MU class: they now make the MUs
+    /// they inherit.
+    pub mu_classes_from: Vec<String>,
 }
 
 /// The model's JSON while a batch applies to it.
@@ -451,6 +454,18 @@ impl Draft {
         found
     }
 
+    /// The instances and classes, in file order, whose own `mu_class` names one of `family`.
+    fn making_mus_of(&mut self, family: &[String]) -> Vec<String> {
+        let names_one = |owner: &Value| owner["attributes"]["mu_class"].as_str().is_some_and(|class| family.iter().any(|name| name == class));
+        let instances: Vec<String> = self.instances().iter().filter(|owner| names_one(owner)).map(|owner| owner["name"].as_str().unwrap_or_default().to_string()).collect();
+        let classes = self
+            .classes()
+            .iter()
+            .filter(|class| names_one(class) && !family.iter().any(|name| class["name"] == name.as_str()))
+            .map(|class| class["name"].as_str().unwrap_or_default().to_string());
+        instances.into_iter().chain(classes).collect()
+    }
+
     fn apply(&mut self, change: Change) -> Result<(), Refusal> {
         match change {
             Change::AddInstance { name, class, position, successors, attributes } => {
@@ -570,7 +585,8 @@ impl Draft {
                     .filter(|instance| family.iter().any(|class| instance["class"] == class.as_str()))
                     .map(|instance| instance["name"].as_str().unwrap_or_default().to_string())
                     .collect();
-                if !delete_dependents && !(derived.is_empty() && instances.is_empty()) {
+                let making = self.making_mus_of(&family);
+                if !delete_dependents && !(derived.is_empty() && instances.is_empty() && making.is_empty()) {
                     let list = |names: &[String]| names.iter().map(|name| format!("`{name}`")).collect::<Vec<_>>().join(", ");
                     let mut what = Vec::new();
                     if !derived.is_empty() {
@@ -578,6 +594,10 @@ impl Draft {
                     }
                     if !instances.is_empty() {
                         what.push(format!("the instances {} are of it or of a class derived from it, with their connections", list(&instances)));
+                    }
+                    if !making.is_empty() {
+                        let verb = if making.len() == 1 { "makes" } else { "make" };
+                        what.push(format!("{} {verb} MUs of it or of a class derived from it, and would make the MUs they inherit", list(&making)));
                     }
                     return Err(format!(
                         "{} depend on `{name}`: removing it would remove them too. Give `delete_dependents: true` to remove them all, or change them first",
@@ -591,6 +611,15 @@ impl Draft {
                 self.also.instances.extend(instances);
                 self.classes().retain(|class| !family.iter().any(|name| class["name"] == name.as_str()));
                 self.also.classes.extend(derived);
+                let unset = |owner: &mut Value| {
+                    let names_one = owner["attributes"]["mu_class"].as_str().is_some_and(|class| family.iter().any(|name| name == class));
+                    if names_one && let Some(attributes) = owner["attributes"].as_object_mut() {
+                        attributes.remove("mu_class");
+                    }
+                };
+                self.instances().iter_mut().for_each(unset);
+                self.classes().iter_mut().for_each(unset);
+                self.also.mu_classes_from.extend(making);
             }
             Change::RenameClass { name, to } => {
                 let index = self.class(&name)?;
@@ -606,6 +635,14 @@ impl Draft {
                         instance["class"] = json!(to);
                     }
                 }
+                // Sources, and classes of them, that make MUs of it.
+                let rename = |owner: &mut Value| {
+                    if owner["attributes"]["mu_class"] == name.as_str() {
+                        owner["attributes"]["mu_class"] = json!(to);
+                    }
+                };
+                self.instances().iter_mut().for_each(rename);
+                self.classes().iter_mut().for_each(rename);
             }
             Change::SetParent { name, parent } => {
                 let index = self.class(&name)?;

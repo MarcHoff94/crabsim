@@ -99,7 +99,7 @@ fn a_batch_applies_in_order_and_saves_the_model_canonical() {
     assert_eq!(output["file_hash"], hash(&saved), "the hash of the file as saved");
     assert_eq!(output["changes"], 5);
     assert!(output.get("instance_order_changed").is_none(), "streams keep pairing, whatever the order");
-    assert_eq!(output["also_removed"], json!({ "instances": [], "classes": [], "connections": [] }));
+    assert_eq!(output["also_removed"], json!({ "instances": [], "classes": [], "connections": [], "mu_classes_from": [] }));
 }
 
 #[test]
@@ -589,4 +589,91 @@ fn only_the_user_sets_a_stream_and_it_must_be_unique() {
     let taken = user.call("edit_model", json!({ "path": "line.json", "changes": [{ "change": "set_stream", "name": "Mill 2", "stream": 40 }] })).unwrap_err().to_json();
     assert_eq!(taken["kind"], "invalid_model");
     assert_eq!(taken["problems"][0]["pointer"], "/instances/2/stream");
+}
+
+// ---------- MU classes (ADR 0021) ----------
+
+#[test]
+fn an_mu_class_is_derived_set_and_chosen_for_a_source_and_its_mus_have_its_values() {
+    let setup = setup("mu-class");
+    edit(&setup, json!([
+        { "change": "add_class", "name": "Tote", "parent": "MU", "attributes": { "length": 0.8 } },
+        { "change": "set_attribute", "target": { "class": "Tote" }, "attribute": "booking_point", "value": 0 },
+        { "change": "set_attribute", "target": { "instance": "In" }, "attribute": "mu_class", "value": "Tote" },
+        { "change": "set_attribute", "target": { "instance": "In" }, "attribute": "mu_values", "value": { "width": 0.5 } },
+    ]));
+
+    let tote = setup.ok("get_attributes", json!({ "path": "line.json", "target": { "class": "Tote" } }));
+    assert_eq!((tote["built_in_class"].clone(), tote["chain"].clone()), (json!("MU"), json!(["MU"])));
+    let names: Vec<&str> = tote["attributes"].as_array().unwrap().iter().map(|a| a["attribute"].as_str().unwrap()).collect();
+    assert_eq!(names, ["description", "length", "width", "booking_point"], "an MU class has only an MU's attributes");
+    let source = setup.ok("get_attributes", json!({ "path": "line.json", "target": { "instance": "In" } }));
+    let mu_class = source["attributes"].as_array().unwrap().iter().find(|a| a["attribute"] == "mu_class").unwrap().clone();
+    assert_eq!(mu_class, json!({ "attribute": "mu_class", "value": "Tote", "from": "instance" }));
+
+    let model = crabsim_model::load(&setup.folder.read("line.json")).unwrap();
+    assert_eq!(model.mu_kind_of(0), Some(crabsim::MuKind { length: 0.8, width: 0.5, booking_point: 0.0 }));
+}
+
+#[test]
+fn the_built_in_mus_values_change_for_the_model_alone() {
+    let setup = setup("mu-built-in");
+    edit(&setup, json!([{ "change": "set_attribute", "target": { "class": "MU" }, "attribute": "width", "value": 0.3 }]));
+
+    let model = crabsim_model::load(&setup.folder.read("line.json")).unwrap();
+    assert!(model.class("MU").unwrap().refines_built_in());
+    assert_eq!(model.mu_kind_of(0).unwrap().width, 0.3);
+    let refused = edit_err(&setup, json!([{ "change": "rename_class", "name": "MU", "to": "Unit" }]));
+    assert!(refused["message"].as_str().unwrap().contains("`MU` is a built-in class"), "{refused}");
+}
+
+#[test]
+fn an_mu_class_cant_be_placed_and_a_source_makes_only_mu_classes() {
+    let setup = setup("mu-place");
+    edit(&setup, json!([{ "change": "add_class", "name": "Tote", "parent": "MU" }]));
+
+    let placed = edit_err(&setup, json!([{ "change": "add_instance", "name": "A tote", "class": "Tote", "position": { "x": 0, "y": 4 } }]));
+    assert!(placed.to_string().contains("`Tote` is an MU class"), "{placed}");
+    let wrong = edit_err(&setup, json!([{ "change": "set_attribute", "target": { "instance": "In" }, "attribute": "mu_class", "value": "Mill" }]));
+    assert!(wrong.to_string().contains("`Mill` is not an MU class"), "{wrong}");
+}
+
+#[test]
+fn renaming_an_mu_class_renames_it_where_sources_name_it() {
+    let setup = setup("mu-rename");
+    edit(&setup, json!([
+        { "change": "add_class", "name": "Tote", "parent": "MU" },
+        { "change": "add_class", "name": "Feeder", "parent": "Source", "attributes": { "mu_class": "Tote" } },
+        { "change": "set_attribute", "target": { "instance": "In" }, "attribute": "mu_class", "value": "Tote" },
+    ]));
+
+    edit(&setup, json!([{ "change": "rename_class", "name": "Tote", "to": "Crate" }]));
+
+    let model = crabsim_model::load(&setup.folder.read("line.json")).unwrap();
+    assert_eq!(model.instances[0].attributes.mu_class.as_deref(), Some("Crate"));
+    assert_eq!(model.class("Feeder").unwrap().attributes.mu_class.as_deref(), Some("Crate"));
+}
+
+#[test]
+fn removing_an_mu_class_a_source_makes_is_refused_unless_asked_and_then_it_makes_what_it_inherits() {
+    let setup = setup("mu-remove");
+    edit(&setup, json!([
+        { "change": "add_class", "name": "Tote", "parent": "MU" },
+        { "change": "add_class", "name": "Big tote", "parent": "Tote" },
+        { "change": "set_attribute", "target": { "instance": "In" }, "attribute": "mu_class", "value": "Big tote" },
+    ]));
+    let before = setup.folder.read("line.json");
+
+    let refused = edit_err(&setup, json!([{ "change": "remove_class", "name": "Tote" }]));
+    let message = refused["message"].as_str().unwrap();
+    for named in ["`Big tote`", "`In` makes MUs of it", "delete_dependents"] {
+        assert!(message.contains(named), "{named} in {message}");
+    }
+    assert_eq!(setup.folder.read("line.json"), before);
+
+    let output = edit(&setup, json!([{ "change": "remove_class", "name": "Tote", "delete_dependents": true }]));
+    let model = crabsim_model::load(&setup.folder.read("line.json")).unwrap();
+    assert_eq!(model.instances.len(), 4, "no instance goes with an MU class");
+    assert_eq!(model.instances[0].attributes.mu_class, None, "it makes the MUs it inherits");
+    assert_eq!(output["also_removed"]["mu_classes_from"], json!(["In"]));
 }

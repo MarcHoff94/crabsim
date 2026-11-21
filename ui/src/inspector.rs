@@ -158,10 +158,10 @@ impl Inspector {
         let read = if workspace.opened().is_some() { workspace.attributes(name) } else { Err("No model file is open".to_string()) };
         if let Ok(attributes) = &read {
             let states = crabsim_model::State::of(built_in);
-            let drains = workspace.drains();
+            let (drains, mu_classes) = (workspace.drains(), workspace.mu_classes());
             self.forms = attributes
                 .iter()
-                .map(|view| (view.attribute.clone(), Form::for_attribute(&view.attribute, view.value.as_ref(), states, &drains)))
+                .map(|view| (view.attribute.clone(), Form::for_attribute(&view.attribute, view.value.as_ref(), states, &drains, &mu_classes)))
                 .collect();
         }
         self.attributes = Some(read);

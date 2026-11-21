@@ -354,10 +354,10 @@ impl Buffer {
     /// Sets the MUs it holds in its default state, by id, in the order they count as entered.
     /// More than its capacity is the caller's mistake: a model file is checked for it.
     pub fn set_starting_mus(&mut self, mus: Vec<u32>) {
-        let (object_id, dwelling_time) = (self.base.object_id, self.dwelling_time);
+        let dwelling_time = self.dwelling_time;
         self.content = mus
             .iter()
-            .map(|&id| Held { mu: MoveableUnit { id, location_id: object_id, left_source: SimTime::ZERO }, ready_at: dwelling_time })
+            .map(|&id| Held { mu: MoveableUnit { id, left_source: SimTime::ZERO, kind: 0 }, ready_at: dwelling_time })
             .collect();
         self.starting_mus = mus;
     }

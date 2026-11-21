@@ -15,7 +15,7 @@ pub mod statistics;
 pub mod time;
 
 pub use crate::materialflow_objects::flows; // keep single module re-export
-pub use crate::materialflow_objects::flows::{BaseObject, FailureProfile, MoveableUnit, ProcessState, TimeBasis};
+pub use crate::materialflow_objects::flows::{BaseObject, FailureProfile, MoveableUnit, MuKindId, ProcessState, TimeBasis};
 
 pub use crate::error::{AdvanceFailure, InitError, MaterialflowError, RunError, RunTimeError};
 pub use crate::event::{EventContext, EventTemplate, EventType, ExitTicket};
@@ -24,7 +24,7 @@ pub use crate::live_session::{
     OUTPUT_BACKLOG_LIMIT,
 };
 pub use crate::materialflow_objects::{Buffer, Drain, ExitStrategy, ModelObject, MultiStation, OtherObjects, SingleStation, Source, StartMode};
-pub use crate::model::{Dimensions, ModelDescription, Position};
+pub use crate::model::{Dimensions, ModelDescription, MuKind, Position};
 pub use crate::picture::{ObjectPicture, Picture};
 pub use crate::report::{Capacity, ActiveInterruption, ObjectKind, ObjectState, Occurrence, OccurrenceKind, OccurrenceType, Recording, RunState, Interruption};
 pub use crate::simulation_run::{BoundedAdvance, SimulationRun, ZERO_TIME_EVENT_LIMIT};

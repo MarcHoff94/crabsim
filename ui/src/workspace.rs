@@ -35,6 +35,8 @@ pub struct ClassEntry {
     /// 0 for a built-in class, 1 for one derived from it, and so on.
     pub depth: usize,
     pub built_in: bool,
+    /// An MU class, which a Source makes MUs of and which isn't placed (ADR 0021).
+    pub mu: bool,
 }
 
 /// One thing Validate found: a problem, which stops the model running, or a warning, which can
@@ -560,19 +562,20 @@ impl Workspace {
         Ok(to)
     }
 
-    /// The classes an instance can be placed from, as a tree by inheritance: each built-in class,
-    /// which stands for the model's own values for it, followed by the model's classes derived
-    /// from it, depth first, in file order.
+    /// The classes, as a tree by inheritance: each built-in class, which stands for the model's
+    /// own values for it, followed by the model's classes derived from it, depth first, in file
+    /// order. The MU classes come last, from the built-in MU.
     pub fn classes(&self) -> Vec<ClassEntry> {
         fn below(model: &Model, parent: &str, depth: usize, into: &mut Vec<ClassEntry>) {
             for class in model.classes.iter().filter(|class| class.parent == parent && !class.refines_built_in()) {
-                into.push(ClassEntry { name: class.name.clone(), parent: Some(parent.to_string()), depth, built_in: false });
+                let mu = model.is_mu_class(&class.name);
+                into.push(ClassEntry { name: class.name.clone(), parent: Some(parent.to_string()), depth, built_in: false, mu });
                 below(model, &class.name, depth + 1, into);
             }
         }
         let mut entries = Vec::new();
         for built_in in BUILT_IN_CLASSES {
-            entries.push(ClassEntry { name: built_in.to_string(), parent: None, depth: 0, built_in: true });
+            entries.push(ClassEntry { name: built_in.to_string(), parent: None, depth: 0, built_in: true, mu: built_in == crabsim_model::BUILT_IN_MU_CLASS });
             below(&self.model, built_in, 1, &mut entries);
         }
         entries
@@ -655,6 +658,11 @@ impl Workspace {
             .collect()
     }
 
+    /// The open model's MU classes, the built-in MU first: what a Source can make.
+    pub fn mu_classes(&self) -> Vec<String> {
+        self.model.mu_classes().into_iter().map(str::to_owned).collect()
+    }
+
     /// The built-in class at the root of `class`'s chain, if it has a sound one.
     pub fn built_in_of(&self, class: &str) -> Option<&'static str> {
         self.model.chain(class).map(|(_, built_in)| built_in)
@@ -678,6 +686,9 @@ impl Workspace {
     /// nothing set on it, so it inherits every value. Its stream is given when the file is saved.
     /// Returns its name.
     pub fn add_instance(&mut self, class: &str, at: Position, take_over: bool) -> Result<String, Refusal> {
+        if self.model.is_mu_class(class) {
+            return Err(Refusal::Invalid(format!("`{class}` is an MU class, which isn't placed: a Source makes its MUs once its MU class is set to it")));
+        }
         let name = self.next_name(class);
         let mut change = json!({ "change": "add_instance", "name": name, "class": class, "position": position_json(at) });
         let (mut changes, values) = self.starting_values(class);

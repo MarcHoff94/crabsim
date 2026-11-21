@@ -118,7 +118,7 @@ An image of the real site, placed under the model at a known scale, so objects c
 _Avoid_: Picture (what the user knows about a run)
 
 **Dimensions**:
-An object's real size in metres: length, width and height, plus its rotation around the vertical axis. They are visual only and have no effect on results. MU moves stay instant whatever the distance.
+An object's real size in metres: length, width and height, plus its rotation around the vertical axis. For a Source, Station, Buffer or Drain they are visual only and have no effect on results: MU moves stay instant whatever the distance. A geometry-aware object, such as a conveyor, reads its own dimensions and path, and what it can take depends on them.
 
 **Default state**:
 The state a material-flow object is in before a simulation run's Init, as configured by the user, including any starting MUs.
@@ -132,6 +132,20 @@ _Avoid_: Event (events are the simulator's internal schedule)
 **Moveable Unit (MU)**:
 An item that travels through the modelled material flow. Its identity is unique across the whole model.
 _Avoid_: Part, product, item
+
+**MU class**:
+What an MU is, kept in the class library beside the object classes. It gives the MU its size, a footprint of length and width in metres, and later other values, such as its own motion limits (a self-driven MU) or what it can carry (a pallet). Every Source is set to one MU class, and every MU it creates is of that class. The Source may change values of the MUs it creates, but never picks no class.
+_Avoid_: MU type
+
+**Booking point**:
+A point in an MU's footprint. When it crosses from one geometry-aware object to the next, the MU officially moves: until then it belongs to the first, though it may already take up space on both.
+_Avoid_: Transfer point
+
+**Destination**:
+Where an MU is meant to go, a value the MU carries. A routing object chooses the way the MU leaves from it, by a table the user enters.
+
+**Geometry-aware object**:
+A material-flow object whose results depend on real sizes and paths, such as a conveyor, which cannot take an MU wider than itself. It reads the MU's size. A Source, Station, Buffer or Drain is not one: they take any MU.
 
 **Material-flow object**:
 Anything in the model that handles MUs and represents a real thing: a Source, Station, Buffer or Drain.
@@ -165,6 +179,41 @@ _Avoid_: Edge (the graph view's word), link
 
 **Successor**:
 An object a connection leads to from a given object. The object it comes from is the successor's predecessor.
+
+### Conveyors
+
+**Conveyor**:
+A geometry-aware object that carries MUs along its path from its start to its end, holding as many as fit along its length, as wide as its width allows. MUs enter only at its start and leave only at its end. Its direction is set before a run. An MU never runs into the one ahead of it: when that one stops, it stops too, whatever its own conveyor is doing.
+_Avoid_: Belt, track (a conveyor of either drive)
+
+**Drive**:
+What moves the MUs on a conveyor. **Conveyor-driven**: the conveyor's own speed, acceleration, deceleration and jerk move every MU on it, as a belt or roller conveyor does. **MU-driven**: each MU moves by its own motion limits, as a shuttle or carrier does, and the conveyor is only the way it follows.
+
+**Path**:
+The line a conveyor's MUs follow, made of segments joined without kinks, any of them rising or falling. Only its length, and the limits it sets, such as its tightest bend and steepest incline, affect results.
+
+**Segment**:
+One piece of a path: a straight, an arc, a transition curve or a helix.
+
+**Straddle**:
+An MU straddles two geometry-aware objects while its footprint is on both. It belongs to the one its booking point is on, and moves at the slower of the two speeds unless one is interrupted, when the one it belongs to decides.
+
+**Cross conveyor**:
+A geometry-aware routing object with four sides, holding one MU at a time. An MU passes straight through without stopping, or stops at its centre for a switch time and leaves by another side, keeping its orientation.
+_Avoid_: Diverter, transfer unit
+
+**Side**:
+One of a cross conveyor's four physical sides: front, back, left or right. Connections attach to sides. A side with incoming connections is an entry side, one with outgoing connections an exit side, never both.
+_Avoid_: Entrance, exit (a connection's place in an order)
+
+**Receiving**:
+What an object without geometry, such as a Station, is doing between accepting an MU from a conveyor and that MU's booking point arriving. It is a state of its own, with its own colour and share of time. Its place is taken from the acceptance. A transfer once begun always finishes, even if that object is interrupted meanwhile.
+
+**Reversible conveyor**:
+A conveyor whose direction can change during a run, its MUs slowing, stopping and moving back, and its two ends trading places as start and end.
+
+**Turntable**:
+A cross conveyor that turns the MU with it as it changes direction, so the MU leaves in a new orientation.
 
 ### Classes
 
@@ -211,7 +260,7 @@ A successor that can receive an MU chooses which MU it wants from its predecesso
 The rule for which MU leaves an object next. By default, the earliest finished MU leaves first, with ties broken by entry order. A Buffer's is **first in, first out**, the default, or **last in, first out**, each among the MUs whose dwelling time is over.
 
 **Distribution strategy**:
-The rule for which successor receives the MU that is leaving, set per Source or Station as its `distribution` (ADR 0016). **Round robin**, the default, offers each MU to the successors in turn. **Weighted** ranks the successors by a weight, such as each one's best route onward to a Drain by process time, and offers the MU to the best one that can take it, those ranking equal taking turns.
+The rule for which successor receives the MU that is leaving, set per Source or Station as its `distribution` (ADR 0016). **Round robin**, the default, offers each MU to the successors in turn. **Weighted** ranks the successors by a weight, such as each one's best route onward to a Drain by process time, and offers the MU to the best one that can take it, those ranking equal taking turns. **By destination** sends each MU the way a table the user enters gives for its destination, and a default way for any destination not in it.
 
 **Macro**:
 A named list of commands in the command line's language, run as `@name` with arguments for its `$1`, `$2` and so on. Macros live in `macros.json` beside the models, each with its author. An agent's macros last for its work and are then archived, unless the user keeps one.
@@ -281,7 +330,7 @@ _Avoid_: Process time (how long one MU takes, not a basis for failures)
 The fixed-size numbers every material-flow object keeps about a simulation run. They are always on, and their size does not depend on how long the run is.
 
 **Busy**:
-The state of an object doing its work: a Station working on at least one MU, a Source waiting out its interval. A Station with a capacity above 1 is busy in one of three ways that don't overlap: full, with every place in work; not full, with free places and nothing waiting to leave; and partly blocked, working while a finished MU can't leave, which outranks the other two. The likely bottleneck counts only busy and full.
+The state of an object doing its work: a Station working on at least one MU, a Source waiting out its interval. A Station with a capacity above 1 is busy in one of three ways that don't overlap: full, with every place in work; not full, with free places and nothing waiting to leave; and partly blocked, working while a finished MU can't leave, which outranks the other two. A conveyor is busy in the same three ways, since what fits on it is its capacity: full when no MU could enter at its start, not full when one could, and partly blocked when its first MU waits at the end while others still move. The likely bottleneck, a Station or a conveyor, counts only busy and full.
 _Avoid_: Processing (Processing time is a time basis)
 
 **Fill histogram**:

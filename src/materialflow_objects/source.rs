@@ -5,7 +5,7 @@ use crate::statistics::{MachineState, StatisticsKeeper};
 use crate::time::SimTime;
 use crate::materialflow_objects::OtherObjects;
 use crate::flows::{
-	EventInterface, MaterialFlow, MoveableUnit, ProcessState, SuccessorContainer, Distributing, retry_move_to_successor, try_to_move_to_successor,
+	EventInterface, MaterialFlow, MoveableUnit, MuKindId, ProcessState, SuccessorContainer, Distributing, retry_move_to_successor, try_to_move_to_successor,
 };
 use super::flows::{BaseObject, FailureProfile};
 use super::interruptions::{Interruptible, Interruptions};
@@ -58,6 +58,8 @@ pub struct Source {
 	/// What was left of its interval when an interruption froze it.
 	frozen: Option<SimTime>,
 	pub statistics: StatisticsKeeper,
+	/// The kind of every MU it creates (ADR 0021): 0, the built-in MU, unless set.
+	pub mu_kind: MuKindId,
 }
 impl Source {
 	pub fn new(
@@ -79,6 +81,7 @@ impl Source {
 			stop_count: 0,
 			frozen: None,
 			statistics: StatisticsKeeper::new(0),
+			mu_kind: 0,
 		}
 	}
 	/// Gives it failures, or none with `None`.
@@ -95,12 +98,12 @@ impl Source {
 		let mu_id = context.new_mu_id();
 		self.content = Some(MoveableUnit {
 			id: mu_id,
-			location_id: self.base.object_id,
 			left_source: context.time,
+			kind: self.mu_kind,
 		});
 		self.statistics.count_mu_in();
 		log::info!("Source {} created MU {}", self.base.object_id, mu_id);
-		context.record(OccurrenceKind::MuCreated { mu_id, at: self.base.object_id, duration: self.proc_time });
+		context.record(OccurrenceKind::MuCreated { mu_id, at: self.base.object_id, duration: self.proc_time, kind: self.mu_kind });
 		if self.state == ProcessState::Blocked {
 			context.record(OccurrenceKind::Unblocked { object_id: self.base.object_id });
 		}

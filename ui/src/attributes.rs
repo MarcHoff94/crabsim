@@ -73,6 +73,16 @@ pub fn summary(value: &Value) -> String {
         };
         return format!("{} % available, {repair}", (availability * 1000.0).round() / 10.0);
     }
+    // A Source's own MU values.
+    if !fields.is_empty() && fields.keys().all(|key| ["length", "width", "booking_point"].contains(&key.as_str())) {
+        let mut parts = Vec::new();
+        for (key, label, unit) in [("length", "length", " m"), ("width", "width", " m"), ("booking_point", "booking point", "")] {
+            if let Some(value) = fields.get(key) {
+                parts.push(format!("{label} {}{unit}", number(value)));
+            }
+        }
+        return parts.join(", ");
+    }
     // State notes, by state.
     format!("notes on {}", fields.keys().cloned().collect::<Vec<_>>().join(", "))
 }
@@ -131,6 +141,9 @@ pub struct Form {
     pub options: &'static [(&'static str, &'static str)],
     /// For failures: each named profile, in the object's order.
     pub profiles: Option<Vec<ProfileForm>>,
+    /// For a value that is one of the model's names, such as a Source's MU class: each name. The
+    /// one chosen is the first part's text.
+    pub choices: Vec<String>,
 }
 
 /// One failure profile's fields: its name, the stream it keeps, and its availability and repair
@@ -189,7 +202,7 @@ impl Form {
                 form: Form::new("failure", Some(profile)),
             })
             .collect();
-        Form { attribute: "failures".into(), parts: Vec::new(), repair: None, distribution: None, options: &[], profiles: Some(profiles) }
+        Form { attribute: "failures".into(), parts: Vec::new(), repair: None, distribution: None, options: &[], profiles: Some(profiles), choices: Vec::new() }
     }
 
     /// The profiles as a model file writes them, each with its stream. An empty list is none at
@@ -221,6 +234,15 @@ impl Form {
         }
         Ok(Value::Array(list))
     }
+}
+
+/// A booking point typed as a share of an MU's length from its front, or what is wrong with it.
+fn booking_point(typed: &str) -> Result<f64, String> {
+    typed
+        .parse::<f64>()
+        .ok()
+        .filter(|share| (0.0..=1.0).contains(share))
+        .ok_or_else(|| format!("`{typed}` isn't a booking point: type a share of the MU's length from its front, 0 at the front to 1 at the rear"))
 }
 
 /// "1st", "2nd", "3rd", "4th" and so on.
@@ -314,6 +336,12 @@ impl Form {
             "exit_strategy" => (vec![part("", value.and_then(Value::as_str).unwrap_or(EXIT_STRATEGIES[0].0))], None),
             "start" => (vec![part("", value.and_then(Value::as_str).unwrap_or(STARTS[0].0))], None),
             "stop_freezes_dwelling" => (vec![part("", if value.and_then(Value::as_bool) == Some(true) { "true" } else { "false" })], None),
+            // Each may be left empty, taking the MU class's.
+            "mu_values" => {
+                let field = |key: &str| value.and_then(|values| values.get(key)).and_then(Value::as_f64).map_or(String::new(), number);
+                (vec![part("length m", field("length")), part("width m", field("width")), part("booking point", field("booking_point"))], None)
+            }
+            "length" | "width" | "booking_point" => (vec![part("", value.and_then(Value::as_f64).map_or(String::new(), number))], None),
             _ => (vec![part("", text_of(value))], None),
         };
         let options: &[(&str, &str)] = match attribute {
@@ -322,15 +350,16 @@ impl Form {
             "stop_freezes_dwelling" => &DWELLING_IN_A_STOP,
             _ => &[],
         };
-        Form { attribute: attribute.to_string(), parts, repair, distribution: None, options, profiles: None }
+        Form { attribute: attribute.to_string(), parts, repair, distribution: None, options, profiles: None, choices: Vec::new() }
     }
 
     /// The fields for `attribute`, whatever it is: state notes need the `states` the object can be
-    /// in, and a distribution the model's `drains`.
-    pub fn for_attribute(attribute: &str, value: Option<&Value>, states: &[State], drains: &[String]) -> Form {
+    /// in, a distribution the model's `drains`, and an MU class the model's `mu_classes`.
+    pub fn for_attribute(attribute: &str, value: Option<&Value>, states: &[State], drains: &[String], mu_classes: &[String]) -> Form {
         match attribute {
             "state_notes" => Form::state_notes(states, value),
             "distribution" => Form::distribution(value, drains),
+            "mu_class" => Form { choices: mu_classes.to_vec(), ..Form::new(attribute, value) },
             attribute => Form::new(attribute, value),
         }
     }
@@ -355,7 +384,7 @@ impl Form {
             successor: field("rank") == Some("successor"),
             drains: ticks,
         };
-        Form { attribute: "distribution".into(), parts: Vec::new(), repair: None, distribution: Some(choice), options: &[], profiles: None }
+        Form { attribute: "distribution".into(), parts: Vec::new(), repair: None, distribution: Some(choice), options: &[], profiles: None, choices: Vec::new() }
     }
 
     /// The fields for state notes: one per state the object can be in, labelled with the state and
@@ -365,7 +394,7 @@ impl Form {
             .iter()
             .map(|state| part(state.label(), value.and_then(|notes| notes.get(state.name())).and_then(Value::as_str).unwrap_or_default()))
             .collect();
-        Form { attribute: "state_notes".into(), parts, repair: None, distribution: None, options: &[], profiles: None }
+        Form { attribute: "state_notes".into(), parts, repair: None, distribution: None, options: &[], profiles: None, choices: Vec::new() }
     }
 
     /// The states a state notes form has a field for.
@@ -464,6 +493,27 @@ impl Form {
                 Ok(Value::Object(size))
             }
             "stop_freezes_dwelling" => Ok(json!(text(0) == "true")),
+            "length" | "width" => match float(0)? {
+                metres if metres > 0.0 => Ok(json!(metres)),
+                _ => Err(format!("`{}` isn't a {}: type metres above 0", text(0), self.attribute)),
+            },
+            "booking_point" => booking_point(text(0)).map(|share| json!(share)),
+            // None of them is no values of its own at all, which a model file says by leaving it out.
+            "mu_values" => {
+                let mut values = Map::new();
+                for (index, key) in ["length", "width"].into_iter().enumerate() {
+                    if !text(index).is_empty() {
+                        match float(index)? {
+                            metres if metres > 0.0 => values.insert(key.into(), json!(metres)),
+                            _ => return Err(format!("`{}` isn't a {key}: type metres above 0, or leave it empty for the MU class's", text(index))),
+                        };
+                    }
+                }
+                if !text(2).is_empty() {
+                    values.insert("booking_point".into(), json!(booking_point(text(2))?));
+                }
+                Ok(if values.is_empty() { Value::Null } else { Value::Object(values) })
+            }
             _ => Ok(json!(text(0))),
         }
     }
@@ -491,6 +541,7 @@ impl Form {
             let given = Form::new("failures", value);
             return self.value().ok() == given.value().ok() && self.value().is_ok();
         }
-        *self == Form::new(&self.attribute, value)
+        // The names offered aren't part of the value.
+        *self == Form { choices: self.choices.clone(), ..Form::new(&self.attribute, value) }
     }
 }

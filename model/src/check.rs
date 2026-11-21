@@ -211,7 +211,13 @@ impl<'m> Checker<'m> {
             let message = self.unknown_class(&instance.class);
             self.problem(owner, "/class", message);
         }
-        if let Some(built_in) = self.built_in(index) {
+        if self.built_in(index) == Some(crate::BUILT_IN_MU_CLASS) {
+            self.problem(
+                owner,
+                "/class",
+                format!("`{}` is an MU class: MUs of it are made by a Source whose `mu_class` names it, and it can't be placed itself", instance.class),
+            );
+        } else if let Some(built_in) = self.built_in(index) {
             self.attributes(owner, &instance.attributes, built_in);
             if built_in == "Buffer" || built_in == "Station" {
                 self.starting_mus_fit(index);
@@ -258,8 +264,17 @@ impl<'m> Checker<'m> {
         for attribute in Attribute::ALL {
             if attributes.is_set(attribute) && !attribute.applies_to(built_in) {
                 let name = attribute.name();
-                self.problem(owner, &format!("/attributes/{name}"), format!("a {built_in} has no attribute `{name}`"));
+                self.problem(owner, &format!("/attributes/{name}"), format!("{} {built_in} has no attribute `{name}`", crate::article(built_in)));
             }
+        }
+        self.mu_values(owner, "/attributes", attributes.length, attributes.width, attributes.booking_point);
+        if let Some(values) = attributes.mu_values {
+            self.mu_values(owner, "/attributes/mu_values", values.length, values.width, values.booking_point);
+        }
+        if built_in == "Source"
+            && let Some(class) = &attributes.mu_class
+        {
+            self.mu_class(owner, class);
         }
         if built_in == "Buffer" && attributes.capacity == Some(Capacity::Limited(0)) {
             self.problem(owner, "/attributes/capacity", "a capacity must be at least 1, or \"unlimited\"");
@@ -357,6 +372,33 @@ impl<'m> Checker<'m> {
             }
             _ => {}
         }
+    }
+
+    /// An MU's footprint is above 0 each way, and its booking point is on it.
+    fn mu_values(&mut self, owner: Owner, at: &str, length: Option<f64>, width: Option<f64>, booking_point: Option<f64>) {
+        for (key, value) in [("length", length), ("width", width)] {
+            if value.is_some_and(|value| !(value > 0.0 && value.is_finite())) {
+                self.problem(owner, &format!("{at}/{key}"), format!("a {key} must be above 0, in metres"));
+            }
+        }
+        if booking_point.is_some_and(|share| !(0.0..=1.0).contains(&share)) {
+            self.problem(owner, &format!("{at}/booking_point"), "a booking point is a share of the MU's length, from 0 (its front) to 1 (its rear)");
+        }
+    }
+
+    /// A Source's MU class is the built-in MU or a class derived from it.
+    fn mu_class(&mut self, owner: Owner, class: &str) {
+        let model = self.model;
+        if model.is_mu_class(class) {
+            return;
+        }
+        let message = if crate::BUILT_IN_CLASSES.contains(&class) || model.class(class).is_some() {
+            format!("`{class}` is not an MU class: a Source makes MUs of `MU` or a class derived from it")
+        } else {
+            let guess = crate::suggest::closest(class, model.mu_classes()).map_or(String::new(), |known| format!(" (did you mean `{known}`?)"));
+            format!("no MU class is called `{class}`{guess}")
+        };
+        self.problem(owner, "/attributes/mu_class", message);
     }
 
     fn dimensions(&mut self, owner: Owner, dimensions: Dimensions) {

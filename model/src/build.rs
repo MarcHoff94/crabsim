@@ -9,13 +9,22 @@ use std::collections::HashMap;
 
 pub(crate) fn build(model: &Model) -> ModelDescription {
     let mut description = ModelDescription::new();
+    // The model's own values for the built-in MU are those of starting MUs and default Sources.
+    let built_in_mu = model.resolve_class(crate::BUILT_IN_MU_CLASS).expect("the built-in MU class always resolves");
+    description.set_built_in_mu_kind(crate::mu_kind(&built_in_mu.attributes));
     // Starting MUs are numbered in file order, from 1. The run hands out later ids above them.
     let mut next_mu = 1;
     for (index, instance) in model.instances.iter().enumerate() {
         let resolved = model.resolve(index).expect("checked: every instance's chain of classes is sound");
         let attributes = &resolved.attributes;
         let id = match resolved.built_in {
-            "Source" => description.add_source(attributes.interval.unwrap_or(SimTime::ZERO)),
+            "Source" => {
+                let source = description.add_source(attributes.interval.unwrap_or(SimTime::ZERO));
+                let kind = model.mu_kind_of(index).expect("checked: a Source's MU class is an MU class");
+                let kind = description.add_mu_kind(kind);
+                description.set_mu_kind(source, kind);
+                source
+            }
             "Station" => {
                 let process_time = attributes.process_time.unwrap_or(SimTime::ZERO);
                 let failures = failure_profile(attributes.failures.as_deref().and_then(<[_]>::first));

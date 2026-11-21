@@ -146,6 +146,24 @@ fn attribute_properties(attributes: &Attributes, has: impl Fn(Attribute) -> bool
     if let Some(description) = attributes.description.as_ref().filter(|_| has(Attribute::Description)) {
         properties.push(("description", Value::Text(description.clone())));
     }
+    if let Some(class) = attributes.mu_class.as_ref().filter(|_| has(Attribute::MuClass)) {
+        properties.push(("mu_class", Value::Text(class.clone())));
+    }
+    if let Some(values) = attributes.mu_values.filter(|_| has(Attribute::MuValues)) {
+        for (key, value) in [("mu_length", values.length), ("mu_width", values.width), ("mu_booking_point", values.booking_point)] {
+            if let Some(value) = value {
+                properties.push((key, Value::Double(value)));
+            }
+        }
+    }
+    // An MU class's footprint: it has no dimensions, so the names don't meet an object's.
+    for (key, attribute, value) in
+        [("length", Attribute::Length, attributes.length), ("width", Attribute::Width, attributes.width), ("booking_point", Attribute::BookingPoint, attributes.booking_point)]
+    {
+        if let Some(value) = value.filter(|_| has(attribute)) {
+            properties.push((key, Value::Double(value)));
+        }
+    }
 }
 
 impl Graph {

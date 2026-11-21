@@ -5,7 +5,7 @@ use crabsim::demo::build_model;
 use crabsim::flows::MaterialFlow;
 use crabsim::random_numbers::Distribution;
 use crabsim::{
-    Dimensions, Drain, EventType, FailureProfile, ActiveInterruption, ModelDescription, ObjectKind, Position, ObjectStatistics, Occurrence, OccurrenceKind, OccurrenceType,
+    Dimensions, Drain, EventType, FailureProfile, ActiveInterruption, ModelDescription, MuKind, ObjectKind, Position, ObjectStatistics, Occurrence, OccurrenceKind, OccurrenceType,
     ProcessState, Recording, RunError, RunState, SimTime, SimulationRun, SingleStation, Interruption,
     ZERO_TIME_EVENT_LIMIT,
 };
@@ -116,7 +116,59 @@ fn init_sets_time_zero_and_queues_first_events_without_processing_them() {
     assert_eq!(statistics_of(&run, dr).mus_in, 0);
     assert_eq!(object(&run.state(), src).contents, vec![1]);
     assert_eq!(occurrences[0].kind, OccurrenceKind::RunInitialised);
-    assert!(occurrences.iter().any(|o| o.kind == OccurrenceKind::MuCreated { mu_id: 1, at: src, duration: SimTime::ZERO }));
+    assert!(occurrences.iter().any(|o| o.kind == OccurrenceKind::MuCreated { mu_id: 1, at: src, duration: SimTime::ZERO, kind: 0 }));
+}
+
+// ---------- MU kinds (ADR 0021) ----------
+
+#[test]
+fn a_model_has_the_built_in_mu_kind_until_given_others() {
+    let model = ModelDescription::new();
+
+    assert_eq!(model.mu_kinds(), &[MuKind::default()]);
+    assert_eq!(MuKind::default(), MuKind { length: 0.6, width: 0.4, booking_point: 0.5 });
+}
+
+#[test]
+fn the_same_mu_kind_added_twice_is_one_kind() {
+    let mut model = ModelDescription::new();
+    let tote = MuKind { length: 0.6, width: 0.4, booking_point: 0.5 };
+    let long_tote = MuKind { length: 1.2, ..tote };
+
+    assert_eq!(model.add_mu_kind(tote), 0);
+    assert_eq!(model.add_mu_kind(long_tote), 1);
+    assert_eq!(model.add_mu_kind(long_tote), 1);
+    assert_eq!(model.mu_kinds().len(), 2);
+}
+
+#[test]
+fn every_mu_a_source_creates_is_of_its_kind() {
+    let mut model = ModelDescription::new();
+    let pallet = model.add_mu_kind(MuKind { length: 1.2, width: 0.8, booking_point: 0.5 });
+    let totes = source(&mut model, 10);
+    let pallets = source(&mut model, 10);
+    model.set_mu_kind(pallets, pallet);
+    let out = drain(&mut model);
+    model.connect(totes, out);
+    model.connect(pallets, out);
+    let mut run = recorded(model.build(0));
+
+    let mut occurrences = run.init().unwrap();
+    occurrences.extend(run.advance_to(secs(25)).unwrap());
+
+    let kinds_at = |at: u32| -> Vec<u16> {
+        occurrences.iter().filter_map(|o| match o.kind { OccurrenceKind::MuCreated { at: here, kind, .. } if here == at => Some(kind), _ => None }).collect()
+    };
+    assert_eq!(kinds_at(totes), vec![0, 0, 0]);
+    assert_eq!(kinds_at(pallets), vec![pallet, pallet, pallet]);
+}
+
+#[test]
+#[should_panic(expected = "has no MU kind 3")]
+fn a_source_can_only_be_given_a_kind_the_model_has() {
+    let mut model = ModelDescription::new();
+    let src = source(&mut model, 10);
+    model.set_mu_kind(src, 3);
 }
 
 #[test]
@@ -538,7 +590,7 @@ fn an_mu_passing_through_a_line_reports_each_step_in_order() {
     assert_eq!(
         of_mu_1,
         vec![
-            (0.0, OccurrenceKind::MuCreated { mu_id: 1, at: src_id, duration: secs(10) }),
+            (0.0, OccurrenceKind::MuCreated { mu_id: 1, at: src_id, duration: secs(10), kind: 0 }),
             (10.0, OccurrenceKind::MuMoved { mu_id: 1, from: src_id, to: st_id }),
             (10.0, OccurrenceKind::WorkStarted { mu_id: 1, at: st_id, duration: secs(60) }),
             (70.0, OccurrenceKind::WorkFinished { mu_id: 1, at: st_id }),

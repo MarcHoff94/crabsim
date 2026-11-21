@@ -2,7 +2,7 @@
 //! stopping at the first. What can't be read is left at its default, and noted in `Broken`, so the
 //! checks that follow don't report it a second time.
 
-use crate::{Attributes, DistributionStrategy, WeightedStrategy, WEIGHABLE, BUILT_IN_CLASSES, Class, Connection, Failures, Instance, Model, Problem, RepairTime, State, StateNotes, FORMAT_VERSION, escape};
+use crate::{Attributes, DistributionStrategy, MuValues, WeightedStrategy, WEIGHABLE, BUILT_IN_CLASSES, Class, Connection, Failures, Instance, Model, Problem, RepairTime, State, StateNotes, FORMAT_VERSION, escape};
 use crabsim::time::parse_time;
 use crate::{exit_strategy_from_name, start_from_name, Capacity, ExitStrategy, StartMode};
 use crabsim::{Dimensions, Position, SimTime};
@@ -38,8 +38,29 @@ const TOP_LEVEL: [&str; 6] = ["$schema", "format_version", "description", "class
 const INSTANCE: [&str; 5] = ["name", "class", "stream", "position", "attributes"];
 const CONNECTION: [&str; 5] = ["from", "to", "exit", "entrance", "description"];
 const CLASS: [&str; 3] = ["name", "parent", "attributes"];
-const ATTRIBUTES: [&str; 14] =
-    ["interval", "process_time", "failures", "starting_mus", "capacity", "start", "dwelling_time", "exit_strategy", "histogram_bar_width", "stop_freezes_dwelling", "dimensions", "description", "state_notes", "distribution"];
+const ATTRIBUTES: [&str; 19] = [
+    "interval",
+    "process_time",
+    "failures",
+    "starting_mus",
+    "capacity",
+    "start",
+    "dwelling_time",
+    "exit_strategy",
+    "histogram_bar_width",
+    "stop_freezes_dwelling",
+    "dimensions",
+    "description",
+    "state_notes",
+    "distribution",
+    "mu_class",
+    "mu_values",
+    "length",
+    "width",
+    "booking_point",
+];
+/// The values a Source can change for the MUs it makes.
+const MU_VALUES: [&str; 3] = ["length", "width", "booking_point"];
 
 pub(crate) fn read(text: &str) -> (Model, Vec<Problem>, Broken) {
     let mut reader = Reader::default();
@@ -308,6 +329,11 @@ impl Reader {
                 "description" => self.text(value, &at, name).map(|text| attributes.description = Some(text)),
                 "state_notes" => self.state_notes(value, &at, name).map(|notes| attributes.state_notes = Some(notes)),
                 "distribution" => self.distribution(value, &at, name).map(|strategy| attributes.distribution = Some(strategy)),
+                "mu_class" => self.text(value, &at, name).map(|class| attributes.mu_class = Some(class)),
+                "mu_values" => self.mu_values(value, &at, name).map(|values| attributes.mu_values = Some(values)),
+                "length" => self.number_value(value, &at, name).map(|length| attributes.length = Some(length)),
+                "width" => self.number_value(value, &at, name).map(|width| attributes.width = Some(width)),
+                "booking_point" => self.number_value(value, &at, name).map(|share| attributes.booking_point = Some(share)),
                 _ => unreachable!("every attribute is read"),
             };
             if read.is_none() {
@@ -398,6 +424,25 @@ impl Reader {
                 number
             }
         }
+    }
+
+    fn number_value(&mut self, value: &Value, pointer: &str, name: Option<&str>) -> Option<f64> {
+        let number = value.as_f64();
+        if number.is_none() {
+            self.problem(pointer.to_owned(), name, format!("{value} should be a number"));
+        }
+        number
+    }
+
+    /// A Source's own values for its MUs, each optional. The values that can be read are kept.
+    fn mu_values(&mut self, value: &Value, pointer: &str, name: Option<&str>) -> Option<MuValues> {
+        let fields = self.object(value, pointer, name, "MU values", &MU_VALUES)?;
+        let mut values = MuValues::default();
+        let mut read = |key: &str| fields.get(key).and_then(|value| self.number_value(value, &format!("{pointer}/{key}"), name));
+        values.length = read("length");
+        values.width = read("width");
+        values.booking_point = read("booking_point");
+        Some(values)
     }
 
     fn position(&mut self, value: &Value, pointer: &str, name: Option<&str>) -> Option<Position> {

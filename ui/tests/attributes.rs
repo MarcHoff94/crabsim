@@ -385,7 +385,7 @@ fn drains(names: &[&str]) -> Vec<String> {
 
 #[test]
 fn a_distribution_starts_as_round_robin_and_set_nowhere_matches_it() {
-    let form = Form::for_attribute("distribution", None, &[], &drains(&["Out"]));
+    let form = Form::for_attribute("distribution", None, &[], &drains(&["Out"]), &[]);
     let choice = form.distribution.clone().unwrap();
     assert!(!choice.weighted);
     assert_eq!(form.value(), Ok(json!("round_robin")));
@@ -396,7 +396,7 @@ fn a_distribution_starts_as_round_robin_and_set_nowhere_matches_it() {
 #[test]
 fn a_weighted_distribution_reads_back_what_it_was_given_whatever_the_order_of_its_drains() {
     let given = json!({ "weighted": { "by": "interval", "order": "largest", "rank": "route", "drains": ["B", "A"] } });
-    let form = Form::for_attribute("distribution", Some(&given), &[], &drains(&["A", "B", "C"]));
+    let form = Form::for_attribute("distribution", Some(&given), &[], &drains(&["A", "B", "C"]), &[]);
     let choice = form.distribution.clone().unwrap();
     assert!(choice.weighted && choice.largest && !choice.successor);
     assert_eq!(choice.by, "interval");
@@ -407,7 +407,7 @@ fn a_weighted_distribution_reads_back_what_it_was_given_whatever_the_order_of_it
 
 #[test]
 fn choosing_weighted_waits_to_be_applied_with_every_drain_counted_by_default() {
-    let mut form = Form::for_attribute("distribution", None, &[], &drains(&["Out"]));
+    let mut form = Form::for_attribute("distribution", None, &[], &drains(&["Out"]), &[]);
     form.distribution.as_mut().unwrap().weighted = true;
     assert!(!form.matches(None));
     assert_eq!(form.value(), Ok(json!({ "weighted": { "by": "process_time", "order": "smallest", "rank": "route" } })), "none ticked counts every Drain");
@@ -416,7 +416,7 @@ fn choosing_weighted_waits_to_be_applied_with_every_drain_counted_by_default() {
 #[test]
 fn a_counted_name_that_isnt_a_drain_stays_ticked_so_saving_never_drops_it() {
     let given = json!({ "weighted": { "by": "process_time", "drains": ["Gone"] } });
-    let form = Form::for_attribute("distribution", Some(&given), &[], &drains(&["Out"]));
+    let form = Form::for_attribute("distribution", Some(&given), &[], &drains(&["Out"]), &[]);
     assert_eq!(form.distribution.unwrap().drains, vec![("Out".into(), false), ("Gone".into(), true)]);
 }
 
@@ -506,4 +506,47 @@ fn a_profiles_time_basis_goes_round_and_simulation_time_is_left_out() {
     assert_eq!(form.value().unwrap()[1]["time_basis"], "working");
     form.add_profile();
     assert!(form.value().unwrap()[2].get("time_basis").is_none(), "a new one counts simulation time");
+}
+
+// ---------- MU classes (ADR 0021) ----------
+
+#[test]
+fn an_mus_footprint_is_metres_above_0_and_its_booking_point_a_share_of_its_length() {
+    let mut length = Form::new("length", Some(&json!(0.6)));
+    assert_eq!(length.parts[0].text, "0.6");
+    length.parts[0].text = "1.2".into();
+    assert_eq!(length.value(), Ok(json!(1.2)));
+    length.parts[0].text = "0".into();
+    assert!(length.value().unwrap_err().contains("metres above 0"));
+
+    let mut point = Form::new("booking_point", Some(&json!(0.5)));
+    point.parts[0].text = "1".into();
+    assert_eq!(point.value(), Ok(json!(1.0)));
+    point.parts[0].text = "1.5".into();
+    assert!(point.value().unwrap_err().contains("0 at the front to 1 at the rear"));
+}
+
+#[test]
+fn a_sources_own_mu_values_are_those_typed_and_none_typed_is_none() {
+    let mut form = Form::new("mu_values", Some(&json!({ "width": 0.45 })));
+    assert_eq!(form.parts.iter().map(|part| part.text.as_str()).collect::<Vec<_>>(), ["", "0.45", ""]);
+    assert!(form.matches(Some(&json!({ "width": 0.45 }))));
+    form.parts[2].text = "0".into();
+    assert_eq!(form.value(), Ok(json!({ "width": 0.45, "booking_point": 0.0 })));
+    for part in &mut form.parts {
+        part.text.clear();
+    }
+    assert_eq!(form.value(), Ok(Value::Null), "nothing of its own");
+    assert_eq!(summary(&json!({ "length": 1.2, "booking_point": 0 })), "length 1.2 m, booking point 0");
+}
+
+#[test]
+fn a_sources_mu_class_is_chosen_from_the_models_mu_classes() {
+    let classes = ["MU".to_string(), "Tote".to_string()];
+    let mut form = Form::for_attribute("mu_class", Some(&json!("MU")), &[], &[], &classes);
+    assert_eq!(form.choices, classes);
+    assert!(form.matches(Some(&json!("MU"))), "the names offered aren't part of the value");
+    form.parts[0].text = "Tote".into();
+    assert_eq!(form.value(), Ok(json!("Tote")));
+    assert!(!form.matches(Some(&json!("MU"))));
 }

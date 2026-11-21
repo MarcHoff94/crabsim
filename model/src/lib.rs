@@ -51,8 +51,21 @@ pub fn start_from_name(name: &str) -> Option<StartMode> {
     [StartMode::Individual, StartMode::Batch].into_iter().find(|&start| start_name(start) == name)
 }
 
-/// The built-in classes every chain of classes ends in.
-pub const BUILT_IN_CLASSES: [&str; 4] = ["Source", "Station", "Buffer", "Drain"];
+/// The built-in classes every chain of classes ends in: the four material-flow objects, and the
+/// built-in MU class (ADR 0021).
+pub const BUILT_IN_CLASSES: [&str; 5] = ["Source", "Station", "Buffer", "Drain", BUILT_IN_MU_CLASS];
+
+/// The built-in classes of material-flow objects, which instances are made from.
+pub const BUILT_IN_OBJECT_CLASSES: [&str; 4] = ["Source", "Station", "Buffer", "Drain"];
+
+/// The built-in MU class, which every MU class derives from (ADR 0021). A Source makes MUs of it
+/// unless given another.
+pub const BUILT_IN_MU_CLASS: &str = "MU";
+
+/// "a" or "an" before a built-in class's name, as in "an MU" or "a Station".
+pub fn article(built_in: &str) -> &'static str {
+    if built_in == BUILT_IN_MU_CLASS { "an" } else { "a" }
+}
 
 /// A model, as a file holds it: valid once `load` or `check` finds no problem.
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -187,6 +200,37 @@ pub struct Attributes {
     /// How a Source or Station picks the successor for its MU (ADR 0016). Round robin by default.
     /// Inherited as a whole.
     pub distribution: Option<DistributionStrategy>,
+    /// The MU class whose MUs a Source makes (ADR 0021). The built-in MU by default.
+    pub mu_class: Option<String>,
+    /// A Source's own values for the MUs it makes, changing its MU class's. None by default.
+    /// Inherited as a whole.
+    pub mu_values: Option<MuValues>,
+    /// An MU class's footprint length along the way it travels, in metres. 0.6 by default.
+    pub length: Option<f64>,
+    /// An MU class's footprint width across the way it travels, in metres. 0.4 by default.
+    pub width: Option<f64>,
+    /// Where an MU class's booking point is, as a share of its length from its front: 0 at the
+    /// front, 1 at the rear (ADR 0023). 0.5 by default, its centre.
+    pub booking_point: Option<f64>,
+}
+
+/// A Source's own values for the MUs it makes: any of an MU class's values, each changing its
+/// MU class's when set.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct MuValues {
+    pub length: Option<f64>,
+    pub width: Option<f64>,
+    pub booking_point: Option<f64>,
+}
+
+/// What MUs with these resolved MU class values are made like, as the engine holds it.
+pub fn mu_kind(attributes: &Attributes) -> crabsim::MuKind {
+    let built_in = crabsim::MuKind::default();
+    crabsim::MuKind {
+        length: attributes.length.unwrap_or(built_in.length),
+        width: attributes.width.unwrap_or(built_in.width),
+        booking_point: attributes.booking_point.unwrap_or(built_in.booking_point),
+    }
 }
 
 /// How an object picks the successor that receives its MU (ADR 0016).
@@ -246,6 +290,11 @@ impl Attributes {
             Attribute::Description => self.description.is_some(),
             Attribute::StateNotes => self.state_notes.is_some(),
             Attribute::Distribution => self.distribution.is_some(),
+            Attribute::MuClass => self.mu_class.is_some(),
+            Attribute::MuValues => self.mu_values.is_some(),
+            Attribute::Length => self.length.is_some(),
+            Attribute::Width => self.width.is_some(),
+            Attribute::BookingPoint => self.booking_point.is_some(),
         }
     }
 
@@ -266,6 +315,11 @@ impl Attributes {
             Attribute::Description => self.description = from.description.clone(),
             Attribute::StateNotes => self.state_notes = from.state_notes.clone(),
             Attribute::Distribution => self.distribution = from.distribution.clone(),
+            Attribute::MuClass => self.mu_class = from.mu_class.clone(),
+            Attribute::MuValues => self.mu_values = from.mu_values,
+            Attribute::Length => self.length = from.length,
+            Attribute::Width => self.width = from.width,
+            Attribute::BookingPoint => self.booking_point = from.booking_point,
         }
     }
 }
@@ -287,10 +341,15 @@ pub enum Attribute {
     Description,
     StateNotes,
     Distribution,
+    MuClass,
+    MuValues,
+    Length,
+    Width,
+    BookingPoint,
 }
 
 impl Attribute {
-    pub const ALL: [Attribute; 14] = [
+    pub const ALL: [Attribute; 19] = [
         Attribute::Interval,
         Attribute::ProcessTime,
         Attribute::Failures,
@@ -305,6 +364,11 @@ impl Attribute {
         Attribute::Description,
         Attribute::StateNotes,
         Attribute::Distribution,
+        Attribute::MuClass,
+        Attribute::MuValues,
+        Attribute::Length,
+        Attribute::Width,
+        Attribute::BookingPoint,
     ];
 
     /// Its name in a file.
@@ -324,6 +388,11 @@ impl Attribute {
             Attribute::Description => "description",
             Attribute::StateNotes => "state_notes",
             Attribute::Distribution => "distribution",
+            Attribute::MuClass => "mu_class",
+            Attribute::MuValues => "mu_values",
+            Attribute::Length => "length",
+            Attribute::Width => "width",
+            Attribute::BookingPoint => "booking_point",
         }
     }
 
@@ -331,8 +400,9 @@ impl Attribute {
     pub fn applies_to(self, built_in: &str) -> bool {
         matches!(
             (built_in, self),
-            (_, Attribute::Dimensions | Attribute::Description | Attribute::StateNotes | Attribute::Failures)
-                | ("Source", Attribute::Interval | Attribute::Distribution)
+            (BUILT_IN_MU_CLASS, Attribute::Length | Attribute::Width | Attribute::BookingPoint | Attribute::Description)
+                | ("Source" | "Station" | "Buffer" | "Drain", Attribute::Dimensions | Attribute::Description | Attribute::StateNotes | Attribute::Failures)
+                | ("Source", Attribute::Interval | Attribute::Distribution | Attribute::MuClass | Attribute::MuValues)
                 | ("Station", Attribute::ProcessTime | Attribute::StartingMus | Attribute::Capacity | Attribute::Start | Attribute::Distribution)
                 | (
                     "Buffer",
@@ -596,6 +666,33 @@ impl Model {
         self.classes.iter().find(|class| class.name == name)
     }
 
+    /// Whether `name` is an MU class: the built-in MU or a class derived from it, whose chain is
+    /// sound.
+    pub fn is_mu_class(&self, name: &str) -> bool {
+        self.chain(name).is_some_and(|(_, built_in)| built_in == BUILT_IN_MU_CLASS)
+    }
+
+    /// The model's MU classes by name, the built-in MU first and then the rest in file order:
+    /// what a Source can make.
+    pub fn mu_classes(&self) -> Vec<&str> {
+        let own = self.classes.iter().filter(|class| !class.refines_built_in() && self.is_mu_class(&class.name)).map(|class| class.name.as_str());
+        std::iter::once(BUILT_IN_MU_CLASS).chain(own).collect()
+    }
+
+    /// What the MUs of the Source at `index` are made like: its MU class's values with its own
+    /// changes. `None` if it isn't a Source, or its MU class isn't one.
+    pub fn mu_kind_of(&self, index: usize) -> Option<crabsim::MuKind> {
+        let resolved = self.resolve(index).filter(|resolved| resolved.built_in == "Source")?;
+        let class = resolved.attributes.mu_class.as_deref().filter(|class| self.is_mu_class(class))?;
+        let mut values = self.resolve_class(class)?.attributes;
+        if let Some(own) = resolved.attributes.mu_values {
+            values.length = own.length.or(values.length);
+            values.width = own.width.or(values.width);
+            values.booking_point = own.booking_point.or(values.booking_point);
+        }
+        Some(mu_kind(&values))
+    }
+
     /// The connections out of the instance called `name`, by exit: the order it offers MUs on.
     pub fn connections_out(&self, name: &str) -> Vec<&Connection> {
         let mut out: Vec<&Connection> = self.connections.iter().filter(|connection| connection.from == name).collect();
@@ -695,6 +792,17 @@ impl Model {
             attributes.capacity.get_or_insert(Capacity::Unlimited);
             attributes.dwelling_time.get_or_insert(SimTime::ZERO);
             attributes.exit_strategy.get_or_insert(ExitStrategy::FirstInFirstOut);
+        }
+        if built_in == "Source" {
+            attributes.mu_class.get_or_insert_with(|| BUILT_IN_MU_CLASS.to_string());
+        }
+        if built_in == BUILT_IN_MU_CLASS {
+            let mu = crabsim::MuKind::default();
+            attributes.length.get_or_insert(mu.length);
+            attributes.width.get_or_insert(mu.width);
+            attributes.booking_point.get_or_insert(mu.booking_point);
+            // An MU is no material-flow object, so it has no size of one.
+            return Some(Resolved { built_in, attributes, origins });
         }
         let kind = match built_in {
             "Source" => ObjectKind::Source,

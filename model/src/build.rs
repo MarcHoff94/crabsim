@@ -18,7 +18,7 @@ pub(crate) fn build(model: &Model) -> ModelDescription {
             "Source" => description.add_source(attributes.interval.unwrap_or(SimTime::ZERO)),
             "Station" => {
                 let process_time = attributes.process_time.unwrap_or(SimTime::ZERO);
-                let failures = failure_profile(attributes.failures.as_ref());
+                let failures = failure_profile(attributes.failures.as_deref().and_then(<[_]>::first));
                 let starting = attributes.starting_mus.unwrap_or(0) as u32;
                 let capacity = attributes.capacity.map_or(1, crabsim::Capacity::limit);
                 if starting == 1 && capacity == 1 {
@@ -48,9 +48,9 @@ pub(crate) fn build(model: &Model) -> ModelDescription {
             "Drain" => description.add_drain(),
             other => unreachable!("checked: `{other}` is a built-in class"),
         };
-        // A Station gets its failures when it is added. Others only need them when they fail.
-        if resolved.built_in != "Station" && attributes.failures.is_some() {
-            description.set_failures(id, Some(failure_profile(attributes.failures.as_ref())));
+        // A Station gets a placeholder profile when it is added, which this list replaces.
+        if let Some(list) = attributes.failures.as_ref().filter(|list| !list.is_empty()) {
+            description.set_failure_profiles(id, list.iter().map(|failures| failure_profile(Some(failures))).collect());
         }
         description.set_name(id, instance.name.clone());
         description.set_stream(id, instance.stream.unwrap_or(index as u64));
@@ -100,7 +100,11 @@ fn failure_profile(failures: Option<&Failures>) -> FailureProfile {
                 RepairTime::Normal { mean, std } => Distribution::NORMAL { mean: millis(mean), std: millis(std) },
                 RepairTime::Erlang { mean, k } => Distribution::ERLANG { mean: millis(mean), k: k as usize },
             };
-            FailureProfile::new(failures.availability as f32, repair_time, 0)
+            let profile = FailureProfile::new(failures.availability as f32, repair_time, 0).named(failures.name.clone());
+            match failures.stream {
+                Some(stream) => profile.with_stream(stream),
+                None => profile,
+            }
         }
     }
 }

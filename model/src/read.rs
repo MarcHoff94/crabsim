@@ -296,7 +296,7 @@ impl Reader {
             let read = match key {
                 "interval" => self.time(value, &at, name).map(|time| attributes.interval = Some(time)),
                 "process_time" => self.time(value, &at, name).map(|time| attributes.process_time = Some(time)),
-                "failures" => self.failures(value, &at, name).map(|failures| attributes.failures = Some(failures)),
+                "failures" => self.failure_list(value, &at, name).map(|failures| attributes.failures = Some(failures)),
                 "starting_mus" => self.count(value, &at, name).map(|count| attributes.starting_mus = Some(count)),
                 "capacity" => self.capacity(value, &at, name).map(|capacity| attributes.capacity = Some(capacity)),
                 "start" => self.start(value, &at, name).map(|start| attributes.start = Some(start)),
@@ -512,8 +512,46 @@ impl Reader {
         Some(Dimensions { length: length?, width: width?, height: height?, rotation_degrees: rotation_degrees? })
     }
 
-    fn failures(&mut self, value: &Value, pointer: &str, name: Option<&str>) -> Option<Failures> {
-        let fields = self.object(value, pointer, name, "failures", &["availability", "repair_time"])?;
+    /// A list of named profiles, or the single object older files have, read as a list of one.
+    fn failure_list(&mut self, value: &Value, pointer: &str, name: Option<&str>) -> Option<Vec<Failures>> {
+        let Some(items) = value.as_array() else {
+            return self.failures(value, pointer, name, false).map(|failures| vec![failures]);
+        };
+        let mut all = Vec::new();
+        let mut ok = true;
+        for (index, item) in items.iter().enumerate() {
+            match self.failures(item, &format!("{pointer}/{index}"), name, true) {
+                Some(failures) => all.push(failures),
+                None => ok = false,
+            }
+        }
+        ok.then_some(all)
+    }
+
+    fn failures(&mut self, value: &Value, pointer: &str, name: Option<&str>, named: bool) -> Option<Failures> {
+        let known: &[&str] = if named { &["name", "stream", "availability", "repair_time"] } else { &["availability", "repair_time"] };
+        let fields = self.object(value, pointer, name, "failures", known)?;
+        let profile_name = if named {
+            match fields.get("name") {
+                None => {
+                    self.problem(pointer.to_owned(), name, "a failure profile needs a `name`");
+                    None
+                }
+                Some(value) => self.text(value, &format!("{pointer}/name"), name),
+            }
+        } else {
+            Some(crate::DEFAULT_FAILURES_NAME.to_owned())
+        };
+        let stream = match fields.get("stream") {
+            None => Some(None),
+            Some(stream) => match stream.as_u64() {
+                Some(stream) => Some(Some(stream)),
+                None => {
+                    self.problem(format!("{pointer}/stream"), name, format!("{stream} is not a stream: write a whole number, 0 or more"));
+                    None
+                }
+            },
+        };
         let availability = self.number(fields, "availability", pointer, name);
         let repair_time = match fields.get("repair_time") {
             None => {
@@ -522,7 +560,7 @@ impl Reader {
             }
             Some(value) => self.repair_time(value, &format!("{pointer}/repair_time"), name),
         };
-        Some(Failures { availability: availability?, repair_time: repair_time? })
+        Some(Failures { name: profile_name?, stream: stream?, availability: availability?, repair_time: repair_time? })
     }
 
     fn repair_time(&mut self, value: &Value, pointer: &str, name: Option<&str>) -> Option<RepairTime> {

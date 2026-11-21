@@ -285,24 +285,70 @@ fn a_count_field_takes_only_whole_numbers() {
 }
 
 #[test]
-fn failures_go_round_from_a_value_to_fields_and_back() {
+fn a_failure_profiles_fields_go_round_from_a_value_and_back() {
     for value in [
         json!({ "availability": 0.9, "repair_time": { "erlang": { "mean": "00:01:00", "k": 2 } } }),
         json!({ "availability": 0.75, "repair_time": { "constant": "00:02:00" } }),
         json!({ "availability": 0.99, "repair_time": { "uniform": { "min": "00:00:30", "max": "00:01:30" } } }),
         json!({ "availability": 0.8, "repair_time": { "normal": { "mean": "00:01:00", "std": "00:00:10" } } }),
     ] {
-        let form = Form::new("failures", Some(&value));
+        let form = Form::new("failure", Some(&value));
         assert_eq!(form.value(), Ok(value.clone()), "{value}");
     }
-    let mut form = Form::new("failures", Some(&json!({ "availability": 0.9, "repair_time": { "erlang": { "mean": "00:01:00", "k": 2 } } })));
+    let mut form = Form::new("failure", Some(&json!({ "availability": 0.9, "repair_time": { "erlang": { "mean": "00:01:00", "k": 2 } } })));
     assert_eq!(form.parts[0].text, "90", "availability as a percentage");
     form.set_repair(RepairKind::Constant);
     assert_eq!(form.value(), Ok(json!({ "availability": 0.9, "repair_time": { "constant": "00:01:00" } })), "what was typed stays");
-    typed(&mut form, &["100"]);
-    assert_eq!(form.value(), Ok(Value::Null), "100 % is never failing, which leaves failures out");
     typed(&mut form, &["101"]);
     assert!(form.value().unwrap_err().contains("100 for one that never fails"));
+}
+
+#[test]
+fn failures_are_a_list_of_named_profiles_each_keeping_its_stream() {
+    let list = json!([
+        { "name": "Tool wear", "stream": 0, "availability": 0.9, "repair_time": { "constant": "00:01:00" } },
+        { "name": "Jam", "stream": 3, "availability": 0.8, "repair_time": { "constant": "00:00:20" } },
+    ]);
+    let mut form = Form::new("failures", Some(&list));
+    assert_eq!(form.value(), Ok(list.clone()));
+    assert!(form.matches(Some(&list)));
+    form.add_profile();
+    let added = &form.profiles.as_ref().unwrap()[2];
+    assert_eq!((added.name.as_str(), added.stream), ("Failures", Some(4)), "a free name, and a stream after every other's");
+    assert!(!form.matches(Some(&list)), "the new one waits to be applied");
+    form.remove_profile(0);
+    let value = form.value().unwrap();
+    assert_eq!(value[0]["name"], "Jam");
+    assert_eq!(value[0]["stream"], 3, "keeps its stream when the one before it goes");
+    form.profiles.as_mut().unwrap()[1].name = "Jam".into();
+    assert!(form.value().unwrap_err().contains("two failure profiles are named \"Jam\""));
+}
+
+#[test]
+fn an_older_single_failures_object_reads_as_one_profile_named_failures() {
+    let old = json!({ "availability": 0.9, "repair_time": { "constant": "00:01:00" } });
+    let form = Form::new("failures", Some(&old));
+    assert_eq!(form.value(), Ok(json!([{ "name": "Failures", "stream": 0, "availability": 0.9, "repair_time": { "constant": "00:01:00" } }])));
+}
+
+#[test]
+fn no_failures_is_an_empty_list_which_waits_for_nothing_and_a_profile_at_100_percent_is_refused() {
+    let mut form = Form::new("failures", None);
+    assert_eq!(form.value(), Ok(json!([])));
+    assert!(form.matches(None), "untouched, it waits for nothing");
+    form.add_profile();
+    form.profiles.as_mut().unwrap()[0].form.parts[0].text = "100".into();
+    assert!(form.value().unwrap_err().contains("never fails: remove it instead"));
+}
+
+#[test]
+fn a_list_of_profiles_reads_as_one_line_naming_each() {
+    use crabsim_ui::attributes::summary;
+    let list = json!([
+        { "name": "Tool wear", "availability": 0.9, "repair_time": { "constant": "00:01:00" } },
+        { "name": "Jam", "availability": 0.8, "repair_time": { "constant": "00:00:20" } },
+    ]);
+    assert_eq!(summary(&list), "Tool wear: 90 % available, repair 00:01:00; Jam: 80 % available, repair 00:00:20");
 }
 
 #[test]
@@ -330,18 +376,6 @@ fn a_value_reads_as_one_short_line_for_a_class_shown_in_the_inspector() {
     assert_eq!(summary(&json!({ "blocked": "waits for the crane", "failed": "spindle" })), "notes on blocked, failed");
 }
 
-#[test]
-fn unset_failures_start_at_100_percent_with_a_constant_repair_which_means_never_fails() {
-    let mut form = Form::new("failures", None);
-    assert_eq!(form.repair, Some(RepairKind::Constant));
-    assert_eq!(form.parts[0].text, "100");
-    assert_eq!(form.value(), Ok(Value::Null), "100 % available is no failures at all");
-    assert!(form.matches(None), "untouched, it waits for nothing");
-    form.parts[0].text = "90".into();
-    assert_eq!(form.value(), Ok(json!({ "availability": 0.9, "repair_time": { "constant": "00:01:00" } })));
-    form.parts[0].text = "0".into();
-    assert!(form.value().is_err());
-}
 
 // ---------- Distribution ----------
 

@@ -326,3 +326,81 @@ fn an_attribute_beginning_with_what_was_typed_wins_over_others_holding_it() {
     assert_eq!(attribute("proc"), Ok(Attribute::ProcessTime));
     assert!(attribute("t").is_err(), "several begin with it, or none does and several hold it");
 }
+
+// ---------- Failure profiles (spec issue 122, PR 3) ----------
+
+fn failures_of(setup: &Setup, instance: &str) -> Value {
+    let got = setup.ok("get_attributes", json!({ "path": "line.json", "target": { "instance": instance } }));
+    got["attributes"].as_array().unwrap().iter().find(|a| a["attribute"] == "failures").unwrap().clone()
+}
+
+#[test]
+fn add_failure_gives_each_instance_named_its_own_profile_and_stream() {
+    let setup = Setup::new("add-failure");
+    setup.ok("write_model", json!({ "path": "line.json", "text": LINE }));
+    setup.ok("run_commands", json!({ "path": "line.json", "commands": "add failure \"Tool wear\" to Mill 1, Mill 2 availability 95% repair 2:00" }));
+    let done = setup.ok("run_commands", json!({ "path": "line.json", "commands": "add failure Jam to Mill 1 availability 0.9 repair 0:30" }));
+    assert_eq!(done["notes"], json!([]));
+    let mill_1 = failures_of(&setup, "Mill 1");
+    assert_eq!(mill_1["from"], "instance");
+    assert_eq!(
+        mill_1["value"],
+        json!([
+            { "name": "Tool wear", "stream": 0, "availability": 0.95, "repair_time": { "constant": "00:02:00" } },
+            { "name": "Jam", "stream": 1, "availability": 0.9, "repair_time": { "constant": "00:00:30" } },
+        ])
+    );
+    assert_eq!(failures_of(&setup, "Mill 2")["value"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn a_command_refuses_as_a_whole_when_any_instance_already_has_the_name() {
+    let setup = Setup::new("add-failure-twice");
+    setup.ok("write_model", json!({ "path": "line.json", "text": LINE }));
+    setup.ok("run_commands", json!({ "path": "line.json", "commands": "add failure Jam to Mill 2 availability 90% repair 1:00" }));
+    let before = setup.folder.read("line.json");
+    let refused = setup.err("run_commands", json!({ "path": "line.json", "commands": "add failure Jam to Mill 1, Mill 2 availability 90% repair 1:00" }));
+    assert!(refused["message"].as_str().unwrap().contains("Mill 2 already has a failure profile named \"Jam\""), "{refused}");
+    assert_eq!(setup.folder.read("line.json"), before, "Mill 1 got nothing either");
+}
+
+#[test]
+fn an_instance_inheriting_its_classs_profiles_gets_a_copy_first_and_is_told_so() {
+    let setup = Setup::new("add-failure-inherited");
+    setup.ok("write_model", json!({ "path": "line.json", "text": LINE }));
+    setup.ok("edit_model", json!({ "path": "line.json", "changes": [{ "change": "set_attribute", "target": { "class": "Mill" }, "attribute": "failures",
+        "value": [{ "name": "Wear", "availability": 0.9, "repair_time": { "constant": "1:00" } }, { "name": "Belt", "availability": 0.9, "repair_time": { "constant": "1:00" } }] }] }));
+    let done = setup.ok("run_commands", json!({ "path": "line.json", "commands": "add failure Jam to Mill 1 availability 80% repair 0:20" }));
+    assert_eq!(done["notes"], json!(["Mill 1 now has its own failures (2 copied from Mill)"]));
+    let names: Vec<Value> = failures_of(&setup, "Mill 1")["value"].as_array().unwrap().iter().map(|p| p["name"].clone()).collect();
+    assert_eq!(names, [json!("Wear"), json!("Belt"), json!("Jam")]);
+    assert_eq!(failures_of(&setup, "Mill 1")["value"][2]["stream"], 2, "after the places the copied ones have");
+    assert_eq!(failures_of(&setup, "Mill 2")["from"], "class", "the other still inherits");
+}
+
+#[test]
+fn remove_and_rename_failure_keep_the_other_profiles_streams() {
+    let setup = Setup::new("remove-rename-failure");
+    setup.ok("write_model", json!({ "path": "line.json", "text": LINE }));
+    setup.ok("run_commands", json!({ "path": "line.json", "commands": "add failure A to Mill 1 availability 90% repair 1:00; add failure B to Mill 1 availability 90% repair 1:00" }));
+    setup.ok("run_commands", json!({ "path": "line.json", "commands": "remove failure A from Mill 1; rename failure B of Mill 1 to \"Belt jam\"" }));
+    assert_eq!(failures_of(&setup, "Mill 1")["value"], json!([{ "name": "Belt jam", "stream": 1, "availability": 0.9, "repair_time": { "constant": "00:01:00" } }]));
+    let refused = setup.err("run_commands", json!({ "path": "line.json", "commands": "remove failure A from Mill 1" }));
+    assert!(refused["message"].as_str().unwrap().contains("Mill 1 has no failure profile named \"A\""), "{refused}");
+}
+
+#[test]
+fn failure_commands_take_the_selected_instance() {
+    let setup = Setup::new("failure-selected");
+    setup.ok("write_model", json!({ "path": "line.json", "text": LINE }));
+    setup.ok("run_commands", json!({ "path": "line.json", "selected": "Out", "commands": "add failure Full to $selected availability 99% repair 5:00" }));
+    assert_eq!(failures_of(&setup, "Out")["value"][0]["name"], "Full");
+}
+
+#[test]
+fn a_failure_command_written_wrongly_says_how_to_write_it() {
+    assert!(refused("add failure Jam to Mill 1 repair 1:00").contains("availability"));
+    assert!(refused("add failure Jam to Mill 1 availability 100% repair 1:00").contains("isn't an availability"));
+    assert!(refused("add failure Jam to Mill 1 availability 90% repair soon").contains("isn't a repair time"));
+    assert!(refused("rename failure Jam of Mill 1").contains("write it as rename failure"));
+}

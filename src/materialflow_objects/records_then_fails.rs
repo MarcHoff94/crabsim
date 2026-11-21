@@ -41,6 +41,7 @@ impl EventInterface for RecordsThenFails {
             contents: Vec::new(),
             process: ProcessState::Idle,
             interrupted: None,
+            failure_profiles: Vec::new(),
             interruptions: Vec::new(),
             remaining: None,
             work: Vec::new(),

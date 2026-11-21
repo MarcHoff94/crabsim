@@ -156,8 +156,9 @@ pub struct Attributes {
     pub interval: Option<SimTime>,
     /// A Station's time working on each MU. 0 by default: a dummy Station.
     pub process_time: Option<SimTime>,
-    /// Random failures, for any object. None by default: it never fails.
-    pub failures: Option<Failures>,
+    /// Named random failure profiles, for any object, independent of each other. None by default:
+    /// it never fails. The list is inherited as a whole.
+    pub failures: Option<Vec<Failures>>,
     /// How many MUs a Station or Buffer holds from Init. 0 by default, and at most its capacity.
     pub starting_mus: Option<u64>,
     /// How many MUs a Station or Buffer holds. A Station's is a whole number from 1, and 1 by
@@ -429,10 +430,19 @@ impl State {
     }
 }
 
-/// Random failures: how much of the time the object is available, and how long a repair takes.
-/// The time between failures follows from the two.
+/// The name of the only failure profile when a file's single `failures` object is read.
+pub const DEFAULT_FAILURES_NAME: &str = "Failures";
+
+/// One random failure profile: how much of the time the object is available, and how long a
+/// repair takes. The time between failures follows from the two.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Failures {
+    /// Unique among the profiles of one object.
+    pub name: String,
+    /// Its random-number stream within its object (ADR 0012), unique there. Without one, its place
+    /// in the list counts as its stream: 0 for the first, which is the object's own random numbers,
+    /// as the single profile of an older file had.
+    pub stream: Option<u64>,
     /// Strictly between 0 and 1.
     pub availability: f64,
     pub repair_time: RepairTime,

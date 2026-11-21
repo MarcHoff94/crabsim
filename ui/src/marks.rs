@@ -70,8 +70,8 @@ impl Marks {
                 self.instants = [Some(occurrence.time), self.instants[0]];
             }
             let (object, shown) = match occurrence.kind {
-                OccurrenceKind::InterruptionBegan { object_id, cause } => (object_id, (true, cause)),
-                OccurrenceKind::InterruptionEnded { object_id, cause } => (object_id, (false, cause)),
+                OccurrenceKind::InterruptionBegan { object_id, cause, .. } => (object_id, (true, cause)),
+                OccurrenceKind::InterruptionEnded { object_id, cause, .. } => (object_id, (false, cause)),
                 _ => continue,
             };
             // The view sends a command a frame or so after the instant it shows, so at speed the

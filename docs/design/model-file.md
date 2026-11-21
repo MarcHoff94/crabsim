@@ -88,7 +88,7 @@ Which attributes an instance has depends on its built-in class at the root of it
 |---|---|---|---|
 | `interval` | Source | 0, so every Source is valid when placed | A time, 0 or more |
 | `process_time` | Station | 0, a dummy Station | A time, 0 or more |
-| `failures` | Station | none: never fails | See below |
+| `failures` | any | none: never fails | See below |
 | `starting_mus` | Station, Buffer | 0 | At most its capacity, and for a Buffer at most 1,000,000: they count as entered at Init, in their order. A Station's full starting batch begins work at Init, and a part of one waits |
 | `capacity` | Station, Buffer | 1 for a Station, `"unlimited"` for a Buffer | A Station's is a whole number from 1 to 10,000: one machine working on that many MUs at once. A Buffer's is a whole number from 1, or `"unlimited"` (ADR 0019). `-1` is read as unlimited and saved as `"unlimited"`, so a Station refuses it |
 | `start` | Station | `"individual"` | `"individual"`, each MU starting on entry, or `"batch"`, work beginning once the Station is full, its entrance closed until it is empty |
@@ -103,11 +103,14 @@ Which attributes an instance has depends on its built-in class at the root of it
 - **Times** are strings in the UI's syntax, read by the same `parse_time` as the UI and the CLI: `"10"`, `"1:30"`, `"2:00:00"`, `"2d 06:00:00"`, `"0:00:12.5"`. Exact to the millisecond.
 - **A dummy Station** has a process time of 0. It takes no time, and exists so that something can happen as an MU passes, such as user code at a hook later. It can still fail, like any Station.
 - **A Source with an interval of 0** creates an MU and offers it at once. It holds one MU at a time and creates the next only once that MU has left, so it waits whenever its successor is busy.
-- **Failures:**
+- **Failures** are a list of named failure profiles, independent of each other (spec issue 122, PR 3):
   ```json
-  "failures": { "availability": 0.9, "repair_time": { "erlang": { "mean": "1:00", "k": 2 } } }
+  "failures": [
+    { "name": "Tool wear", "stream": 0, "availability": 0.9, "repair_time": { "erlang": { "mean": "1:00", "k": 2 } } },
+    { "name": "Jam", "stream": 1, "availability": 0.98, "repair_time": { "constant": "0:20" } }
+  ]
   ```
-  Availability is strictly between 0 and 1. The repair time is one of `{"constant": t}`, `{"uniform": {"min": t, "max": t}}`, `{"normal": {"mean": t, "std": t}}` or `{"erlang": {"mean": t, "k": n}}`, with its mean above 0. The time between failures is derived from the availability, as today.
+  Each name is unique within its object. Availability is strictly between 0 and 1. The repair time is one of `{"constant": t}`, `{"uniform": {"min": t, "max": t}}`, `{"normal": {"mean": t, "std": t}}` or `{"erlang": {"mean": t, "k": n}}`, with its mean above 0. The time between failures is derived from the availability. A profile's `stream` is its own within its object, unique there: with the object's random numbers it gives the profile's, so adding or removing another profile changes nothing for it, and a class's profiles fail apart in each of its instances. Without one, its place in the list counts as its stream, and stream 0 is the object's own random numbers. A single `failures` object, as older files have it, reads as a list of one named "Failures" with no stream, so it fails exactly as before, and saves as a list. The list is inherited as a whole, and an empty list says an instance never fails though its class does. At most 255 profiles.
 - **State notes** say what a state means for this class or instance, beside crabsim's own meaning of it, which the window shows in its help on an object:
   ```json
   "state_notes": { "blocked": "waits for the conveyor to clear", "failed": "the gripper needs changing" }

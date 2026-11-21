@@ -376,11 +376,11 @@ fn names_must_be_present_unique_and_without_spaces_at_either_end() {
 fn values_out_of_range_are_refused() {
     let station = |attributes: Value| file(json!([{ "name": "S", "class": "Station", "attributes": attributes }]));
     let failures = |availability: f64, repair_time: Value| station(json!({ "failures": { "availability": availability, "repair_time": repair_time } }));
-    assert_found(&failures(1.0, json!({ "constant": "1:00" })), "/instances/0/attributes/failures/availability", "above 0 and below 1");
-    assert_found(&failures(0.0, json!({ "constant": "1:00" })), "/instances/0/attributes/failures/availability", "above 0 and below 1");
-    assert_found(&failures(0.9, json!({ "constant": "0" })), "/instances/0/attributes/failures/repair_time/constant", "has to take some time");
-    assert_found(&failures(0.9, json!({ "erlang": { "mean": "1:00", "k": 0 } })), "/instances/0/attributes/failures/repair_time/erlang/k", "at least 1");
-    assert_found(&failures(0.9, json!({ "uniform": { "min": "2:00", "max": "1:00" } })), "/instances/0/attributes/failures/repair_time/uniform", "`min` can't be more than `max`");
+    assert_found(&failures(1.0, json!({ "constant": "1:00" })), "/instances/0/attributes/failures/0/availability", "above 0 and below 1");
+    assert_found(&failures(0.0, json!({ "constant": "1:00" })), "/instances/0/attributes/failures/0/availability", "above 0 and below 1");
+    assert_found(&failures(0.9, json!({ "constant": "0" })), "/instances/0/attributes/failures/0/repair_time/constant", "has to take some time");
+    assert_found(&failures(0.9, json!({ "erlang": { "mean": "1:00", "k": 0 } })), "/instances/0/attributes/failures/0/repair_time/erlang/k", "at least 1");
+    assert_found(&failures(0.9, json!({ "uniform": { "min": "2:00", "max": "1:00" } })), "/instances/0/attributes/failures/0/repair_time/uniform", "`min` can't be more than `max`");
     assert_found(&failures(0.9, json!({ "constant": "1:00", "normal": { "mean": "1:00", "std": "0" } })), "/instances/0/attributes/failures/repair_time", "exactly one of");
     assert_found(&station(json!({ "dimensions": { "length": 0, "width": 1, "height": 1 } })), "/instances/0/attributes/dimensions/length", "above 0");
     assert_found(&file(json!([{ "name": "B", "class": "Buffer", "attributes": { "capacity": 0 } }])), "/instances/0/attributes/capacity", "at least 1");
@@ -602,7 +602,7 @@ fn values_are_inherited_through_a_chain_of_classes_and_say_where_they_come_from(
     assert_eq!(a.built_in, "Station");
     assert_eq!(a.attributes.process_time, Some(secs(45)));
     assert_eq!(a.origin(Attribute::ProcessTime), &class("CNC mill"));
-    assert_eq!(a.attributes.failures.as_ref().map(|f| f.availability), Some(0.95));
+    assert_eq!(a.attributes.failures.as_ref().map(|f| f[0].availability), Some(0.95));
     assert_eq!(a.origin(Attribute::Failures), &class("Mill"));
     assert_eq!(a.attributes.description.as_deref(), Some("5-axis"));
     assert_eq!(a.attributes.starting_mus, Some(0));
@@ -688,7 +688,7 @@ fn class_problems_are_reported_with_the_class() {
             "/classes/3/parent: a class named `Station` is this model's own values for the built-in class, so it has no parent",
             "/classes/4/attributes/process_time: a Drain has no attribute `process_time`",
             "/classes/5/name: class 4 already has this name",
-            "/classes/6/attributes/failures/availability: an availability must be above 0 and below 1, not 1.5: leave out `failures` for one that never fails",
+            "/classes/6/attributes/failures/0/availability: an availability must be above 0 and below 1, not 1.5: leave out `failures` for one that never fails",
             "/classes/7/name: a name can't start or end with spaces",
             "/instances/1/class: unknown class `Machine`: its attributes weren't checked",
         ]
@@ -1140,7 +1140,7 @@ fn a_source_buffer_or_drain_can_have_failures_and_they_fail() {
         assert!(object.statistics.failures > 100, "object {} failed {} times", object.id, object.statistics.failures);
     }
     let bad = file(json!([{ "name": "Out", "class": "Drain", "attributes": { "failures": { "availability": 1.5, "repair_time": { "constant": "0:30" } } } }]));
-    assert_found(&bad, "/instances/0/attributes/failures/availability", "above 0 and below 1");
+    assert_found(&bad, "/instances/0/attributes/failures/0/availability", "above 0 and below 1");
 }
 
 #[test]
@@ -1248,4 +1248,103 @@ fn the_buffered_line_file_is_in_canonical_form_with_no_warnings() {
     let model = load(&text).unwrap();
     assert_eq!(model.save(), text);
     assert!(model.warnings().is_empty(), "{:?}", model.warnings());
+}
+
+// ---------- Failure profiles ----------
+
+fn mill_with(failures: Value) -> String {
+    file(json!([
+        { "name": "In", "class": "Source", "stream": 0, "successors": ["Mill"], "attributes": { "interval": "10" } },
+        { "name": "Mill", "class": "Station", "stream": 9, "successors": ["Out"], "attributes": { "process_time": "5", "failures": failures } },
+        { "name": "Out", "class": "Drain", "stream": 1 },
+    ]))
+}
+
+fn profile(name: &str, availability: f64, stream: Option<u64>) -> Value {
+    let mut fields = json!({ "name": name, "availability": availability, "repair_time": { "constant": "0:20" } });
+    if let Some(stream) = stream {
+        fields["stream"] = json!(stream);
+    }
+    fields
+}
+
+#[test]
+fn a_single_failures_object_reads_as_a_list_of_one_named_failures_and_saves_as_a_list() {
+    let text = mill_with(json!({ "availability": 0.8, "repair_time": { "constant": "0:20" } }));
+    let model = load(&text).unwrap();
+    let list = model.instances[1].attributes.failures.clone().unwrap();
+    assert_eq!((list.len(), list[0].name.as_str(), list[0].stream), (1, "Failures", None));
+    let saved = model.save();
+    assert!(saved.contains("\"name\": \"Failures\""), "{saved}");
+    assert_eq!(load(&saved).unwrap().instances[1].attributes.failures, Some(list));
+}
+
+#[test]
+fn a_single_profile_from_an_older_file_fails_exactly_as_the_same_profile_named_in_a_list() {
+    let old = built(&mill_with(json!({ "availability": 0.8, "repair_time": { "constant": "0:20" } })));
+    let new = built(&mill_with(json!([profile("Failures", 0.8, None)])));
+    assert_eq!(run_for(&old, 3, secs(86_400)), run_for(&new, 3, secs(86_400)));
+}
+
+#[test]
+fn profiles_are_named_uniquely_and_checked_one_by_one() {
+    assert_found(&mill_with(json!([profile("Jam", 0.9, None), profile("Jam", 0.9, None)])), "/instances/1/attributes/failures/1/name", "already a failure profile named \"Jam\"");
+    assert_found(&mill_with(json!([profile("Jam", 0.9, None), profile("Wear", 1.0, None)])), "/instances/1/attributes/failures/1/availability", "above 0 and below 1");
+    assert_found(&mill_with(json!([profile("", 0.9, None)])), "/instances/1/attributes/failures/0/name", "can't be empty");
+    assert_found(&mill_with(json!([{ "availability": 0.9, "repair_time": { "constant": "0:20" } }])), "/instances/1/attributes/failures/0", "needs a `name`");
+    assert_found(&mill_with(json!([{ "name": "A", "stream": -1, "availability": 0.9, "repair_time": { "constant": "0:20" } }])), "/instances/1/attributes/failures/0/stream", "whole number");
+}
+
+#[test]
+fn two_profiles_reach_the_run_each_failing_on_its_own_and_adding_one_leaves_the_other_alone() {
+    let wear = profile("Tool wear", 0.9, Some(21));
+    let jam = profile("Jam", 0.8, Some(22));
+    let failures_of = |list: Value| {
+        let description = built(&mill_with(list));
+        let mut run = description.build(3);
+        run.init().unwrap();
+        run.advance_to(secs(86_400)).unwrap();
+        let state = run.state();
+        state.objects.into_iter().find(|object| description.name(object.id) == Some("Mill")).unwrap().failure_profiles
+    };
+    let alone = failures_of(json!([wear.clone()]));
+    let both = failures_of(json!([wear, jam]));
+    assert_eq!(both.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), ["Tool wear", "Jam"]);
+    assert!(both[1].failures > 10, "{both:?}");
+    assert_eq!(alone[0].failures, both[0].failures, "its own stream, so another profile doesn't change when it fails");
+}
+
+#[test]
+fn a_class_hands_its_whole_list_to_its_instances() {
+    let text = json!({ "format_version": 2,
+        "classes": [{ "name": "Lathe", "parent": "Station", "attributes": { "failures": [profile("Wear", 0.9, Some(5)), profile("Jam", 0.8, Some(6))] } }],
+        "instances": [{ "name": "L1", "class": "Lathe", "stream": 0 }], "connections": [] })
+    .to_string();
+    let model = load(&text).unwrap();
+    let resolved = model.resolve(0).unwrap();
+    assert_eq!(resolved.attributes.failures.map(|list| list.len()), Some(2));
+}
+
+#[test]
+fn two_profiles_of_one_object_cant_share_a_stream_counting_a_place_as_one() {
+    assert_found(&mill_with(json!([profile("Wear", 0.9, Some(4)), profile("Jam", 0.9, Some(4))])), "/instances/1/attributes/failures/1/stream", "\"Wear\" already has stream 4");
+    assert_found(&mill_with(json!([profile("Wear", 0.9, Some(1)), profile("Jam", 0.9, None)])), "/instances/1/attributes/failures/1/stream", "already has stream 1");
+}
+
+#[test]
+fn a_classs_profiles_fail_apart_in_each_instance() {
+    let text = json!({ "format_version": 2,
+        "classes": [{ "name": "Lathe", "parent": "Station", "attributes": { "process_time": "5", "failures": [{ "name": "Jam", "stream": 3, "availability": 0.8, "repair_time": { "erlang": { "mean": "0:20", "k": 2 } } }] } }],
+        "instances": [
+            { "name": "In", "class": "Source", "stream": 0, "attributes": { "interval": "1" } },
+            { "name": "L1", "class": "Lathe", "stream": 1 }, { "name": "L2", "class": "Lathe", "stream": 2 },
+            { "name": "Out", "class": "Drain", "stream": 3 }],
+        "connections": [
+            { "from": "In", "to": "L1", "exit": 1, "entrance": 1 }, { "from": "In", "to": "L2", "exit": 2, "entrance": 1 },
+            { "from": "L1", "to": "Out", "exit": 1, "entrance": 1 }, { "from": "L2", "to": "Out", "exit": 1, "entrance": 2 }] })
+    .to_string();
+    let description = built(&text);
+    let (_, state) = run_for(&description, 5, secs(86_400));
+    let jam = |name: &str| state.objects.iter().find(|object| description.name(object.id) == Some(name)).unwrap().failure_profiles[0].clone();
+    assert_ne!(jam("L1").time_failed, jam("L2").time_failed, "each instance's own stream");
 }

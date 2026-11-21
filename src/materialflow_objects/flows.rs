@@ -22,28 +22,62 @@ pub struct BaseObject{
 	pub object_id: u32,
 	pub random_seed: u64,
 }
+/// The name of an object's only failure profile when none is given: what a model file's single
+/// `failures` object is called.
+pub const DEFAULT_FAILURE_NAME: &str = "Failures";
+
 #[derive(Clone)]
 pub struct FailureProfile {
+	/// Unique within its object.
+	pub name: String,
+	/// The profile's random-number stream within its object (ADR 0012): with the object's seed it
+	/// gives the profile's failures, so adding or removing another profile changes nothing here.
+	/// `None` is its place in the list, and stream 0 is the object's own seed, which is what a single
+	/// profile from an older file had, so its failures don't change.
+	pub stream: Option<u64>,
 	pub active: bool,
 	pub availablity: f32,
 	pub mtbf: SimTime,
 	pub dist_sampler_mttr: DistributionSampler,
 	pub dist_sampler_mtbf: DistributionSampler,
 	pub seed: u64,
+	/// Since when this profile has been failing, if it is.
+	pub failing_since: Option<SimTime>,
+	/// How long it has failed since statistics began, not counting a failure in progress.
+	pub time_failed: SimTime,
+	/// How many failures began since statistics began.
+	pub failures: u64,
 }
 impl FailureProfile {
 	pub fn new(availablity: f32, distribution_mttr: Distribution, seed: u64) -> FailureProfile {
 		let placeholder = distribution_mttr.with_mean(0.0);
 		let mut result = FailureProfile {
+			name: DEFAULT_FAILURE_NAME.to_string(),
+			stream: None,
 			active: false,
 			availablity,
 			mtbf: SimTime::ZERO,
 			dist_sampler_mttr: DistributionSampler::new(distribution_mttr, seed),
 			dist_sampler_mtbf: DistributionSampler::new(placeholder, seed.wrapping_add(1)),
 			seed,
+			failing_since: None,
+			time_failed: SimTime::ZERO,
+			failures: 0,
 		};
 		result.set_availability(availablity);
 		result
+	}
+	pub fn named(mut self, name: impl Into<String>) -> FailureProfile {
+		self.name = name.into();
+		self
+	}
+	pub fn with_stream(mut self, stream: u64) -> FailureProfile {
+		self.stream = Some(stream);
+		self
+	}
+	/// How long it has failed by `now`, a failure in progress included.
+	pub fn failed_by(&self, now: SimTime) -> SimTime {
+		self.time_failed + self.failing_since.map_or(SimTime::ZERO, |since| now.saturating_sub(since))
 	}
 	pub fn get_time_to_next_failure(&mut self) -> Result<Option<SimTime>,MaterialflowError> {
 		if self.active == false {

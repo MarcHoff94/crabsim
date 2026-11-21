@@ -1,6 +1,7 @@
 //! What a simulation run reports: occurrences and state. Views and tests consume
 //! these instead of reaching into material-flow objects or engine events.
 
+use crate::event::ProfileIndex;
 use crate::flows::ProcessState;
 use crate::statistics::{FillStatistics, MeasuringPeriods, ObjectStatistics};
 use crate::time::SimTime;
@@ -27,8 +28,9 @@ pub enum OccurrenceKind {
     Unblocked { object_id: u32 },
     /// A failure, stop or pause began. The object is interrupted while any interruption is active, so
     /// overlapping ones are one stop.
-    InterruptionBegan { object_id: u32, cause: Interruption },
-    InterruptionEnded { object_id: u32, cause: Interruption },
+    /// `profile` is the failure profile's index in the object's list, for a random failure.
+    InterruptionBegan { object_id: u32, cause: Interruption, profile: Option<ProfileIndex> },
+    InterruptionEnded { object_id: u32, cause: Interruption, profile: Option<ProfileIndex> },
 }
 
 /// The kinds of occurrence, for choosing which to record.
@@ -145,6 +147,22 @@ pub struct WorkLeft {
     pub left: SimTime,
 }
 
+/// What an object reports about one of its failure profiles.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FailureProfileState {
+    /// Its place in the object's list, which failure events and occurrences name it by. Profiles
+    /// that never fail (100% available) are left out, so this can skip numbers.
+    pub index: u8,
+    pub name: String,
+    pub availability: f32,
+    /// How many failures of this profile began since statistics began.
+    pub failures: u64,
+    /// How long it has failed since statistics began, a failure in progress included.
+    pub time_failed: SimTime,
+    /// Since when it has been failing, if it is.
+    pub failing_since: Option<SimTime>,
+}
+
 /// What one material-flow object reports about itself.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ObjectState {
@@ -175,6 +193,9 @@ pub struct ObjectState {
     /// The process time in the Station's default state, which Reset returns to.
     pub configured_process_time: Option<SimTime>,
     pub statistics: ObjectStatistics,
+    /// Each failure profile's figures, in the order of the object's list. Empty for an object with
+    /// none, which then allocates nothing for it.
+    pub failure_profiles: Vec<FailureProfileState>,
     /// How full a Buffer was: the fewest MUs it held and its histogram. `None` for other objects,
     /// which then allocate nothing for it.
     pub fill: Option<Box<FillStatistics>>,

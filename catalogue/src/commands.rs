@@ -20,9 +20,9 @@ pub(crate) fn entries() -> Vec<Entry> {
 }
 
 /// Every command's first words, for completing them.
-pub const VERBS: [&str; 17] = [
+pub const VERBS: [&str; 20] = [
     "add", "connect", "disconnect", "rename", "remove", "set", "restore", "move", "derive", "class rename", "class duplicate",
-    "class remove", "make class", "goto", "speed", "seed", "open",
+    "class remove", "make class", "add failure", "remove failure", "rename failure", "goto", "speed", "seed", "open",
 ];
 
 /// What a line asks for: changes to the model, or one thing for the window.
@@ -58,6 +58,9 @@ pub struct Planned {
     pub placed: Option<String>,
     /// Whether it removes an instance or a class, which the window asks about first.
     pub removes: bool,
+    /// What it did beyond what it says, for the person who typed it, such as an instance getting
+    /// its own copy of its class's failure profiles.
+    pub notes: Vec<String>,
 }
 
 /// A command for the window rather than the model.
@@ -85,6 +88,9 @@ pub struct Context {
 struct Names {
     instances: Vec<Placed>,
     classes: Vec<String>,
+    /// Each instance's failure profiles as the line has set them so far, as a model file writes
+    /// them.
+    failures: std::collections::HashMap<String, Vec<Value>>,
 }
 
 #[derive(Clone)]
@@ -109,7 +115,7 @@ impl Names {
             .collect();
         let mut classes: Vec<String> = BUILT_IN_CLASSES.iter().map(|name| name.to_string()).collect();
         classes.extend(model.classes.iter().filter(|class| !class.refines_built_in()).map(|class| class.name.clone()));
-        Names { instances, classes }
+        Names { instances, classes, failures: std::collections::HashMap::new() }
     }
 
     fn instance(&self, wanted: &str) -> Result<String, String> {
@@ -408,7 +414,21 @@ fn read_command(command: &str, model: &Model, context: &Context, names: &mut Nam
         Some((verb, rest)) => (verb.to_string(), rest.trim()),
         None => (command.to_string(), ""),
     };
-    let planned = |changes: Vec<Value>| Planned { command: command.to_string(), changes, placed: None, removes: false };
+    let planned = |changes: Vec<Value>| Planned { command: command.to_string(), changes, placed: None, removes: false, notes: Vec::new() };
+    if let Some((what, rest)) = command.split_once(' ')
+        && matches!(what, "add" | "remove" | "rename")
+        && let Some(rest) = rest.trim_start().strip_prefix("failure ")
+    {
+        // `$selected` stands for the instance selected, as in a macro, which may be several by
+        // name in the window.
+        let rest = match (&context.selected, rest.contains("$selected")) {
+            (Some(selected), true) => rest.replace("$selected", selected),
+            (None, true) => return Err("$selected is the instance selected, and none is".to_string()),
+            _ => rest.to_string(),
+        };
+        let (changes, notes) = failure_command(what, rest.trim(), model, names)?;
+        return Ok(Planned { notes, removes: what == "remove", ..planned(changes) });
+    }
     let split = |text: &str, word: &str| -> Result<(String, String), String> {
         text.split_once(&format!(" {word} "))
             .map(|(left, right)| (left.trim().to_string(), right.trim().to_string()))
@@ -538,6 +558,144 @@ fn read_command(command: &str, model: &Model, context: &Context, names: &mut Nam
     }
 }
 
+/// A failure profile's name at the start of `text`, in quotes or as one word, and what follows.
+fn profile_name(text: &str) -> Result<(String, &str), String> {
+    let text = text.trim_start();
+    if let Some(quoted) = text.strip_prefix('"') {
+        let (name, rest) = quoted.split_once('"').ok_or("a name in quotes needs its closing quote")?;
+        if name.trim().is_empty() {
+            return Err("a failure profile needs a name".to_string());
+        }
+        return Ok((name.to_string(), rest));
+    }
+    let (name, rest) = text.split_once(' ').unwrap_or((text, ""));
+    if name.is_empty() {
+        return Err("which failure profile? Give its name, in quotes if it has spaces".to_string());
+    }
+    Ok((name.to_string(), rest))
+}
+
+/// Instances named in a comma-separated list.
+fn instance_list(text: &str, names: &Names) -> Result<Vec<String>, String> {
+    let mut found = Vec::new();
+    for wanted in text.split(',').map(str::trim) {
+        let name = names.instance(wanted)?;
+        if !found.contains(&name) {
+            found.push(name);
+        }
+    }
+    Ok(found)
+}
+
+/// An instance's failure profiles as the line has them so far, and, if it inherits them, the
+/// class it does from.
+fn failures_of(model: &Model, names: &Names, instance: &str) -> (Vec<Value>, Option<String>) {
+    if let Some(list) = names.failures.get(instance) {
+        return (list.clone(), None);
+    }
+    let Some(index) = model.instances.iter().position(|candidate| candidate.name == instance) else { return (Vec::new(), None) };
+    let Some(resolved) = model.resolve(index) else { return (Vec::new(), None) };
+    let as_json = |attributes: crabsim_model::Attributes| attributes.to_json()["failures"].as_array().cloned().unwrap_or_default();
+    let list = as_json(crabsim_model::Attributes { failures: resolved.attributes.failures.clone(), ..Default::default() });
+    match resolved.origin(Attribute::Failures) {
+        crabsim_model::Origin::Class(class) if !list.is_empty() => (list, Some(class.clone())),
+        _ => (list, None),
+    }
+}
+
+/// A profile's stream within its object, or its place in the list.
+fn stream_of(profile: &Value, place: usize) -> u64 {
+    profile["stream"].as_u64().unwrap_or(place as u64)
+}
+
+/// `add failure "Jam" to A, B availability 95% repair 2:00`, `remove failure "Jam" from A, B` and
+/// `rename failure "Jam" of A, B to "Belt jam"`: each instance named gets its whole list set, so a
+/// class's list it inherited is copied to it first.
+fn failure_command(what: &str, rest: &str, model: &Model, names: &mut Names) -> Result<(Vec<Value>, Vec<String>), String> {
+    let (profile, rest) = profile_name(rest)?;
+    let rest = rest.trim();
+    let mut changes = Vec::new();
+    let mut notes = Vec::new();
+    let (instances, change): (Vec<String>, Box<dyn Fn(&str, &mut Vec<Value>) -> Result<(), String>>) = match what {
+        "add" => {
+            let rest = rest.strip_prefix("to ").ok_or("write it as add failure \"Jam\" to Station 3 availability 95% repair 2:00")?;
+            let (targets, values) = rest.split_once(" availability ").ok_or("give its availability, such as availability 95%")?;
+            let (availability, repair) = values.split_once(" repair ").ok_or("give its repair time, such as repair 2:00")?;
+            let availability = availability.trim();
+            let share = match availability.strip_suffix('%') {
+                Some(percent) => percent.trim().parse::<f64>().ok().map(|percent| percent / 100.0),
+                None => availability.parse::<f64>().ok(),
+            }
+            .filter(|share| *share > 0.0 && *share < 1.0)
+            .ok_or_else(|| format!("`{availability}` isn't an availability: type one above 0% and below 100%, such as 95%"))?;
+            let repair = repair.trim();
+            let time = parse_time(repair).filter(|time| *time > SimTime::ZERO).ok_or_else(|| format!("`{repair}` isn't a repair time: type one such as 2:00"))?;
+            let repair = crabsim::time::format_time_exact(time);
+            let profile = profile.clone();
+            (
+                instance_list(targets, names)?,
+                Box::new(move |instance: &str, list: &mut Vec<Value>| {
+                    if list.iter().any(|existing| existing["name"] == profile.as_str()) {
+                        return Err(format!("{instance} already has a failure profile named \"{profile}\""));
+                    }
+                    let stream = list.iter().enumerate().map(|(place, existing)| stream_of(existing, place) + 1).max().unwrap_or(0);
+                    list.push(json!({ "name": profile, "stream": stream, "availability": share, "repair_time": { "constant": repair } }));
+                    Ok(())
+                }),
+            )
+        }
+        "remove" => {
+            let targets = rest.strip_prefix("from ").ok_or("write it as remove failure \"Jam\" from Station 3")?;
+            let profile = profile.clone();
+            (
+                instance_list(targets, names)?,
+                Box::new(move |instance: &str, list: &mut Vec<Value>| {
+                    let place = list.iter().position(|existing| existing["name"] == profile.as_str()).ok_or_else(|| format!("{instance} has no failure profile named \"{profile}\""))?;
+                    // The others keep their streams, so their failures stay as they were.
+                    for (at, existing) in list.iter_mut().enumerate() {
+                        if existing.get("stream").is_none() {
+                            existing["stream"] = json!(at);
+                        }
+                    }
+                    list.remove(place);
+                    Ok(())
+                }),
+            )
+        }
+        _ => {
+            let rest = rest.strip_prefix("of ").ok_or("write it as rename failure \"Jam\" of Station 3 to \"Belt jam\"")?;
+            let (targets, to) = rest.rsplit_once(" to ").ok_or("write it as rename failure \"Jam\" of Station 3 to \"Belt jam\"")?;
+            let (to, after) = profile_name(to)?;
+            if !after.trim().is_empty() {
+                return Err(format!("`{}` follows the new name: put a name with spaces in quotes", after.trim()));
+            }
+            let profile = profile.clone();
+            (
+                instance_list(targets, names)?,
+                Box::new(move |instance: &str, list: &mut Vec<Value>| {
+                    if list.iter().any(|existing| existing["name"] == to.as_str()) {
+                        return Err(format!("{instance} already has a failure profile named \"{to}\""));
+                    }
+                    let existing = list.iter_mut().find(|existing| existing["name"] == profile.as_str()).ok_or_else(|| format!("{instance} has no failure profile named \"{profile}\""))?;
+                    existing["name"] = json!(to);
+                    Ok(())
+                }),
+            )
+        }
+    };
+    for instance in instances {
+        let (mut list, inherited_from) = failures_of(model, names, &instance);
+        let copied = list.len();
+        change(&instance, &mut list)?;
+        if let Some(class) = inherited_from {
+            notes.push(format!("{instance} now has its own failures ({copied} copied from {class})"));
+        }
+        changes.push(json!({ "change": "set_attribute", "target": { "instance": instance }, "attribute": "failures", "value": list }));
+        names.failures.insert(instance, list);
+    }
+    Ok((changes, notes))
+}
+
 /// `Station 3.process_time 0:45` as the instance (or else class) it names, the attribute, and
 /// what follows. The name may hold spaces and dots, so each dot is tried until one is followed
 /// by an attribute and preceded by a name.
@@ -652,6 +810,9 @@ pub struct RunCommandsOutput {
     pub commands: usize,
     /// The instances `add` placed, in order.
     pub placed: Vec<String>,
+    /// What the commands did beyond what they say, such as an instance getting its own copy of
+    /// the failure profiles it inherited.
+    pub notes: Vec<String>,
     /// What the commands removed beyond what they named, such as a removed instance's
     /// connections.
     pub also_removed: crate::edit::AlsoRemoved,
@@ -659,7 +820,7 @@ pub struct RunCommandsOutput {
 
 impl Operation for RunCommands {
     const NAME: &'static str = "run_commands";
-    const DESCRIPTION: &'static str = "Changes a model file with a line of commands in people's words, the same language as the window's : line, applied as one edit_model batch, all or nothing. Commands are separated by ; and are: add <class> [as <name>] [at <x> <y>] (placed beside `selected` or the instance added before it in the line, its length plus 2 m to the right, else at `at`; a new Station's process time starts at 10 s as in the window); connect <a> > <b>; disconnect <a> > <b>; rename <a> to <b>; remove <a> (with its connections); set <name>.<attribute> <value> (on an instance, or else a class, a value written as in a model file, such as 0:45); restore <name>.<attribute>; move <a> to <x> <y> or by <dx> <dy> (metres); derive <class> as <name>; class rename <a> to <b>; class duplicate <a> as <b>; class remove <a> (with what depends on it); make class <name> from <instance>. Names are matched exactly, or by a part only one name holds, ignoring case, and attributes by part of their name, such as proc for process_time. A command that can't apply refuses the line naming it by place, such as 3rd command. goto, speed, seed, open and validate are for the window: use start_run, read_model or validate_model instead. An agent needs its claim, as for edit_model.";
+    const DESCRIPTION: &'static str = "Changes a model file with a line of commands in people's words, the same language as the window's : line, applied as one edit_model batch, all or nothing. Commands are separated by ; and are: add <class> [as <name>] [at <x> <y>] (placed beside `selected` or the instance added before it in the line, its length plus 2 m to the right, else at `at`; a new Station's process time starts at 10 s as in the window); connect <a> > <b>; disconnect <a> > <b>; rename <a> to <b>; remove <a> (with its connections); set <name>.<attribute> <value> (on an instance, or else a class, a value written as in a model file, such as 0:45); restore <name>.<attribute>; move <a> to <x> <y> or by <dx> <dy> (metres); derive <class> as <name>; class rename <a> to <b>; class duplicate <a> as <b>; class remove <a> (with what depends on it); make class <name> from <instance>; add failure <profile> to <a>[, <b>…] availability <95%> repair <2:00> (a constant repair time; each instance gets its own copy, with a stream of its own, and one inheriting its class's profiles gets a copy of them first, said in notes); remove failure <profile> from <a>[, <b>…]; rename failure <profile> of <a>[, <b>…] to <name> (a profile's name in quotes if it has spaces). Names are matched exactly, or by a part only one name holds, ignoring case, and attributes by part of their name, such as proc for process_time. A command that can't apply refuses the line naming it by place, such as 3rd command. goto, speed, seed, open and validate are for the window: use start_run, read_model or validate_model instead. An agent needs its claim, as for edit_model.";
     const EFFECT: Effect = Effect::Destructive;
     const CHANGES_MODELS: bool = true;
     type Input = RunCommandsInput;
@@ -683,7 +844,7 @@ impl Operation for RunCommands {
                     }
                     MacroCommand::Keep { .. } => return Err(OperationError::invalid_input("keeping a macro is the user's own: ask the user to keep it")),
                 }
-                return Ok(RunCommandsOutput { path: input.path, file_hash: crate::edit::hash(&text), commands: 1, placed: Vec::new(), also_removed: Default::default() });
+                return Ok(RunCommandsOutput { path: input.path, file_hash: crate::edit::hash(&text), commands: 1, placed: Vec::new(), notes: Vec::new(), also_removed: Default::default() });
             }
             Parsed::Sequence(_) => {
                 return Err(OperationError::invalid_input("that macro also holds commands for the window, such as goto: run its model changes alone, or the macro in the window"));
@@ -721,6 +882,7 @@ impl Operation for RunCommands {
             file_hash: edited.file_hash,
             commands: planned.len(),
             placed: planned.iter().filter_map(|command| command.placed.clone()).collect(),
+            notes: planned.iter().flat_map(|command| command.notes.clone()).collect(),
             also_removed: edited.also_removed,
         })
     }

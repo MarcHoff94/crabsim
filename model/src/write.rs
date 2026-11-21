@@ -92,7 +92,7 @@ pub(crate) fn attributes(attributes: &Attributes) -> Value {
         fields.insert("process_time".into(), time(process_time));
     }
     if let Some(failures) = &attributes.failures {
-        fields.insert("failures".into(), self::failures(failures));
+        fields.insert("failures".into(), Value::Array(failures.iter().map(self::failures).collect()));
     }
     if let Some(count) = attributes.starting_mus {
         fields.insert("starting_mus".into(), json!(count));
@@ -172,5 +172,12 @@ fn failures(failures: &Failures) -> Value {
         RepairTime::Normal { mean, std } => json!({ "normal": { "mean": time(mean), "std": time(std) } }),
         RepairTime::Erlang { mean, k } => json!({ "erlang": { "mean": time(mean), "k": k } }),
     };
-    json!({ "availability": failures.availability, "repair_time": repair_time })
+    let mut fields = Map::new();
+    fields.insert("name".into(), json!(failures.name));
+    if let Some(stream) = failures.stream {
+        fields.insert("stream".into(), json!(stream));
+    }
+    fields.insert("availability".into(), json!(failures.availability));
+    fields.insert("repair_time".into(), repair_time);
+    Value::Object(fields)
 }

@@ -82,6 +82,9 @@ impl EventContext {
     }
 }
 
+/// Which of an object's failure profiles an event is about.
+pub type ProfileIndex = u8;
+
 #[derive(Debug, Clone)]
 pub enum EventType {
     MUEntrance,
@@ -89,8 +92,9 @@ pub enum EventType {
     /// A successor has room: `from` is that successor, which the predecessor may now try.
     BlockedRetry { from: u32 },
     Finished,
-    StartFailure,
-    EndFailure,
+    /// A random failure of the object's failure profile at this index begins, or ends.
+    StartFailure(ProfileIndex),
+    EndFailure(ProfileIndex),
     PauseOn,
     PauseOff,
     /// Someone stops a Station by hand, or ends that.

@@ -123,7 +123,7 @@ pub struct AttributesFile {
     /// Station: the time it works on each MU. 0 by default, a dummy Station that takes no time.
     pub process_time: Option<Time>,
     /// Any object: random failures. Left out, it never fails.
-    pub failures: Option<FailuresFile>,
+    pub failures: Option<FailuresValue>,
     /// Station, Buffer: how many MUs it holds from the start of a run, at most its capacity, in
     /// the order they count as having entered. 0 by default.
     pub starting_mus: Option<u64>,
@@ -291,6 +291,31 @@ pub struct StateNotesFile {
     /// Any object.
     #[schemars(length(min = 1))]
     pub paused: Option<String>,
+}
+
+/// Failure profiles: a list of named ones, which are independent of each other, or, as older files
+/// have it, a single unnamed one, read as a list of one named "Failures".
+#[derive(JsonSchema)]
+#[serde(untagged)]
+pub enum FailuresValue {
+    List(Vec<FailureProfileFile>),
+    One(FailuresFile),
+}
+
+/// One named failure profile.
+#[derive(JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FailureProfileFile {
+    /// Unique among the object's profiles.
+    #[schemars(length(min = 1))]
+    pub name: String,
+    /// Its random-number stream within the object, 0 or more, unique there. Without one, its place
+    /// in the list from 0.
+    pub stream: Option<u64>,
+    /// The share of time available, above 0 and below 1.
+    #[schemars(extend("exclusiveMinimum" = 0, "exclusiveMaximum" = 1))]
+    pub availability: f64,
+    pub repair_time: RepairTimeFile,
 }
 
 /// Random failures. The time between failures follows from the availability and the repair time.

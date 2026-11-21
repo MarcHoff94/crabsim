@@ -101,7 +101,13 @@ fn attribute_properties(attributes: &Attributes, has: impl Fn(Attribute) -> bool
     if let Some(time) = attributes.process_time.filter(|_| has(Attribute::ProcessTime)) {
         properties.push(("process_time_s", seconds(time)));
     }
-    if let Some(failures) = attributes.failures.as_ref().filter(|_| has(Attribute::Failures)) {
+    // The first failure profile keeps the property names of the single one every object had; the
+    // others, which a graph tool rarely needs apart, go into one text property.
+    if let Some(failures) = attributes.failures.as_ref().and_then(|list| list.first()).filter(|_| has(Attribute::Failures)) {
+        if let Some(list) = attributes.failures.as_ref().filter(|list| list.len() > 1) {
+            let names: Vec<String> = list.iter().map(|profile| format!("{} ({})", profile.name, profile.availability)).collect();
+            properties.push(("failure_profiles", Value::Text(names.join(", "))));
+        }
         properties.push(("availability", Value::Double(failures.availability)));
         let (distribution, parameters): (&str, Properties) = match failures.repair_time {
             RepairTime::Constant(time) => ("constant", vec![("repair_time_s", seconds(time))]),

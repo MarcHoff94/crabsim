@@ -648,6 +648,7 @@ impl Operation for ForgetRun {
         transaction.execute("DELETE FROM observations WHERE run = ?1", [&input.run])?;
         transaction.execute("DELETE FROM statistics WHERE run = ?1", [&input.run])?;
         transaction.execute("DELETE FROM histograms WHERE run = ?1", [&input.run])?;
+        transaction.execute("DELETE FROM failure_profiles WHERE run = ?1", [&input.run])?;
         transaction.commit()?;
         Ok(ForgetRunOutput { forgotten: input.run })
     }

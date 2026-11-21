@@ -2191,6 +2191,12 @@ fn several_view(
         if view.attribute == "state_notes" {
             continue;
         }
+        if view.attribute == "failures" {
+            ui.add_space(4.0);
+            ui.label(egui::RichText::new(attribute_label(&view.attribute)).strong());
+            ui.label(egui::RichText::new("Change each one's failure profiles in its own window, or all at once with add failure on the : line.").weak());
+            continue;
+        }
         ui.add_space(4.0);
         ui.label(egui::RichText::new(attribute_label(&view.attribute)).strong());
         let mut commit = false;
@@ -3366,6 +3372,11 @@ fn object_window_contents(
                 grid.label(value);
                 grid.end_row();
             }
+            for (name, value) in inspection.failure_profile_rows() {
+                grid.label(name).on_hover_text("A failure profile: its failures, and the share of the time it was failing, overlaps with others included");
+                grid.label(value);
+                grid.end_row();
+            }
         });
         if let Some(fill) = &details.fill {
             fill_histogram(section, fill);
@@ -4107,6 +4118,56 @@ fn attribute_label(attribute: &str) -> &str {
     }
 }
 
+/// The failure profiles' fields: each one's name, how its repair time is spread and its values,
+/// with Remove, and Add a profile after them. Returns whether to apply them now, as when a field
+/// is left or a profile removed.
+fn profile_fields(ui: &mut egui::Ui, form: &mut Form, salt: &str) -> bool {
+    let mut commit = false;
+    let mut remove = None;
+    let profiles = form.profiles.as_mut().expect("a failures form has profiles");
+    if profiles.is_empty() {
+        ui.label(egui::RichText::new("None: it never fails.").weak());
+    }
+    for (place, profile) in profiles.iter_mut().enumerate() {
+        ui.push_id((salt, place), |ui| {
+            ui.horizontal(|row| {
+                let field = row.add(egui::TextEdit::singleline(&mut profile.name).hint_text("name").desired_width(140.0)).on_hover_text("The failure profile's name, its own among this object's");
+                if place == 0 {
+                    focus_if_wanted(row, &field, salt);
+                }
+                commit |= field.lost_focus();
+                if row.small_button("Remove").on_hover_text("Take this failure profile out. The others keep their random numbers").clicked() {
+                    remove = Some(place);
+                }
+            });
+            let kind = profile.form.repair.unwrap_or(RepairKind::Constant);
+            egui::ComboBox::from_id_salt(("repair", salt, place)).selected_text(kind.name()).show_ui(ui, |menu| {
+                for choice in RepairKind::ALL {
+                    if menu.selectable_label(kind == choice, choice.name()).clicked() && kind != choice {
+                        profile.form.set_repair(choice);
+                    }
+                }
+            });
+            egui::Grid::new(("profile", salt, place)).num_columns(2).spacing([8.0, 2.0]).show(ui, |grid| {
+                for part in profile.form.parts.iter_mut().filter(|part| !part.label.is_empty()) {
+                    grid.label(part.label);
+                    commit |= grid.add(egui::TextEdit::singleline(&mut part.text).desired_width(120.0)).lost_focus();
+                    grid.end_row();
+                }
+            });
+        });
+        ui.add_space(4.0);
+    }
+    if let Some(place) = remove {
+        form.remove_profile(place);
+        commit = true;
+    }
+    if ui.small_button("Add a profile").on_hover_text("Another independent cause of failures, with its own availability, repair time and random numbers").clicked() {
+        form.add_profile();
+    }
+    commit
+}
+
 /// Every attribute of the selected instance, its value and where it comes from. Before Init or
 /// after Reset each can be changed, saved to the model file, and each set on the instance can be
 /// restored on its own. During a run, when they aren't `editable`, one line says when they can
@@ -4160,6 +4221,10 @@ fn attributes_section(
         let Some(form) = forms.get_mut(&view.attribute) else { continue };
         let mut commit = false;
         ui.scope(|fields| {
+            if form.profiles.is_some() {
+                commit |= profile_fields(fields, form, &format!("{salt}{}", view.attribute));
+                return;
+            }
             if let Some(choice) = form.distribution.as_mut() {
                 distribution_fields(fields, choice, &format!("{salt}{}", view.attribute));
                 return;

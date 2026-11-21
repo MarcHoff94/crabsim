@@ -322,6 +322,7 @@ impl EventInterface for SingleStation {
 	}
 	fn clear_statistics(&mut self, now: SimTime) {
 		self.statistics.clear(now);
+		self.interruptions.clear_statistics(now);
 	}
 	fn report(&self, now: SimTime) -> ObjectState {
 		let remaining = match self.finish {
@@ -336,6 +337,7 @@ impl EventInterface for SingleStation {
 			process: self.state.clone(),
 			interrupted: self.interruptions.most_serious(),
 			interruptions: self.interruptions.list(),
+			failure_profiles: self.interruptions.profile_states(now),
 			remaining,
 			work: self.content.iter().zip(remaining).map(|(mu, left)| WorkLeft { mu_id: mu.id, left }).collect(),
 			blocked_predecessors: waiting_ids(&self.blockedlist),

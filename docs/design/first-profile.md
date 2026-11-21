@@ -330,9 +330,24 @@ The ADR has to answer one thing this measurement can't: an `enum` closes the set
 **In step 3 or next to it, whichever way storage goes:**
 
 - ~~Remove the `order` `Vec`.~~ Done, and it measured about what the removal above predicted. See "After removing the `order` `Vec`".
-- Replace the new-events `Vec`. An output buffer the run reuses should beat the inline list measured here.
+- ~~Replace the new-events `Vec`.~~ Done on 2026-11-21: see "Without a `Vec` per event".
 - ~~Shrink the queue entry when the millisecond time type goes in.~~ Done: it is 32 bytes.
 - Leave the `log` calls alone.
 - Step 4's switch for recording is worth 6 to 8% of speed, and far more in memory.
 
 Show before and after numbers from `cargo bench --bench reference`, and check that the events and MUs left don't change unless behaviour is meant to. The millisecond type is expected to change them slightly.
+
+## Without a `Vec` per event (2026-11-21)
+
+An object's event handler returned what it scheduled as a freshly allocated `Option<Vec<EventTemplate>>`, which the run copied into its queue and freed. Objects now call `EventContext::schedule`, into one list the run moves into its queue after each event and hands back emptied, keeping its memory. Every handler schedules in the order its list had, so ties in the queue are unchanged: occurrences and state of the demo and the buffered line, plain and with every Station general, on seeds 0, 7 and 123 over 20 days, with and without pauses and stops, hashed identical to `master`.
+
+Measured on the first PC, master's benchmark binary and the new one alternating, six rounds of 5 repetitions per scenario. The first three rounds were disturbed by something else on the machine (master's demo between 5.65M and 8.67M events/s), so the table gives the means of the last three, in which every round agrees:
+
+| Scenario | `master` | Without the `Vec` | Change | Allocations per event |
+|---|---|---|---|---|
+| `demo-headless` | 8.84M/s | 12.83M/s | +45% | 0.62 to 0.00 |
+| `large-headless` | 5.06M/s | 6.24M/s | +23% | 0.62 to 0.00 |
+| `buffered-headless` | 7.49M/s | 11.01M/s | +47% | 0.77 to 0.00 |
+| `demo-dropped` | 8.12M/s | 11.52M/s | +42% | 0.63 to 0.01 |
+
+The new binary was faster in all 12 pairs of those rounds, and in 22 of all 24. The gain is far larger than the 10 to 20% expected from an allocation and a free of about 20 to 40 ns each against an event of about 113 ns, so Windows' default allocator costs more than that here. The large model gains least, as before, because more of its time goes to memory than to the allocator.

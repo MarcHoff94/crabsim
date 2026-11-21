@@ -29,7 +29,7 @@ impl EventInterface for RecordsThenFails {
         context: &mut EventContext,
         _eventtype: &EventType,
         _others: &mut OtherObjects<'_>,
-    ) -> Result<Option<Vec<EventTemplate>>, RunTimeError> {
+    ) -> Result<(), RunTimeError> {
         context.record(OccurrenceKind::Blocked { object_id: self.base.object_id });
         Err(RunTimeError {})
     }
@@ -79,7 +79,7 @@ impl MaterialFlow for RecordsThenFails {
     }
     fn add_blocked(&mut self, _id_blocked: u32, _since: SimTime, _answering_retry: bool) {}
     fn relist_blocked(&mut self, _id_blocked: u32, _next: Option<SimTime>) {}
-    fn notify_blocked_predecessors(&mut self) -> Result<Option<Vec<EventTemplate>>, MaterialflowError> {
-        Ok(None)
+    fn notify_blocked_predecessors(&mut self, _context: &mut EventContext) -> Result<(), MaterialflowError> {
+        Ok(())
     }
 }

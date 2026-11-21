@@ -29,11 +29,14 @@ pub struct EventContext {
     next_mu_id: u32,
     recording: Recording,
     occurrences: Vec<Occurrence>,
+    /// The events the object in hand schedules, in order. The run moves them into its queue
+    /// after each event and keeps the memory, so scheduling allocates nothing once it has grown.
+    scheduled: Vec<EventTemplate>,
 }
 
 impl EventContext {
     pub fn new(first_mu_id: u32, recording: Recording) -> EventContext {
-        EventContext { time: SimTime::ZERO, seq: 0, next_mu_id: first_mu_id, recording, occurrences: Vec::new() }
+        EventContext { time: SimTime::ZERO, seq: 0, next_mu_id: first_mu_id, recording, occurrences: Vec::new(), scheduled: Vec::new() }
     }
 
     pub fn set_recording(&mut self, recording: Recording) {
@@ -57,6 +60,25 @@ impl EventContext {
 
     pub fn take_occurrences(&mut self) -> Vec<Occurrence> {
         std::mem::take(&mut self.occurrences)
+    }
+
+    /// Schedules an event, `exec_time` from now. Events at one time run in the order they were
+    /// scheduled, so the order of these calls is part of the result.
+    #[inline]
+    pub fn schedule(&mut self, event: EventTemplate) {
+        self.scheduled.push(event);
+    }
+
+    /// The events scheduled since this was last called, leaving none. The run hands the list back
+    /// through `return_scheduled` once it has queued them, so its memory is kept.
+    pub fn take_scheduled(&mut self) -> Vec<EventTemplate> {
+        std::mem::take(&mut self.scheduled)
+    }
+
+    /// Takes back the list from `take_scheduled`, emptied, to schedule into again.
+    pub fn return_scheduled(&mut self, mut list: Vec<EventTemplate>) {
+        list.clear();
+        self.scheduled = list;
     }
 }
 

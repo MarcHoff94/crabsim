@@ -129,25 +129,25 @@ impl Buffer {
         context: &mut EventContext,
         eventtype: &EventType,
         others: &mut OtherObjects<'_>,
-    ) -> Result<Option<Vec<EventTemplate>>, RunTimeError> {
+    ) -> Result<(), RunTimeError> {
         let interrupted = self.interruptions.is_interrupted();
         match *eventtype {
             // Interrupted, it releases nothing: every MU that became ready meanwhile is passed on
             // when the interruption ends. An exit queued before dwelling froze is stale.
-            EventType::MUExit(ticket) if interrupted || ticket.stop_count != self.stop_count => Ok(None),
+            EventType::MUExit(ticket) if interrupted || ticket.stop_count != self.stop_count => Ok(()),
             // An MU's dwelling time is over. A blocked Buffer already waits in line with an
             // earlier MU and keeps that place, so there is nothing to try.
-            EventType::MUExit(_) if self.blocked => Ok(None),
+            EventType::MUExit(_) if self.blocked => Ok(()),
             EventType::MUExit(_) => self.pass_on(context, others, None),
             // Only a Buffer that was refused is waiting. A retry can also arrive after its MU
             // went elsewhere, and then an MU that became ready since must take its own turn.
-            EventType::BlockedRetry { .. } if !self.blocked => Ok(None),
+            EventType::BlockedRetry { .. } if !self.blocked => Ok(()),
             // Interrupted, it keeps its place in the line, as if refused (spec issue 122).
             EventType::BlockedRetry { from } if interrupted => {
                 if let Some(since) = self.offered_since(context.time) {
                     others.get_mut(from).add_blocked(self.base.object_id, since, true);
                 }
-                Ok(None)
+                Ok(())
             }
             EventType::BlockedRetry { from } => self.pass_on(context, others, Some(from)),
             _ => self.handle_interruption(eventtype, context, others).unwrap_or(Err(RunTimeError {})),
@@ -155,9 +155,9 @@ impl Buffer {
     }
 
     /// Passes on every MU that may leave, one at a time, until one is refused: to any successor,
-    /// or in answer to a retry only to the successor that sent it.
-    fn pass_on(&mut self, context: &mut EventContext, others: &mut OtherObjects<'_>, only: Option<u32>) -> Result<Option<Vec<EventTemplate>>, RunTimeError> {
-        let mut events = Vec::new();
+    /// or in answer to a retry only to the successor that sent it. Each successor's event is
+    /// scheduled as its MU goes in, and the retries for those waiting for room after them all.
+    fn pass_on(&mut self, context: &mut EventContext, others: &mut OtherObjects<'_>, only: Option<u32>) -> Result<(), RunTimeError> {
         let mut moved = false;
         while self.offered(context.time).is_some() {
             let held = self.content.len();
@@ -172,13 +172,15 @@ impl Buffer {
             }
             moved = true;
             self.set_blocked(false, context);
-            events.extend(entered);
+            if let Some(entered) = entered {
+                context.schedule(entered);
+            }
         }
         if moved {
             // It has room again.
-            events.extend(retries_for_blocked(&mut self.blockedlist, self.base.object_id).unwrap_or_default());
+            retries_for_blocked(&mut self.blockedlist, self.base.object_id, context);
         }
-        Ok((!events.is_empty()).then_some(events))
+        Ok(())
     }
 
     /// Notes whether it is blocked, reporting when that begins or ends.
@@ -243,8 +245,9 @@ impl MaterialFlow for Buffer {
     fn relist_blocked(&mut self, id_blocked: u32, next: Option<SimTime>) {
         relist_blocked(&mut self.blockedlist, id_blocked, next);
     }
-    fn notify_blocked_predecessors(&mut self) -> Result<Option<Vec<EventTemplate>>, MaterialflowError> {
-        Ok(retries_for_blocked(&mut self.blockedlist, self.base.object_id))
+    fn notify_blocked_predecessors(&mut self, context: &mut EventContext) -> Result<(), MaterialflowError> {
+        retries_for_blocked(&mut self.blockedlist, self.base.object_id, context);
+        Ok(())
     }
 }
 
@@ -338,7 +341,7 @@ impl EventInterface for Buffer {
         context: &mut EventContext,
         eventtype: &EventType,
         others: &mut OtherObjects<'_>,
-    ) -> Result<Option<Vec<EventTemplate>>, RunTimeError> {
+    ) -> Result<(), RunTimeError> {
         let outcome = self.handle_event(context, eventtype, others);
         self.update_statistics(context.time);
         outcome
@@ -387,7 +390,7 @@ impl Interruptible for Buffer {
     /// With dwelling frozen, every MU still dwelling when the interruption began becomes ready
     /// later by its length, each with an exit then. Every MU that may leave now is passed on,
     /// and those waiting for room hear of it.
-    fn stop_ended(&mut self, context: &mut EventContext, others: &mut OtherObjects<'_>, events: &mut Vec<EventTemplate>) -> Result<(), RunTimeError> {
+    fn stop_ended(&mut self, context: &mut EventContext, others: &mut OtherObjects<'_>) -> Result<(), RunTimeError> {
         if self.stop_freezes_dwelling {
             let (began, now) = (self.interrupted_at, context.time);
             let length = now.saturating_sub(began);
@@ -395,13 +398,13 @@ impl Interruptible for Buffer {
                 if self.content[at].ready_at > began {
                     self.content[at].ready_at = self.content[at].ready_at + length;
                     let (mu_id, ready_at) = (self.content[at].mu.id, self.content[at].ready_at);
-                    events.push(self.exit_event(mu_id, ready_at.saturating_sub(now)));
+                    context.schedule(self.exit_event(mu_id, ready_at.saturating_sub(now)));
                 }
             }
         }
-        events.extend(self.pass_on(context, others, None)?.unwrap_or_default());
+        self.pass_on(context, others, None)?;
         if self.is_entrance_allowed() {
-            events.extend(retries_for_blocked(&mut self.blockedlist, self.base.object_id).unwrap_or_default());
+            retries_for_blocked(&mut self.blockedlist, self.base.object_id, context);
         }
         Ok(())
     }

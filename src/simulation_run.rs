@@ -449,7 +449,7 @@ mod tests {
         let mut run = fails_at_five_seconds();
         run.init().unwrap();
         run.step().unwrap_err();
-        run.schedule_event(secs(6), EventType::StartFailure, 0).unwrap();
+        run.schedule_event(secs(6), EventType::StartFailure(0), 0).unwrap();
         let failure = run.step().unwrap_err();
         assert_eq!(failure.occurrences, vec![Occurrence { time: secs(6), kind: OccurrenceKind::Blocked { object_id: 0 } }]);
     }

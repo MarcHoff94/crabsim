@@ -308,6 +308,8 @@ pub struct Details {
     pub capacity: u64,
     /// A Buffer's fewest MUs and fill histogram.
     pub fill: Option<FillStatistics>,
+    /// Each failure profile that can fail, with its figures.
+    pub failure_profiles: Vec<crabsim::report::FailureProfileState>,
 }
 
 /// A fill histogram's median as the inspector and the statistics window say it: one number while bars are 1 MU
@@ -347,6 +349,22 @@ pub fn fill_bars(fill: &FillStatistics) -> Vec<FillBar> {
 }
 
 impl Inspection {
+    /// Each failure profile's figures, by name, once the object has more than one: how often it
+    /// failed and its share of the time measured. With one profile the object's own rows say it.
+    pub fn failure_profile_rows(&self) -> Vec<(String, String)> {
+        let Some(details) = self.details.as_ref().filter(|details| details.failure_profiles.len() > 1) else { return Vec::new() };
+        let measured = details.statistics.measured_time().as_millis();
+        details
+            .failure_profiles
+            .iter()
+            .map(|profile| {
+                let share = if measured == 0 { "–".to_string() } else { format!("{:.1} %", profile.time_failed.as_millis() as f64 * 100.0 / measured as f64) };
+                let failing = if profile.failing_since.is_some() { ", failing now" } else { "" };
+                (profile.name.clone(), format!("{} failures, {share} failed{failing}", profile.failures))
+            })
+            .collect()
+    }
+
     /// The object's statistics as the inspector's rows, only those that can vary for its type: a
     /// Source only makes MUs and waits to pass them on, and a Drain only takes them in, so their
     /// shares of time would always read 0% or 100%. None until a full state has arrived.
@@ -1277,7 +1295,24 @@ impl ViewState {
             .map(|pictured| pictured.interruptions())
             .unwrap_or_default()
             .iter()
-            .map(|interruption| format!("{} since {}", cause_name(interruption.cause), format_time(interruption.since)))
+            .map(|interruption| {
+                let mut line = format!("{} since {}", cause_name(interruption.cause), format_time(interruption.since));
+                // Which profiles it failed for, named from the last full state.
+                if interruption.cause == crabsim::Interruption::Failed
+                    && let (Some(pictured), Some(state)) = (pictured, self.details.as_ref())
+                    && let Some(reported) = state.objects.iter().find(|reported| reported.id == id)
+                {
+                    let names: Vec<&str> = pictured
+                        .failing()
+                        .iter()
+                        .filter_map(|&index| reported.failure_profiles.iter().find(|profile| profile.index == index).map(|profile| profile.name.as_str()))
+                        .collect();
+                    if !names.is_empty() {
+                        line += &format!(": {}", names.join(", "));
+                    }
+                }
+                line
+            })
             .collect();
         let offered = self.initialised && !self.run_failed();
         Some(Inspection {
@@ -1310,6 +1345,7 @@ impl ViewState {
             limited: object.capacity != crabsim::Capacity::Unlimited,
             capacity: object.capacity.limit(),
             fill: object.fill.as_deref().cloned(),
+            failure_profiles: object.failure_profiles.clone(),
         })
     }
 

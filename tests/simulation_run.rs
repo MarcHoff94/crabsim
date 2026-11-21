@@ -72,7 +72,7 @@ fn statistics_of(run: &SimulationRun, id: u32) -> ObjectStatistics {
 }
 
 fn fail_at(run: &mut SimulationRun, at: u64, object_id: u32) {
-    run.schedule_event(secs(at), EventType::StartFailure, object_id).unwrap();
+    run.schedule_event(secs(at), EventType::StartFailure(0), object_id).unwrap();
 }
 
 fn moves_from(occurrences: &[Occurrence], object_id: u32) -> Vec<f64> {
@@ -213,7 +213,7 @@ fn an_event_cannot_be_scheduled_in_the_past() {
     run.init().unwrap();
     run.advance_to(secs(50)).unwrap();
     assert_eq!(
-        run.schedule_event(secs(10), EventType::StartFailure, st_id).unwrap_err(),
+        run.schedule_event(secs(10), EventType::StartFailure(0), st_id).unwrap_err(),
         RunError::EventInThePast
     );
 }
@@ -309,7 +309,7 @@ fn a_bounded_advance_before_init_is_an_error() {
 #[test]
 fn an_error_from_a_bounded_advance_carries_the_occurrences_before_it() {
     let mut run = source_into_drain();
-    run.schedule_event(secs(25), EventType::StartFailure, 0).unwrap();
+    run.schedule_event(secs(25), EventType::StartFailure(0), 0).unwrap();
     let failure = run.advance_bounded(secs(30), 100).unwrap_err();
     assert_eq!(failure.error, RunError::ObjectFailed { object_id: 0, time: secs(25) });
     assert_eq!(moves_from(&failure.occurrences, 0), vec![10.0, 20.0]);
@@ -593,8 +593,8 @@ fn a_failure_reports_its_stop_beginning_and_ending_with_its_cause() {
     assert_eq!(
         stops,
         vec![
-            (20.0, OccurrenceKind::InterruptionBegan { object_id: st_id, cause: Interruption::Failed }),
-            (25.0, OccurrenceKind::InterruptionEnded { object_id: st_id, cause: Interruption::Failed }),
+            (20.0, OccurrenceKind::InterruptionBegan { object_id: st_id, cause: Interruption::Failed, profile: Some(0) }),
+            (25.0, OccurrenceKind::InterruptionEnded { object_id: st_id, cause: Interruption::Failed, profile: Some(0) }),
         ]
     );
 }
@@ -742,7 +742,7 @@ fn an_active_failure_profile_keeps_producing_failures() {
     let occurrences = run.advance_to(secs(200)).unwrap();
     let began: Vec<f64> = occurrences
         .iter()
-        .filter(|o| o.kind == OccurrenceKind::InterruptionBegan { object_id: st, cause: Interruption::Failed })
+        .filter(|o| o.kind == OccurrenceKind::InterruptionBegan { object_id: st, cause: Interruption::Failed, profile: Some(0) })
         .map(|o| o.time.as_secs_f64())
         .collect();
     assert_eq!(began, vec![30.0, 90.0, 150.0]);
@@ -1360,8 +1360,8 @@ fn sampled_times_are_rounded_to_the_nearest_millisecond() {
     assert_eq!(
         stops,
         vec![
-            (1_501, OccurrenceKind::InterruptionBegan { object_id: st, cause: Interruption::Failed }),
-            (3_002, OccurrenceKind::InterruptionEnded { object_id: st, cause: Interruption::Failed }),
+            (1_501, OccurrenceKind::InterruptionBegan { object_id: st, cause: Interruption::Failed, profile: Some(0) }),
+            (3_002, OccurrenceKind::InterruptionEnded { object_id: st, cause: Interruption::Failed, profile: Some(0) }),
         ]
     );
 }
@@ -2110,10 +2110,10 @@ fn a_failure_overlapping_a_pause_is_two_interruptions_and_one_stop() {
     assert_eq!(
         interruptions,
         vec![
-            (20.0, OccurrenceKind::InterruptionBegan { object_id: st, cause: Interruption::Failed }),
-            (25.0, OccurrenceKind::InterruptionBegan { object_id: st, cause: Interruption::Paused }),
-            (30.0, OccurrenceKind::InterruptionEnded { object_id: st, cause: Interruption::Failed }),
-            (35.0, OccurrenceKind::InterruptionEnded { object_id: st, cause: Interruption::Paused }),
+            (20.0, OccurrenceKind::InterruptionBegan { object_id: st, cause: Interruption::Failed, profile: Some(0) }),
+            (25.0, OccurrenceKind::InterruptionBegan { object_id: st, cause: Interruption::Paused, profile: None }),
+            (30.0, OccurrenceKind::InterruptionEnded { object_id: st, cause: Interruption::Failed, profile: Some(0) }),
+            (35.0, OccurrenceKind::InterruptionEnded { object_id: st, cause: Interruption::Paused, profile: None }),
         ]
     );
 
@@ -2374,8 +2374,8 @@ fn stopping_twice_or_ending_what_is_not_stopped_does_nothing() {
     assert_eq!(
         forced,
         vec![
-            (20.0, OccurrenceKind::InterruptionBegan { object_id: st, cause: Interruption::Stopped }),
-            (30.0, OccurrenceKind::InterruptionEnded { object_id: st, cause: Interruption::Stopped }),
+            (20.0, OccurrenceKind::InterruptionBegan { object_id: st, cause: Interruption::Stopped, profile: None }),
+            (30.0, OccurrenceKind::InterruptionEnded { object_id: st, cause: Interruption::Stopped, profile: None }),
         ]
     );
     assert_eq!(exit_times(&occurrences), vec![80.0]);
@@ -2712,4 +2712,40 @@ fn reset_ends_the_interruptions_of_sources_buffers_and_drains() {
     // And it runs as if nothing had happened.
     run.init().unwrap();
     assert_eq!(exit_times(&run.advance_to(secs(25)).unwrap()), vec![10.0, 20.0]);
+}
+
+#[test]
+fn a_station_with_two_failure_profiles_counts_each_ones_failures_and_time() {
+    use crabsim::flows::FailureProfile;
+    let mut model = ModelDescription::new();
+    let source = model.add_source(secs(10));
+    let st = model.add_station(secs(5), FailureProfile::new(1.0, Distribution::CONSTANT { value: 0.0 }, 0));
+    let drain = model.add_drain();
+    model.connect(source, st);
+    model.connect(st, drain);
+    model.set_failure_profiles(
+        st,
+        vec![
+            FailureProfile::new(0.99, Distribution::CONSTANT { value: 30_000.0 }, 0).named("Tool wear").with_stream(11),
+            FailureProfile::new(0.98, Distribution::CONSTANT { value: 10_000.0 }, 0).named("Jam").with_stream(12),
+        ],
+    );
+    let mut run = model.build(3);
+    run.set_recording(Recording::ALL);
+    run.init().unwrap();
+    let occurrences = run.advance_to(secs(86_400)).map_err(|f| f.error).unwrap();
+    let full = run.state();
+    let state = object(&full, st);
+    let [wear, jam] = &state.failure_profiles[..] else { panic!("two profiles") };
+    assert_eq!((wear.name.as_str(), jam.name.as_str()), ("Tool wear", "Jam"));
+    assert!(wear.failures > 5 && jam.failures > 5, "{} and {}", wear.failures, jam.failures);
+    assert_eq!(statistics_of(&run, st).failures, wear.failures + jam.failures);
+    let named = |profile: u8| occurrences.iter().filter(|o| matches!(o.kind, OccurrenceKind::InterruptionBegan { profile: Some(p), .. } if p == profile)).count() as u64;
+    assert_eq!((named(0), named(1)), (wear.failures, jam.failures));
+    // Same seed, same failures.
+    let mut again = model.build(3);
+    again.init().unwrap();
+    again.advance_to(secs(86_400)).map_err(|f| f.error).unwrap();
+    let full_again = again.state();
+    assert_eq!(object(&full_again, st).failure_profiles, state.failure_profiles);
 }

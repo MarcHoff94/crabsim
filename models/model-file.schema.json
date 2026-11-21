@@ -88,7 +88,7 @@
         },
         "failures": {
           "description": "Any object: random failures. Left out, it never fails.",
-          "$ref": "#/$defs/FailuresFile"
+          "$ref": "#/$defs/FailuresValue"
         },
         "starting_mus": {
           "description": "Station, Buffer: how many MUs it holds from the start of a run, at most its capacity, in the order they count as having entered. 0 by default.",
@@ -146,10 +146,35 @@
       "type": "string",
       "pattern": "^\\s*(\\d+\\s*d(\\s*((\\d+:)?\\d+:)?\\d+(\\.\\d+)?)?|((\\d+:)?\\d+:)?\\d+(\\.\\d+)?)\\s*$"
     },
-    "FailuresFile": {
-      "description": "Random failures. The time between failures follows from the availability and the repair time.",
+    "FailuresValue": {
+      "description": "Failure profiles: a list of named ones, which are independent of each other, or, as older files have it, a single unnamed one, read as a list of one named \"Failures\".",
+      "anyOf": [
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FailureProfileFile"
+          }
+        },
+        {
+          "$ref": "#/$defs/FailuresFile"
+        }
+      ]
+    },
+    "FailureProfileFile": {
+      "description": "One named failure profile.",
       "type": "object",
       "properties": {
+        "name": {
+          "description": "Unique among the object's profiles.",
+          "type": "string",
+          "minLength": 1
+        },
+        "stream": {
+          "description": "Its random-number stream within the object, 0 or more, unique there. Without one, its place in the list from 0.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
         "availability": {
           "description": "The share of time available, above 0 and below 1.",
           "type": "number",
@@ -163,6 +188,7 @@
       },
       "additionalProperties": false,
       "required": [
+        "name",
         "availability",
         "repair_time"
       ]
@@ -263,6 +289,27 @@
           ],
           "additionalProperties": false
         }
+      ]
+    },
+    "FailuresFile": {
+      "description": "Random failures. The time between failures follows from the availability and the repair time.",
+      "type": "object",
+      "properties": {
+        "availability": {
+          "description": "The share of time available, above 0 and below 1.",
+          "type": "number",
+          "format": "double",
+          "exclusiveMinimum": 0,
+          "exclusiveMaximum": 1
+        },
+        "repair_time": {
+          "$ref": "#/$defs/RepairTimeFile"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "availability",
+        "repair_time"
       ]
     },
     "CapacityFile": {

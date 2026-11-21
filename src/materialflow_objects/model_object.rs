@@ -72,16 +72,29 @@ impl ModelObject {
         }
     }
 
-    /// The object's failures, if it has any.
-    pub fn failure_profile(&self) -> Option<&FailureProfile> {
+    /// The object's failure profiles, in order. Empty if it has none.
+    pub fn failure_profiles(&self) -> &[FailureProfile] {
         match self {
-            ModelObject::Station(station) => station.interruptions.failure_profile(),
-            ModelObject::MultiStation(station) => station.interruptions.failure_profile(),
-            ModelObject::Source(source) => source.interruptions.failure_profile(),
-            ModelObject::Buffer(buffer) => buffer.interruptions.failure_profile(),
-            ModelObject::Drain(drain) => drain.interruptions.failure_profile(),
+            ModelObject::Station(station) => station.interruptions.failure_profiles(),
+            ModelObject::MultiStation(station) => station.interruptions.failure_profiles(),
+            ModelObject::Source(source) => source.interruptions.failure_profiles(),
+            ModelObject::Buffer(buffer) => buffer.interruptions.failure_profiles(),
+            ModelObject::Drain(drain) => drain.interruptions.failure_profiles(),
             #[cfg(test)]
-            ModelObject::RecordsThenFails(_) => None,
+            ModelObject::RecordsThenFails(_) => &[],
+        }
+    }
+
+    /// Gives the object these failure profiles, replacing any it had.
+    pub fn set_failure_profiles(&mut self, failures: Vec<FailureProfile>) {
+        match self {
+            ModelObject::Station(station) => station.interruptions.set_failure_profiles(failures),
+            ModelObject::MultiStation(station) => station.interruptions.set_failure_profiles(failures),
+            ModelObject::Source(source) => source.interruptions.set_failure_profiles(failures),
+            ModelObject::Buffer(buffer) => buffer.interruptions.set_failure_profiles(failures),
+            ModelObject::Drain(drain) => drain.interruptions.set_failure_profiles(failures),
+            #[cfg(test)]
+            ModelObject::RecordsThenFails(_) => {}
         }
     }
 

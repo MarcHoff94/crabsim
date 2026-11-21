@@ -258,7 +258,7 @@ fn zero_time_loop() -> SimulationRun {
 fn fails_at_25() -> SimulationRun {
     let mut run = source_into_drain();
     run.init().unwrap();
-    run.schedule_event(secs(25), EventType::StartFailure, 0).unwrap();
+    run.schedule_event(secs(25), EventType::StartFailure(0), 0).unwrap();
     run
 }
 
@@ -1510,7 +1510,7 @@ fn a_pause_takes_effect_at_shown_time_without_a_halt() {
     watched.session.pause(STATION).unwrap();
     let seen = watched.look();
     assert_eq!(seen.statuses, vec![], "still advancing");
-    let paused = Occurrence { time: secs(1_000), kind: OccurrenceKind::InterruptionBegan { object_id: STATION, cause: Interruption::Paused } };
+    let paused = Occurrence { time: secs(1_000), kind: OccurrenceKind::InterruptionBegan { object_id: STATION, cause: Interruption::Paused, profile: None } };
     assert!(seen.occurrences.contains(&paused), "{:?}", seen.occurrences);
 
     watched.at(1_100);
@@ -1528,7 +1528,7 @@ fn a_pause_while_halted_shows_at_once() {
     watched.look();
     watched.session.pause(STATION).unwrap();
     let seen = watched.look();
-    assert!(seen.occurrences.iter().any(|o| o.kind == OccurrenceKind::InterruptionBegan { object_id: STATION, cause: Interruption::Paused }));
+    assert!(seen.occurrences.iter().any(|o| o.kind == OccurrenceKind::InterruptionBegan { object_id: STATION, cause: Interruption::Paused, profile: None }));
     assert_eq!(watched.shown, secs(1_000));
 }
 
@@ -1649,7 +1649,7 @@ fn a_stop_by_hand_takes_effect_at_shown_time_and_replays() {
     watched.look();
     watched.session.stop_object(STATION).unwrap();
     let seen = watched.look();
-    let forced = Occurrence { time: secs(1_000), kind: OccurrenceKind::InterruptionBegan { object_id: STATION, cause: Interruption::Stopped } };
+    let forced = Occurrence { time: secs(1_000), kind: OccurrenceKind::InterruptionBegan { object_id: STATION, cause: Interruption::Stopped, profile: None } };
     assert!(seen.occurrences.contains(&forced), "{:?}", seen.occurrences);
     watched.at(1_500);
     watched.look();

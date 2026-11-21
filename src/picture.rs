@@ -30,6 +30,8 @@ pub struct ObjectPicture {
     process: ProcessState,
     /// When each active interruption began, by `Interruption::index`.
     interrupted_since: [Option<SimTime>; 3],
+    /// Which failure profiles are failing, so that the object stays failed until the last ends.
+    failing: Vec<u8>,
     /// Each MU in work, in the order it came in, with when its work completes, or while
     /// stopped the work left on it, frozen. A Station with capacity has several, a Source the
     /// MU it is making.
@@ -137,7 +139,7 @@ impl Picture {
                     object.hold();
                 }
             }
-            OccurrenceKind::InterruptionBegan { object_id, cause } => {
+            OccurrenceKind::InterruptionBegan { object_id, cause, profile } => {
                 let object = &mut objects[object_id as usize];
                 // Only the first interruption of a stop freezes the work.
                 if !object.is_interrupted() {
@@ -145,11 +147,24 @@ impl Picture {
                         *time = time.saturating_sub(now);
                     }
                 }
-                object.interrupted_since[cause.index()] = Some(now);
+                if object.interrupted_since[cause.index()].is_none() {
+                    object.interrupted_since[cause.index()] = Some(now);
+                }
+                if let Some(profile) = profile {
+                    if !object.failing.contains(&profile) {
+                        object.failing.push(profile);
+                    }
+                }
             }
-            OccurrenceKind::InterruptionEnded { object_id, cause } => {
+            OccurrenceKind::InterruptionEnded { object_id, cause, profile } => {
                 let object = &mut objects[object_id as usize];
-                object.interrupted_since[cause.index()] = None;
+                if let Some(profile) = profile {
+                    object.failing.retain(|&failing| failing != profile);
+                }
+                // A failure ends the object's failed state only when no profile is still failing.
+                if cause != Interruption::Failed || object.failing.is_empty() {
+                    object.interrupted_since[cause.index()] = None;
+                }
                 // Only the last interruption of a stop to end resumes the work.
                 if !object.is_interrupted() {
                     for (_, time) in &mut object.work {
@@ -173,6 +188,7 @@ impl ObjectPicture {
             interrupted_since: Interruption::ALL.map(|cause| {
                 state.interruptions.iter().find(|interruption| interruption.cause == cause).map(|i| i.since)
             }),
+            failing: state.failure_profiles.iter().filter(|profile| profile.failing_since.is_some()).map(|profile| profile.index).collect(),
             work: if state.work.is_empty() {
                 // A Source reports only its time left, on the MU it holds.
                 state.remaining.map(|left| (state.contents.first().copied().unwrap_or(u32::MAX), left)).into_iter().collect::<Vec<_>>()
@@ -195,6 +211,11 @@ impl ObjectPicture {
 
     pub fn id(&self) -> u32 {
         self.id
+    }
+
+    /// The failure profiles failing now, by their place in the object's list.
+    pub fn failing(&self) -> &[u8] {
+        &self.failing
     }
 
     pub fn kind(&self) -> ObjectKind {

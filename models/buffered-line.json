@@ -25,15 +25,18 @@
       },
       "attributes": {
         "process_time": "00:00:04",
-        "failures": {
-          "availability": 0.9,
-          "repair_time": {
-            "erlang": {
-              "mean": "00:01:00",
-              "k": 2
+        "failures": [
+          {
+            "name": "Failures",
+            "availability": 0.9,
+            "repair_time": {
+              "erlang": {
+                "mean": "00:01:00",
+                "k": 2
+              }
             }
           }
-        }
+        ]
       }
     },
     {
@@ -58,15 +61,18 @@
       },
       "attributes": {
         "process_time": "00:00:05",
-        "failures": {
-          "availability": 0.85,
-          "repair_time": {
-            "erlang": {
-              "mean": "00:01:30",
-              "k": 2
+        "failures": [
+          {
+            "name": "Failures",
+            "availability": 0.85,
+            "repair_time": {
+              "erlang": {
+                "mean": "00:01:30",
+                "k": 2
+              }
             }
           }
-        }
+        ]
       }
     },
     {
@@ -106,15 +112,18 @@
       },
       "attributes": {
         "process_time": "00:00:04",
-        "failures": {
-          "availability": 0.95,
-          "repair_time": {
-            "erlang": {
-              "mean": "00:00:30",
-              "k": 2
+        "failures": [
+          {
+            "name": "Failures",
+            "availability": 0.95,
+            "repair_time": {
+              "erlang": {
+                "mean": "00:00:30",
+                "k": 2
+              }
             }
           }
-        }
+        ]
       }
     },
     {

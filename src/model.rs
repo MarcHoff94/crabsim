@@ -9,6 +9,7 @@ use crate::distribution::{DistributionRule, Ranking};
 use crate::flows::{FailureProfile, MoveableUnit};
 use crate::materialflow_objects::{Buffer, Drain, ModelObject, MultiStation, SingleStation, Source, StartMode};
 use crate::materialflow_objects::ExitStrategy;
+use crate::random_numbers::Distribution;
 use crate::report::{Capacity, ObjectKind};
 use crate::simulation_run::SimulationRun;
 use crate::time::SimTime;
@@ -95,20 +96,22 @@ impl ModelDescription {
     pub fn set_station_capacity(&mut self, id: u32, capacity: u64, start: StartMode) {
         assert!(capacity >= 1, "a Station's capacity is at least 1");
         let object = self.objects.get_mut(id as usize).unwrap_or_else(|| panic!("object {id} is not in the model"));
-        let (proc_time, failures, succ, mus) = match object {
-            ModelObject::Station(station) => (station.configured_proc_time, station.interruptions.failure_profile().cloned().expect("a Station has a failure profile"), station.succ.clone(), station.starting_content.iter().map(|mu| mu.id).collect()),
-            ModelObject::MultiStation(station) => (station.configured_proc_time, station.interruptions.failure_profile().cloned().expect("a Station has a failure profile"), station.succ.clone(), station.starting_mus.clone()),
+        let failures = object.failure_profiles().to_vec();
+        let (proc_time, succ, mus) = match object {
+            ModelObject::Station(station) => (station.configured_proc_time, station.succ.clone(), station.starting_content.iter().map(|mu| mu.id).collect()),
+            ModelObject::MultiStation(station) => (station.configured_proc_time, station.succ.clone(), station.starting_mus.clone()),
             _ => panic!("object {id} is not a Station"),
         };
         *object = if capacity == 1 {
             let mu = mus.first().map(|&mu_id| MoveableUnit { id: mu_id, location_id: id, left_source: SimTime::ZERO });
-            ModelObject::Station(SingleStation::new(id, proc_time, failures, mu, succ))
+            ModelObject::Station(SingleStation::new(id, proc_time, FailureProfile::new(1.0, Distribution::CONSTANT { value: 0.0 }, 0), mu, succ))
         } else {
-            let mut station = MultiStation::new(id, proc_time, failures, capacity, start);
+            let mut station = MultiStation::new(id, proc_time, FailureProfile::new(1.0, Distribution::CONSTANT { value: 0.0 }, 0), capacity, start);
             station.succ = succ;
             station.set_starting_mus(mus);
             ModelObject::MultiStation(station)
         };
+        object.set_failure_profiles(failures);
     }
 
     /// Builds every Station with capacity 1 as a `MultiStation`, for tests that check it behaves
@@ -118,7 +121,8 @@ impl ModelDescription {
         let mut model = self.clone();
         for object in &mut model.objects {
             if let ModelObject::Station(station) = object {
-                let mut general = MultiStation::new(station.base.object_id, station.configured_proc_time, station.interruptions.failure_profile().cloned().expect("a Station has a failure profile"), 1, StartMode::Individual);
+                let mut general = MultiStation::new(station.base.object_id, station.configured_proc_time, FailureProfile::new(1.0, Distribution::CONSTANT { value: 0.0 }, 0), 1, StartMode::Individual);
+                general.interruptions.set_failure_profiles(station.interruptions.failure_profiles().to_vec());
                 general.succ = station.succ.clone();
                 general.set_starting_mus(station.starting_content.iter().map(|mu| mu.id).collect());
                 *object = ModelObject::MultiStation(general);
@@ -171,8 +175,14 @@ impl ModelDescription {
         self.buffer_mut(id).stop_freezes_dwelling = freezes;
     }
 
-    /// Gives a Source, Buffer or Drain failures, or none with `None`. A Station gets its failures
-    /// when it is added.
+    /// Gives an object these failure profiles, replacing any it had, which for a Station
+    /// includes the one it was added with. Several can fail at once, each with its own stream.
+    pub fn set_failure_profiles(&mut self, id: u32, failures: Vec<FailureProfile>) {
+        self.objects.get_mut(id as usize).unwrap_or_else(|| panic!("object {id} is not in the model")).set_failure_profiles(failures);
+    }
+
+    /// Gives a Source, Buffer or Drain one failure profile, or none with `None`. A Station gets its
+    /// failures when it is added, or through `set_failure_profiles`.
     pub fn set_failures(&mut self, id: u32, failures: Option<FailureProfile>) {
         match self.objects.get_mut(id as usize) {
             Some(ModelObject::Source(source)) => source.set_failures(failures),
@@ -268,7 +278,7 @@ impl ModelDescription {
     pub fn longest_failure_time(&self) -> Option<SimTime> {
         self.objects
             .iter()
-            .filter_map(ModelObject::failure_profile)
+            .flat_map(|object| object.failure_profiles())
             .filter(|failures| failures.active)
             .map(|failures| failures.mtbf.max(SimTime::from_millis_f64(failures.dist_sampler_mttr.params.mean())))
             .max()

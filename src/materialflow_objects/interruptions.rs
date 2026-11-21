@@ -5,9 +5,9 @@
 //! what being interrupted means for it.
 
 use crate::error::RunTimeError;
-use crate::event::{EventContext, EventTemplate, EventType};
+use crate::event::{EventContext, EventTemplate, EventType, ProfileIndex};
 use crate::materialflow_objects::OtherObjects;
-use crate::report::{ActiveInterruption, Interruption, OccurrenceKind};
+use crate::report::{ActiveInterruption, FailureProfileState, Interruption, OccurrenceKind};
 use crate::statistics::StatisticsKeeper;
 use crate::time::SimTime;
 use super::flows::FailureProfile;
@@ -30,14 +30,21 @@ pub struct Interruptions {
     active: [bool; 3],
     /// When each cause last began, by `Interruption::index`. Read only while it is active.
     since: [SimTime; 3],
-    /// Boxed, so an object pays for it only through a pointer: a profile holds two random number
-    /// generators, and every object in a run takes the size of the largest.
-    failures: Option<Box<FailureProfile>>,
+    /// Its named failure profiles, independent of each other. One pointer, `None` for none: a
+    /// profile holds two random number generators, and every object in a run takes the size of
+    /// the largest, so the list lives behind a box. A failure event looks its profile up here,
+    /// a few times per failure and never per MU.
+    #[allow(clippy::box_collection)]
+    failures: Option<Box<Vec<FailureProfile>>>,
 }
 
 impl Interruptions {
     pub fn new(failures: Option<FailureProfile>) -> Interruptions {
-        Interruptions { active: [false; 3], since: [SimTime::ZERO; 3], failures: failures.map(Box::new) }
+        Interruptions::with_profiles(failures.into_iter().collect())
+    }
+
+    pub fn with_profiles(failures: Vec<FailureProfile>) -> Interruptions {
+        Interruptions { active: [false; 3], since: [SimTime::ZERO; 3], failures: boxed(failures) }
     }
 
     /// Whether any interruption is active.
@@ -63,38 +70,84 @@ impl Interruptions {
             .collect()
     }
 
-    pub fn failure_profile(&self) -> Option<&FailureProfile> {
-        self.failures.as_deref()
+    /// The failure profiles, in the order they were given.
+    pub fn failure_profiles(&self) -> &[FailureProfile] {
+        self.failures.as_deref().map_or(&[], |list| list.as_slice())
     }
 
-    /// Gives the object failures, or none with `None`. Part of its configuration, so it is set
-    /// before a run, not during one.
+    /// Gives the object one failure profile, or none with `None`. Part of its configuration, so
+    /// it is set before a run, not during one.
     pub fn set_failures(&mut self, failures: Option<FailureProfile>) {
-        self.failures = failures.map(Box::new);
+        self.set_failure_profiles(failures.into_iter().collect());
     }
 
+    /// Gives the object these failure profiles, replacing any it had.
+    pub fn set_failure_profiles(&mut self, failures: Vec<FailureProfile>) {
+        self.failures = boxed(failures);
+    }
+
+    /// Seeds every profile from the object's `seed` and the profile's stream, which is its own
+    /// within the object, or else its place in the list. Stream 0 is the object's seed itself, so
+    /// a single profile from before profiles had streams fails as it always has. Since the stream
+    /// is the object's, a class's profiles fail apart in each of its instances.
     pub fn reseed(&mut self, seed: u64) {
         if let Some(failures) = &mut self.failures {
-            failures.reseed(seed);
+            for (index, profile) in failures.iter_mut().enumerate() {
+                let stream = profile.stream.unwrap_or(index as u64);
+                profile.reseed(seed ^ stream.wrapping_mul(0xD1B5_4A32_D192_ED03));
+            }
         }
     }
 
-    /// The first random failure, due at Init, if the object has an active profile.
-    pub fn first_failure(&mut self, object_id: u32) -> Option<EventTemplate> {
-        self.next_failure(object_id)
+    /// Each profile's figures at `now`, for the object's state.
+    pub fn profile_states(&self, now: SimTime) -> Vec<FailureProfileState> {
+        self.failure_profiles()
+            .iter()
+            .enumerate()
+            .filter(|(_, profile)| profile.active)
+            .map(|(index, profile)| FailureProfileState {
+                index: index as u8,
+                name: profile.name.clone(),
+                availability: profile.availablity,
+                failures: profile.failures,
+                time_failed: profile.failed_by(now),
+                failing_since: profile.failing_since,
+            })
+            .collect()
     }
 
-    fn next_failure(&mut self, object_id: u32) -> Option<EventTemplate> {
-        let failures = self.failures.as_mut().filter(|failures| failures.active)?;
-        let after = failures.get_time_to_next_failure().ok().flatten()?;
-        Some(EventTemplate { eventtype: EventType::StartFailure, exec_time: after, object_id })
+    /// The first random failure of each active profile, due at Init.
+    pub fn first_failure(&mut self, object_id: u32) -> Vec<EventTemplate> {
+        let count = self.failure_profiles().len();
+        (0..count).filter_map(|index| self.next_failure(index, object_id)).collect()
     }
 
-    /// Back to the default state: nothing active. The profile keeps its random numbers' state, as
-    /// a Station's always has.
+    fn next_failure(&mut self, index: usize, object_id: u32) -> Option<EventTemplate> {
+        let profile = self.failures.as_mut()?.get_mut(index).filter(|profile| profile.active)?;
+        let after = profile.get_time_to_next_failure().ok().flatten()?;
+        Some(EventTemplate { eventtype: EventType::StartFailure(index as ProfileIndex), exec_time: after, object_id })
+    }
+
+    /// Back to the default state: nothing active and nothing counted. The profiles keep their
+    /// random numbers' state, as a Station's always has.
     pub fn reset(&mut self) {
         self.active = [false; 3];
         self.since = [SimTime::ZERO; 3];
+        self.clear_statistics(SimTime::ZERO);
+        for profile in self.failures.iter_mut().flat_map(|list| list.iter_mut()) {
+            profile.failing_since = None;
+        }
+    }
+
+    /// Starts each profile's figures afresh at `now`: a failure in progress counts from here.
+    pub fn clear_statistics(&mut self, now: SimTime) {
+        for profile in self.failures.iter_mut().flat_map(|list| list.iter_mut()) {
+            profile.time_failed = SimTime::ZERO;
+            profile.failures = 0;
+            if profile.failing_since.is_some() {
+                profile.failing_since = Some(now);
+            }
+        }
     }
 
     /// Handles a stop event, recording what began or ended, counting it in `statistics`,
@@ -107,28 +160,37 @@ impl Interruptions {
         context: &mut EventContext,
         statistics: &mut StatisticsKeeper,
     ) -> Option<Change> {
-        // A random failure means nothing for an object with no failure profile.
-        if matches!(eventtype, EventType::StartFailure | EventType::EndFailure) && self.failures.is_none() {
-            return None;
+        // A random failure means nothing for an object with no such failure profile.
+        if let EventType::StartFailure(index) | EventType::EndFailure(index) = *eventtype {
+            if self.failure_profiles().len() <= index as usize {
+                return None;
+            }
         }
         let change = match *eventtype {
-            EventType::StartFailure => {
-                if self.is_active(Interruption::Failed) {
+            EventType::StartFailure(index) => {
+                let profile = &mut self.failures.as_mut().expect("checked above")[index as usize];
+                if profile.failing_since.is_some() {
                     Change::Unchanged
                 } else {
-                    let change = self.begin(Interruption::Failed, object_id, context, statistics);
+                    profile.failing_since = Some(context.time);
+                    profile.failures += 1;
+                    let repair = SimTime::from_millis_f64(profile.dist_sampler_mttr.sample());
+                    let change = self.begin(Interruption::Failed, Some(index), object_id, context, statistics);
                     statistics.count_failure();
-                    let failures = self.failures.as_mut().expect("checked above");
-                    let repair = SimTime::from_millis_f64(failures.dist_sampler_mttr.sample());
-                    context.schedule(EventTemplate { eventtype: EventType::EndFailure, exec_time: repair, object_id });
+                    context.schedule(EventTemplate { eventtype: EventType::EndFailure(index), exec_time: repair, object_id });
                     change
                 }
             }
-            EventType::EndFailure => {
-                // The failure's own end, so it is always active here.
-                self.active[Interruption::Failed.index()] = false;
-                context.record(OccurrenceKind::InterruptionEnded { object_id, cause: Interruption::Failed });
-                if let Some(next) = self.next_failure(object_id) {
+            EventType::EndFailure(index) => {
+                let profile = &mut self.failures.as_mut().expect("checked above")[index as usize];
+                if let Some(since) = profile.failing_since.take() {
+                    profile.time_failed += context.time.saturating_sub(since);
+                }
+                context.record(OccurrenceKind::InterruptionEnded { object_id, cause: Interruption::Failed, profile: Some(index) });
+                // The failure is over, but the object stays failed while another profile is.
+                let still_failing = self.failure_profiles().iter().any(|profile| profile.failing_since.is_some());
+                self.active[Interruption::Failed.index()] = still_failing;
+                if let Some(next) = self.next_failure(index as usize, object_id) {
                     context.schedule(next);
                 }
                 self.ended()
@@ -144,9 +206,12 @@ impl Interruptions {
 
     /// Starts an interruption. Only the first of overlapping ones begins the stop, so time spent
     /// interrupted counts once.
-    fn begin(&mut self, cause: Interruption, object_id: u32, context: &mut EventContext, statistics: &mut StatisticsKeeper) -> Change {
-        context.record(OccurrenceKind::InterruptionBegan { object_id, cause });
-        self.since[cause.index()] = context.time;
+    fn begin(&mut self, cause: Interruption, profile: Option<ProfileIndex>, object_id: u32, context: &mut EventContext, statistics: &mut StatisticsKeeper) -> Change {
+        context.record(OccurrenceKind::InterruptionBegan { object_id, cause, profile });
+        // A cause already active, such as a second failing profile, keeps its first time.
+        if !self.is_active(cause) {
+            self.since[cause.index()] = context.time;
+        }
         let was_interrupted = self.is_interrupted();
         self.active[cause.index()] = true;
         if was_interrupted {
@@ -161,7 +226,7 @@ impl Interruptions {
         if self.is_active(cause) {
             return Change::Unchanged;
         }
-        let change = self.begin(cause, object_id, context, statistics);
+        let change = self.begin(cause, None, object_id, context, statistics);
         match cause {
             Interruption::Paused => statistics.count_pause(),
             _ => statistics.count_failure(),
@@ -174,13 +239,18 @@ impl Interruptions {
             return Change::Unchanged;
         }
         self.active[cause.index()] = false;
-        context.record(OccurrenceKind::InterruptionEnded { object_id, cause });
+        context.record(OccurrenceKind::InterruptionEnded { object_id, cause, profile: None });
         self.ended()
     }
 
     fn ended(&self) -> Change {
         if self.is_interrupted() { Change::Unchanged } else { Change::Ended }
     }
+}
+
+#[allow(clippy::box_collection)]
+fn boxed(failures: Vec<FailureProfile>) -> Option<Box<Vec<FailureProfile>>> {
+    (!failures.is_empty()).then(|| Box::new(failures))
 }
 
 /// An object that can be interrupted. It keeps `Interruptions` and says what an interruption means
@@ -284,24 +354,24 @@ mod tests {
     #[test]
     fn a_random_failure_schedules_its_repair_and_then_the_next_failure() {
         let mut fixture = Fixture::new(Some(failing()));
-        let first = fixture.interruptions.first_failure(ID).expect("an active profile fails");
-        assert!(matches!(first.eventtype, EventType::StartFailure));
-        let (change, events) = fixture.at(100, EventType::StartFailure);
+        let first = fixture.interruptions.first_failure(ID).pop().expect("an active profile fails");
+        assert!(matches!(first.eventtype, EventType::StartFailure(0)));
+        let (change, events) = fixture.at(100, EventType::StartFailure(0));
         assert_eq!(change, Change::Began);
         assert_eq!(events.len(), 1);
-        assert!(matches!(events[0].eventtype, EventType::EndFailure));
+        assert!(matches!(events[0].eventtype, EventType::EndFailure(0)));
         assert_eq!(events[0].exec_time.as_millis(), 60_000, "the repair time");
-        let (change, events) = fixture.at(60_100, EventType::EndFailure);
+        let (change, events) = fixture.at(60_100, EventType::EndFailure(0));
         assert_eq!(change, Change::Ended);
         assert_eq!(events.len(), 1);
-        assert!(matches!(events[0].eventtype, EventType::StartFailure));
+        assert!(matches!(events[0].eventtype, EventType::StartFailure(0)));
     }
 
     #[test]
     fn an_inactive_profile_never_fails() {
         let mut fixture = Fixture::new(Some(FailureProfile::new(1.0, Distribution::CONSTANT { value: 60_000.0 }, 7)));
-        assert!(fixture.interruptions.first_failure(ID).is_none());
-        assert!(Fixture::new(None).interruptions.first_failure(ID).is_none());
+        assert!(fixture.interruptions.first_failure(ID).is_empty());
+        assert!(Fixture::new(None).interruptions.first_failure(ID).is_empty());
     }
 
     #[test]
@@ -313,6 +383,113 @@ mod tests {
         assert!(!fixture.interruptions.is_interrupted());
         assert!(fixture.interruptions.list().is_empty());
         assert_eq!(fixture.change(30, EventType::PauseOn), Change::Began);
+    }
+
+    fn two_profiles() -> Interruptions {
+        Interruptions::with_profiles(vec![
+            FailureProfile::new(0.9, Distribution::CONSTANT { value: 60_000.0 }, 7).named("Tool wear"),
+            FailureProfile::new(0.8, Distribution::CONSTANT { value: 10_000.0 }, 8).named("Jam"),
+        ])
+    }
+
+    #[test]
+    fn each_profile_schedules_its_own_failures_and_names_itself_in_its_events() {
+        let mut interruptions = two_profiles();
+        let first = interruptions.first_failure(ID);
+        assert_eq!(first.len(), 2);
+        assert!(matches!(first[0].eventtype, EventType::StartFailure(0)));
+        assert!(matches!(first[1].eventtype, EventType::StartFailure(1)));
+    }
+
+    #[test]
+    fn overlapping_failures_of_two_profiles_are_one_stop_and_each_counts_its_own_time() {
+        let mut fixture = Fixture::new(None);
+        fixture.interruptions = two_profiles();
+        assert_eq!(fixture.change(100, EventType::StartFailure(0)), Change::Began);
+        assert_eq!(fixture.change(200, EventType::StartFailure(1)), Change::Unchanged, "already interrupted");
+        // The Jam ends first, so the object stays failed for Tool wear.
+        assert_eq!(fixture.change(10_200, EventType::EndFailure(1)), Change::Unchanged);
+        assert!(fixture.interruptions.is_active(Interruption::Failed));
+        assert_eq!(fixture.change(60_100, EventType::EndFailure(0)), Change::Ended);
+        assert!(!fixture.interruptions.is_interrupted());
+
+        let states = fixture.interruptions.profile_states(SimTime::from_millis(70_000));
+        assert_eq!(states.iter().map(|state| (state.name.as_str(), state.failures, state.time_failed.as_millis())).collect::<Vec<_>>(), vec![("Tool wear", 1, 60_000), ("Jam", 1, 10_000)]);
+        let statistics = fixture.statistics.read(SimTime::from_millis(70_000));
+        assert_eq!((statistics.stops, statistics.failures), (1, 2), "one stop, two failures");
+
+        let occurrences = fixture.context.take_occurrences();
+        let profiles: Vec<Option<u8>> = occurrences
+            .iter()
+            .filter_map(|o| match o.kind {
+                OccurrenceKind::InterruptionBegan { profile, .. } => Some(profile),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(profiles, vec![Some(0), Some(1)], "each failure names its profile");
+    }
+
+    #[test]
+    fn the_failed_state_keeps_the_time_its_first_failure_began() {
+        let mut fixture = Fixture::new(None);
+        fixture.interruptions = two_profiles();
+        fixture.at(100, EventType::StartFailure(0));
+        fixture.at(200, EventType::StartFailure(1));
+        assert_eq!(fixture.interruptions.list()[0].since.as_millis(), 100);
+    }
+
+    #[test]
+    fn a_failure_in_progress_counts_in_the_profiles_time_so_far() {
+        let mut fixture = Fixture::new(None);
+        fixture.interruptions = two_profiles();
+        fixture.at(1_000, EventType::StartFailure(1));
+        let jam = &fixture.interruptions.profile_states(SimTime::from_millis(4_000))[1];
+        assert_eq!((jam.time_failed.as_millis(), jam.failing_since), (3_000, Some(SimTime::from_millis(1_000))));
+        fixture.interruptions.clear_statistics(SimTime::from_millis(4_000));
+        let jam = &fixture.interruptions.profile_states(SimTime::from_millis(5_000))[1];
+        assert_eq!((jam.time_failed.as_millis(), jam.failures), (1_000, 0), "counts afresh from 4 s, and the failure that began earlier isn't counted again");
+    }
+
+    #[test]
+    fn an_event_for_a_profile_the_object_lacks_is_not_its_business() {
+        let mut fixture = Fixture::new(Some(failing()));
+        assert!(fixture.interruptions.handle(&EventType::StartFailure(1), ID, &mut fixture.context, &mut fixture.statistics).is_none());
+    }
+
+    #[test]
+    fn reset_clears_every_profiles_figures() {
+        let mut fixture = Fixture::new(None);
+        fixture.interruptions = two_profiles();
+        fixture.at(100, EventType::StartFailure(0));
+        fixture.interruptions.reset();
+        let states = fixture.interruptions.profile_states(SimTime::from_millis(500));
+        assert!(states.iter().all(|state| state.failures == 0 && state.time_failed == SimTime::ZERO && state.failing_since.is_none()));
+    }
+
+    #[test]
+    fn profiles_with_no_stream_of_their_own_fail_independently_of_each_other() {
+        let mut interruptions = Interruptions::with_profiles(vec![
+            FailureProfile::new(0.9, Distribution::ERLANG { mean: 60_000.0, k: 2 }, 0).named("A"),
+            FailureProfile::new(0.9, Distribution::ERLANG { mean: 60_000.0, k: 2 }, 0).named("B"),
+        ]);
+        interruptions.reseed(1234);
+        let firsts = interruptions.first_failure(ID);
+        assert_ne!(firsts[0].exec_time, firsts[1].exec_time, "the same seed would give the same failures");
+    }
+
+    #[test]
+    fn a_profiles_stream_keeps_its_failures_wherever_it_is_in_the_list() {
+        let profile = |name: &str, stream: u64| FailureProfile::new(0.9, Distribution::ERLANG { mean: 60_000.0, k: 2 }, 0).named(name).with_stream(stream);
+        let mut alone = Interruptions::with_profiles(vec![profile("Jam", 3)]);
+        let mut second = Interruptions::with_profiles(vec![profile("Wear", 1), profile("Jam", 3)]);
+        alone.reseed(42);
+        second.reseed(42);
+        assert_eq!(alone.first_failure(ID)[0].exec_time, second.first_failure(ID)[1].exec_time);
+        let mut unstreamed = Interruptions::with_profiles(vec![FailureProfile::new(0.9, Distribution::ERLANG { mean: 60_000.0, k: 2 }, 0)]);
+        let mut stream_0 = Interruptions::with_profiles(vec![profile("Failures", 0)]);
+        unstreamed.reseed(42);
+        stream_0.reseed(42);
+        assert_eq!(unstreamed.first_failure(ID)[0].exec_time, stream_0.first_failure(ID)[0].exec_time, "no stream is its place, and the first's is the object's own");
     }
 
     #[test]

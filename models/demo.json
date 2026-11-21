@@ -7,15 +7,18 @@
       "name": "Demo station",
       "parent": "Station",
       "attributes": {
-        "failures": {
-          "availability": 0.9,
-          "repair_time": {
-            "erlang": {
-              "mean": "00:01:00",
-              "k": 2
+        "failures": [
+          {
+            "name": "Failures",
+            "availability": 0.9,
+            "repair_time": {
+              "erlang": {
+                "mean": "00:01:00",
+                "k": 2
+              }
             }
           }
-        },
+        ],
         "description": "A Station that fails at random, available 90% of the time, with an Erlang repair time"
       }
     }

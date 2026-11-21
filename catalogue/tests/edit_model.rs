@@ -155,7 +155,7 @@ fn a_batch_ending_invalid_is_refused_with_every_problem_pointing_into_the_result
     );
     assert_eq!(error["kind"], "invalid_model");
     let pointers: Vec<&str> = error["problems"].as_array().unwrap().iter().map(|problem| problem["pointer"].as_str().unwrap()).collect();
-    assert_eq!(pointers, ["/classes/0/attributes/failures/availability", "/instances/2/attributes/proces_time"]);
+    assert_eq!(pointers, ["/classes/0/attributes/failures/0/availability", "/instances/2/attributes/proces_time"]);
     assert!(error["problems"][1]["message"].as_str().unwrap().contains("did you mean `process_time`?"));
     assert_eq!(setup.folder.read("line.json"), before);
 }
@@ -420,7 +420,7 @@ fn get_attributes_gives_every_attribute_with_its_value_and_origin() {
     let of = |name: &str| attributes.iter().find(|(n, _)| n == name).unwrap().1.clone();
     assert_eq!(of("distribution"), json!({ "attribute": "distribution", "from": "not_set" }), "round robin by default, set nowhere");
     assert_eq!(of("process_time"), json!({ "attribute": "process_time", "value": "00:00:50", "from": "instance" }));
-    assert_eq!(of("failures"), json!({ "attribute": "failures", "value": { "availability": 0.9, "repair_time": { "constant": "00:01:00" } }, "from": "class", "class": "Mill" }));
+    assert_eq!(of("failures"), json!({ "attribute": "failures", "value": [{ "name": "Failures", "availability": 0.9, "repair_time": { "constant": "00:01:00" } }], "from": "class", "class": "Mill" }));
     assert_eq!(of("starting_mus"), json!({ "attribute": "starting_mus", "value": 0, "from": "built_in" }));
     assert_eq!(of("capacity"), json!({ "attribute": "capacity", "value": 1, "from": "built_in" }));
     assert_eq!(of("start"), json!({ "attribute": "start", "value": "individual", "from": "built_in" }));

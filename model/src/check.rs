@@ -279,8 +279,26 @@ impl<'m> Checker<'m> {
         if built_in == "Station" && attributes.capacity.is_some_and(|capacity| capacity.limit() > MOST_STATION_CAPACITY) {
             self.problem(owner, "/attributes/capacity", "a Station's capacity can be at most 10,000");
         }
-        if let Some(failures) = &attributes.failures {
-            self.failures(owner, failures);
+        if let Some(list) = &attributes.failures {
+            if list.len() > 255 {
+                self.problem(owner, "/attributes/failures", "an object can have at most 255 failure profiles");
+            }
+            for (index, failures) in list.iter().enumerate() {
+                if failures.name.trim().is_empty() {
+                    self.problem(owner, &format!("/attributes/failures/{index}/name"), "a failure profile's name can't be empty");
+                } else if list[..index].iter().any(|earlier| earlier.name == failures.name) {
+                    self.problem(owner, &format!("/attributes/failures/{index}/name"), format!("there is already a failure profile named \"{}\" here", failures.name));
+                }
+                let stream = |at: usize, failures: &Failures| failures.stream.unwrap_or(at as u64);
+                if let Some(earlier) = list[..index].iter().enumerate().find(|(at, earlier)| stream(*at, earlier) == stream(index, failures)) {
+                    self.problem(
+                        owner,
+                        &format!("/attributes/failures/{index}/stream"),
+                        format!("\"{}\" already has stream {}: each failure profile of an object needs its own", earlier.1.name, stream(index, failures)),
+                    );
+                }
+                self.failures(owner, index, failures);
+            }
         }
         if let Some(dimensions) = attributes.dimensions {
             self.dimensions(owner, dimensions);
@@ -300,8 +318,9 @@ impl<'m> Checker<'m> {
         }
     }
 
-    fn failures(&mut self, owner: Owner, failures: &Failures) {
-        let at = "/attributes/failures";
+    fn failures(&mut self, owner: Owner, index: usize, failures: &Failures) {
+        let at = format!("/attributes/failures/{index}");
+        let at = at.as_str();
         if !(failures.availability > 0.0 && failures.availability < 1.0) {
             self.problem(
                 owner,

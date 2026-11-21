@@ -30,6 +30,25 @@ pub fn summary(value: &Value) -> String {
     if let Value::Bool(freezes) = value {
         return if *freezes { "freezes" } else { "runs on" }.to_string();
     }
+    // Failure profiles, each by name.
+    if let Value::Array(profiles) = value
+        && profiles.iter().all(|profile| profile.get("availability").is_some())
+    {
+        if profiles.is_empty() {
+            return "none".to_string();
+        }
+        return profiles
+            .iter()
+            .map(|profile| {
+                let line = summary(&json!({ "availability": profile["availability"], "repair_time": profile["repair_time"] }));
+                match profile["name"].as_str() {
+                    Some(name) => format!("{name}: {line}"),
+                    None => line,
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+    }
     let Value::Object(fields) = value else {
         return text(value);
     };
@@ -110,6 +129,101 @@ pub struct Form {
     /// For a value that is one of a few: each as a model file writes it, with its label. The
     /// one chosen is the first part's text.
     pub options: &'static [(&'static str, &'static str)],
+    /// For failures: each named profile, in the object's order.
+    pub profiles: Option<Vec<ProfileForm>>,
+}
+
+/// One failure profile's fields: its name, the stream it keeps, and its availability and repair
+/// time as a form of its own (`failure`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProfileForm {
+    pub name: String,
+    /// Its stream within the object: kept when it has one, its place in the list when it came
+    /// without one, and new for one added in the window.
+    pub stream: Option<u64>,
+    pub form: Form,
+}
+
+impl Form {
+    /// Adds a failure profile, 95 % available with a constant repair of a minute, named so no
+    /// other has its name, with a stream after every other's.
+    pub fn add_profile(&mut self) {
+        let Some(profiles) = self.profiles.as_mut() else { return };
+        let taken = |name: &str| profiles.iter().any(|profile| profile.name == name);
+        let name = if !taken("Failures") {
+            "Failures".to_string()
+        } else {
+            (2..).map(|n| format!("Failures {n}")).find(|name| !taken(name)).expect("some number is free")
+        };
+        let stream = profiles.iter().enumerate().map(|(place, profile)| profile.stream.unwrap_or(place as u64) + 1).max().unwrap_or(0);
+        let form = Form::new("failure", Some(&json!({ "availability": 0.95, "repair_time": { "constant": "00:01:00" } })));
+        profiles.push(ProfileForm { name, stream: Some(stream), form });
+    }
+
+    /// Takes the failure profile at `place` out.
+    pub fn remove_profile(&mut self, place: usize) {
+        if let Some(profiles) = self.profiles.as_mut().filter(|profiles| place < profiles.len()) {
+            profiles.remove(place);
+        }
+    }
+
+    fn failures(value: Option<&Value>) -> Form {
+        // An older file's single object reads as one profile named "Failures".
+        let list = match value {
+            Some(Value::Array(list)) => list.clone(),
+            Some(Value::Object(_)) => vec![value.cloned().expect("an object")],
+            _ => Vec::new(),
+        };
+        let profiles = list
+            .iter()
+            .enumerate()
+            .map(|(place, profile)| ProfileForm {
+                name: profile["name"].as_str().unwrap_or("Failures").to_string(),
+                stream: Some(profile["stream"].as_u64().unwrap_or(place as u64)),
+                form: Form::new("failure", Some(profile)),
+            })
+            .collect();
+        Form { attribute: "failures".into(), parts: Vec::new(), repair: None, distribution: None, options: &[], profiles: Some(profiles) }
+    }
+
+    /// The profiles as a model file writes them, each with its stream. An empty list is none at
+    /// all, even where a class gives some.
+    fn failures_value(profiles: &[ProfileForm]) -> Result<Value, String> {
+        let mut list = Vec::new();
+        for (place, profile) in profiles.iter().enumerate() {
+            let name = profile.name.trim();
+            if name.is_empty() {
+                return Err(format!("the {} failure profile needs a name", crate::attributes::ordinal(place + 1)));
+            }
+            if profiles[..place].iter().any(|earlier| earlier.name.trim() == name) {
+                return Err(format!("two failure profiles are named \"{name}\": each needs its own name"));
+            }
+            let mut value = match profile.form.value()? {
+                Value::Null => return Err(format!("\"{name}\" at 100 % never fails: remove it instead")),
+                value => value,
+            };
+            let mut fields = Map::new();
+            fields.insert("name".into(), json!(name));
+            fields.insert("stream".into(), json!(profile.stream.unwrap_or(place as u64)));
+            for (key, field) in value.as_object_mut().into_iter().flat_map(std::mem::take) {
+                fields.insert(key, field);
+            }
+            list.push(Value::Object(fields));
+        }
+        Ok(Value::Array(list))
+    }
+}
+
+/// "1st", "2nd", "3rd", "4th" and so on.
+pub fn ordinal(place: usize) -> String {
+    let suffix = match (place % 10, place % 100) {
+        (_, 11..=13) => "th",
+        (1, _) => "st",
+        (2, _) => "nd",
+        (3, _) => "rd",
+        _ => "th",
+    };
+    format!("{place}{suffix}")
 }
 
 /// A Buffer's exit strategies, by name in a model file, with their labels in the window.
@@ -163,8 +277,11 @@ impl Form {
     /// Failures without a value start at 100 % available with a constant repair time: one that
     /// never fails, until the availability is lowered.
     pub fn new(attribute: &str, value: Option<&Value>) -> Form {
+        if attribute == "failures" {
+            return Form::failures(value);
+        }
         let (parts, repair) = match attribute {
-            "failures" => {
+            "failure" => {
                 let failures = value.cloned().unwrap_or_else(|| json!({ "availability": 1.0, "repair_time": { "constant": "00:01:00" } }));
                 let availability = failures["availability"].as_f64().map_or(String::new(), |a| number(a * 100.0));
                 let (kind, first, second) = match failures["repair_time"].as_object().and_then(|repair| repair.iter().next()) {
@@ -196,7 +313,7 @@ impl Form {
             "stop_freezes_dwelling" => &DWELLING_IN_A_STOP,
             _ => &[],
         };
-        Form { attribute: attribute.to_string(), parts, repair, distribution: None, options }
+        Form { attribute: attribute.to_string(), parts, repair, distribution: None, options, profiles: None }
     }
 
     /// The fields for `attribute`, whatever it is: state notes need the `states` the object can be
@@ -229,7 +346,7 @@ impl Form {
             successor: field("rank") == Some("successor"),
             drains: ticks,
         };
-        Form { attribute: "distribution".into(), parts: Vec::new(), repair: None, distribution: Some(choice), options: &[] }
+        Form { attribute: "distribution".into(), parts: Vec::new(), repair: None, distribution: Some(choice), options: &[], profiles: None }
     }
 
     /// The fields for state notes: one per state the object can be in, labelled with the state and
@@ -239,7 +356,7 @@ impl Form {
             .iter()
             .map(|state| part(state.label(), value.and_then(|notes| notes.get(state.name())).and_then(Value::as_str).unwrap_or_default()))
             .collect();
-        Form { attribute: "state_notes".into(), parts, repair: None, distribution: None, options: &[] }
+        Form { attribute: "state_notes".into(), parts, repair: None, distribution: None, options: &[], profiles: None }
     }
 
     /// The states a state notes form has a field for.
@@ -283,7 +400,8 @@ impl Form {
                 Ok(limit) if limit >= 1 => Ok(json!(limit)),
                 _ => Err(format!("`{}` isn't a capacity: type a whole number from 1, or -1 for no limit", text(0))),
             },
-            "failures" => {
+            "failures" => Form::failures_value(self.profiles.as_deref().unwrap_or_default()),
+            "failure" => {
                 let percent = float(0)?;
                 // 100 % available never fails, which a model file says by leaving failures out.
                 if percent == 100.0 {
@@ -358,6 +476,11 @@ impl Form {
             let given = value.cloned().unwrap_or_else(|| json!("round_robin"));
             let given = Form::distribution(Some(&given), &[]).value().unwrap_or_default();
             return self.value().ok().map(sorted) == Some(sorted(given));
+        }
+        if self.attribute == "failures" {
+            // Compared as the file would have them, each with its stream.
+            let given = Form::new("failures", value);
+            return self.value().ok() == given.value().ok() && self.value().is_ok();
         }
         *self == Form::new(&self.attribute, value)
     }

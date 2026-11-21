@@ -395,6 +395,7 @@ impl EventInterface for MultiStation {
 	}
 	fn clear_statistics(&mut self, now: SimTime) {
 		self.statistics.clear(now);
+		self.interruptions.clear_statistics(now);
 	}
 	fn report(&self, now: SimTime) -> ObjectState {
 		let work: Vec<WorkLeft> = self
@@ -413,6 +414,7 @@ impl EventInterface for MultiStation {
 			process: self.process_state(),
 			interrupted: self.interruptions.most_serious(),
 			interruptions: self.interruptions.list(),
+			failure_profiles: self.interruptions.profile_states(now),
 			remaining: work.iter().map(|work| work.left).min(),
 			work,
 			blocked_predecessors: waiting_ids(&self.blockedlist),

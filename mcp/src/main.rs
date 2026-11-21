@@ -48,6 +48,28 @@ Every run's results stay in a results store, which query_results reads with SQL 
 struct Server {
     catalogue: Arc<Catalogue>,
     tools: Vec<Tool>,
+    /// The instructions for agents, with a warning first when this build is out of date.
+    instructions: String,
+}
+
+/// What to say when the server was built from another commit than its source checkout is at now,
+/// so its tools' descriptions and behaviour may be out of date. A harness keeps running whatever
+/// binary it was pointed at, and `cargo test` and `cargo build` at the root never build this one,
+/// so an old one can go unnoticed: an agent was once told Buffers didn't work, long after they did.
+fn staleness(built: &str, source: Option<&str>) -> Option<String> {
+    let built_commit = built.trim_end_matches("-dirty");
+    let source = source?;
+    (built_commit != "unknown" && built_commit != source).then(|| {
+        format!(
+            "This crabsim-mcp is out of date: it was built from commit {built_commit}, and its source is now at {source}, so what its tools say and do may be old. Tell the user to stop this server and rebuild it with `cargo build --release -p crabsim-mcp`."
+        )
+    })
+}
+
+/// The commit the source checkout this server was built from is at now, if it is still there.
+fn source_commit() -> Option<String> {
+    let output = std::process::Command::new("git").args(["-C", env!("CARGO_MANIFEST_DIR"), "rev-parse", "--short=7", "HEAD"]).output().ok()?;
+    output.status.success().then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 impl Server {
@@ -68,7 +90,16 @@ impl Server {
                     .with_annotations(annotations)
             })
             .collect();
-        Server { catalogue: Arc::new(catalogue), tools }
+        let instructions = match staleness(crabsim_catalogue::BUILD, source_commit().as_deref()) {
+            Some(warning) => {
+                eprintln!("{warning}");
+                format!("{warning}
+
+{INSTRUCTIONS}")
+            }
+            None => INSTRUCTIONS.to_string(),
+        };
+        Server { catalogue: Arc::new(catalogue), tools, instructions }
     }
 }
 
@@ -80,7 +111,7 @@ impl ServerHandler for Server {
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("crabsim", env!("CARGO_PKG_VERSION")))
-            .with_instructions(INSTRUCTIONS)
+            .with_instructions(self.instructions.clone())
     }
 
     async fn list_tools(&self, _request: Option<PaginatedRequestParams>, _context: RequestContext<RoleServer>) -> Result<ListToolsResult, ErrorData> {
@@ -134,5 +165,25 @@ fn main() -> ExitCode {
             eprintln!("crabsim-mcp stopped: {error}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::staleness;
+
+    #[test]
+    fn a_server_built_from_another_commit_than_its_source_says_it_is_out_of_date() {
+        let warning = staleness("abc1234", Some("def5678")).expect("out of date");
+        assert!(warning.contains("built from commit abc1234") && warning.contains("now at def5678") && warning.contains("cargo build --release -p crabsim-mcp"), "{warning}");
+        assert!(staleness("abc1234-dirty", Some("def5678")).is_some(), "uncommitted changes on an old commit");
+    }
+
+    #[test]
+    fn a_current_build_or_one_without_its_source_says_nothing() {
+        assert_eq!(staleness("abc1234", Some("abc1234")), None);
+        assert_eq!(staleness("abc1234-dirty", Some("abc1234")), None, "built from the commit the source is at");
+        assert_eq!(staleness("abc1234", None), None, "the source checkout is gone, or git isn't there");
+        assert_eq!(staleness("unknown", Some("abc1234")), None, "built outside git");
     }
 }

@@ -2608,3 +2608,46 @@ fn clearing_statistics_in_a_session_starts_its_periods_afresh() {
     assert_eq!(state.statistics_since, secs(5_400));
     assert_eq!(state.periods.as_ref().unwrap().complete, 3, "periods end at 2:30, 3:30 and 4:30");
 }
+
+#[test]
+fn work_left_follows_a_stop_by_hand_begun_and_ended_while_halted_in_any_order_of_outputs() {
+    for (ask_between, ask_after) in [(false, false), (true, false), (false, true), (true, true)] {
+        let mut watched = Watched::new(line_with_random_failures);
+        watched.session.start().unwrap();
+        // A moment the Station is working, with a few seconds left.
+        let mut at = 1_000;
+        loop {
+            watched.at(at);
+            watched.look();
+            if watched.state_now().objects[STATION as usize].remaining.is_some_and(|left| left > secs(2)) {
+                break;
+            }
+            at += 1;
+        }
+        watched.session.halt().unwrap();
+        watched.look();
+        watched.session.stop_object(STATION).unwrap();
+        if ask_between {
+            watched.session.request_state().unwrap();
+        }
+        watched.look();
+        watched.session.end_stop(STATION).unwrap();
+        if ask_after {
+            watched.session.request_state().unwrap();
+        }
+        watched.look_without_errors();
+        let shown = watched.picture.shown();
+        let pictured = watched.picture.objects()[STATION as usize].remaining(shown);
+        let state = watched.state_now();
+        let own = state.objects[STATION as usize].remaining;
+        assert!(own.is_some(), "the Station is working");
+        assert_eq!(pictured, own, "asked between {ask_between}, after {ask_after}, at {shown:?}");
+        watched.session.start().unwrap();
+        watched.at(at + 1);
+        watched.look_without_errors();
+        let shown = watched.picture.shown();
+        let pictured = watched.picture.objects()[STATION as usize].remaining(shown);
+        let own = watched.state_now().objects[STATION as usize].remaining;
+        assert_eq!(pictured, own, "going on, asked between {ask_between}, after {ask_after}, at {shown:?}");
+    }
+}

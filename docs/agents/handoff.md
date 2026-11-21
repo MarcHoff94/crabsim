@@ -198,7 +198,7 @@ Performance is the first thing to weigh in design trade-offs. It is a guideline 
   - `StartFailure` and `EndFailure` will need to name their profile. A queue entry is 32 bytes (`ScheduledEvent`, printed by the benchmark), so give the index a small type and check the entry stays at 32.
   - A failure event schedules what follows through the context inside `Interruptions::handle`, before the object's `stop_began` or `stop_ended` runs, so the next failure is queued ahead of what the object schedules. Keep that order for a model with one profile, so its results stay identical: hash the demo and the buffered line against `master` as before, with the old single `failures` read as a list of one named "Failures" and its stream unchanged.
   - The hash program used for PRs 1, 2 and 126 was temporary: a `src/hash_check.rs` added to `src/lib.rs` for the check and removed before committing. Write it again: it builds each model with `ModelDescription`, records everything, and hashes every occurrence and the final state.
-  - A fault from PR 1, also on `master` before it, is still open: after a stop by hand is ended while the run is halted, the window's Work left shows the completion time rather than the time left.
+  - A fault from PR 1, also on `master` before it: after a stop by hand is ended while the run is halted, the window's Work left showed the completion time rather than the time left. Fixed on `fix/stale-mcp-server`: while halted, the stop's events wait at shown time, a state the window asks for comes from a replay that has already handled them, and the run's own occurrences of them arrive after it, so the `Picture` applied the end of a stop it already knew had ended, counting the work left from now twice. An end of an interruption that isn't active now changes nothing in the picture, as in the run (`work_left_follows_a_stop_by_hand_begun_and_ended_while_halted_in_any_order_of_outputs`).
 
 ### Stops (as agreed before spec issue 122)
 - **Interruption** is the cause (a failure or a pause). **Stop** is the resulting state of the object. A failure from t=20 to 30 plus a pause from t=25 to 35 is two interruptions and one stop from t=20 to 35.
@@ -567,6 +567,8 @@ JSON is the only model file format: YAML is out.
 The grilling session ended here on 2026-11-07, with nothing left open.
 
 ## Known problems
+
+- **A harness runs whatever `crabsim-mcp.exe` it was pointed at,** and nothing at the root rebuilds it. On 2026-11-21 the trials in `C:\Users\marcu\projects\crabsim_trials` still ran a build from 2026-11-15, whose `model_file_format` said Buffers didn't work, so an agent optimising a model placed none. Since `fix/stale-mcp-server` the server compares its build's commit with its checkout's at startup and warns agents and stderr when they differ. Rebuild it with `cargo build --release -p crabsim-mcp` after pulling, with every harness using it closed, since Windows won't replace a running .exe.
 
 - **Illegal connections panic while running,** in a model built in code: an edge into a Source, or a self-loop. `ModelDescription` only rejects a successor on a Drain and ids not in the model. A model file can't have them: its check refuses both.
 - **Dead code** hidden by `#![allow(dead_code)]`: `MUEntrance`, `Finished`, `exitlocked`, `Paused`, and `FailureProfile.mtbf`.

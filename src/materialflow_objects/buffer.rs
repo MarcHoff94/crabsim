@@ -304,8 +304,8 @@ impl EventInterface for Buffer {
         self.interrupted_at = SimTime::ZERO;
     }
     fn clear_statistics(&mut self, now: SimTime) {
-        self.statistics.clear(now);
-		self.interruptions.clear_statistics(now);
+        self.interruptions.clear_statistics(now, &self.statistics);
+		self.statistics.clear(now);
         self.fill.clear();
     }
     fn report(&self, now: SimTime) -> ObjectState {
@@ -316,7 +316,7 @@ impl EventInterface for Buffer {
             process: self.process_state(),
             interrupted: self.interruptions.most_serious(),
             interruptions: self.interruptions.list(),
-			failure_profiles: self.interruptions.profile_states(now),
+			failure_profiles: self.interruptions.profile_states(now, &self.statistics),
             remaining: None,
             work: Vec::new(),
             blocked_predecessors: waiting_ids(&self.blockedlist),

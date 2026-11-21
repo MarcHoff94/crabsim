@@ -2749,3 +2749,83 @@ fn a_station_with_two_failure_profiles_counts_each_ones_failures_and_time() {
     let full_again = again.state();
     assert_eq!(object(&full_again, st).failure_profiles, state.failure_profiles);
 }
+
+// ---------- Time bases (spec issue 122, PR 4) ----------
+
+/// A Source every 10 s into a Station working 5 s, so it is busy half the time, into a Drain. The
+/// Station has one profile, 90 % available with an Erlang repair of a minute, on `basis`.
+fn half_busy_line(basis: crabsim::TimeBasis) -> (ModelDescription, u32) {
+    use crabsim::flows::FailureProfile;
+    let mut model = ModelDescription::new();
+    let source = model.add_source(secs(10));
+    let st = model.add_station(secs(5), FailureProfile::new(1.0, Distribution::CONSTANT { value: 0.0 }, 0));
+    let drain = model.add_drain();
+    model.connect(source, st);
+    model.connect(st, drain);
+    model.set_failure_profiles(st, vec![FailureProfile::new(0.9, Distribution::ERLANG { mean: 60_000.0, k: 2 }, 0).named("Wear").with_time_basis(basis)]);
+    (model, st)
+}
+
+fn profile_after(model: &ModelDescription, st: u32, days: u64, pauses: bool) -> crabsim::report::FailureProfileState {
+    let mut run = model.build(11);
+    run.init().unwrap();
+    if pauses {
+        // Paused for 8 hours every day.
+        for day in 0..days {
+            run.schedule_event(secs(day * 86_400 + 3_600), EventType::PauseOn, st).unwrap();
+            run.schedule_event(secs(day * 86_400 + 3_600 + 8 * 3_600), EventType::PauseOff, st).unwrap();
+        }
+    }
+    // A warm-up, after which a profile on processing time keeps what it counted.
+    run.advance_to(secs(5 * 86_400)).map_err(|f| f.error).unwrap();
+    run.clear_statistics();
+    run.advance_to(secs(days * 86_400)).map_err(|f| f.error).unwrap();
+    object(&run.state(), st).failure_profiles[0].clone()
+}
+
+#[test]
+fn each_time_basis_achieves_the_configured_availability_on_its_own_time() {
+    use crabsim::TimeBasis;
+    for (basis, pauses) in [(TimeBasis::Simulation, false), (TimeBasis::Working, true), (TimeBasis::Processing, false), (TimeBasis::Processing, true)] {
+        let (model, st) = half_busy_line(basis);
+        let profile = profile_after(&model, st, 400, pauses);
+        let availability = profile.availability().unwrap();
+        assert!((availability - 0.9).abs() < 0.01, "{basis:?}, pauses {pauses}: {availability} from {profile:?}");
+    }
+}
+
+#[test]
+fn a_profile_on_processing_time_fails_about_half_as_often_on_a_station_busy_half_the_time() {
+    use crabsim::TimeBasis;
+    let (simulation, st) = half_busy_line(TimeBasis::Simulation);
+    let (processing, _) = half_busy_line(TimeBasis::Processing);
+    let on_simulation = profile_after(&simulation, st, 200, false).failures as f64;
+    let on_processing = profile_after(&processing, st, 200, false).failures as f64;
+    let ratio = on_processing / on_simulation;
+    assert!((0.45..0.6).contains(&ratio), "{on_processing} against {on_simulation}");
+}
+
+#[test]
+fn a_profile_on_working_time_fails_less_often_the_more_the_object_is_paused() {
+    use crabsim::TimeBasis;
+    let (model, st) = half_busy_line(TimeBasis::Working);
+    let unpaused = profile_after(&model, st, 200, false).failures as f64;
+    let paused = profile_after(&model, st, 200, true).failures as f64;
+    // Paused a third of each day.
+    let ratio = paused / unpaused;
+    assert!((0.6..0.73).contains(&ratio), "{paused} against {unpaused}");
+}
+
+#[test]
+fn on_simulation_time_a_profile_fails_as_it_always_has() {
+    let (model, st) = half_busy_line(crabsim::TimeBasis::Simulation);
+    let mut plain = model.clone();
+    plain.set_failure_profiles(st, vec![crabsim::flows::FailureProfile::new(0.9, Distribution::ERLANG { mean: 60_000.0, k: 2 }, 0)]);
+    let run = |model: &ModelDescription| {
+        let mut run = model.build(4);
+        run.set_recording(Recording::ALL);
+        run.init().unwrap();
+        run.advance_to(secs(20 * 86_400)).map_err(|f| f.error).unwrap()
+    };
+    assert_eq!(run(&model), run(&plain), "naming the basis changes nothing");
+}

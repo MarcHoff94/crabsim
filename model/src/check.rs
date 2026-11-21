@@ -297,6 +297,13 @@ impl<'m> Checker<'m> {
                         format!("\"{}\" already has stream {}: each failure profile of an object needs its own", earlier.1.name, stream(index, failures)),
                     );
                 }
+                if failures.time_basis == crate::TimeBasis::Processing && matches!(built_in, "Buffer" | "Drain") {
+                    self.problem(
+                        owner,
+                        &format!("/attributes/failures/{index}/time_basis"),
+                        format!("a {built_in} is never busy working on MUs, so it has no processing time: use \"simulation\" or \"working\""),
+                    );
+                }
                 self.failures(owner, index, failures);
             }
         }

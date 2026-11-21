@@ -177,6 +177,9 @@ fn failures(failures: &Failures) -> Value {
     if let Some(stream) = failures.stream {
         fields.insert("stream".into(), json!(stream));
     }
+    if failures.time_basis != crate::TimeBasis::Simulation {
+        fields.insert("time_basis".into(), json!(crate::time_basis_name(failures.time_basis)));
+    }
     fields.insert("availability".into(), json!(failures.availability));
     fields.insert("repair_time".into(), repair_time);
     Value::Object(fields)

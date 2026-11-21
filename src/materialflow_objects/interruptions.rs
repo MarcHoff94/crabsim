@@ -10,7 +10,7 @@ use crate::materialflow_objects::OtherObjects;
 use crate::report::{ActiveInterruption, FailureProfileState, Interruption, OccurrenceKind};
 use crate::statistics::StatisticsKeeper;
 use crate::time::SimTime;
-use super::flows::FailureProfile;
+use super::flows::{FailureProfile, TimeBasis};
 
 /// What one stop event did to an object.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,8 +34,29 @@ pub struct Interruptions {
     /// profile holds two random number generators, and every object in a run takes the size of
     /// the largest, so the list lives behind a box. A failure event looks its profile up here,
     /// a few times per failure and never per MU.
-    #[allow(clippy::box_collection)]
-    failures: Option<Box<Vec<FailureProfile>>>,
+    failures: Option<Box<Profiles>>,
+}
+
+/// The failure profiles, and what only they need: how long the object has been paused since Init,
+/// not counting a pause in progress, which working time leaves out. It lives here, so an object
+/// without profiles doesn't grow for it, and clearing the statistics doesn't touch it.
+#[derive(Clone)]
+struct Profiles {
+    list: Vec<FailureProfile>,
+    paused: SimTime,
+}
+
+impl std::ops::Deref for Profiles {
+    type Target = Vec<FailureProfile>;
+    fn deref(&self) -> &Vec<FailureProfile> {
+        &self.list
+    }
+}
+
+impl std::ops::DerefMut for Profiles {
+    fn deref_mut(&mut self) -> &mut Vec<FailureProfile> {
+        &mut self.list
+    }
 }
 
 impl Interruptions {
@@ -99,8 +120,14 @@ impl Interruptions {
         }
     }
 
-    /// Each profile's figures at `now`, for the object's state.
-    pub fn profile_states(&self, now: SimTime) -> Vec<FailureProfileState> {
+    /// Each profile's figures at `now`, for the object's state, with its up time from the object's
+    /// `statistics`.
+    pub fn profile_states(&self, now: SimTime, statistics: &StatisticsKeeper) -> Vec<FailureProfileState> {
+        if self.failure_profiles().iter().all(|profile| !profile.active) {
+            return Vec::new();
+        }
+        let read = statistics.read(now);
+        let measured = read.measured_time();
         self.failure_profiles()
             .iter()
             .enumerate()
@@ -112,20 +139,46 @@ impl Interruptions {
                 failures: profile.failures,
                 time_failed: profile.failed_by(now),
                 failing_since: profile.failing_since,
+                time_basis: profile.time_basis,
+                up: match profile.time_basis {
+                    TimeBasis::Simulation => measured.saturating_sub(profile.failed_by(now)),
+                    TimeBasis::Working => measured.saturating_sub(profile.failed_by(now)).saturating_sub(read.time_paused),
+                    TimeBasis::Processing => read.time_busy,
+                },
             })
             .collect()
     }
 
-    /// The first random failure of each active profile, due at Init.
+    /// The first random failure of each active profile, due at Init, when no time has counted on
+    /// any basis.
     pub fn first_failure(&mut self, object_id: u32) -> Vec<EventTemplate> {
         let count = self.failure_profiles().len();
-        (0..count).filter_map(|index| self.next_failure(index, object_id)).collect()
+        (0..count).filter_map(|index| self.next_failure(index, object_id, SimTime::ZERO)).collect()
     }
 
-    fn next_failure(&mut self, index: usize, object_id: u32) -> Option<EventTemplate> {
+    /// Schedules a profile's next failure, `counted` being the time counted on its basis now. It is
+    /// due once its basis has counted the time sampled, which is never sooner than that time from
+    /// now, so the event goes there and is checked when it fires (lazy checking).
+    fn next_failure(&mut self, index: usize, object_id: u32, counted: SimTime) -> Option<EventTemplate> {
         let profile = self.failures.as_mut()?.get_mut(index).filter(|profile| profile.active)?;
         let after = profile.get_time_to_next_failure().ok().flatten()?;
+        profile.due = counted + after;
         Some(EventTemplate { eventtype: EventType::StartFailure(index as ProfileIndex), exec_time: after, object_id })
+    }
+
+    /// The time counted on `basis` by `now`, the object's statistics giving its busy time.
+    fn counted(&self, basis: TimeBasis, now: SimTime, statistics: &StatisticsKeeper) -> SimTime {
+        match basis {
+            TimeBasis::Simulation => now,
+            TimeBasis::Working => now.saturating_sub(self.paused_by(now)),
+            TimeBasis::Processing => statistics.read(now).time_busy,
+        }
+    }
+
+    /// How long it has been paused by `now`, a pause in progress included.
+    fn paused_by(&self, now: SimTime) -> SimTime {
+        let in_progress = if self.is_active(Interruption::Paused) { now.saturating_sub(self.since[Interruption::Paused.index()]) } else { SimTime::ZERO };
+        self.failures.as_ref().map_or(SimTime::ZERO, |profiles| profiles.paused) + in_progress
     }
 
     /// Back to the default state: nothing active and nothing counted. The profiles keep their
@@ -133,15 +186,25 @@ impl Interruptions {
     pub fn reset(&mut self) {
         self.active = [false; 3];
         self.since = [SimTime::ZERO; 3];
-        self.clear_statistics(SimTime::ZERO);
+        if let Some(profiles) = self.failures.as_mut() {
+            profiles.paused = SimTime::ZERO;
+        }
         for profile in self.failures.iter_mut().flat_map(|list| list.iter_mut()) {
             profile.failing_since = None;
+            profile.time_failed = SimTime::ZERO;
+            profile.failures = 0;
         }
     }
 
-    /// Starts each profile's figures afresh at `now`: a failure in progress counts from here.
-    pub fn clear_statistics(&mut self, now: SimTime) {
+    /// Starts each profile's figures afresh at `now`: a failure in progress counts from here. Called
+    /// before the object's `statistics` are cleared, so that a profile counting busy time, which
+    /// they hold, keeps what it has counted towards its next failure.
+    pub fn clear_statistics(&mut self, now: SimTime, statistics: &StatisticsKeeper) {
+        let busy = statistics.read(now).time_busy;
         for profile in self.failures.iter_mut().flat_map(|list| list.iter_mut()) {
+            if profile.time_basis == TimeBasis::Processing {
+                profile.due = profile.due.saturating_sub(busy);
+            }
             profile.time_failed = SimTime::ZERO;
             profile.failures = 0;
             if profile.failing_since.is_some() {
@@ -168,8 +231,14 @@ impl Interruptions {
         }
         let change = match *eventtype {
             EventType::StartFailure(index) => {
+                let basis = self.failure_profiles()[index as usize].time_basis;
+                let counted = if basis == TimeBasis::Simulation { None } else { Some(self.counted(basis, context.time, statistics)) };
                 let profile = &mut self.failures.as_mut().expect("checked above")[index as usize];
                 if profile.failing_since.is_some() {
+                    Change::Unchanged
+                } else if let Some(counted) = counted.filter(|&counted| counted < profile.due) {
+                    // Its basis counted too little to get here: come back when it could have.
+                    context.schedule(EventTemplate { eventtype: EventType::StartFailure(index), exec_time: profile.due.saturating_sub(counted), object_id });
                     Change::Unchanged
                 } else {
                     profile.failing_since = Some(context.time);
@@ -190,7 +259,9 @@ impl Interruptions {
                 // The failure is over, but the object stays failed while another profile is.
                 let still_failing = self.failure_profiles().iter().any(|profile| profile.failing_since.is_some());
                 self.active[Interruption::Failed.index()] = still_failing;
-                if let Some(next) = self.next_failure(index as usize, object_id) {
+                let basis = self.failure_profiles()[index as usize].time_basis;
+                let counted = self.counted(basis, context.time, statistics);
+                if let Some(next) = self.next_failure(index as usize, object_id, counted) {
                     context.schedule(next);
                 }
                 self.ended()
@@ -238,6 +309,11 @@ impl Interruptions {
         if !self.is_active(cause) {
             return Change::Unchanged;
         }
+        if cause == Interruption::Paused {
+            if let Some(profiles) = self.failures.as_mut() {
+                profiles.paused += context.time.saturating_sub(self.since[cause.index()]);
+            }
+        }
         self.active[cause.index()] = false;
         context.record(OccurrenceKind::InterruptionEnded { object_id, cause, profile: None });
         self.ended()
@@ -248,9 +324,8 @@ impl Interruptions {
     }
 }
 
-#[allow(clippy::box_collection)]
-fn boxed(failures: Vec<FailureProfile>) -> Option<Box<Vec<FailureProfile>>> {
-    (!failures.is_empty()).then(|| Box::new(failures))
+fn boxed(failures: Vec<FailureProfile>) -> Option<Box<Profiles>> {
+    (!failures.is_empty()).then(|| Box::new(Profiles { list: failures, paused: SimTime::ZERO }))
 }
 
 /// An object that can be interrupted. It keeps `Interruptions` and says what an interruption means
@@ -413,7 +488,7 @@ mod tests {
         assert_eq!(fixture.change(60_100, EventType::EndFailure(0)), Change::Ended);
         assert!(!fixture.interruptions.is_interrupted());
 
-        let states = fixture.interruptions.profile_states(SimTime::from_millis(70_000));
+        let states = fixture.interruptions.profile_states(SimTime::from_millis(70_000), &fixture.statistics);
         assert_eq!(states.iter().map(|state| (state.name.as_str(), state.failures, state.time_failed.as_millis())).collect::<Vec<_>>(), vec![("Tool wear", 1, 60_000), ("Jam", 1, 10_000)]);
         let statistics = fixture.statistics.read(SimTime::from_millis(70_000));
         assert_eq!((statistics.stops, statistics.failures), (1, 2), "one stop, two failures");
@@ -443,10 +518,10 @@ mod tests {
         let mut fixture = Fixture::new(None);
         fixture.interruptions = two_profiles();
         fixture.at(1_000, EventType::StartFailure(1));
-        let jam = &fixture.interruptions.profile_states(SimTime::from_millis(4_000))[1];
+        let jam = &fixture.interruptions.profile_states(SimTime::from_millis(4_000), &fixture.statistics)[1];
         assert_eq!((jam.time_failed.as_millis(), jam.failing_since), (3_000, Some(SimTime::from_millis(1_000))));
-        fixture.interruptions.clear_statistics(SimTime::from_millis(4_000));
-        let jam = &fixture.interruptions.profile_states(SimTime::from_millis(5_000))[1];
+        fixture.interruptions.clear_statistics(SimTime::from_millis(4_000), &fixture.statistics);
+        let jam = &fixture.interruptions.profile_states(SimTime::from_millis(5_000), &fixture.statistics)[1];
         assert_eq!((jam.time_failed.as_millis(), jam.failures), (1_000, 0), "counts afresh from 4 s, and the failure that began earlier isn't counted again");
     }
 
@@ -462,7 +537,7 @@ mod tests {
         fixture.interruptions = two_profiles();
         fixture.at(100, EventType::StartFailure(0));
         fixture.interruptions.reset();
-        let states = fixture.interruptions.profile_states(SimTime::from_millis(500));
+        let states = fixture.interruptions.profile_states(SimTime::from_millis(500), &fixture.statistics);
         assert!(states.iter().all(|state| state.failures == 0 && state.time_failed == SimTime::ZERO && state.failing_since.is_none()));
     }
 
@@ -490,6 +565,45 @@ mod tests {
         unstreamed.reseed(42);
         stream_0.reseed(42);
         assert_eq!(unstreamed.first_failure(ID)[0].exec_time, stream_0.first_failure(ID)[0].exec_time, "no stream is its place, and the first's is the object's own");
+    }
+
+    #[test]
+    fn on_working_time_a_failure_comes_later_by_the_time_paused_checked_when_it_fires() {
+        let mut fixture = Fixture::new(None);
+        // 50 % available with a constant minute's repair: a minute between failures.
+        fixture.interruptions = Interruptions::with_profiles(vec![FailureProfile::new(0.5, Distribution::CONSTANT { value: 60_000.0 }, 0).with_time_basis(TimeBasis::Working)]);
+        let first = fixture.interruptions.first_failure(ID);
+        assert_eq!(first[0].exec_time.as_millis(), 60_000, "as soon as it could come, as if never paused");
+        fixture.at(10_000, EventType::PauseOn);
+        fixture.at(30_000, EventType::PauseOff);
+        let (change, events) = fixture.at(60_000, EventType::StartFailure(0));
+        assert_eq!(change, Change::Unchanged, "only 40 s of working time so far");
+        assert!(matches!(events[0].eventtype, EventType::StartFailure(0)));
+        assert_eq!(events[0].exec_time.as_millis(), 20_000, "the 20 s paused");
+        assert!(fixture.context.take_occurrences().iter().all(|o| !matches!(o.kind, OccurrenceKind::InterruptionBegan { cause: Interruption::Failed, .. })));
+        let (change, _) = fixture.at(80_000, EventType::StartFailure(0));
+        assert_eq!(change, Change::Began);
+    }
+
+    #[test]
+    fn a_pause_in_progress_holds_a_working_time_failure_back() {
+        let mut fixture = Fixture::new(None);
+        fixture.interruptions = Interruptions::with_profiles(vec![FailureProfile::new(0.5, Distribution::CONSTANT { value: 60_000.0 }, 0).with_time_basis(TimeBasis::Working)]);
+        fixture.interruptions.first_failure(ID);
+        fixture.at(50_000, EventType::PauseOn);
+        let (change, events) = fixture.at(60_000, EventType::StartFailure(0));
+        assert_eq!(change, Change::Unchanged);
+        assert_eq!(events[0].exec_time.as_millis(), 10_000, "10 s of it paused so far, and more may come");
+    }
+
+    #[test]
+    fn on_simulation_time_nothing_is_checked() {
+        let mut fixture = Fixture::new(None);
+        fixture.interruptions = Interruptions::with_profiles(vec![FailureProfile::new(0.5, Distribution::CONSTANT { value: 60_000.0 }, 0)]);
+        fixture.interruptions.first_failure(ID);
+        fixture.at(10_000, EventType::PauseOn);
+        fixture.at(30_000, EventType::PauseOff);
+        assert_eq!(fixture.change(60_000, EventType::StartFailure(0)), Change::Began);
     }
 
     #[test]

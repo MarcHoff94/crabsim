@@ -628,6 +628,16 @@ fn failure_command(what: &str, rest: &str, model: &Model, names: &mut Names) -> 
             }
             .filter(|share| *share > 0.0 && *share < 1.0)
             .ok_or_else(|| format!("`{availability}` isn't an availability: type one above 0% and below 100%, such as 95%"))?;
+            // An optional `on working time` at the end names its time basis.
+            let (repair, basis) = match repair.rsplit_once(" on ") {
+                Some((repair, basis)) => {
+                    let word = basis.trim().strip_suffix(" time").unwrap_or(basis.trim());
+                    let basis = crabsim_model::time_basis_named(word)
+                        .ok_or_else(|| format!("`{}` isn't a time basis: write on simulation time, on working time or on processing time", basis.trim()))?;
+                    (repair, basis)
+                }
+                None => (repair, crabsim_model::TimeBasis::Simulation),
+            };
             let repair = repair.trim();
             let time = parse_time(repair).filter(|time| *time > SimTime::ZERO).ok_or_else(|| format!("`{repair}` isn't a repair time: type one such as 2:00"))?;
             let repair = crabsim::time::format_time_exact(time);
@@ -639,7 +649,11 @@ fn failure_command(what: &str, rest: &str, model: &Model, names: &mut Names) -> 
                         return Err(format!("{instance} already has a failure profile named \"{profile}\""));
                     }
                     let stream = list.iter().enumerate().map(|(place, existing)| stream_of(existing, place) + 1).max().unwrap_or(0);
-                    list.push(json!({ "name": profile, "stream": stream, "availability": share, "repair_time": { "constant": repair } }));
+                    let mut added = json!({ "name": profile, "stream": stream, "availability": share, "repair_time": { "constant": repair } });
+                    if basis != crabsim_model::TimeBasis::Simulation {
+                        added["time_basis"] = json!(crabsim_model::time_basis_name(basis));
+                    }
+                    list.push(added);
                     Ok(())
                 }),
             )
@@ -820,7 +834,7 @@ pub struct RunCommandsOutput {
 
 impl Operation for RunCommands {
     const NAME: &'static str = "run_commands";
-    const DESCRIPTION: &'static str = "Changes a model file with a line of commands in people's words, the same language as the window's : line, applied as one edit_model batch, all or nothing. Commands are separated by ; and are: add <class> [as <name>] [at <x> <y>] (placed beside `selected` or the instance added before it in the line, its length plus 2 m to the right, else at `at`; a new Station's process time starts at 10 s as in the window); connect <a> > <b>; disconnect <a> > <b>; rename <a> to <b>; remove <a> (with its connections); set <name>.<attribute> <value> (on an instance, or else a class, a value written as in a model file, such as 0:45); restore <name>.<attribute>; move <a> to <x> <y> or by <dx> <dy> (metres); derive <class> as <name>; class rename <a> to <b>; class duplicate <a> as <b>; class remove <a> (with what depends on it); make class <name> from <instance>; add failure <profile> to <a>[, <b>…] availability <95%> repair <2:00> (a constant repair time; each instance gets its own copy, with a stream of its own, and one inheriting its class's profiles gets a copy of them first, said in notes); remove failure <profile> from <a>[, <b>…]; rename failure <profile> of <a>[, <b>…] to <name> (a profile's name in quotes if it has spaces). Names are matched exactly, or by a part only one name holds, ignoring case, and attributes by part of their name, such as proc for process_time. A command that can't apply refuses the line naming it by place, such as 3rd command. goto, speed, seed, open and validate are for the window: use start_run, read_model or validate_model instead. An agent needs its claim, as for edit_model.";
+    const DESCRIPTION: &'static str = "Changes a model file with a line of commands in people's words, the same language as the window's : line, applied as one edit_model batch, all or nothing. Commands are separated by ; and are: add <class> [as <name>] [at <x> <y>] (placed beside `selected` or the instance added before it in the line, its length plus 2 m to the right, else at `at`; a new Station's process time starts at 10 s as in the window); connect <a> > <b>; disconnect <a> > <b>; rename <a> to <b>; remove <a> (with its connections); set <name>.<attribute> <value> (on an instance, or else a class, a value written as in a model file, such as 0:45); restore <name>.<attribute>; move <a> to <x> <y> or by <dx> <dy> (metres); derive <class> as <name>; class rename <a> to <b>; class duplicate <a> as <b>; class remove <a> (with what depends on it); make class <name> from <instance>; add failure <profile> to <a>[, <b>…] availability <95%> repair <2:00> [on working time] (a constant repair time, on simulation time unless it says on working or on processing time; each instance gets its own copy, with a stream of its own, and one inheriting its class's profiles gets a copy of them first, said in notes); remove failure <profile> from <a>[, <b>…]; rename failure <profile> of <a>[, <b>…] to <name> (a profile's name in quotes if it has spaces). Names are matched exactly, or by a part only one name holds, ignoring case, and attributes by part of their name, such as proc for process_time. A command that can't apply refuses the line naming it by place, such as 3rd command. goto, speed, seed, open and validate are for the window: use start_run, read_model or validate_model instead. An agent needs its claim, as for edit_model.";
     const EFFECT: Effect = Effect::Destructive;
     const CHANGES_MODELS: bool = true;
     type Input = RunCommandsInput;

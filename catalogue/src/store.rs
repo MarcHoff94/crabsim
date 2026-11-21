@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 pub const STORE_FILE: &str = "results.sqlite";
 
 /// The tables' version, kept in SQLite's `user_version`. A change to the tables raises it.
-const TABLES_VERSION: i64 = 5;
+const TABLES_VERSION: i64 = 6;
 
 /// The most rows `query_results` returns.
 pub const QUERY_ROW_LIMIT: usize = 1_000;
@@ -82,7 +82,9 @@ CREATE TABLE IF NOT EXISTS failure_profiles (
     object TEXT NOT NULL,
     profile TEXT NOT NULL,
     failures INTEGER NOT NULL,
-    failed_s REAL NOT NULL
+    failed_s REAL NOT NULL,
+    time_basis TEXT,
+    availability REAL
 );
 CREATE INDEX IF NOT EXISTS failure_profiles_by_object ON failure_profiles (run, object);
 ";
@@ -96,7 +98,7 @@ macro_rules! tables_description {
             "observations(run, number from 1, seed TEXT: the observation's own seed, events, wall_time_s, error, error_time_s: simulated seconds). ",
             "statistics(run, observation, object: instance name, class, built_in_class: Source|Station|Buffer|Drain, statistic, value REAL), one row per figure of an observation that ran to its end. ",
             "histograms(run, observation, object, from_mus, to_mus: NULL for a last bar that takes everything from from_mus, time_s), how long each Buffer held each number of MUs, one row per bar with any time, the bars 1 MU wide or, with more MUs, a wider power of 2 unless the model sets histogram_bar_width. ",
-            "failure_profiles(run, observation, object, profile: the failure profile's name, failures: how many began, failed_s: how long it failed, in seconds), one row per failure profile that can fail, of an observation that ran to its end. The object's own failed_share and failures count every profile together. ",
+            "failure_profiles(run, observation, object, profile: the failure profile's name, failures: how many began, failed_s: how long it failed, in seconds, time_basis: simulation|working|processing, what counts down to its failures, availability: achieved on its own time basis, 0 to 1, NULL when nothing counted), one row per failure profile that can fail, of an observation that ran to its end. The object's own failed_share and failures count every profile together. ",
             "Statistics: mus_in, mus_out, working_share, blocked_share, idle_share, failed_share, paused_share (each 0 to 1 of the time measured after the warm-up), for a Station with a capacity above 1 working_full_share, working_not_full_share and working_partly_blocked_share (the three parts of working_share), failures, availability (0 to 1), for Drains throughput_per_hour and mean_lead_time_s, and for Buffers mean_mus, min_mus (the fewest held for any time), max_mus, median_mus (weighted by time, the fewest MUs of the histogram bar holding it) and, with a limit, full_share. Times are in seconds. Besides SQLite's own functions, such as avg, min, max and count, there are sqrt, power, ln, exp and log10, for example to work out a standard deviation. ",
             "Example: SELECT object, AVG(value) FROM statistics WHERE run = 'run-3' AND statistic = 'blocked_share' GROUP BY object HAVING AVG(value) > 0.3"
         )
@@ -140,6 +142,10 @@ impl Store {
         // Versions 1 and 2 didn't record which build and which agent or user started a run.
         if (1..=2).contains(&version) {
             transaction.execute_batch("ALTER TABLE runs ADD COLUMN crabsim_build TEXT; ALTER TABLE runs ADD COLUMN agent TEXT")?;
+        }
+        // Version 5 had failure profiles without their time basis and achieved availability.
+        if version == 5 {
+            transaction.execute_batch("ALTER TABLE failure_profiles ADD COLUMN time_basis TEXT; ALTER TABLE failure_profiles ADD COLUMN availability REAL")?;
         }
         transaction.pragma_update(None, "user_version", TABLES_VERSION)?;
         transaction.commit()?;

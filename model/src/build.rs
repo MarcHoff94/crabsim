@@ -100,7 +100,7 @@ fn failure_profile(failures: Option<&Failures>) -> FailureProfile {
                 RepairTime::Normal { mean, std } => Distribution::NORMAL { mean: millis(mean), std: millis(std) },
                 RepairTime::Erlang { mean, k } => Distribution::ERLANG { mean: millis(mean), k: k as usize },
             };
-            let profile = FailureProfile::new(failures.availability as f32, repair_time, 0).named(failures.name.clone());
+            let profile = FailureProfile::new(failures.availability as f32, repair_time, 0).named(failures.name.clone()).with_time_basis(failures.time_basis);
             match failures.stream {
                 Some(stream) => profile.with_stream(stream),
                 None => profile,

@@ -175,6 +175,10 @@
           "format": "uint64",
           "minimum": 0
         },
+        "time_basis": {
+          "description": "What counts down to its next failure. Simulation time by default.",
+          "$ref": "#/$defs/TimeBasisFile"
+        },
         "availability": {
           "description": "The share of time available, above 0 and below 1.",
           "type": "number",
@@ -191,6 +195,26 @@
         "name",
         "availability",
         "repair_time"
+      ]
+    },
+    "TimeBasisFile": {
+      "description": "The kind of time that counts down to a failure profile's next failure.",
+      "oneOf": [
+        {
+          "description": "All time counts, whatever the object is doing.",
+          "type": "string",
+          "const": "simulation"
+        },
+        {
+          "description": "All time but paused, idle and blocked included.",
+          "type": "string",
+          "const": "working"
+        },
+        {
+          "description": "Only time busy, once however many MUs are in work: a Station or Source only.",
+          "type": "string",
+          "const": "processing"
+        }
       ]
     },
     "RepairTimeFile": {

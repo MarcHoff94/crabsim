@@ -2,7 +2,7 @@
 //! these instead of reaching into material-flow objects or engine events.
 
 use crate::event::ProfileIndex;
-use crate::flows::ProcessState;
+use crate::flows::{ProcessState, TimeBasis};
 use crate::statistics::{FillStatistics, MeasuringPeriods, ObjectStatistics};
 use crate::time::SimTime;
 
@@ -161,6 +161,21 @@ pub struct FailureProfileState {
     pub time_failed: SimTime,
     /// Since when it has been failing, if it is.
     pub failing_since: Option<SimTime>,
+    /// What counts down to its next failure.
+    pub time_basis: TimeBasis,
+    /// The time counted on its basis while it wasn't failing, since statistics began: all time
+    /// but its own failures on simulation time, less pauses on working time, and the object's busy
+    /// time on processing time.
+    pub up: SimTime,
+}
+
+impl FailureProfileState {
+    /// Its achieved availability on its own time basis, up / (up + failed), which converges to the
+    /// availability configured. None until any time has counted.
+    pub fn availability(&self) -> Option<f64> {
+        let total = (self.up + self.time_failed).as_millis();
+        (total > 0).then(|| self.up.as_millis() as f64 / total as f64)
+    }
 }
 
 /// What one material-flow object reports about itself.

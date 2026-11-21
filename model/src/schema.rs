@@ -312,10 +312,24 @@ pub struct FailureProfileFile {
     /// Its random-number stream within the object, 0 or more, unique there. Without one, its place
     /// in the list from 0.
     pub stream: Option<u64>,
+    /// What counts down to its next failure. Simulation time by default.
+    pub time_basis: Option<TimeBasisFile>,
     /// The share of time available, above 0 and below 1.
     #[schemars(extend("exclusiveMinimum" = 0, "exclusiveMaximum" = 1))]
     pub availability: f64,
     pub repair_time: RepairTimeFile,
+}
+
+/// The kind of time that counts down to a failure profile's next failure.
+#[derive(JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum TimeBasisFile {
+    /// All time counts, whatever the object is doing.
+    Simulation,
+    /// All time but paused, idle and blocked included.
+    Working,
+    /// Only time busy, once however many MUs are in work: a Station or Source only.
+    Processing,
 }
 
 /// Random failures. The time between failures follows from the availability and the repair time.

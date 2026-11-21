@@ -529,7 +529,7 @@ impl Reader {
     }
 
     fn failures(&mut self, value: &Value, pointer: &str, name: Option<&str>, named: bool) -> Option<Failures> {
-        let known: &[&str] = if named { &["name", "stream", "availability", "repair_time"] } else { &["availability", "repair_time"] };
+        let known: &[&str] = if named { &["name", "stream", "time_basis", "availability", "repair_time"] } else { &["availability", "repair_time"] };
         let fields = self.object(value, pointer, name, "failures", known)?;
         let profile_name = if named {
             match fields.get("name") {
@@ -552,6 +552,16 @@ impl Reader {
                 }
             },
         };
+        let time_basis = match fields.get("time_basis") {
+            None => Some(crate::TimeBasis::Simulation),
+            Some(value) => match value.as_str().and_then(crate::time_basis_named) {
+                Some(basis) => Some(basis),
+                None => {
+                    self.problem(format!("{pointer}/time_basis"), name, format!("{value} is not a time basis: use \"simulation\", \"working\" or \"processing\""));
+                    None
+                }
+            },
+        };
         let availability = self.number(fields, "availability", pointer, name);
         let repair_time = match fields.get("repair_time") {
             None => {
@@ -560,7 +570,7 @@ impl Reader {
             }
             Some(value) => self.repair_time(value, &format!("{pointer}/repair_time"), name),
         };
-        Some(Failures { name: profile_name?, stream: stream?, availability: availability?, repair_time: repair_time? })
+        Some(Failures { name: profile_name?, stream: stream?, time_basis: time_basis?, availability: availability?, repair_time: repair_time? })
     }
 
     fn repair_time(&mut self, value: &Value, pointer: &str, name: Option<&str>) -> Option<RepairTime> {

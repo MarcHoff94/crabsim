@@ -141,8 +141,13 @@ pub struct ProfileForm {
     /// Its stream within the object: kept when it has one, its place in the list when it came
     /// without one, and new for one added in the window.
     pub stream: Option<u64>,
+    /// What counts down to its next failure, as a model file names it.
+    pub time_basis: String,
     pub form: Form,
 }
+
+/// The time bases, as a model file names them, with their labels in the window.
+pub const TIME_BASES: [(&str, &str); 3] = [("simulation", "Simulation time"), ("working", "Working time"), ("processing", "Processing time")];
 
 impl Form {
     /// Adds a failure profile, 95 % available with a constant repair of a minute, named so no
@@ -157,7 +162,7 @@ impl Form {
         };
         let stream = profiles.iter().enumerate().map(|(place, profile)| profile.stream.unwrap_or(place as u64) + 1).max().unwrap_or(0);
         let form = Form::new("failure", Some(&json!({ "availability": 0.95, "repair_time": { "constant": "00:01:00" } })));
-        profiles.push(ProfileForm { name, stream: Some(stream), form });
+        profiles.push(ProfileForm { name, stream: Some(stream), time_basis: "simulation".into(), form });
     }
 
     /// Takes the failure profile at `place` out.
@@ -180,6 +185,7 @@ impl Form {
             .map(|(place, profile)| ProfileForm {
                 name: profile["name"].as_str().unwrap_or("Failures").to_string(),
                 stream: Some(profile["stream"].as_u64().unwrap_or(place as u64)),
+                time_basis: profile["time_basis"].as_str().unwrap_or("simulation").to_string(),
                 form: Form::new("failure", Some(profile)),
             })
             .collect();
@@ -205,6 +211,9 @@ impl Form {
             let mut fields = Map::new();
             fields.insert("name".into(), json!(name));
             fields.insert("stream".into(), json!(profile.stream.unwrap_or(place as u64)));
+            if profile.time_basis != "simulation" {
+                fields.insert("time_basis".into(), json!(profile.time_basis));
+            }
             for (key, field) in value.as_object_mut().into_iter().flat_map(std::mem::take) {
                 fields.insert(key, field);
             }

@@ -62,8 +62,8 @@ impl EventInterface for Drain {
         self.interruptions.reset();
     }
     fn clear_statistics(&mut self, now: SimTime) {
-        self.statistics.clear(now);
-		self.interruptions.clear_statistics(now);
+        self.interruptions.clear_statistics(now, &self.statistics);
+		self.statistics.clear(now);
     }
     fn report(&self, now: SimTime) -> ObjectState {
         ObjectState {
@@ -73,7 +73,7 @@ impl EventInterface for Drain {
             process: ProcessState::Idle,
             interrupted: self.interruptions.most_serious(),
             interruptions: self.interruptions.list(),
-			failure_profiles: self.interruptions.profile_states(now),
+			failure_profiles: self.interruptions.profile_states(now, &self.statistics),
             remaining: None,
             work: Vec::new(),
             blocked_predecessors: waiting_ids(&self.blockedlist),

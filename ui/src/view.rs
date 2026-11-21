@@ -349,10 +349,17 @@ pub fn fill_bars(fill: &FillStatistics) -> Vec<FillBar> {
 }
 
 impl Inspection {
-    /// Each failure profile's figures, by name, once the object has more than one: how often it
-    /// failed and its share of the time measured. With one profile the object's own rows say it.
+    /// Each failure profile's figures, by name, once the object has more than one or one that
+    /// isn't on simulation time: how often it failed, its share of the time measured, and the
+    /// availability it achieved on its own time basis. Otherwise the object's own rows say it.
     pub fn failure_profile_rows(&self) -> Vec<(String, String)> {
-        let Some(details) = self.details.as_ref().filter(|details| details.failure_profiles.len() > 1) else { return Vec::new() };
+        let Some(details) = self
+            .details
+            .as_ref()
+            .filter(|details| details.failure_profiles.len() > 1 || details.failure_profiles.iter().any(|profile| profile.time_basis != crabsim::TimeBasis::Simulation))
+        else {
+            return Vec::new();
+        };
         let measured = details.statistics.measured_time().as_millis();
         details
             .failure_profiles
@@ -360,7 +367,13 @@ impl Inspection {
             .map(|profile| {
                 let share = if measured == 0 { "–".to_string() } else { format!("{:.1} %", profile.time_failed.as_millis() as f64 * 100.0 / measured as f64) };
                 let failing = if profile.failing_since.is_some() { ", failing now" } else { "" };
-                (profile.name.clone(), format!("{} failures, {share} failed{failing}", profile.failures))
+                let basis = match profile.time_basis {
+                    crabsim::TimeBasis::Simulation => "",
+                    crabsim::TimeBasis::Working => " on working time",
+                    crabsim::TimeBasis::Processing => " on processing time",
+                };
+                let available = profile.availability().map_or(String::new(), |availability| format!(", {:.1} % available{basis}", availability * 100.0));
+                (profile.name.clone(), format!("{} failures, {share} failed{available}{failing}", profile.failures))
             })
             .collect()
     }

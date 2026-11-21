@@ -26,6 +26,19 @@ pub struct BaseObject{
 /// `failures` object is called.
 pub const DEFAULT_FAILURE_NAME: &str = "Failures";
 
+/// The kind of time that counts down to a failure profile's next failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TimeBasis {
+	/// All time counts, whatever the object is doing.
+	#[default]
+	Simulation,
+	/// All time but paused, idle and blocked included.
+	Working,
+	/// Only time busy, once however many MUs are in work. A Source is busy while it waits out its
+	/// interval. Only Stations and Sources offer it.
+	Processing,
+}
+
 #[derive(Clone)]
 pub struct FailureProfile {
 	/// Unique within its object.
@@ -35,6 +48,11 @@ pub struct FailureProfile {
 	/// `None` is its place in the list, and stream 0 is the object's own seed, which is what a single
 	/// profile from an older file had, so its failures don't change.
 	pub stream: Option<u64>,
+	/// What counts down to its next failure.
+	pub time_basis: TimeBasis,
+	/// The time counted on its basis at which its next failure is due. On simulation time this is
+	/// never read: the failure simply comes when its event does.
+	pub due: SimTime,
 	pub active: bool,
 	pub availablity: f32,
 	pub mtbf: SimTime,
@@ -54,6 +72,8 @@ impl FailureProfile {
 		let mut result = FailureProfile {
 			name: DEFAULT_FAILURE_NAME.to_string(),
 			stream: None,
+			time_basis: TimeBasis::Simulation,
+			due: SimTime::ZERO,
 			active: false,
 			availablity,
 			mtbf: SimTime::ZERO,
@@ -73,6 +93,10 @@ impl FailureProfile {
 	}
 	pub fn with_stream(mut self, stream: u64) -> FailureProfile {
 		self.stream = Some(stream);
+		self
+	}
+	pub fn with_time_basis(mut self, time_basis: TimeBasis) -> FailureProfile {
+		self.time_basis = time_basis;
 		self
 	}
 	/// How long it has failed by `now`, a failure in progress included.

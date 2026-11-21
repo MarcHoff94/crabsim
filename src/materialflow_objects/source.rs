@@ -193,8 +193,8 @@ impl EventInterface for Source {
 		self.statistics.reset();
 	}
 	fn clear_statistics(&mut self, now: SimTime) {
+		self.interruptions.clear_statistics(now, &self.statistics);
 		self.statistics.clear(now);
-		self.interruptions.clear_statistics(now);
 	}
 	fn report(&self, now: SimTime) -> ObjectState {
 		ObjectState {
@@ -204,7 +204,7 @@ impl EventInterface for Source {
 			process: self.state.clone(),
 			interrupted: self.interruptions.most_serious(),
 			interruptions: self.interruptions.list(),
-			failure_profiles: self.interruptions.profile_states(now),
+			failure_profiles: self.interruptions.profile_states(now, &self.statistics),
 			remaining: self.frozen.or(self.completion_time.map(|completion| completion.saturating_sub(now))),
 			work: Vec::new(),
 			blocked_predecessors: Vec::new(),

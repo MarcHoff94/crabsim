@@ -89,12 +89,14 @@ pub enum ProcessState {
 pub trait EventInterface {
 	/// Prepares the object for a run and returns its first events. Called from the default state.
 	fn init(&mut self, context: &mut EventContext) -> Result<Vec<EventTemplate>, InitError>;
+	/// Handles an event, scheduling what follows through `context.schedule`, in the order the
+	/// queue should take them: events at one time run in the order they were scheduled.
 	fn execute_event(
 		&mut self,
 		context: &mut EventContext,
 		eventtype: &EventType,
 		others: &mut OtherObjects<'_>,
-	) -> Result<Option<Vec<EventTemplate>>, RunTimeError>;
+	) -> Result<(), RunTimeError>;
 	/// Returns the object to its default state: every MU from the run is gone, and the
 	/// configured settings and starting MUs are back.
 	fn reset(&mut self);
@@ -117,7 +119,8 @@ pub trait MaterialFlow: EventInterface {
 	/// A listed predecessor's MU has moved. It waits on by its next MU, ready since `next`, or
 	/// gives up its place if it has none.
 	fn relist_blocked(&mut self, id_blocked: u32, next: Option<SimTime>);
-	fn notify_blocked_predecessors(&mut self) -> Result<Option<Vec<EventTemplate>>, MaterialflowError>;
+	/// Schedules a retry for each predecessor waiting for it, longest-waiting first.
+	fn notify_blocked_predecessors(&mut self, context: &mut EventContext) -> Result<(), MaterialflowError>;
 }
 
 /// A predecessor's place in the line for a successor to have room.
@@ -173,26 +176,18 @@ pub fn relist_blocked(blockedlist: &mut Vec<Waiting>, id_blocked: u32, next: Opt
 	}
 }
 
-/// One retry for each predecessor waiting, longest-waiting first. Each keeps its entry until its
-/// retry is answered: refused, it is back in its place, and otherwise the place is gone. Those
-/// whose last retry came to nothing aren't waiting, and go in the same pass.
-pub fn retries_for_blocked(blockedlist: &mut Vec<Waiting>, from: u32) -> Option<Vec<EventTemplate>> {
-	if blockedlist.is_empty() {
-		return None;
-	}
-	// Not `with_capacity`: a Station pushes its own exit onto these, and an exactly full `Vec`
-	// would reallocate on nearly every move with someone waiting. The first push here makes room
-	// for four. That was 0.24 allocations per event, and 13% of the demo's time (2026-11-17).
-	let mut retries = Vec::new();
+/// Schedules one retry for each predecessor waiting, longest-waiting first. Each keeps its entry
+/// until its retry is answered: refused, it is back in its place, and otherwise the place is
+/// gone. Those whose last retry came to nothing aren't waiting, and go in the same pass.
+pub fn retries_for_blocked(blockedlist: &mut Vec<Waiting>, from: u32, context: &mut EventContext) {
 	blockedlist.retain_mut(|waiting| {
 		if waiting.retried {
 			return false;
 		}
 		waiting.retried = true;
-		retries.push(EventTemplate { eventtype: EventType::BlockedRetry { from }, exec_time: SimTime::ZERO, object_id: waiting.id });
+		context.schedule(EventTemplate { eventtype: EventType::BlockedRetry { from }, exec_time: SimTime::ZERO, object_id: waiting.id });
 		true
 	});
-	(!retries.is_empty()).then_some(retries)
 }
 
 /// The predecessors waiting in a line, longest-waiting first, for a state report.

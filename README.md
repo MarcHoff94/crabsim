@@ -1,6 +1,6 @@
 # crabsim
 
-A discrete-event simulator for any material flow, such as a factory line, written in Rust. A model is made of Sources, Stations, Buffers and Drains that create, work on, hold and take out moveable units (MUs). Stations fail at random, can be paused or forced to fail, and keep statistics such as busy, blocked and failed time, lead time and throughput.
+A discrete-event simulator for any material flow, such as a factory line, written in Rust. A model is made of Sources, Stations, Buffers and Drains that create, work on, hold and take out moveable units (MUs). Any object can fail at random, be paused or be stopped by hand, and every object keeps statistics such as busy, blocked and failed time, lead time and throughput.
 
 crabsim exists to simulate long periods as fast as possible: a year of the demo model takes about 1.2 seconds, at about 13 million events per second, and a run's memory stays flat however long it is. A live session can also play a run at a chosen speed, step forward and back through it, and take interventions while it plays, which is what the window shows.
 
@@ -12,7 +12,8 @@ crabsim exists to simulate long periods as fast as possible: a year of the demo 
 - **The MCP server** gives AI agents the same operations. An agent claims a model before changing it, and you see and manage its claims.
 - **Undo and redo** take back any change to a model file, yours or an agent's, from a change history kept beside the models.
 - **Buffers** hold MUs between machines, up to a capacity or without limit, for a dwelling time, first in, first out or last in, first out. `models/buffered-line.json` is an example.
-- **Not yet:** a Station works on one MU at a time, and only Stations fail. The plan is in `docs/agents/handoff.md`.
+- **Stations** work on one MU at a time, or on several at once with a capacity, each MU starting as it enters or all together once full.
+- **Not yet:** several named failure profiles on one object, and failures that count only working or processing time. The plan is in `docs/agents/handoff.md`.
 
 ## Requirements
 
@@ -69,8 +70,8 @@ $env:RUST_LOG = 'info'
 Hover over any control to see what it does, and press `?` for the list of keys.
 
 - **Run:** Init, Start, Halt and Reset, a speed, stepping back and forward, and going to a time. With Animate off a run goes as fast as it can.
-- **Look:** click an object for the inspector, which shows its state, statistics and every attribute with where its value comes from. The Results tab gives each Drain's throughput, every Station's shares of time and the likely bottleneck. The Paths tab draws routes, weights and distribution strategies on the canvas.
-- **Experiment during a run:** pause a Station, force it to fail or change its process time. Each intervention leaves a mark, and going back past one asks first.
+- **Look:** click an object for a summary in the inspector, or double-click it for its own window, which shows its state, statistics and every attribute with where its value comes from. The statistics window gives each Drain's throughput, every Station's shares of time, the Buffers' fill and the likely bottleneck. The Paths tab draws routes, weights and distribution strategies on the canvas.
+- **Experiment during a run:** pause or stop any object by hand, or change a Station's process time. Each intervention leaves a mark, and going back past one asks first.
 - **Build**, with no run in progress: drag a class onto the canvas, drag from an object's handle to connect it, drag objects to move them, and change values in the inspector. Right-click a class to derive, duplicate, rename or remove it.
 - **From the keyboard:** `h` `j` `k` `l` move between objects, Space starts and halts, and `:` opens a command line, such as `:add Mill; connect Split > Mill 3`. `qa` records the lines you give into a macro and `@a` runs it.
 - **Undo:** `u` takes back the latest change to the model and Ctrl+R redoes it, with a count such as `3u`. It asks first before taking back an agent's change. The Agents tab lists every change with who made it, and a click on one goes back to it.

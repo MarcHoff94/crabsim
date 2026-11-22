@@ -3,7 +3,12 @@
 //! ```text
 //! cargo bench --bench reference
 //! cargo bench --bench reference -- --reps 9 --seed 3 --scenario demo-dropped
+//! cargo bench --bench reference --features counters -- --scenario conveyor-line
 //! ```
+//!
+//! With the `counters` feature, a conveyor scenario also says how many MUs a conveyor walks on
+//! average each time it works out its events again. Counting costs time, so take speeds from a run
+//! without it.
 //!
 //! It runs in the bench profile, which is the tuned release profile, with no logger and no view.
 //! Compare the numbers from before and after a change on the same machine with little else
@@ -148,37 +153,54 @@ enum Occurrences {
     Headless,
 }
 
-/// Objects in one line of each model.
-const DEMO_OBJECTS: usize = 14;
-const BUFFERED_OBJECTS: usize = 8;
+/// Which model a scenario runs.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Model {
+    /// The demo line, as `add_line` copies it.
+    Demo,
+    /// The second example, `crabsim::demo::buffered_line`, with Buffers.
+    Buffered,
+    /// `crabsim::demo::conveyor_line`, with accumulating conveyors and a chain of two.
+    Conveyors,
+}
+
+impl Model {
+    /// Objects in one line of the model.
+    fn objects(self) -> usize {
+        match self {
+            Model::Demo => 14,
+            Model::Buffered => 8,
+            Model::Conveyors => 8,
+        }
+    }
+}
 
 struct Scenario {
     name: &'static str,
-    /// The second example, `crabsim::demo::buffered_line`, with Buffers, rather than the demo.
-    buffered: bool,
+    model: Model,
     lines: usize,
     length: SimTime,
     length_label: &'static str,
     occurrences: Occurrences,
 }
 
-const SCENARIOS: [Scenario; 7] = [
-    Scenario { name: "demo-headless", buffered: false, lines: 1, length: YEAR, length_label: "1 year", occurrences: Occurrences::Headless },
+const SCENARIOS: [Scenario; 8] = [
+    Scenario { name: "demo-headless", model: Model::Demo, lines: 1, length: YEAR, length_label: "1 year", occurrences: Occurrences::Headless },
     // The same run over ten times the length: peak memory should stay where it is.
-    Scenario { name: "demo-headless-10y", buffered: false, lines: 1, length: YEAR.times(10), length_label: "10 years", occurrences: Occurrences::Headless },
+    Scenario { name: "demo-headless-10y", model: Model::Demo, lines: 1, length: YEAR.times(10), length_label: "10 years", occurrences: Occurrences::Headless },
     Scenario {
         name: "large-headless",
-        buffered: false,
+        model: Model::Demo,
         lines: LARGE_MODEL_LINES,
         length: SimTime::from_secs(2 * 86_400),
         length_label: "2 days",
         occurrences: Occurrences::Headless,
     },
-    Scenario { name: "demo-kept", buffered: false, lines: 1, length: YEAR, length_label: "1 year", occurrences: Occurrences::Kept },
-    Scenario { name: "demo-dropped", buffered: false, lines: 1, length: YEAR, length_label: "1 year", occurrences: Occurrences::Dropped },
+    Scenario { name: "demo-kept", model: Model::Demo, lines: 1, length: YEAR, length_label: "1 year", occurrences: Occurrences::Kept },
+    Scenario { name: "demo-dropped", model: Model::Demo, lines: 1, length: YEAR, length_label: "1 year", occurrences: Occurrences::Dropped },
     Scenario {
         name: "large-dropped",
-        buffered: false,
+        model: Model::Demo,
         lines: LARGE_MODEL_LINES,
         length: SimTime::from_secs(2 * 86_400),
         length_label: "2 days",
@@ -186,7 +208,10 @@ const SCENARIOS: [Scenario; 7] = [
     },
     // Buffers with and without a limit, a dwelling time and both exit strategies. Not the demo,
     // so its figures compare only with its own from before.
-    Scenario { name: "buffered-headless", buffered: true, lines: 1, length: YEAR, length_label: "1 year", occurrences: Occurrences::Headless },
+    Scenario { name: "buffered-headless", model: Model::Buffered, lines: 1, length: YEAR, length_label: "1 year", occurrences: Occurrences::Headless },
+    // Accumulating conveyors between Stations and a chain of two (spec issue 133). Its own
+    // figures from before are what it compares with.
+    Scenario { name: "conveyor-line", model: Model::Conveyors, lines: 1, length: YEAR, length_label: "1 year", occurrences: Occurrences::Headless },
 ];
 
 /// One repetition of a scenario.
@@ -233,7 +258,11 @@ fn measure(scenario: &Scenario, seed: u64) -> Measurement {
     let bytes_before_model = LIVE_BYTES.load(Relaxed);
     PEAK_BYTES.store(bytes_before_model, Relaxed);
 
-    let mut run = if scenario.buffered { crabsim::demo::buffered_line().build(seed) } else { reference_model(scenario.lines, seed) };
+    let mut run = match scenario.model {
+        Model::Demo => reference_model(scenario.lines, seed),
+        Model::Buffered => crabsim::demo::buffered_line().build(seed),
+        Model::Conveyors => crabsim::demo::conveyor_line().build(seed),
+    };
     if !matches!(scenario.occurrences, Occurrences::Headless) {
         run.set_recording(Recording::ALL);
     }
@@ -271,7 +300,7 @@ fn run_scenario(scenario: &Scenario, seed: u64, reps: usize) {
         "{:<17} {:>8} {:>6} {:>7.2}M/s {:>9.2}M {:>7.2}s {:>6.2}..{:<6.2} {:>8.2} {:>6.2} {:>10.1}MB {:>9} {:>11}",
         scenario.name,
         scenario.length_label,
-        scenario.lines * if scenario.buffered { BUFFERED_OBJECTS } else { DEMO_OBJECTS },
+        scenario.lines * scenario.model.objects(),
         events / wall / 1e6,
         scenario.length.as_secs_f64() / wall / 1e6,
         wall,
@@ -283,6 +312,18 @@ fn run_scenario(scenario: &Scenario, seed: u64, reps: usize) {
         median.mus_left,
         median.events,
     );
+    #[cfg(feature = "counters")]
+    if scenario.model == Model::Conveyors {
+        use crabsim::materialflow_objects::conveyor::counters::{MUS_WALKED, REPLANS};
+        // Every repetition counted, and each ran the same events.
+        let (replans, walked) = (REPLANS.swap(0, Relaxed), MUS_WALKED.swap(0, Relaxed));
+        println!(
+            "{:<17} {:.2} replans an event, {:.2} MUs walked a replan",
+            "",
+            replans as f64 / (events * reps as f64),
+            walked as f64 / replans.max(1) as f64
+        );
+    }
 }
 
 /// Peak heap of a headless run of the demo model, from before it is built until `length`.

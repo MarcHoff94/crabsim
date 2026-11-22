@@ -448,6 +448,130 @@ impl FillKeeper {
     }
 }
 
+/// What only a Conveyor keeps beyond its `ObjectStatistics` and its fill histogram (which is
+/// `ObjectState::fill`, as a Buffer's): how much of its length its MUs took and how long they took
+/// to cross it (spec issue 133, PR 4). The length taken is the whole footprints of the MUs it
+/// holds, so an MU entering or leaving counts whole, and a share of it is never above 1.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BeltStatistics {
+    /// The conveyor's length, in metres.
+    pub length: f64,
+    /// The length taken, in metres, summed over the time it was taken for, in metre-milliseconds.
+    pub length_time: f64,
+    /// The most length it took for any length of time, or takes now, in metres.
+    pub max_length_taken: f64,
+    /// MUs whose booking point has crossed its end since statistics began.
+    pub crossings: u64,
+    pub crossing_total: SimTime,
+    /// The longest crossing, including that of the MU still on it that has been on it longest, so a
+    /// jam shows here too.
+    pub crossing_max: SimTime,
+}
+
+impl BeltStatistics {
+    /// The mean share of its length taken over `measured`. None until any time has been measured.
+    pub fn mean_share_taken(&self, measured: SimTime) -> Option<f64> {
+        ratio(self.length_time, measured.as_millis() as f64 * self.length).map(|share| share.min(1.0))
+    }
+
+    /// The most share of its length taken for any length of time.
+    pub fn max_share_taken(&self) -> f64 {
+        if self.length > 0.0 { (self.max_length_taken / self.length).min(1.0) } else { 0.0 }
+    }
+
+    /// The mean time an MU took to cross it. None before the first.
+    pub fn crossing_mean(&self) -> Option<SimTime> {
+        (self.crossings > 0).then(|| SimTime::from_millis_f64(self.crossing_total.as_millis() as f64 / self.crossings as f64))
+    }
+}
+
+/// Keeps a Conveyor's fill and its `BeltStatistics`, from the stretches its `StatisticsKeeper`
+/// hands it as a Buffer's `FillKeeper` is fed. Fixed in size, however long the run.
+#[derive(Debug, Clone)]
+pub(crate) struct BeltKeeper {
+    fill: FillKeeper,
+    length: f64,
+    /// The length taken since the last observation: what the stretch that ends next was at.
+    taken: f64,
+    length_time: f64,
+    max_taken: f64,
+    crossings: u64,
+    crossing_total: SimTime,
+    crossing_max: SimTime,
+}
+
+impl BeltKeeper {
+    pub(crate) fn new(length: f64) -> BeltKeeper {
+        BeltKeeper {
+            fill: FillKeeper::new(None),
+            length,
+            taken: 0.0,
+            length_time: 0.0,
+            max_taken: 0.0,
+            crossings: 0,
+            crossing_total: SimTime::ZERO,
+            crossing_max: SimTime::ZERO,
+        }
+    }
+
+    /// `time` spent holding `held` MUs, at the length taken until now.
+    #[inline]
+    pub(crate) fn stretch(&mut self, held: u64, time: SimTime) {
+        if time > SimTime::ZERO {
+            self.fill.add(held, time);
+            self.length_time += self.taken * time.as_millis() as f64;
+            self.max_taken = self.max_taken.max(self.taken);
+        }
+    }
+
+    /// The length taken from now on.
+    #[inline]
+    pub(crate) fn set_taken(&mut self, taken: f64) {
+        self.taken = taken;
+    }
+
+    /// An MU took `time` from its booking point crossing the start to crossing the end.
+    pub(crate) fn crossed(&mut self, time: SimTime) {
+        self.crossings += 1;
+        self.crossing_total += time;
+        self.crossing_max = self.crossing_max.max(time);
+    }
+
+    /// With the stretch `in_progress` and the time the MU longest on the conveyor has been on it,
+    /// changing nothing.
+    pub(crate) fn read(&self, in_progress: (u64, SimTime), oldest: Option<SimTime>) -> (FillStatistics, BeltStatistics) {
+        let (_, time) = in_progress;
+        let mut belt = BeltStatistics {
+            length: self.length,
+            length_time: self.length_time + self.taken * time.as_millis() as f64,
+            max_length_taken: self.max_taken.max(self.taken),
+            crossings: self.crossings,
+            crossing_total: self.crossing_total,
+            crossing_max: self.crossing_max,
+        };
+        if let Some(oldest) = oldest {
+            belt.crossing_max = belt.crossing_max.max(oldest);
+        }
+        (self.fill.read(in_progress), belt)
+    }
+
+    /// Starts afresh, as its `StatisticsKeeper` does when cleared: what it holds carries on.
+    pub(crate) fn clear(&mut self) {
+        self.fill.clear();
+        self.length_time = 0.0;
+        self.max_taken = self.taken;
+        self.crossings = 0;
+        self.crossing_total = SimTime::ZERO;
+        self.crossing_max = SimTime::ZERO;
+    }
+
+    /// Back to how it was before Init.
+    pub(crate) fn reset(&mut self) {
+        self.taken = 0.0;
+        self.clear();
+    }
+}
+
 /// The 97.5% quantile of Student's t distribution with `df` degrees of freedom, for a two-sided
 /// 95% interval.
 pub fn t_quantile(df: usize) -> f64 {

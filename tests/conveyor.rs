@@ -641,3 +641,130 @@ fn reset_forgets_what_two_conveyors_were_doing_and_replays_the_same() {
 
     assert_eq!(again, run_until(&mut recorded(model.build(0)), secs(100)));
 }
+
+// ---------- Conveyor statistics (spec issue 133, PR 4) ----------
+
+fn belt_figures(run: &SimulationRun, belt: u32) -> crabsim::BeltStatistics {
+    **object(&run.state(), belt).belt.as_ref().expect("a conveyor reports its belt statistics")
+}
+
+#[test]
+fn a_conveyors_busy_time_is_full_while_its_start_is_taken_and_not_full_after() {
+    let (model, _, belt, _) = conveyor_to_drain();
+    let mut run = model.build(0);
+
+    run.init().unwrap();
+    run.advance_to(secs(55)).unwrap();
+
+    let statistics = object(&run.state(), belt).statistics;
+    // Empty for the first 10 s, then an MU on it throughout. Each of the five MUs that entered
+    // keeps its rear behind the start for 0.3 m at 0.5 m/s, 0.6 s, which is when no MU could enter.
+    assert_eq!(statistics.time_idle, secs(10));
+    assert_eq!(statistics.time_busy, secs(45));
+    assert_eq!(statistics.time_busy_full(), millis(3_000));
+    assert_eq!(statistics.time_busy_not_full, millis(42_000));
+    assert_eq!(statistics.time_busy_partly_blocked, SimTime::ZERO);
+    assert_eq!(statistics.time_blocked, SimTime::ZERO);
+    assert_eq!(statistics.measured_time(), secs(55));
+}
+
+#[test]
+fn a_conveyor_is_partly_blocked_while_its_first_mu_waits_and_others_still_move_then_blocked() {
+    let mut model = ModelDescription::new();
+    let source = model.add_source(secs(10));
+    let belt = conveyor(&mut model);
+    let mill = station(&mut model, 1_000);
+    model.connect(source, belt);
+    model.connect(belt, mill);
+    let mut run = model.build(0);
+    run.init().unwrap();
+
+    // The mill takes the first MU at once and works on it for 1,000 s. The second reaches the end at
+    // 39.4 s and waits, while the third, entering at 30 s, is still moving.
+    run.advance_to(millis(39_400)).unwrap();
+    assert_eq!(object(&run.state(), belt).statistics.time_busy_partly_blocked, SimTime::ZERO);
+    run.advance_to(secs(45)).unwrap();
+    assert_eq!(object(&run.state(), belt).statistics.time_busy_partly_blocked, millis(5_600));
+    run.advance_to(secs(900)).unwrap();
+
+    let statistics = object(&run.state(), belt).statistics;
+    assert!(statistics.time_blocked > secs(500), "every MU closed up and stopped: {statistics:?}");
+    assert_eq!(statistics.time_busy, statistics.time_busy_full() + statistics.time_busy_not_full + statistics.time_busy_partly_blocked);
+    assert_eq!(statistics.measured_time(), secs(900));
+    let _ = source;
+}
+
+#[test]
+fn a_conveyor_reports_how_full_it_was_in_mus_and_in_length() {
+    let (model, _, belt, _) = conveyor_to_drain();
+    let mut run = model.build(0);
+    run.init().unwrap();
+    run.advance_to(secs(55)).unwrap();
+
+    let state = run.state();
+    let fill = object(&state, belt).fill.as_ref().expect("a conveyor has a fill histogram as a Buffer does");
+    // None for 10 s, one MU for 10 s, then two.
+    assert_eq!(fill.histogram.bars[..3], [secs(10), secs(10), secs(35)]);
+    assert_eq!(fill.lowest, 0);
+    assert_eq!(object(&state, belt).statistics.max_contents, 3, "for an instant at 30 s: the MU leaving is still on it when the next enters");
+    let figures = belt_figures(&run, belt);
+    // 0.6 m for 10 s and 1.2 m for 35 s, of 10 m over the 55 s.
+    assert!((figures.length_time - 0.6 * 10_000.0 - 1.2 * 35_000.0).abs() < 1e-6, "{figures:?}");
+    assert!((figures.mean_share_taken(secs(55)).unwrap() - 48.0 / 550.0).abs() < 1e-9);
+    assert!((figures.max_length_taken - 1.2).abs() < 1e-9);
+    assert!((figures.max_share_taken() - 0.12).abs() < 1e-9);
+}
+
+#[test]
+fn a_conveyor_reports_how_long_mus_took_to_cross_it() {
+    let (model, _, belt, _) = conveyor_to_drain();
+    let mut run = model.build(0);
+    run.init().unwrap();
+    run.advance_to(secs(55)).unwrap();
+
+    let figures = belt_figures(&run, belt);
+    // Booking point to booking point, 10 m at 0.5 m/s, for the three that left.
+    assert_eq!(figures.crossings, 3);
+    assert_eq!(figures.crossing_mean(), Some(secs(20)));
+    assert_eq!(figures.crossing_max, secs(20));
+}
+
+#[test]
+fn the_longest_crossing_includes_an_mu_that_has_been_on_the_conveyor_longer_than_any_that_left() {
+    let mut model = ModelDescription::new();
+    let source = model.add_source(secs(10));
+    let belt = conveyor(&mut model);
+    let mill = station(&mut model, 1_000);
+    model.connect(source, belt);
+    model.connect(belt, mill);
+    let mut run = model.build(0);
+    run.init().unwrap();
+
+    run.advance_to(secs(500)).unwrap();
+
+    let figures = belt_figures(&run, belt);
+    assert_eq!(figures.crossings, 1, "only the first left");
+    assert_eq!(figures.crossing_max, secs(480), "the second has been on since 20 s");
+    let _ = source;
+}
+
+#[test]
+fn clearing_statistics_and_reset_start_a_conveyors_figures_afresh() {
+    let (model, _, belt, _) = conveyor_to_drain();
+    let mut run = model.build(0);
+    run.init().unwrap();
+    run.advance_to(secs(35)).unwrap();
+
+    run.clear_statistics();
+    run.advance_to(secs(55)).unwrap();
+    let figures = belt_figures(&run, belt);
+    assert_eq!(figures.crossings, 2, "those leaving at 40 s and 50 s");
+    assert!((figures.length_time - 1.2 * 20_000.0).abs() < 1e-6, "two MUs throughout: {figures:?}");
+    let fill = object(&run.state(), belt).fill.clone().unwrap();
+    assert_eq!(fill.histogram.total(), secs(20));
+
+    run.reset();
+    run.init().unwrap();
+    let figures = belt_figures(&run, belt);
+    assert_eq!((figures.crossings, figures.length_time, figures.max_length_taken), (0, 0.0, 0.0));
+}

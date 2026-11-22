@@ -17,7 +17,7 @@ pub(crate) fn entries() -> Vec<Entry> {
 }
 
 /// Every statistic the store keeps, in the order results show them.
-pub const STATISTICS: [&str; 20] = [
+pub const STATISTICS: [&str; 24] = [
     "mus_in",
     "mus_out",
     "working_share",
@@ -38,6 +38,10 @@ pub const STATISTICS: [&str; 20] = [
     "max_mus",
     "median_mus",
     "full_share",
+    "mean_length_taken_share",
+    "max_length_taken_share",
+    "mean_crossing_time_s",
+    "max_crossing_time_s",
 ];
 
 /// How many of the busiest, the most blocked and the most failed objects a summary shows.
@@ -53,10 +57,12 @@ const BLOCKED_FLOOR: f64 = 0.01;
 /// An object's figures at the end of an observation, by their names in the store. A figure that
 /// doesn't exist, such as a share before any time was measured, is left out, and so are the three
 /// parts of working but for a Station with a capacity above 1: for any other object working is
-/// all full. Only a Buffer has how full it was.
+/// all full. A Conveyor has the three parts of working, as a Station with a capacity does. Only a
+/// Buffer or a Conveyor has how full it was, and only a Conveyor how much of its length its MUs took
+/// and how long they took to cross it.
 pub(crate) fn figures(object: &ObjectState, now: SimTime) -> Vec<(&'static str, f64)> {
     let statistics = &object.statistics;
-    let with_capacity = object.kind == ObjectKind::Station && object.capacity.limit() > 1;
+    let with_capacity = (object.kind == ObjectKind::Station && object.capacity.limit() > 1) || object.kind == ObjectKind::Conveyor;
     let mut figures = vec![("mus_in", statistics.mus_in as f64), ("mus_out", statistics.mus_out as f64)];
     let measured = statistics.measured_time().as_millis() as f64;
     if measured > 0.0 {
@@ -100,9 +106,19 @@ pub(crate) fn figures(object: &ObjectState, now: SimTime) -> Vec<(&'static str, 
         if let Some((from, _)) = fill.median() {
             figures.push(("median_mus", from as f64));
         }
-        if object.capacity != crabsim::Capacity::Unlimited && measured > 0.0 {
+        if object.kind == ObjectKind::Buffer && object.capacity != crabsim::Capacity::Unlimited && measured > 0.0 {
             figures.push(("full_share", statistics.time_full.as_millis() as f64 / measured));
         }
+    }
+    if let Some(belt) = &object.belt {
+        if let Some(share) = belt.mean_share_taken(statistics.measured_time()) {
+            figures.push(("mean_length_taken_share", share));
+        }
+        figures.push(("max_length_taken_share", belt.max_share_taken()));
+        if let Some(mean) = belt.crossing_mean() {
+            figures.push(("mean_crossing_time_s", mean.as_secs_f64()));
+        }
+        figures.push(("max_crossing_time_s", belt.crossing_max.as_secs_f64()));
     }
     figures
 }
@@ -193,11 +209,11 @@ pub struct ObjectResults {
     pub why: Vec<Why>,
     /// By statistic: mus_in, mus_out, working_share, blocked_share, idle_share, failed_share,
     /// paused_share, receiving_share, failures, availability, for Drains throughput_per_hour and
-    /// mean_lead_time_s, and for Buffers mean_mus, min_mus, max_mus, median_mus and full_share,
+    /// mean_lead_time_s, for Buffers and Conveyors mean_mus, min_mus, max_mus and median_mus, for Buffers full_share, and for Conveyors working_full_share, working_not_full_share, working_partly_blocked_share, mean_length_taken_share, max_length_taken_share, mean_crossing_time_s and max_crossing_time_s,
     /// named as in the store. Shares and availability are from 0 to 1, times in seconds. A figure
     /// that is 0 in every observation is left out.
     pub figures: BTreeMap<String, Figure>,
-    /// For a Buffer named in `objects`: how long it held each number of MUs, as the mean share
+    /// For a Buffer or Conveyor named in `objects`: how long it held each number of MUs, as the mean share
     /// of each observation's measured time, the bars with any time in order.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub histogram: Option<Vec<HistogramBar>>,
@@ -424,7 +440,7 @@ impl Operation for RunResults {
                     figures.insert(statistic.to_string(), figure);
                 }
             }
-            let histogram = if built_in == "Buffer" && why[name].contains(&Why::Chosen) {
+            let histogram = if (built_in == "Buffer" || built_in == "Conveyor") && why[name].contains(&Why::Chosen) {
                 let mut bars = connection.prepare("SELECT observation, from_mus, to_mus, time_s FROM histograms WHERE run = ?1 AND object = ?2")?;
                 let rows = bars
                     .query_map(params![id, name], |row| Ok((row.get::<_, u32>(0)?, row.get::<_, i64>(1)? as u64, row.get::<_, Option<i64>>(2)?.map(|to| to as u64), row.get::<_, f64>(3)?)))?

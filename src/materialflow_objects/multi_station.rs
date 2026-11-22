@@ -442,6 +442,7 @@ impl EventInterface for MultiStation {
 			configured_process_time: Some(self.configured_proc_time),
 			statistics: self.statistics.read(now),
 			fill: None,
+			belt: None,
 			positions: Vec::new(),
 		}
 	}

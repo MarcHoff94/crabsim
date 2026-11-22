@@ -218,6 +218,7 @@ impl EventInterface for Source {
 			configured_process_time: None,
 			statistics: self.statistics.read(now),
 			fill: None,
+			belt: None,
 			positions: Vec::new(),
 		}
 	}

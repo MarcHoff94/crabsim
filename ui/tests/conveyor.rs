@@ -158,3 +158,32 @@ fn connections_meet_a_conveyors_start_and_leave_from_its_end() {
     assert!((into.end.x - 5.0).abs() < 1e-9 && into.end.y.abs() < 1e-9, "{into:?}");
     assert!((out_of.start.x - 15.0).abs() < 1e-9 && out_of.start.y.abs() < 1e-9, "{out_of:?}");
 }
+
+#[test]
+fn the_object_window_and_the_statistics_window_show_a_conveyors_figures() {
+    // MUs enter at 10, 20, 30, 40 and 50 s, and each crosses in 20 s, booking point to booking point.
+    let mut watched = halted_at(55_000);
+    watched.view.select(Some(BELT));
+    watched.details();
+
+    let inspection = watched.view.inspection().unwrap();
+    let rows = inspection.statistics_rows();
+    let value = |label: &str| rows.iter().find(|(name, _)| *name == label).unwrap_or_else(|| panic!("no {label} in {rows:?}")).1.clone();
+    assert_eq!(value("Mean crossing"), "00:00:20");
+    assert_eq!(value("  partly blocked"), "0.0 %");
+    let parts = ["  start taken", "  room at its start", "  partly blocked"].map(|label| value(label));
+    assert!(parts.iter().all(|part| part.ends_with('%')), "{parts:?}");
+    let details = inspection.details.clone().unwrap();
+    assert!(!crabsim_ui::view::fill_bars(details.fill.as_ref().unwrap()).is_empty(), "its fill histogram, as a Buffer's");
+    let figures: Vec<&str> = inspection.key_figures().iter().map(|(name, _)| *name).collect();
+    assert_eq!(figures, ["Busy, full", "Blocked", "Crossing"]);
+
+    watched.view.set_statistics_open(true);
+    watched.details();
+    let results = watched.view.results().unwrap();
+    assert_eq!(results.conveyors.len(), 1);
+    let belt = &results.conveyors[0];
+    assert_eq!((belt.id, belt.name.as_str(), belt.mean_crossing), (BELT, "Belt", Some(SimTime::from_secs(20))));
+    assert!(belt.busy > 0.8 && belt.busy_full < belt.busy, "{belt:?}");
+    assert_eq!(results.bottleneck.as_ref().map(|likely| likely.instance.as_str()), Some("Belt"), "a Conveyor is in the likely-bottleneck rule");
+}

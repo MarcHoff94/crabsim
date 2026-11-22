@@ -9,6 +9,10 @@ edition = "2021"
 log = "0.4"
 rand = "0.9.2"
 
+[features]
+# Counts how many MUs conveyors walk when they work out their events again, for the benchmark.
+counters = []
+
 [[bench]]
 name = "reference"
 harness = false

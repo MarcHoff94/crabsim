@@ -59,7 +59,7 @@ pub fn meaning(kind: ObjectKind, state: State) -> &'static str {
         (ObjectKind::Drain, State::Failed) => "Interrupted by a random failure until its repair is done. It takes no MU, so what feeds it waits.",
         (ObjectKind::Drain, State::Stopped) => "Stopped by hand, until someone ends it. It takes no MU. It counts as a failure in the statistics.",
         (ObjectKind::Drain, State::Paused) => "Paused until someone resumes it. It takes no MU, so what feeds it waits.",
-        (ObjectKind::Conveyor, State::Busy) => "Moving at least one MU along its path.",
+        (ObjectKind::Conveyor, State::Busy) => "Moving at least one MU along its path. Its statistics split this in three: full while its start is taken so that no MU could enter, with room at its start, and partly blocked while the MU at its end waits for a successor and others still move.",
         (ObjectKind::Conveyor, State::Blocked) => "Holding MUs, none of which moves: the one at its end waits for a successor to take it, and the rest have closed up behind it.",
         (ObjectKind::Conveyor, State::Idle) => "Empty: no MU is on it.",
         (ObjectKind::Conveyor, State::Failed) => "Interrupted by a random failure until its repair is done. Every MU on it stands, and it takes and passes on none.",

@@ -3,7 +3,7 @@
 
 use crate::event::ProfileIndex;
 use crate::flows::{ProcessState, TimeBasis};
-use crate::statistics::{FillStatistics, MeasuringPeriods, ObjectStatistics};
+use crate::statistics::{BeltStatistics, FillStatistics, MeasuringPeriods, ObjectStatistics};
 use crate::time::SimTime;
 
 /// Something that happened in the model at a point in simulation time.
@@ -230,6 +230,9 @@ pub struct ObjectState {
     /// How full a Buffer was: the fewest MUs it held and its histogram. `None` for other objects,
     /// which then allocate nothing for it.
     pub fill: Option<Box<FillStatistics>>,
+    /// How much of its length a conveyor's MUs took and how long they took to cross it. `None` for
+    /// other objects, which then allocate nothing for it. Its `fill` is the conveyor's too.
+    pub belt: Option<Box<BeltStatistics>>,
     /// Each MU on a conveyor, front first, and how it moves now. Empty for other objects, which
     /// then allocate nothing for it.
     pub positions: Vec<BeltPosition>,

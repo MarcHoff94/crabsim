@@ -53,6 +53,7 @@ impl EventInterface for RecordsThenFails {
             configured_process_time: None,
             statistics: Default::default(),
             fill: None,
+            belt: None,
             positions: Vec::new(),
         }
     }

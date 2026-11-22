@@ -3742,10 +3742,15 @@ fn results_view(ui: &mut egui::Ui, results: Option<(&str, &crabsim_ui::view::Res
     ui.label(egui::RichText::new("Likely bottleneck").strong()).on_hover_text(crabsim_catalogue::bottleneck::RULE);
     match &results.bottleneck {
         None => {
-            ui.label(egui::RichText::new("The model has no Station.").weak());
+            ui.label(egui::RichText::new("The model has no Station or Conveyor.").weak());
         }
         Some(likely) => {
-            let id = results.stations.iter().find(|station| station.name == likely.instance).map(|station| station.id);
+            let id = results
+                .stations
+                .iter()
+                .find(|station| station.name == likely.instance)
+                .map(|station| station.id)
+                .or_else(|| results.conveyors.iter().find(|conveyor| conveyor.name == likely.instance).map(|conveyor| conveyor.id));
             ui.horizontal(|row| {
                 match id {
                     Some(id) => pick(row, id, &likely.instance, &mut chosen),
@@ -3785,10 +3790,12 @@ fn results_view(ui: &mut egui::Ui, results: Option<(&str, &crabsim_ui::view::Res
     stations.sort_by(|a, b| key(b).total_cmp(&key(a)));
     // A Station with capacity can be busy without being full, which the bottleneck rule counts.
     let full = results.with_capacity;
+    // Only a Station a conveyor hands MUs to is ever receiving.
+    let receiving = results.with_receiving;
     // The inspector's width is fixed, and the table with intervals or a Full column is wider, so
     // it scrolls sideways rather than cutting off its last columns.
     egui::ScrollArea::horizontal().id_salt("stations").show(ui, |ui| {
-        egui::Grid::new("stations").num_columns(if full { 6 } else { 5 }).spacing([4.0, 2.0]).striped(true).show(ui, |grid| {
+        egui::Grid::new("stations").num_columns(5 + usize::from(full) + usize::from(receiving)).spacing([4.0, 2.0]).striped(true).show(ui, |grid| {
             if grid.selectable_label(*sort == SortBy::Model, "Station").on_hover_text("In model order").clicked() {
                 *sort = SortBy::Model;
             }
@@ -3804,6 +3811,10 @@ fn results_view(ui: &mut egui::Ui, results: Option<(&str, &crabsim_ui::view::Res
                 if grid.selectable_label(*sort == by, text).on_hover_text(hint).clicked() {
                     *sort = by;
                 }
+            }
+            if receiving {
+                grid.label(egui::RichText::new("Receiving").color(shade_colour32(Shade::Receiving)))
+                    .on_hover_text("A place reserved for an MU a conveyor is handing over, with nothing else going on");
             }
             grid.end_row();
             for station in stations {
@@ -3824,6 +3835,9 @@ fn results_view(ui: &mut egui::Ui, results: Option<(&str, &crabsim_ui::view::Res
                         grid.label(percent(station.idle));
                         grid.label(percent(station.failed + station.paused));
                     }
+                }
+                if receiving {
+                    grid.label(percent(station.receiving));
                 }
                 grid.end_row();
             }
@@ -3847,6 +3861,45 @@ fn results_view(ui: &mut egui::Ui, results: Option<(&str, &crabsim_ui::view::Res
                 grid.label(buffer.full.map_or_else(|| "–".to_string(), percent));
                 grid.end_row();
             }
+        });
+    }
+    if !results.conveyors.is_empty() {
+        ui.add_space(8.0);
+        ui.label(egui::RichText::new("Conveyors").strong()).on_hover_text("What each Conveyor did, how full it was and how long MUs took to cross it");
+        egui::ScrollArea::horizontal().id_salt("conveyors").show(ui, |ui| {
+            egui::Grid::new("conveyors").num_columns(9).spacing([6.0, 2.0]).striped(true).show(ui, |grid| {
+                grid.label("Conveyor");
+                grid.label(egui::RichText::new("Busy").color(shade_colour32(Shade::Busy))).on_hover_text("Moving at least one MU");
+                grid.label(egui::RichText::new("Full").color(shade_colour32(Shade::Busy)))
+                    .on_hover_text("Moving MUs with its start taken, so that no MU could enter, which the likely bottleneck counts");
+                grid.label(egui::RichText::new("Blocked").color(shade_colour32(Shade::Blocked))).on_hover_text("Holding MUs, none of which moves");
+                grid.label(egui::RichText::new("Interrupted").color(shade_colour32(Shade::Failed))).on_hover_text("Failed, stopped or paused");
+                grid.label("Mean MUs").on_hover_text("MUs on it on average over time");
+                grid.label("Length").on_hover_text("The share of its length its MUs took on average, by their whole footprints");
+                grid.label("Crossing").on_hover_text("The mean time from an MU's booking point crossing its start to crossing its end");
+                grid.label("Longest").on_hover_text("The longest crossing, including the MU on it longest now");
+                grid.end_row();
+                for conveyor in &results.conveyors {
+                    pick(grid, conveyor.id, &conveyor.name, &mut chosen);
+                    match conveyor.intervals {
+                        Some(intervals) => {
+                            for interval in [intervals.busy, intervals.busy_full, intervals.blocked, intervals.interrupted] {
+                                grid.label(percent_interval(interval));
+                            }
+                        }
+                        None => {
+                            for share in [conveyor.busy, conveyor.busy_full, conveyor.blocked, conveyor.interrupted] {
+                                grid.label(percent(share));
+                            }
+                        }
+                    }
+                    grid.label(conveyor.mean_mus.map_or_else(|| "–".to_string(), |mean| format!("{mean:.1}")));
+                    grid.label(conveyor.length_taken.map_or_else(|| "–".to_string(), percent));
+                    grid.label(conveyor.mean_crossing.map_or_else(|| "–".to_string(), format_time_exact));
+                    grid.label(format_time_exact(conveyor.longest_crossing));
+                    grid.end_row();
+                }
+            });
         });
     }
     chosen

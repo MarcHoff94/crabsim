@@ -28,5 +28,5 @@ pub use crate::model::{Dimensions, ModelDescription, MuKind, Position};
 pub use crate::picture::{ObjectPicture, Picture};
 pub use crate::report::{Capacity, ActiveInterruption, ObjectKind, ObjectState, Occurrence, OccurrenceKind, OccurrenceType, Recording, RunState, Interruption};
 pub use crate::simulation_run::{BoundedAdvance, SimulationRun, ZERO_TIME_EVENT_LIMIT};
-pub use crate::statistics::{DrainStatistics, FillStatistics, Histogram, MeasuringPeriods, ObjectStatistics, PeriodFigures, Spread, HISTOGRAM_BARS};
+pub use crate::statistics::{BeltStatistics, DrainStatistics, FillStatistics, Histogram, MeasuringPeriods, ObjectStatistics, PeriodFigures, Spread, HISTOGRAM_BARS};
 pub use crate::time::SimTime;

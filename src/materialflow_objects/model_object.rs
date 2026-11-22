@@ -136,6 +136,20 @@ impl ModelObject {
         matches!(self, ModelObject::Conveyor(_))
     }
 
+    pub(crate) fn as_conveyor(&self) -> Option<&Conveyor> {
+        match self {
+            ModelObject::Conveyor(conveyor) => Some(conveyor),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn as_conveyor_mut(&mut self) -> Option<&mut Conveyor> {
+        match self {
+            ModelObject::Conveyor(conveyor) => Some(conveyor),
+            _ => None,
+        }
+    }
+
     /// The kind of MU it would pass on at `now`, if it has one to pass on.
     pub fn offered_kind(&self, now: SimTime) -> Option<MuKindId> {
         match self {
@@ -200,8 +214,8 @@ impl MaterialFlow for ModelObject {
     fn is_exit_allowed(&self) -> bool {
         on_the_object!(self, object => object.is_exit_allowed())
     }
-    fn accepts(&self, kind: MuKindId, now: SimTime) -> bool {
-        on_the_object!(self, object => object.accepts(kind, now))
+    fn accepts(&self, kind: MuKindId, now: SimTime, from_belt: bool) -> bool {
+        on_the_object!(self, object => object.accepts(kind, now, from_belt))
     }
     fn reserve(&mut self, mu_id: u32, context: &mut EventContext) {
         on_the_object!(self, object => object.reserve(mu_id, context))

@@ -154,6 +154,9 @@ pub(crate) fn attributes(attributes: &Attributes) -> Value {
             fields.insert(key.into(), json!(value));
         }
     }
+    if let Some(accumulating) = attributes.accumulating {
+        fields.insert("accumulating".into(), json!(accumulating));
+    }
     Value::Object(fields)
 }
 

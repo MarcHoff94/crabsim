@@ -3,9 +3,10 @@
 //! `docs/design/conveyor.md`.
 //!
 //! An MU's place is where its front is, in metres from the start. Every MU moves at the
-//! conveyor's speed or stands, so the standing MUs are a block at the front, and a conveyor keeps
-//! at most a few events queued: its front MU reaching the end or handing over, the first moving
-//! MU closing up to the block, and room at the start for those waiting.
+//! conveyor's speed or stands, except one straddling this conveyor and the next, which moves at the
+//! slower of their speeds (ADR 0023). A conveyor keeps at most a few events queued: its front MU
+//! reaching the end or handing over, the first MU closing up to the one ahead, the MU it handed to
+//! a conveyor clearing its start, and room at the start for those waiting.
 
 use std::collections::VecDeque;
 
@@ -34,12 +35,15 @@ pub enum ConveyorStep {
 	FrontAtEnd,
 	/// The front MU's booking point crosses the end, so it goes to the successor that took it.
 	Booked,
-	/// The first moving MU closes up to the standing block ahead of it.
+	/// The first MU that is faster than the one ahead of it closes up to it.
 	CloseUp,
 	/// There is room at the start for the first waiting predecessor whose MU can fit.
 	Room,
 	/// Something changed from outside, such as an MU entering: work out the events again.
 	Wake,
+	/// An MU straddling this conveyor and the one before it has passed a point that changes how it
+	/// moves or what is behind it: work out the events again.
+	Straddle,
 }
 
 /// Names a conveyor's event and the plan it belongs to. Anything that changes the conveyor makes
@@ -59,6 +63,7 @@ impl ConveyorTicket {
 			1 => ConveyorStep::Booked,
 			2 => ConveyorStep::CloseUp,
 			3 => ConveyorStep::Room,
+			5 => ConveyorStep::Straddle,
 			_ => ConveyorStep::Wake,
 		}
 	}
@@ -71,9 +76,20 @@ struct OnBelt {
 	/// Where its front was at `since`, in metres from the start.
 	front: f64,
 	since: SimTime,
-	/// Moving at the conveyor's speed, or standing.
-	moving: bool,
+	/// In metres per second, 0 standing: the conveyor's, or the slower speed of an MU on two.
+	speed: f64,
 }
+
+/// The MU a conveyor handed to the next one, which still has its rear on this one: where its rear
+/// is, in this conveyor's metres from its start, and how fast it moves.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Lead {
+	rear: f64,
+	speed: f64,
+}
+
+/// A conveyor that reserved a place for an MU whose predecessor isn't known yet.
+const NOBODY: u32 = u32::MAX;
 
 #[derive(Clone)]
 pub struct Conveyor {
@@ -86,6 +102,9 @@ pub struct Conveyor {
 	pub speed: f64,
 	/// The least space between two MUs, in metres.
 	pub gap: f64,
+	/// Whether MUs behind a stopped one close up and stop while the rest still move (the default),
+	/// or every MU stops as a whole when the first one does and they all start together.
+	pub accumulating: bool,
 	/// Front first.
 	belt: VecDeque<OnBelt>,
 	/// The front MU has reached the end and is offered, or waits to be taken.
@@ -93,6 +112,15 @@ pub struct Conveyor {
 	/// The successor that has taken the front MU, which the conveyor hands it to once its booking
 	/// point crosses the end.
 	handing_to: Option<u32>,
+	/// The conveyor it has handed an MU to that still has its rear on this one, which the MUs
+	/// behind must not run into (ADR 0023).
+	led_by: Option<u32>,
+	/// The conveyor whose MU is on both, with its rear still on that one, being this conveyor's
+	/// last MU.
+	straddle_from: Option<u32>,
+	/// The conveyor that has reserved the space under its front MU for its start: nothing else may
+	/// enter until it has handed that MU over.
+	reserved_by: Option<u32>,
 	/// When the front MU reached the end, which it waits in lines by.
 	ready_since: SimTime,
 	/// The plan its queued events belong to.
@@ -125,9 +153,13 @@ impl Conveyor {
 			width,
 			speed,
 			gap: 0.0,
+			accumulating: true,
 			belt: VecDeque::new(),
 			front_at_end: false,
 			handing_to: None,
+			led_by: None,
+			straddle_from: None,
+			reserved_by: None,
 			ready_since: SimTime::ZERO,
 			plan: 0,
 			wake_pending: false,
@@ -155,7 +187,7 @@ impl Conveyor {
 	/// Where the MU at `at` has its front at `now`.
 	fn front(&self, at: usize, now: SimTime) -> f64 {
 		let on = &self.belt[at];
-		if on.moving { on.front + self.speed * now.saturating_sub(on.since).as_millis() as f64 / 1000.0 } else { on.front }
+		on.front + on.speed * now.saturating_sub(on.since).as_millis() as f64 / 1000.0
 	}
 
 	fn rear(&self, at: usize, now: SimTime) -> f64 {
@@ -168,14 +200,13 @@ impl Conveyor {
 		kind.booking_point * kind.length
 	}
 
-	/// Sets the MU at `at` at `front` from `now` on, moving or standing, and says so.
-	fn plan_mu(&mut self, at: usize, front: f64, moving: bool, context: &mut EventContext) {
+	/// Sets the MU at `at` at `front` from `now` on, moving at `speed` or standing, and says so.
+	fn plan_mu(&mut self, at: usize, front: f64, speed: f64, context: &mut EventContext) {
 		let on = &mut self.belt[at];
 		on.front = front;
 		on.since = context.time;
-		on.moving = moving;
+		on.speed = speed;
 		let (mu_id, kind) = (on.mu.id, on.mu.kind);
-		let speed = if moving { self.speed } else { 0.0 };
 		context.record(OccurrenceKind::MotionPlanned { mu_id, at: self.base.object_id, front: front as f32, speed: speed as f32, kind });
 	}
 
@@ -185,63 +216,202 @@ impl Conveyor {
 		kind.width <= self.width + EPSILON && kind.length <= self.length + EPSILON
 	}
 
-	/// How far the last MU's rear must be past the start for one of this kind to enter.
-	fn room_needed(&self, kind: MuKindId) -> f64 {
-		self.booking_offset(kind) + self.gap
+	/// How far the last MU's rear must be past the start for one of this kind to enter. From
+	/// another conveyor it enters with its front at the start, so only the gap is needed. From
+	/// anything else it enters with its booking point there.
+	fn room_needed(&self, kind: MuKindId, from_belt: bool) -> f64 {
+		if from_belt { self.gap } else { self.booking_offset(kind) + self.gap }
 	}
 
-	/// How long it takes to move `distance` metres, rounded up to the next millisecond so a
-	/// position is never short of where an event says it is.
-	fn time_to(&self, distance: f64) -> SimTime {
+	/// How long it takes to move `distance` metres at `speed`, rounded up to the next millisecond
+	/// so a position is never short of where an event says it is.
+	fn time_for(distance: f64, speed: f64) -> SimTime {
 		if distance <= EPSILON {
 			return SimTime::ZERO;
 		}
-		SimTime::from_millis((distance / self.speed * 1000.0 - 1e-6).ceil().max(0.0) as u64)
+		SimTime::from_millis((distance / speed * 1000.0 - 1e-6).ceil().max(0.0) as u64)
 	}
 
 	fn event(&self, step: ConveyorStep, after: SimTime) -> EventTemplate {
 		EventTemplate { eventtype: EventType::Conveyor(ConveyorTicket { step: step as u8, plan: self.plan }), exec_time: after, object_id: self.base.object_id }
 	}
 
-	/// The first MU behind the standing block at the front, which is moving. `None` if every MU
-	/// moves, or every MU stands.
-	fn first_behind_block(&self) -> Option<usize> {
-		let block = self.belt.iter().take_while(|on| !on.moving).count();
-		(block > 0 && block < self.belt.len()).then_some(block)
+	/// Its speed if it isn't interrupted, which another conveyor's MU on both of them is limited by.
+	pub(crate) fn belt_speed(&self) -> Option<f64> {
+		(!self.interruptions.is_interrupted()).then_some(self.speed)
+	}
+
+	/// The last MU's rear and speed, for the conveyor `from` that has reserved a place for its MU
+	/// here, or handed one over that still has its rear on it: neither may run into it.
+	pub(crate) fn tail_lead(&self, from: u32, now: SimTime) -> Option<Lead> {
+		if (self.straddle_from != Some(from) && self.reserved_by != Some(from)) || self.belt.is_empty() {
+			return None;
+		}
+		let last = self.belt.len() - 1;
+		Some(Lead { rear: self.rear(last, now), speed: self.belt[last].speed })
+	}
+
+	/// The wake-up that has it work out its events again, unless one is queued already.
+	pub(crate) fn take_wake(&mut self) -> Option<EventTemplate> {
+		if self.wake_pending {
+			return None;
+		}
+		self.wake_pending = true;
+		Some(self.event(ConveyorStep::Wake, SimTime::ZERO))
+	}
+
+	/// Has the conveyor `id` work out its events again.
+	fn wake(id: u32, context: &mut EventContext, others: &mut OtherObjects<'_>) {
+		if let Some(wake) = others.get_mut(id).as_conveyor_mut().and_then(Conveyor::take_wake) {
+			context.schedule(wake);
+		}
+	}
+
+	/// Has every conveyor whose MUs depend on how this one is moving work out its events again.
+	fn wake_neighbours(&self, context: &mut EventContext, others: &mut OtherObjects<'_>) {
+		for id in [self.led_by, self.straddle_from, self.reserved_by.filter(|&id| id != NOBODY)].into_iter().flatten() {
+			Self::wake(id, context, others);
+		}
+	}
+
+	/// What its front MU must not run into on the next conveyor, in this conveyor's metres: the last
+	/// MU there, while it has handed it an MU whose rear is still on this one, or has reserved a
+	/// place there for the front MU, which has its front on it.
+	fn lead(&mut self, others: &OtherObjects<'_>, now: SimTime) -> Option<Lead> {
+		let next = self.handing_to.or(self.led_by)?;
+		let lead = others.get(next).as_conveyor().and_then(|next| next.tail_lead(self.base.object_id, now));
+		if lead.is_none() && self.handing_to.is_none() {
+			self.led_by = None;
+		}
+		lead.map(|lead| Lead { rear: self.length + lead.rear, speed: lead.speed })
+	}
+
+	/// How fast the MU at `at` moves unless it is held up by the one ahead of it.
+	fn own_speed(&self, at: usize, others: &OtherObjects<'_>, now: SimTime) -> f64 {
+		if self.interruptions.is_interrupted() || (at == 0 && self.front_at_end && self.handing_to.is_none()) {
+			return 0.0;
+		}
+		let mut speed = self.speed;
+		// An MU on this conveyor and the next moves at the slower of the two, but while one is
+		// stopped it moves at the speed of the one it belongs to (ADR 0023).
+		if at == 0 {
+			if let Some(next) = self.handing_to {
+				speed = others.get(next).as_conveyor().and_then(Conveyor::belt_speed).map_or(speed, |next| speed.min(next));
+			}
+		}
+		if let (Some(from), true) = (self.straddle_from, at + 1 == self.belt.len()) {
+			if self.rear(at, now) < -EPSILON {
+				speed = others.get(from).as_conveyor().and_then(Conveyor::belt_speed).map_or(speed, |from| speed.min(from));
+			}
+		}
+		speed
+	}
+
+	/// Sets the MU at `at` where it is now at `front`, moving at `speed`, and says so if either
+	/// differs from what it was planned to do.
+	fn apply(&mut self, at: usize, was: f64, front: f64, speed: f64, context: &mut EventContext) {
+		if self.belt[at].speed != speed || (front - was).abs() > EPSILON {
+			self.plan_mu(at, front, speed, context);
+		}
+	}
+
+	/// Gives every MU the speed it has from now on, which depends on the one ahead of it and, for
+	/// the front one, on what it handed to the next conveyor. Returns in how many seconds the first
+	/// MU that is faster than the one ahead closes up to it, if one does.
+	fn settle(&mut self, lead: Option<Lead>, others: &OtherObjects<'_>, context: &mut EventContext) -> Option<f64> {
+		let now = context.time;
+		let mut closes_up: Option<f64> = None;
+		let mut note = |time: f64| closes_up = Some(closes_up.map_or(time, |least| least.min(time)));
+		if self.accumulating {
+			let mut ahead = lead.map(|lead| (lead.rear, lead.speed));
+			for at in 0..self.belt.len() {
+				let was = self.front(at, now);
+				let mut front = was;
+				let mut speed = self.own_speed(at, others, now);
+				if let Some((rear, ahead_speed)) = ahead {
+					let room = rear - self.gap - front;
+					if room <= EPSILON {
+						speed = speed.min(ahead_speed);
+						// Rounded up to a millisecond, it may have gone a little past.
+						if -room > EPSILON {
+							front += room;
+						}
+					} else if speed > ahead_speed {
+						note(room / (speed - ahead_speed));
+					}
+				}
+				self.apply(at, was, front, speed, context);
+				ahead = Some((front - self.kind(self.belt[at].mu.kind).length, speed));
+			}
+		} else if !self.belt.is_empty() {
+			// Every MU rides the belt, which stops when the first can't move on, and goes at the
+			// slowest speed any of them is held to.
+			let mut group = (0..self.belt.len()).map(|at| self.own_speed(at, others, now)).fold(f64::INFINITY, f64::min);
+			if let Some(lead) = lead {
+				let room = lead.rear - self.gap - self.front(0, now);
+				if room <= EPSILON {
+					group = group.min(lead.speed);
+				} else if group > lead.speed {
+					note(room / (group - lead.speed));
+				}
+			}
+			for at in 0..self.belt.len() {
+				let front = self.front(at, now);
+				self.apply(at, front, front, group, context);
+			}
+		}
+		closes_up
 	}
 
 	/// Works out its events again from how its MUs move now, voiding those queued.
-	fn replan(&mut self, context: &mut EventContext, others: &OtherObjects<'_>) {
+	fn replan(&mut self, context: &mut EventContext, others: &mut OtherObjects<'_>) {
 		self.plan = self.plan.wrapping_add(1);
 		if self.interruptions.is_interrupted() {
 			return;
 		}
 		let now = context.time;
-		if self.belt.front().is_some_and(|on| on.moving) {
-			let front = self.front(0, now);
-			let event = match self.handing_to {
-				Some(_) => self.event(ConveyorStep::Booked, self.time_to(self.length + self.booking_offset(self.belt[0].mu.kind) - front)),
-				None => self.event(ConveyorStep::FrontAtEnd, self.time_to(self.length - front)),
-			};
-			context.schedule(event);
+		let lead = self.lead(others, now);
+		let closes_up = self.settle(lead, others, context);
+		if let Some(first) = self.belt.front() {
+			if first.speed > 0.0 {
+				let front = self.front(0, now);
+				let event = match self.handing_to {
+					Some(_) => Some((ConveyorStep::Booked, self.length + self.booking_offset(first.mu.kind) - front)),
+					None if !self.front_at_end => Some((ConveyorStep::FrontAtEnd, self.length - front)),
+					None => None,
+				};
+				if let Some((step, distance)) = event {
+					context.schedule(self.event(step, Self::time_for(distance, first.speed)));
+				}
+			}
 		}
-		if let Some(at) = self.first_behind_block() {
-			let stop_at = self.rear(at - 1, now) - self.gap;
-			context.schedule(self.event(ConveyorStep::CloseUp, self.time_to(stop_at - self.front(at, now))));
+		if let Some(seconds) = closes_up {
+			// At least a millisecond, so one that is nearly there can't make a loop of events at
+			// one time.
+			let after = SimTime::from_millis(((seconds * 1000.0 - 1e-6).ceil().max(1.0)) as u64);
+			context.schedule(self.event(ConveyorStep::CloseUp, after));
+		}
+		if let Some(from) = self.straddle_from {
+			self.watch_straddler(from, context, others);
+		} else if let Some(from) = self.reserved_by.filter(|&from| from != NOBODY) {
+			// Its last MU may be what the MU that is coming in must not run into.
+			Self::wake(from, context, others);
 		}
 		if !self.retried {
-			let waiting = waiting_ids(&self.blockedlist);
-			let first = waiting.into_iter().find_map(|id| others.get(id).offered_kind(now).filter(|&kind| self.fits(kind)));
-			if let Some(kind) = first {
-				let need = self.room_needed(kind);
+			let first = waiting_ids(&self.blockedlist).into_iter().find_map(|id| {
+				let waiting = others.get(id);
+				waiting.offered_kind(now).filter(|&kind| self.fits(kind)).map(|kind| (kind, waiting.reads_mu_kind()))
+			});
+			if let Some((kind, from_belt)) = first {
+				let need = self.room_needed(kind, from_belt);
 				let after = match self.belt.back() {
 					None => Some(SimTime::ZERO),
-					Some(_) => {
+					Some(last) => {
 						let rear = self.rear(self.belt.len() - 1, now);
 						if rear >= need - EPSILON {
 							Some(SimTime::ZERO)
-						} else if self.belt.back().is_some_and(|on| on.moving) {
-							Some(self.time_to(need - rear))
+						} else if last.speed > 0.0 {
+							Some(Self::time_for(need - rear, last.speed))
 						} else {
 							None
 						}
@@ -254,17 +424,25 @@ impl Conveyor {
 		}
 	}
 
-	/// The standing block at the front moves again, now that the front MU may move.
-	fn move_block(&mut self, context: &mut EventContext) {
+	/// The last MU still has its rear on the conveyor `from` that handed it over, or is less than
+	/// the gap past its start. `from` is told so its MUs behind don't run into it, and it is told
+	/// again when it has cleared.
+	fn watch_straddler(&mut self, from: u32, context: &mut EventContext, others: &mut OtherObjects<'_>) {
 		let now = context.time;
-		for at in 0..self.belt.len() {
-			if self.belt[at].moving {
-				break;
+		let last = self.belt.len().checked_sub(1);
+		let rear = last.map(|last| self.rear(last, now));
+		match (last, rear) {
+			(Some(last), Some(rear)) if rear < self.gap - EPSILON => {
+				let speed = self.belt[last].speed;
+				if speed > 0.0 {
+					// First the point where `from` stops holding it back, then where it is clear.
+					let target = if rear < -EPSILON { 0.0 } else { self.gap };
+					context.schedule(self.event(ConveyorStep::Straddle, Self::time_for(target - rear, speed)));
+				}
 			}
-			let front = self.front(at, now);
-			self.plan_mu(at, front, true, context);
+			_ => self.straddle_from = None,
 		}
-		self.retried = false;
+		Self::wake(from, context, others);
 	}
 
 	/// Offers the front MU, at the end, to its successors, or only to `only` answering its retry.
@@ -276,7 +454,10 @@ impl Conveyor {
 			return Ok(false);
 		};
 		self.front_at_end = false;
-		self.move_block(context);
+		self.retried = false;
+		if let Some(next) = others.get_mut(taken_by).as_conveyor_mut() {
+			next.reserved_by = Some(self.base.object_id);
+		}
 		if self.booking_offset(self.belt[0].mu.kind) <= EPSILON {
 			self.hand_over(taken_by, context, others)?;
 		} else {
@@ -295,6 +476,10 @@ impl Conveyor {
 		let from = self.base.object_id;
 		context.record(OccurrenceKind::MuMoved { mu_id: on.mu.id, from, to });
 		log::info!("seq={} MU {} moved from conveyor {} to {}", context.seq, on.mu.id, from, to);
+		if others.get(to).as_conveyor().is_some() {
+			// Its rear may still be on this one, which the MUs behind must not run into.
+			self.led_by = Some(to);
+		}
 		if let Some(entered) = others.get_mut(to).process_mu_entrance(on.mu, context).map_err(|_| RunTimeError {})? {
 			context.schedule(entered);
 		}
@@ -313,23 +498,21 @@ impl Conveyor {
 				let now = context.time;
 				match ticket.step() {
 					ConveyorStep::FrontAtEnd => {
+						// Held up on the way, it isn't there: the plan was already void.
+						if self.belt.is_empty() || self.front(0, now) < self.length - 1e-3 {
+							self.replan(context, others);
+							return Ok(());
+						}
 						self.plan_mu_quietly(0, self.length, now);
 						self.front_at_end = true;
 						self.ready_since = now;
-						if !self.offer(context, others, None)? {
-							self.plan_mu(0, self.length, false, context);
-						}
+						self.offer(context, others, None)?;
 					}
 					ConveyorStep::Booked => {
 						let to = self.handing_to.expect("a successor took the front MU");
 						self.hand_over(to, context, others)?;
 					}
-					ConveyorStep::CloseUp => {
-						if let Some(at) = self.first_behind_block() {
-							let stop_at = self.rear(at - 1, now) - self.gap;
-							self.plan_mu(at, stop_at, false, context);
-						}
-					}
+					ConveyorStep::CloseUp | ConveyorStep::Straddle => {}
 					ConveyorStep::Room => {
 						self.retried = true;
 						retries_for_blocked(&mut self.blockedlist, self.base.object_id, context);
@@ -355,7 +538,14 @@ impl Conveyor {
 				}
 				Ok(())
 			}
-			_ => self.handle_interruption(eventtype, context, others).unwrap_or(Err(RunTimeError {})),
+			_ => {
+				let was = self.interruptions.is_interrupted();
+				let outcome = self.handle_interruption(eventtype, context, others).unwrap_or(Err(RunTimeError {}));
+				if was != self.interruptions.is_interrupted() {
+					self.wake_neighbours(context, others);
+				}
+				outcome
+			}
 		}
 	}
 
@@ -370,7 +560,7 @@ impl Conveyor {
 	fn process_state(&self) -> ProcessState {
 		if self.belt.is_empty() {
 			ProcessState::Idle
-		} else if self.belt.iter().any(|on| on.moving) {
+		} else if self.belt.iter().any(|on| on.speed > 0.0) {
 			ProcessState::Processing
 		} else {
 			ProcessState::Blocked
@@ -399,14 +589,20 @@ impl MaterialFlow for Conveyor {
 		false
 	}
 	#[inline(never)]
-	fn accepts(&self, kind: MuKindId, now: SimTime) -> bool {
-		if self.interruptions.is_interrupted() || !self.fits(kind) {
+	fn accepts(&self, kind: MuKindId, now: SimTime, from_belt: bool) -> bool {
+		if self.interruptions.is_interrupted() || self.reserved_by.is_some() || !self.fits(kind) {
 			return false;
 		}
 		match self.belt.back() {
 			None => true,
-			Some(_) => self.rear(self.belt.len() - 1, now) >= self.room_needed(kind) - EPSILON,
+			Some(_) => self.rear(self.belt.len() - 1, now) >= self.room_needed(kind, from_belt) - EPSILON,
 		}
+	}
+	/// Another conveyor's MU has its front at the start: nothing else may enter until it has been
+	/// handed over (ADR 0023).
+	#[inline(never)]
+	fn reserve(&mut self, _mu_id: u32, _context: &mut EventContext) {
+		self.reserved_by = Some(NOBODY);
 	}
 	#[inline(never)]
 	fn is_exit_allowed(&self) -> bool {
@@ -418,9 +614,22 @@ impl MaterialFlow for Conveyor {
 	fn process_mu_entrance(&mut self, mu: MoveableUnit, context: &mut EventContext) -> Result<Option<EventTemplate>, MaterialflowError> {
 		log::info!("MU {} entered conveyor {}", mu.id, self.base.object_id);
 		let front = self.booking_offset(mu.kind);
-		self.belt.push_back(OnBelt { mu, front, since: context.time, moving: true });
+		// Handed over by a conveyor, it may still have its rear on that one.
+		if let Some(from) = self.reserved_by.take() {
+			self.straddle_from = Some(from).filter(|&from| from != NOBODY);
+		}
+		// A belt that is stopped as a whole takes it standing, and one that moves, moving: the
+		// events that follow work out the rest.
+		let speed = if self.interruptions.is_interrupted() {
+			0.0
+		} else if self.accumulating {
+			self.speed
+		} else {
+			self.belt.front().map_or(self.speed, |first| first.speed)
+		};
+		self.belt.push_back(OnBelt { mu, front, since: context.time, speed });
 		let at = self.belt.len() - 1;
-		self.plan_mu(at, front, true, context);
+		self.plan_mu(at, front, speed, context);
 		self.statistics.count_mu_in();
 		self.retried = false;
 		self.update_state(context);
@@ -469,6 +678,9 @@ impl EventInterface for Conveyor {
 		self.belt.clear();
 		self.front_at_end = false;
 		self.handing_to = None;
+		self.led_by = None;
+		self.straddle_from = None;
+		self.reserved_by = None;
 		self.ready_since = SimTime::ZERO;
 		self.plan = 0;
 		self.wake_pending = false;
@@ -509,7 +721,7 @@ impl EventInterface for Conveyor {
 				.map(|at| BeltPosition {
 					mu_id: self.belt[at].mu.id,
 					front: self.front(at, now),
-					speed: if self.belt[at].moving && !stopped { self.speed } else { 0.0 },
+					speed: if stopped { 0.0 } else { self.belt[at].speed },
 					kind: self.belt[at].mu.kind,
 				})
 				.collect(),
@@ -540,32 +752,17 @@ impl Interruptible for Conveyor {
 	fn stop_began(&mut self, context: &mut EventContext) {
 		let now = context.time;
 		for at in 0..self.belt.len() {
-			if self.belt[at].moving {
+			if self.belt[at].speed > 0.0 {
 				let front = self.front(at, now);
-				self.plan_mu(at, front, false, context);
+				self.plan_mu(at, front, 0.0, context);
 			}
 		}
 		self.plan = self.plan.wrapping_add(1);
 	}
-	/// Its MUs move again where their way is clear: the front MU unless it waits at the end, and
-	/// each behind it unless it has closed up to a standing one. The front MU at the end is
-	/// offered again.
+	/// Its MUs move again where their way is clear, as `replan` works out, and the front MU at the
+	/// end is offered again.
 	#[inline(never)]
 	fn stop_ended(&mut self, context: &mut EventContext, others: &mut OtherObjects<'_>) -> Result<(), RunTimeError> {
-		let now = context.time;
-		let mut ahead_moves = false;
-		for at in 0..self.belt.len() {
-			let moves = if at == 0 {
-				!(self.front_at_end && self.handing_to.is_none())
-			} else {
-				ahead_moves || self.rear(at - 1, now) - self.gap - self.front(at, now) > EPSILON
-			};
-			if moves {
-				let front = self.front(at, now);
-				self.plan_mu(at, front, true, context);
-			}
-			ahead_moves = moves;
-		}
 		self.retried = false;
 		if self.front_at_end && self.handing_to.is_none() && !self.belt.is_empty() {
 			self.offer(context, others, None)?;
@@ -597,6 +794,9 @@ impl SuccessorContainer for Conveyor {
 		self.belt.clear();
 		self.front_at_end = false;
 		self.handing_to = None;
+		self.led_by = None;
+		self.straddle_from = None;
+		self.reserved_by = None;
 		self.state = ProcessState::Idle;
 	}
 	#[inline(never)]
@@ -612,6 +812,10 @@ impl SuccessorContainer for Conveyor {
 	#[inline(never)]
 	fn offered_kind(&self, _now: SimTime) -> Option<MuKindId> {
 		self.belt.front().filter(|_| self.front_at_end && self.handing_to.is_none()).map(|on| on.mu.kind)
+	}
+	#[inline(never)]
+	fn on_belt(&self) -> bool {
+		true
 	}
 	#[inline(never)]
 	fn statistics_mut(&mut self) -> &mut StatisticsKeeper {

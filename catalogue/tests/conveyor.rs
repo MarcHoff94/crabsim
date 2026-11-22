@@ -32,13 +32,16 @@ fn a_conveyor_has_its_attributes_with_defaults_and_they_change_through_edit_mode
     let setup = setup("conveyor-attributes");
     let got = setup.ok("get_attributes", json!({ "path": "line.json", "target": { "instance": "Belt" } }));
     let names: Vec<&str> = got["attributes"].as_array().unwrap().iter().map(|a| a["attribute"].as_str().unwrap()).collect();
-    assert_eq!(names, ["failures", "dimensions", "description", "state_notes", "distribution", "width", "path", "speed", "gap"], "every attribute a Conveyor has");
+    assert_eq!(names, ["failures", "dimensions", "description", "state_notes", "distribution", "width", "path", "speed", "gap", "accumulating"], "every attribute a Conveyor has");
+    assert_eq!(attribute(&setup, "accumulating"), json!({ "attribute": "accumulating", "value": true, "from": "built_in" }));
     assert_eq!(attribute(&setup, "speed"), json!({ "attribute": "speed", "value": 0.5, "from": "built_in" }));
     assert_eq!(attribute(&setup, "path"), json!({ "attribute": "path", "value": [{ "straight": 10.0 }], "from": "instance" }));
 
     setup.ok("edit_model", json!({ "path": "line.json", "changes": [
         { "change": "set_attribute", "target": { "instance": "Belt" }, "attribute": "speed", "value": 1.0 },
+        { "change": "set_attribute", "target": { "instance": "Belt" }, "attribute": "accumulating", "value": false },
         { "change": "set_attribute", "target": { "class": "Conveyor" }, "attribute": "gap", "value": 0.2 } ] }));
+    assert_eq!(attribute(&setup, "accumulating")["value"], false);
     assert_eq!(attribute(&setup, "speed")["value"], 1.0);
     assert_eq!(attribute(&setup, "gap"), json!({ "attribute": "gap", "value": 0.2, "from": "class", "class": "Conveyor" }));
     let refused = setup.err("edit_model", json!({ "path": "line.json", "changes": [

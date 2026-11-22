@@ -186,6 +186,9 @@ An object a connection leads to from a given object. The object it comes from is
 A geometry-aware object that carries MUs along its path from its start to its end, holding as many as fit along its length, as wide as its width allows. MUs enter only at its start and leave only at its end. Its direction is set before a run. An MU never runs into the one ahead of it: when that one stops, it stops too, whatever its own conveyor is doing.
 _Avoid_: Belt, track (a conveyor of either drive)
 
+**Accumulating**:
+What a conveyor does with the MUs behind one that stops. **Accumulating**, the default: they close up to it, keeping the gap, and stop one by one while the rest move on. **Non-accumulating** (`accumulating` false): every MU on the conveyor stops as a whole when its first can't leave, wherever it is, and they all start again together, as far apart as they were.
+
 **Drive**:
 What moves the MUs on a conveyor. **Conveyor-driven**: the conveyor's own speed, acceleration, deceleration and jerk move every MU on it, as a belt or roller conveyor does. **MU-driven**: each MU moves by its own motion limits, as a shuttle or carrier does, and the conveyor is only the way it follows.
 

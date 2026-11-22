@@ -218,6 +218,9 @@ pub struct Attributes {
     pub speed: Option<f64>,
     /// The least space between two MUs on a conveyor, in metres. 0 by default.
     pub gap: Option<f64>,
+    /// Whether a conveyor's MUs close up behind a stopped one while the rest move on (the
+    /// default), or every MU stops as a whole when the first can't leave.
+    pub accumulating: Option<bool>,
 }
 
 /// One piece of a conveyor's path (ADR 0024). Straights only so far: arcs, transition curves and
@@ -328,6 +331,7 @@ impl Attributes {
             Attribute::Path => self.path.is_some(),
             Attribute::Speed => self.speed.is_some(),
             Attribute::Gap => self.gap.is_some(),
+            Attribute::Accumulating => self.accumulating.is_some(),
         }
     }
 
@@ -356,6 +360,7 @@ impl Attributes {
             Attribute::Path => self.path = from.path.clone(),
             Attribute::Speed => self.speed = from.speed,
             Attribute::Gap => self.gap = from.gap,
+            Attribute::Accumulating => self.accumulating = from.accumulating,
         }
     }
 }
@@ -385,10 +390,11 @@ pub enum Attribute {
     Path,
     Speed,
     Gap,
+    Accumulating,
 }
 
 impl Attribute {
-    pub const ALL: [Attribute; 22] = [
+    pub const ALL: [Attribute; 23] = [
         Attribute::Interval,
         Attribute::ProcessTime,
         Attribute::Failures,
@@ -411,6 +417,7 @@ impl Attribute {
         Attribute::Path,
         Attribute::Speed,
         Attribute::Gap,
+        Attribute::Accumulating,
     ];
 
     /// Its name in a file.
@@ -438,6 +445,7 @@ impl Attribute {
             Attribute::Path => "path",
             Attribute::Speed => "speed",
             Attribute::Gap => "gap",
+            Attribute::Accumulating => "accumulating",
         }
     }
 
@@ -447,7 +455,7 @@ impl Attribute {
             (built_in, self),
             (BUILT_IN_MU_CLASS, Attribute::Length | Attribute::Width | Attribute::BookingPoint | Attribute::Description)
                 | ("Source" | "Station" | "Buffer" | "Drain" | "Conveyor", Attribute::Dimensions | Attribute::Description | Attribute::StateNotes | Attribute::Failures)
-                | ("Conveyor", Attribute::Path | Attribute::Width | Attribute::Speed | Attribute::Gap | Attribute::Distribution)
+                | ("Conveyor", Attribute::Path | Attribute::Width | Attribute::Speed | Attribute::Gap | Attribute::Accumulating | Attribute::Distribution)
                 | ("Source", Attribute::Interval | Attribute::Distribution | Attribute::MuClass | Attribute::MuValues)
                 | ("Station", Attribute::ProcessTime | Attribute::StartingMus | Attribute::Capacity | Attribute::Start | Attribute::Distribution)
                 | (
@@ -863,6 +871,7 @@ impl Model {
             attributes.width.get_or_insert(0.6);
             attributes.speed.get_or_insert(0.5);
             attributes.gap.get_or_insert(0.0);
+            attributes.accumulating.get_or_insert(true);
             // Its size is its path's length and its width, whatever its dimensions say.
             let length = path_length(attributes.path.as_deref().unwrap_or_default());
             let width = attributes.width.unwrap_or(0.6);

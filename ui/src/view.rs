@@ -155,30 +155,25 @@ pub const MIN_LABEL_PIXELS: f64 = 5.0;
 /// Names grow no bigger than this when zoomed in close, the size of the panels' text.
 pub const MAX_LABEL_PIXELS: f64 = 16.0;
 
-/// How big an MU is drawn, in metres. Visual only: MUs have no size in the model yet.
-pub const MU_METRES: f64 = 0.5;
-/// MUs are drawn from this zoom on, where one is 3 pixels across.
-pub const MU_MIN_PIXELS_PER_METRE: f64 = 6.0;
+/// How much of its place among several an MU may take, at most, so MUs side by side in an object
+/// show apart.
+const MU_FILL: f64 = 0.9;
+/// MUs are drawn from this zoom on, where the built-in MU, 0.4 m wide, is 3 pixels across.
+pub const MU_MIN_PIXELS_PER_METRE: f64 = 7.5;
 /// The fastest speed at which MUs are drawn while advancing. Faster, they jump about too quickly
 /// to follow, so holders show a count instead.
 pub const MU_MAX_SPEED: f64 = 120.0;
 
-/// One MU as drawn, in the object that holds it.
+/// One MU as drawn, in the object that holds it: always a rectangle of its own footprint, its
+/// length along the holder's, so it looks the same wherever it is (ADR 0021).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MuMarker {
     pub mu: u32,
     pub holder: u32,
-    pub at: Point,
-}
-
-/// An MU on a conveyor, drawn at its own size where its motion puts it at shown time, turned with
-/// the conveyor (ADR 0022).
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct BeltMarker {
-    pub mu: u32,
-    pub holder: u32,
     /// Its footprint's centre.
     pub at: Point,
+    /// Drawn this long and wide: its footprint, or in an object without geometry holding several,
+    /// the same shape shrunk to fit its place among them.
     pub length: f64,
     pub width: f64,
     pub rotation_degrees: f64,
@@ -1097,53 +1092,52 @@ impl ViewState {
             && (self.status != SessionStatus::Advancing || (self.animate && self.speed <= MU_MAX_SPEED))
     }
 
-    /// Every MU to draw, each in the object that holds it, or none when MUs aren't shown. A move
-    /// takes no time, so an MU is drawn in its new holder at once. A Buffer's MUs aren't drawn:
-    /// it can hold any number, so it always shows a count.
+    /// Every MU to draw, each in the object that holds it, or none when MUs aren't shown. Each is
+    /// a rectangle of its own footprint, turned with its holder, wherever it is. On a conveyor it
+    /// is where its latest motion puts it at shown time, its rear an MU length behind its front,
+    /// so one entering shows part of itself behind the start. In an object without geometry its
+    /// place is visual only: the MUs share the object's footprint in a grid, each at its own size,
+    /// or shrunk alike to fit when the object is too small for them. A move takes no time, so an
+    /// MU is drawn in its new holder at once. A Buffer's MUs aren't drawn: it can hold any number,
+    /// so it always shows a count.
     pub fn mu_markers(&self, camera: &Camera) -> Vec<MuMarker> {
         if !self.shows_mus(camera) {
             return Vec::new();
         }
-        self.picture
-            .objects()
-            .iter()
-            .filter(|pictured| !pictured.contents().is_empty() && !matches!(pictured.kind(), ObjectKind::Buffer | ObjectKind::Conveyor))
-            .flat_map(|pictured| {
-                let holder = pictured.id();
-                let spots = self.objects[holder as usize].mu_spots(pictured.contents().len());
-                pictured.contents().iter().zip(spots).map(move |(&mu, at)| MuMarker { mu, holder, at })
-            })
-            .collect()
-    }
-
-    /// Every MU on a conveyor, at its own size where it is at shown time, or none when MUs
-    /// aren't shown. Its front is where its latest motion puts it, from the conveyor's start, its
-    /// rear an MU length behind, so one entering shows part of itself behind the start.
-    pub fn belt_markers(&self, camera: &Camera) -> Vec<BeltMarker> {
-        if !self.shows_mus(camera) {
-            return Vec::new();
-        }
         let now = self.picture.shown();
-        self.picture
-            .objects()
-            .iter()
-            .filter(|pictured| pictured.kind() == ObjectKind::Conveyor)
-            .flat_map(|pictured| {
-                let belt = &self.objects[pictured.id() as usize];
-                pictured.motion().iter().map(move |motion| {
+        let size = |mu: u32| self.mu_kinds.get(usize::from(self.picture.kind_of(mu))).copied().unwrap_or_default();
+        let mut markers = Vec::new();
+        for pictured in self.picture.objects().iter().filter(|pictured| !pictured.contents().is_empty() && pictured.kind() != ObjectKind::Buffer) {
+            let holder = &self.objects[pictured.id() as usize];
+            if pictured.kind() == ObjectKind::Conveyor {
+                for motion in pictured.motion() {
                     let kind = self.mu_kinds.get(usize::from(motion.kind)).copied().unwrap_or_default();
                     let centre = motion.front_at(now) - kind.length / 2.0;
-                    BeltMarker {
+                    markers.push(MuMarker {
                         mu: motion.mu_id,
-                        holder: belt.id,
-                        at: belt.from_local(Point { x: centre - belt.length / 2.0, y: 0.0 }),
+                        holder: holder.id,
+                        at: holder.from_local(Point { x: centre - holder.length / 2.0, y: 0.0 }),
                         length: kind.length,
                         width: kind.width,
-                        rotation_degrees: belt.rotation_degrees,
-                    }
-                })
-            })
-            .collect()
+                        rotation_degrees: holder.rotation_degrees,
+                    });
+                }
+                continue;
+            }
+            let contents = pictured.contents();
+            let (cell_length, cell_width) = holder.mu_cell(contents.len());
+            // One scale for all, so MUs of one kind look alike side by side.
+            let scale = contents
+                .iter()
+                .map(|&mu| size(mu))
+                .map(|kind| (MU_FILL * cell_length / kind.length).min(MU_FILL * cell_width / kind.width))
+                .fold(1.0_f64, f64::min);
+            for (&mu, at) in contents.iter().zip(holder.mu_spots(contents.len())) {
+                let kind = size(mu);
+                markers.push(MuMarker { mu, holder: holder.id, at, length: kind.length * scale, width: kind.width * scale, rotation_degrees: holder.rotation_degrees });
+            }
+        }
+        markers
     }
 
     /// Where each conveyor goes, from its start to its end, for the arrow drawn along it.
@@ -1794,6 +1788,13 @@ impl ObjectView {
 
     /// Where `count` MUs sit in the footprint: spread over a grid, in the order held, starting
     /// at the top left. One sits in the middle.
+    /// How long and wide each place is when it holds `count` MUs, as `mu_spots` lays them out.
+    pub fn mu_cell(&self, count: usize) -> (f64, f64) {
+        let columns = (count as f64).sqrt().ceil().max(1.0) as usize;
+        let rows = count.div_ceil(columns).max(1);
+        (self.length / columns as f64, self.width / rows as f64)
+    }
+
     pub fn mu_spots(&self, count: usize) -> Vec<Point> {
         let columns = (count as f64).sqrt().ceil().max(1.0) as usize;
         let rows = count.div_ceil(columns).max(1);

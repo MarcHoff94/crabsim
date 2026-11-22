@@ -39,6 +39,7 @@ impl EventInterface for RecordsThenFails {
             id: self.base.object_id,
             kind: ObjectKind::Drain,
             contents: Vec::new(),
+            content_kinds: Vec::new(),
             process: ProcessState::Idle,
             interrupted: None,
             failure_profiles: Vec::new(),

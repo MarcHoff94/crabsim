@@ -428,6 +428,7 @@ impl EventInterface for MultiStation {
 			id: self.base.object_id,
 			kind: ObjectKind::Station,
 			contents: self.places.iter().map(|place| place.mu.id).collect(),
+			content_kinds: self.places.iter().map(|place| place.mu.kind).collect(),
 			process: self.process_state(),
 			interrupted: self.interruptions.most_serious(),
 			interruptions: self.interruptions.list(),

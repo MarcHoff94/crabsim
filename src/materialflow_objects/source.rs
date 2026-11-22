@@ -204,6 +204,7 @@ impl EventInterface for Source {
 			id: self.base.object_id,
 			kind: ObjectKind::Source,
 			contents: self.content.iter().map(|mu| mu.id).collect(),
+			content_kinds: self.content.iter().map(|mu| mu.kind).collect(),
 			process: self.state.clone(),
 			interrupted: self.interruptions.most_serious(),
 			interruptions: self.interruptions.list(),

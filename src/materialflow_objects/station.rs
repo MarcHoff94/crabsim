@@ -351,6 +351,7 @@ impl EventInterface for SingleStation {
 			id: self.base.object_id,
 			kind: ObjectKind::Station,
 			contents: self.content.iter().map(|mu| mu.id).collect(),
+			content_kinds: self.content.iter().map(|mu| mu.kind).collect(),
 			process: self.state.clone(),
 			interrupted: self.interruptions.most_serious(),
 			interruptions: self.interruptions.list(),

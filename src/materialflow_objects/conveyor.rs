@@ -491,6 +491,7 @@ impl EventInterface for Conveyor {
 			id: self.base.object_id,
 			kind: ObjectKind::Conveyor,
 			contents: self.belt.iter().map(|on| on.mu.id).collect(),
+			content_kinds: self.belt.iter().map(|on| on.mu.kind).collect(),
 			process: self.state.clone(),
 			interrupted: self.interruptions.most_serious(),
 			interruptions: self.interruptions.list(),

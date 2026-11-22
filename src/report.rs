@@ -198,6 +198,9 @@ pub struct ObjectState {
     pub kind: ObjectKind,
     /// Ids of the MUs the object currently holds, for a Buffer in the order they came in.
     pub contents: Vec<u32>,
+    /// The MU kind of each MU in `contents`, in the same order (ADR 0021), so a view draws each at
+    /// its own size wherever it is.
+    pub content_kinds: Vec<crate::flows::MuKindId>,
     /// What it is doing. A Buffer is `Idle` when empty, `Processing` while it holds MUs, and
     /// `Blocked` when an MU that may leave can't.
     pub process: ProcessState,

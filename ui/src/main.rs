@@ -26,7 +26,7 @@ use crabsim::{LiveSession, SessionStatus, SimTime, TimeMode, WallClock};
 use crabsim_ui::camera::Camera as ViewCamera;
 use crabsim_ui::view::{
     Change, Control, DEFAULT_SPEED, Deletion, Details, EndTimeProblem, GoingOn, Inspection, Intervention, Interval, JumpProblem, MAX_SPEED,
-    MIN_PERIODS, MIN_SPEED, Mark, PERIOD_FAILURE_FACTOR, Point, MU_METRES, Shade, StepBack, ViewState, format_time, format_time_exact, label_size, parse_time, rgb,
+    MIN_PERIODS, MIN_SPEED, Mark, PERIOD_FAILURE_FACTOR, Point, Shade, StepBack, ViewState, format_time, format_time_exact, label_size, parse_time, rgb,
     wall_time_roughly,
 };
 use crabsim_ui::keys::{Command, Direction, Key, Keys, PromptKind};
@@ -210,7 +210,6 @@ fn main() {
                 place_camera,
                 draw_connections,
                 place_mus,
-                place_belt_mus,
             )
                 .chain(),
         )
@@ -709,19 +708,10 @@ struct Scene {
 #[derive(Component)]
 struct WorldCamera;
 
-/// Entities drawing MUs, reused from frame to frame: the first `shown` are visible.
+/// Entities drawing MUs, each a square of a metre scaled to the MU's footprint, reused from frame
+/// to frame: the first `shown` are visible.
 #[derive(Resource)]
 struct MuPool {
-    entities: Vec<Entity>,
-    shown: usize,
-    mesh: Handle<Mesh>,
-    material: Handle<StandardMaterial>,
-}
-
-/// Entities drawing MUs on conveyors, each a square of a metre scaled to the MU's footprint,
-/// reused from frame to frame: the first `shown` are visible.
-#[derive(Resource)]
-struct BeltPool {
     entities: Vec<Entity>,
     shown: usize,
     mesh: Handle<Mesh>,
@@ -750,12 +740,6 @@ fn setup(
     let count = ui.view.objects().len();
     commands.insert_resource(Scene { entities, drawn: vec![Shade::Unknown; count], materials });
     commands.insert_resource(MuPool {
-        entities: Vec::new(),
-        shown: 0,
-        mesh: meshes.add(Circle::new(MU_METRES as f32 / 2.0)),
-        material: material_assets.add(StandardMaterial { base_color: MU_COLOUR, unlit: true, ..default() }),
-    });
-    commands.insert_resource(BeltPool {
         entities: Vec::new(),
         shown: 0,
         mesh: meshes.add(Rectangle::new(1.0, 1.0)),
@@ -1084,8 +1068,9 @@ fn request_details(session: Res<Session>, mut ui: ResMut<Ui>, time: Res<Time<Rea
 }
 
 
-/// Draws each MU in the object that holds it, when the view state says MUs are shown, reusing
-/// the entities from the frame before. Only what changed touches the ECS.
+/// Draws each MU, when the view state says MUs are shown, as a rectangle of its footprint where it
+/// is, the same shape wherever it is, reusing the entities from the frame before. Only what
+/// changed touches the ECS.
 fn place_mus(
     mut commands: Commands,
     ui: Res<Ui>,
@@ -1093,45 +1078,6 @@ fn place_mus(
     mut drawn: Query<(&mut Transform, &mut Visibility)>,
 ) {
     let markers = ui.camera.map(|camera| ui.view.mu_markers(&camera)).unwrap_or_default();
-    let pool = &mut *pool;
-    for (index, marker) in markers.iter().enumerate() {
-        let at = Vec3::new(marker.at.x as f32, marker.at.y as f32, 0.2);
-        match pool.entities.get(index) {
-            Some(&entity) => {
-                if let Ok((mut transform, mut visibility)) = drawn.get_mut(entity) {
-                    if transform.translation != at {
-                        transform.translation = at;
-                    }
-                    if *visibility != Visibility::Inherited {
-                        *visibility = Visibility::Inherited;
-                    }
-                }
-            }
-            None => {
-                let entity = commands
-                    .spawn((Mesh3d(pool.mesh.clone()), MeshMaterial3d(pool.material.clone()), Transform::from_translation(at)))
-                    .id();
-                pool.entities.push(entity);
-            }
-        }
-    }
-    for &entity in pool.entities.iter().take(pool.shown).skip(markers.len()) {
-        if let Ok((_, mut visibility)) = drawn.get_mut(entity) {
-            *visibility = Visibility::Hidden;
-        }
-    }
-    pool.shown = markers.len();
-}
-
-/// Draws each MU on a conveyor at its own size and place, reusing the entities from the frame
-/// before. Only what changed touches the ECS.
-fn place_belt_mus(
-    mut commands: Commands,
-    ui: Res<Ui>,
-    mut pool: ResMut<BeltPool>,
-    mut drawn: Query<(&mut Transform, &mut Visibility)>,
-) {
-    let markers = ui.camera.map(|camera| ui.view.belt_markers(&camera)).unwrap_or_default();
     let pool = &mut *pool;
     for (index, marker) in markers.iter().enumerate() {
         let wanted = Transform {

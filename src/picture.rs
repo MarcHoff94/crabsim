@@ -18,6 +18,9 @@ pub struct Picture {
     shown: SimTime,
     has_state: bool,
     objects: Vec<ObjectPicture>,
+    /// The MU kind of each MU in the model now, so a view draws it at its own size wherever it is
+    /// (ADR 0021). An MU it doesn't know is of the built-in MU's kind, 0.
+    kinds: std::collections::HashMap<u32, crate::flows::MuKindId>,
 }
 
 /// What the picture knows about one material-flow object.
@@ -106,17 +109,28 @@ impl Picture {
         self.objects.get(id as usize)
     }
 
+    /// The MU kind of the MU `mu_id`: the built-in MU's, 0, for one it doesn't know.
+    pub fn kind_of(&self, mu_id: u32) -> crate::flows::MuKindId {
+        self.kinds.get(&mu_id).copied().unwrap_or(0)
+    }
+
     fn take_state(&mut self, state: &RunState) {
         self.shown = state.time;
         self.has_state = true;
         self.objects = state.objects.iter().map(|object| ObjectPicture::from_state(object, state.time)).collect();
+        self.kinds = state
+            .objects
+            .iter()
+            .flat_map(|object| object.contents.iter().copied().zip(object.content_kinds.iter().copied()))
+            .collect();
     }
 
     fn apply(&mut self, kind: &OccurrenceKind, now: SimTime) {
         let objects = &mut self.objects;
         match *kind {
             OccurrenceKind::RunInitialised => {}
-            OccurrenceKind::MuCreated { mu_id, at, duration, .. } => {
+            OccurrenceKind::MuCreated { mu_id, at, duration, kind } => {
+                self.kinds.insert(mu_id, kind);
                 let object = &mut objects[at as usize];
                 object.contents = vec![mu_id];
                 object.process = ProcessState::Processing;
@@ -149,7 +163,10 @@ impl Picture {
                     object.follow_belt();
                 }
             }
-            OccurrenceKind::MuLeft { mu_id, at, .. } => objects[at as usize].contents.retain(|&id| id != mu_id),
+            OccurrenceKind::MuLeft { mu_id, at, .. } => {
+                objects[at as usize].contents.retain(|&id| id != mu_id);
+                self.kinds.remove(&mu_id);
+            }
             OccurrenceKind::WorkStarted { mu_id, at, duration } => {
                 let object = &mut objects[at as usize];
                 object.process = ProcessState::Processing;

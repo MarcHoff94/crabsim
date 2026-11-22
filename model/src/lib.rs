@@ -53,10 +53,10 @@ pub fn start_from_name(name: &str) -> Option<StartMode> {
 
 /// The built-in classes every chain of classes ends in: the four material-flow objects, and the
 /// built-in MU class (ADR 0021).
-pub const BUILT_IN_CLASSES: [&str; 5] = ["Source", "Station", "Buffer", "Drain", BUILT_IN_MU_CLASS];
+pub const BUILT_IN_CLASSES: [&str; 6] = ["Source", "Station", "Buffer", "Drain", "Conveyor", BUILT_IN_MU_CLASS];
 
 /// The built-in classes of material-flow objects, which instances are made from.
-pub const BUILT_IN_OBJECT_CLASSES: [&str; 4] = ["Source", "Station", "Buffer", "Drain"];
+pub const BUILT_IN_OBJECT_CLASSES: [&str; 5] = ["Source", "Station", "Buffer", "Drain", "Conveyor"];
 
 /// The built-in MU class, which every MU class derives from (ADR 0021). A Source makes MUs of it
 /// unless given another.
@@ -212,7 +212,37 @@ pub struct Attributes {
     /// Where an MU class's booking point is, as a share of its length from its front: 0 at the
     /// front, 1 at the rear (ADR 0023). 0.5 by default, its centre.
     pub booking_point: Option<f64>,
+    /// A conveyor's path, as segments from its start (ADR 0024). One straight of 5 m by default.
+    pub path: Option<Vec<Segment>>,
+    /// A conveyor's speed, in metres per second. 0.5 by default.
+    pub speed: Option<f64>,
+    /// The least space between two MUs on a conveyor, in metres. 0 by default.
+    pub gap: Option<f64>,
 }
+
+/// One piece of a conveyor's path (ADR 0024). Straights only so far: arcs, transition curves and
+/// helices come with paths.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Segment {
+    /// This many metres straight on, above 0.
+    Straight(f64),
+}
+
+impl Segment {
+    pub fn length(self) -> f64 {
+        match self {
+            Segment::Straight(metres) => metres,
+        }
+    }
+}
+
+/// A path's length: what a conveyor's MUs travel.
+pub fn path_length(path: &[Segment]) -> f64 {
+    path.iter().map(|segment| segment.length()).sum()
+}
+
+/// A conveyor's path until given one: 5 m straight.
+pub const DEFAULT_PATH: [Segment; 1] = [Segment::Straight(5.0)];
 
 /// A Source's own values for the MUs it makes: any of an MU class's values, each changing its
 /// MU class's when set.
@@ -295,6 +325,9 @@ impl Attributes {
             Attribute::Length => self.length.is_some(),
             Attribute::Width => self.width.is_some(),
             Attribute::BookingPoint => self.booking_point.is_some(),
+            Attribute::Path => self.path.is_some(),
+            Attribute::Speed => self.speed.is_some(),
+            Attribute::Gap => self.gap.is_some(),
         }
     }
 
@@ -320,6 +353,9 @@ impl Attributes {
             Attribute::Length => self.length = from.length,
             Attribute::Width => self.width = from.width,
             Attribute::BookingPoint => self.booking_point = from.booking_point,
+            Attribute::Path => self.path = from.path.clone(),
+            Attribute::Speed => self.speed = from.speed,
+            Attribute::Gap => self.gap = from.gap,
         }
     }
 }
@@ -346,10 +382,13 @@ pub enum Attribute {
     Length,
     Width,
     BookingPoint,
+    Path,
+    Speed,
+    Gap,
 }
 
 impl Attribute {
-    pub const ALL: [Attribute; 19] = [
+    pub const ALL: [Attribute; 22] = [
         Attribute::Interval,
         Attribute::ProcessTime,
         Attribute::Failures,
@@ -369,6 +408,9 @@ impl Attribute {
         Attribute::Length,
         Attribute::Width,
         Attribute::BookingPoint,
+        Attribute::Path,
+        Attribute::Speed,
+        Attribute::Gap,
     ];
 
     /// Its name in a file.
@@ -393,6 +435,9 @@ impl Attribute {
             Attribute::Length => "length",
             Attribute::Width => "width",
             Attribute::BookingPoint => "booking_point",
+            Attribute::Path => "path",
+            Attribute::Speed => "speed",
+            Attribute::Gap => "gap",
         }
     }
 
@@ -401,7 +446,8 @@ impl Attribute {
         matches!(
             (built_in, self),
             (BUILT_IN_MU_CLASS, Attribute::Length | Attribute::Width | Attribute::BookingPoint | Attribute::Description)
-                | ("Source" | "Station" | "Buffer" | "Drain", Attribute::Dimensions | Attribute::Description | Attribute::StateNotes | Attribute::Failures)
+                | ("Source" | "Station" | "Buffer" | "Drain" | "Conveyor", Attribute::Dimensions | Attribute::Description | Attribute::StateNotes | Attribute::Failures)
+                | ("Conveyor", Attribute::Path | Attribute::Width | Attribute::Speed | Attribute::Gap | Attribute::Distribution)
                 | ("Source", Attribute::Interval | Attribute::Distribution | Attribute::MuClass | Attribute::MuValues)
                 | ("Station", Attribute::ProcessTime | Attribute::StartingMus | Attribute::Capacity | Attribute::Start | Attribute::Distribution)
                 | (
@@ -430,13 +476,16 @@ pub enum State {
     /// Interrupted by hand, called "forced failure" before ADR 0020.
     Stopped,
     Paused,
+    /// A place reserved for an MU a conveyor is handing over, and nothing else going on
+    /// (ADR 0023).
+    Receiving,
 }
 
 /// A model's own notes on what states mean for a class or instance, by state.
 pub type StateNotes = std::collections::BTreeMap<State, String>;
 
 impl State {
-    pub const ALL: [State; 7] = [State::Busy, State::Holding, State::Blocked, State::Idle, State::Failed, State::Stopped, State::Paused];
+    pub const ALL: [State; 8] = [State::Busy, State::Holding, State::Blocked, State::Idle, State::Failed, State::Stopped, State::Paused, State::Receiving];
 
     /// Its name in a file.
     pub fn name(self) -> &'static str {
@@ -448,6 +497,7 @@ impl State {
             State::Failed => "failed",
             State::Stopped => "stopped",
             State::Paused => "paused",
+            State::Receiving => "receiving",
         }
     }
 
@@ -469,6 +519,7 @@ impl State {
             State::Failed => "Failed",
             State::Stopped => "Stopped",
             State::Paused => "Paused",
+            State::Receiving => "Receiving",
         }
     }
 
@@ -479,9 +530,11 @@ impl State {
     pub fn of(built_in: &str) -> &'static [State] {
         match built_in {
             "Source" => &[State::Busy, State::Blocked, State::Failed, State::Stopped, State::Paused],
-            "Station" => &[State::Busy, State::Blocked, State::Idle, State::Failed, State::Stopped, State::Paused],
-            "Buffer" => &[State::Holding, State::Blocked, State::Idle, State::Failed, State::Stopped, State::Paused],
-            "Drain" => &[State::Idle, State::Failed, State::Stopped, State::Paused],
+            "Station" => &[State::Busy, State::Blocked, State::Idle, State::Receiving, State::Failed, State::Stopped, State::Paused],
+            "Buffer" => &[State::Holding, State::Blocked, State::Idle, State::Receiving, State::Failed, State::Stopped, State::Paused],
+            "Drain" => &[State::Idle, State::Receiving, State::Failed, State::Stopped, State::Paused],
+            // Moving MUs, every MU standing, or empty.
+            "Conveyor" => &[State::Busy, State::Blocked, State::Idle, State::Failed, State::Stopped, State::Paused],
             _ => &[],
         }
     }
@@ -496,6 +549,7 @@ impl State {
             State::Failed => "failed",
             State::Stopped => "stopped",
             State::Paused => "paused",
+            State::Receiving => "receiving",
         }
     }
 }
@@ -802,6 +856,18 @@ impl Model {
             attributes.width.get_or_insert(mu.width);
             attributes.booking_point.get_or_insert(mu.booking_point);
             // An MU is no material-flow object, so it has no size of one.
+            return Some(Resolved { built_in, attributes, origins });
+        }
+        if built_in == "Conveyor" {
+            attributes.path.get_or_insert_with(|| DEFAULT_PATH.to_vec());
+            attributes.width.get_or_insert(0.6);
+            attributes.speed.get_or_insert(0.5);
+            attributes.gap.get_or_insert(0.0);
+            // Its size is its path's length and its width, whatever its dimensions say.
+            let length = path_length(attributes.path.as_deref().unwrap_or_default());
+            let width = attributes.width.unwrap_or(0.6);
+            let size = attributes.dimensions.get_or_insert(Dimensions::default_for(ObjectKind::Conveyor));
+            (size.length, size.width) = (length, width);
             return Some(Resolved { built_in, attributes, origins });
         }
         let kind = match built_in {

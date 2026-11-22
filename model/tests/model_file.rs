@@ -1515,3 +1515,118 @@ fn an_mus_footprint_is_above_0_and_its_booking_point_on_it() {
     let unknown = file(line_making(json!({ "mu_values": { "height": 1.0 } })));
     assert_found(&unknown, "/instances/0/attributes/mu_values/height", "unknown field `height`");
 }
+
+// ---------- Conveyors (spec issue 133, PR 2) ----------
+
+/// In -> Belt -> Out, the Belt with these attributes.
+fn belt_line(belt: Value) -> String {
+    file(json!([
+        { "name": "In", "class": "Source", "successors": ["Belt"], "attributes": { "interval": "10" } },
+        { "name": "Belt", "class": "Conveyor", "successors": ["Out"], "attributes": belt },
+        { "name": "Out", "class": "Drain" },
+    ]))
+}
+
+#[test]
+fn a_conveyor_has_a_path_width_speed_and_gap_and_its_size_is_theirs() {
+    let model = load(&belt_line(json!({ "path": [{ "straight": 10 }], "speed": 0.5, "gap": 0.1, "dimensions": { "length": 1, "width": 1, "height": 0.8, "rotation_degrees": 90 } }))).unwrap();
+
+    let belt = model.resolve(1).unwrap();
+    assert_eq!(belt.built_in, "Conveyor");
+    assert_eq!(belt.attributes.path, Some(vec![crabsim_model::Segment::Straight(10.0)]));
+    assert_eq!((belt.attributes.width, belt.attributes.speed, belt.attributes.gap), (Some(0.6), Some(0.5), Some(0.1)));
+    let size = belt.attributes.dimensions.unwrap();
+    assert_eq!((size.length, size.width, size.height, size.rotation_degrees), (10.0, 0.6, 0.8, 90.0), "its length and width are its own");
+    let description = model.to_description();
+    assert_eq!(description.kind(1), crabsim::ObjectKind::Conveyor);
+    assert_eq!(description.dimensions(1).length, 10.0);
+}
+
+#[test]
+fn a_conveyor_by_default_is_5_m_long_0_6_m_wide_at_0_5_m_a_second() {
+    let model = load(&belt_line(json!({}))).unwrap();
+    let belt = model.resolve(1).unwrap().attributes;
+    assert_eq!((crabsim_model::path_length(&belt.path.unwrap()), belt.width, belt.speed, belt.gap), (5.0, Some(0.6), Some(0.5), Some(0.0)));
+}
+
+#[test]
+fn a_conveyor_file_runs_as_the_conveyor_built_in_code() {
+    let text = belt_line(json!({ "path": [{ "straight": 10 }] }));
+    let (occurrences, _) = run_for(&load(&text).unwrap().to_description(), 0, secs(55));
+    let left: Vec<f64> = occurrences.iter().filter(|o| matches!(o.kind, OccurrenceKind::MuLeft { .. })).map(|o| o.time.as_secs_f64()).collect();
+    assert_eq!(left, [30.0, 40.0, 50.0]);
+}
+
+#[test]
+fn a_conveyors_path_and_values_survive_saving() {
+    let model = load(&belt_line(json!({ "path": [{ "straight": 4 }, { "straight": 2.5 }], "width": 0.8, "speed": 1.25, "gap": 0.05 }))).unwrap();
+    let saved = model.save();
+    assert_eq!(load(&saved).unwrap(), model);
+    let written: Value = serde_json::from_str(&saved).unwrap();
+    assert_eq!(written["instances"][1]["attributes"]["path"], json!([{ "straight": 4.0 }, { "straight": 2.5 }]));
+}
+
+#[test]
+fn a_conveyors_values_are_checked_and_curves_come_later() {
+    assert_found(&belt_line(json!({ "path": [{ "arc": { "radius": 1, "angle": 90 } }] })), "/instances/1/attributes/path/0/arc", "arcs come with curved paths");
+    assert_found(&belt_line(json!({ "path": [{ "straigt": 3 }] })), "/instances/1/attributes/path/0/straigt", "did you mean `straight`?");
+    assert_found(&belt_line(json!({ "path": [{ "straight": 0 }] })), "/instances/1/attributes/path/0/straight", "above 0");
+    assert_found(&belt_line(json!({ "path": [] })), "/instances/1/attributes/path", "at least one segment");
+    assert_found(&belt_line(json!({ "path": 10 })), "/instances/1/attributes/path", "a list of segments");
+    assert_found(&belt_line(json!({ "speed": 0 })), "/instances/1/attributes/speed", "above 0");
+    assert_found(&belt_line(json!({ "gap": -0.1 })), "/instances/1/attributes/gap", "0 or more");
+    assert_found(&belt_line(json!({ "width": 0 })), "/instances/1/attributes/width", "above 0");
+    assert_found(&belt_line(json!({ "process_time": "10" })), "/instances/1/attributes/process_time", "a Conveyor has no attribute");
+}
+
+#[test]
+fn a_conveyor_cant_lead_into_a_conveyor_yet() {
+    let text = file(json!([
+        { "name": "In", "class": "Source", "successors": ["A"], "attributes": { "interval": "10" } },
+        { "name": "A", "class": "Conveyor", "successors": ["B"] },
+        { "name": "B", "class": "Conveyor", "successors": ["Out"] },
+        { "name": "Out", "class": "Drain" },
+    ]));
+    assert_found(&text, "/connections/1/to", "can't lead straight into another conveyor yet");
+}
+
+#[test]
+fn an_mu_class_too_big_for_a_conveyor_its_source_reaches_is_a_warning() {
+    let text = with_classes(
+        json!([{ "name": "Pallet", "parent": "MU", "attributes": { "length": 1.2, "width": 0.8 } }]),
+        json!([
+            { "name": "In", "class": "Source", "successors": ["Mill"], "attributes": { "interval": "10", "mu_class": "Pallet" } },
+            { "name": "Mill", "class": "Station", "successors": ["Belt"] },
+            { "name": "Belt", "class": "Conveyor", "successors": ["Out"] },
+            { "name": "Out", "class": "Drain" },
+        ]),
+    );
+    let warnings = load(&text).unwrap().warnings();
+    assert!(
+        warnings.iter().any(|w| w.pointer == "/instances/0" && w.message.contains("0.8 m wide, and conveyor `Belt` only 0.6 m")),
+        "{warnings:#?}"
+    );
+    let fits = load(&text.replace("\"width\":0.8", "\"width\":0.5")).unwrap().warnings();
+    assert!(!fits.iter().any(|w| w.message.contains("conveyor")), "{fits:#?}");
+}
+
+/// The conveyor example as a file, with line endings as crabsim writes them.
+fn conveyor_example() -> String {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../models/conveyor-line.json");
+    std::fs::read_to_string(path).expect("models/conveyor-line.json exists").replace("\r\n", "\n")
+}
+
+#[test]
+fn the_conveyor_example_is_valid_canonical_and_warns_of_nothing() {
+    let text = conveyor_example();
+    let model = load(&text).unwrap();
+    assert_eq!(model.save(), text, "in canonical form");
+    assert!(model.warnings().is_empty(), "{:#?}", model.warnings());
+}
+
+#[test]
+#[ignore = "writes models/conveyor-line.json in canonical form"]
+fn write_the_conveyor_example_canonical() {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../models/conveyor-line.json");
+    std::fs::write(path, load(&conveyor_example()).unwrap().save()).unwrap();
+}

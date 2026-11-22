@@ -1,0 +1,158 @@
+{
+  "$schema": "./model-file.schema.json",
+  "format_version": 2,
+  "description": "Totes on conveyors between machines (spec issue 133): a feed conveyor fills up in front of a slow Mill, a Buffer between the Mill and the outfeed conveyor, and late totes, booked by their rear, joining at the Buffer.",
+  "classes": [
+    {
+      "name": "Tote",
+      "parent": "MU",
+      "attributes": {
+        "description": "A grey tote",
+        "length": 0.6,
+        "width": 0.4
+      }
+    },
+    {
+      "name": "Late tote",
+      "parent": "Tote",
+      "attributes": {
+        "description": "Booked by its rear: it drives into the next machine whole first",
+        "booking_point": 1.0
+      }
+    }
+  ],
+  "instances": [
+    {
+      "name": "In",
+      "class": "Source",
+      "stream": 0,
+      "position": {
+        "x": 0.0,
+        "y": 0.0
+      },
+      "attributes": {
+        "interval": "00:00:08",
+        "mu_class": "Tote"
+      }
+    },
+    {
+      "name": "Feed",
+      "class": "Conveyor",
+      "stream": 1,
+      "position": {
+        "x": 6.5,
+        "y": 0.0
+      },
+      "attributes": {
+        "path": [
+          {
+            "straight": 10.0
+          }
+        ],
+        "speed": 0.5,
+        "gap": 0.1
+      }
+    },
+    {
+      "name": "Mill",
+      "class": "Station",
+      "stream": 2,
+      "position": {
+        "x": 13.5,
+        "y": 0.0
+      },
+      "attributes": {
+        "process_time": "00:00:10"
+      }
+    },
+    {
+      "name": "Store",
+      "class": "Buffer",
+      "stream": 3,
+      "position": {
+        "x": 17.5,
+        "y": 0.0
+      },
+      "attributes": {
+        "capacity": 4
+      }
+    },
+    {
+      "name": "Late in",
+      "class": "Source",
+      "stream": 4,
+      "position": {
+        "x": 17.5,
+        "y": 4.0
+      },
+      "attributes": {
+        "interval": "00:00:30",
+        "mu_class": "Late tote"
+      }
+    },
+    {
+      "name": "Outfeed",
+      "class": "Conveyor",
+      "stream": 5,
+      "position": {
+        "x": 23.0,
+        "y": 0.0
+      },
+      "attributes": {
+        "path": [
+          {
+            "straight": 8.0
+          }
+        ],
+        "speed": 0.8
+      }
+    },
+    {
+      "name": "Out",
+      "class": "Drain",
+      "stream": 6,
+      "position": {
+        "x": 29.0,
+        "y": 0.0
+      }
+    }
+  ],
+  "connections": [
+    {
+      "from": "In",
+      "to": "Feed",
+      "exit": 1,
+      "entrance": 1
+    },
+    {
+      "from": "Feed",
+      "to": "Mill",
+      "exit": 1,
+      "entrance": 1
+    },
+    {
+      "from": "Mill",
+      "to": "Store",
+      "exit": 1,
+      "entrance": 1
+    },
+    {
+      "from": "Store",
+      "to": "Outfeed",
+      "exit": 1,
+      "entrance": 1
+    },
+    {
+      "from": "Late in",
+      "to": "Store",
+      "exit": 1,
+      "entrance": 2
+    },
+    {
+      "from": "Outfeed",
+      "to": "Out",
+      "exit": 1,
+      "entrance": 1
+    }
+  ]
+}

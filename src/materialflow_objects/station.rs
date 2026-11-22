@@ -7,7 +7,7 @@ use super::flows::BaseObject;
 use crate::materialflow_objects::OtherObjects;
 use super::interruptions::{Interruptible, Interruptions};
 use crate::flows::{
-	EventInterface, FailureProfile, MaterialFlow, MoveableUnit, ProcessState, SuccessorContainer, Distributing, Waiting, list_blocked, relist_blocked, waiting_ids, retries_for_blocked, retry_move_to_successor, try_to_move_to_successor
+	EventInterface, FailureProfile, MaterialFlow, MoveableUnit, MuKindId, ProcessState, SuccessorContainer, Distributing, Waiting, list_blocked, relist_blocked, waiting_ids, retries_for_blocked, retry_move_to_successor, try_to_move_to_successor
 };
 
 /// When a Station's work ends, or ended, or how much is left of it. One field for all three, since
@@ -183,6 +183,10 @@ impl SingleStation {
 	}
 	/// The last interruption has ended, so the station picks up from where it was stopped.
 	fn resume(&mut self, context: &mut EventContext, others: &mut OtherObjects<'_>) -> Result<(), RunTimeError> {
+		if self.state == ProcessState::Receiving {
+			// Still receiving: the MU arrives in its own time, whatever happened meanwhile.
+			return Ok(());
+		}
 		if let Finish::Interrupted(remain) = self.finish {
 			// Resume interrupted processing
 			self.finish = Finish::At(context.time + remain);
@@ -246,7 +250,7 @@ impl MaterialFlow for SingleStation {
 		}
 		match self.state {
 			ProcessState::Idle => !self.is_interrupted(),
-			ProcessState::Processing | ProcessState::Blocked => false,
+			ProcessState::Processing | ProcessState::Blocked | ProcessState::Receiving => false,
 		}
 	}
 	fn is_exit_allowed(&self) -> bool {
@@ -260,6 +264,8 @@ impl MaterialFlow for SingleStation {
 			ProcessState::Processing => false,
 			// Blocked: allow exit when not interrupted
 			ProcessState::Blocked => !self.is_interrupted(),
+			// Receiving: it has nothing to pass on yet
+			ProcessState::Receiving => false,
 		}
 	}
 	fn process_mu_entrance(
@@ -272,8 +278,19 @@ impl MaterialFlow for SingleStation {
 		self.content = Some(mu);
 		self.statistics.count_mu_in();
 		let exit = self.start_work(mu_id, context);
+		// An MU it was receiving arrives even while it is interrupted, and waits with its work
+		// frozen until the interruption ends. The exit just scheduled is then stale.
+		if self.is_interrupted() {
+			self.freeze_work(context);
+		}
 		self.update_statistics(context.time);
 		Ok(Some(exit))
+	}
+	fn reserve(&mut self, mu_id: u32, context: &mut EventContext) {
+		self.entrancelocked = true;
+		self.set_state(ProcessState::Receiving, context);
+		context.record(OccurrenceKind::Reserved { object_id: self.base.object_id, mu_id });
+		self.update_statistics(context.time);
 	}
 	fn add_blocked(&mut self, id_blocked: u32, since: SimTime, answering_retry: bool) {
 		list_blocked(&mut self.blockedlist, id_blocked, since, answering_retry);
@@ -347,6 +364,7 @@ impl EventInterface for SingleStation {
 			configured_process_time: Some(self.configured_proc_time),
 			statistics: self.statistics.read(now),
 			fill: None,
+			positions: Vec::new(),
 		}
 	}
 	fn get_object_id(&self) -> &u32 {
@@ -398,6 +416,9 @@ impl SuccessorContainer for SingleStation {
 			Finish::ReadySince(since) => since,
 			_ => SimTime::ZERO,
 		})
+	}
+	fn offered_kind(&self, _now: SimTime) -> Option<MuKindId> {
+		self.content.as_ref().map(|mu| mu.kind)
 	}
 	fn statistics_mut(&mut self) -> &mut StatisticsKeeper {
 		&mut self.statistics

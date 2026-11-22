@@ -17,6 +17,8 @@ pub struct Drain {
     pub blockedlist: Vec<Waiting>,
     /// Its failures and pauses (ADR 0020). Interrupted, it refuses MUs.
     pub interruptions: Interruptions,
+    /// MUs conveyors are handing over to it, whose booking points haven't arrived (ADR 0023).
+    incoming: u16,
 }
 impl Drain {
     pub fn new(object_id: u32) -> Drain {
@@ -26,6 +28,7 @@ impl Drain {
             entrance_locked: false,
             blockedlist: Vec::new(),
             interruptions: Interruptions::new(None),
+            incoming: 0,
         }
     }
 
@@ -34,9 +37,14 @@ impl Drain {
         self.interruptions.set_failures(failures);
     }
 
-    /// Tells the statistics what it ended up doing: idle, or interrupted.
+    /// Idle, or receiving an MU from a conveyor (ADR 0023).
+    fn process_state(&self) -> ProcessState {
+        if self.incoming > 0 { ProcessState::Receiving } else { ProcessState::Idle }
+    }
+
+    /// Tells the statistics what it ended up doing: idle, receiving, or interrupted.
     fn update_statistics(&mut self, now: SimTime) {
-        self.statistics.observe(now, MachineState::of(self.interruptions.most_serious(), &ProcessState::Idle), 0);
+        self.statistics.observe(now, MachineState::of(self.interruptions.most_serious(), &self.process_state()), 0);
     }
 }
 
@@ -60,6 +68,7 @@ impl EventInterface for Drain {
         self.entrance_locked = false;
         self.blockedlist.clear();
         self.interruptions.reset();
+        self.incoming = 0;
     }
     fn clear_statistics(&mut self, now: SimTime) {
         self.interruptions.clear_statistics(now, &self.statistics);
@@ -70,7 +79,7 @@ impl EventInterface for Drain {
             id: self.base.object_id,
             kind: ObjectKind::Drain,
             contents: Vec::new(),
-            process: ProcessState::Idle,
+            process: self.process_state(),
             interrupted: self.interruptions.most_serious(),
             interruptions: self.interruptions.list(),
 			failure_profiles: self.interruptions.profile_states(now, &self.statistics),
@@ -83,6 +92,7 @@ impl EventInterface for Drain {
             configured_process_time: None,
             statistics: self.statistics.read(now),
             fill: None,
+            positions: Vec::new(),
         }
     }
     fn get_object_id(&self) -> &u32 {
@@ -99,7 +109,7 @@ impl EventInterface for Drain {
 
 impl MaterialFlow for Drain {
     fn is_entrance_allowed(&self) -> bool {
-        !self.entrance_locked && !self.interruptions.is_interrupted()
+        !self.entrance_locked && !self.interruptions.is_interrupted() && self.incoming < u16::MAX
     }
     fn is_exit_allowed(&self) -> bool {
         !self.entrance_locked
@@ -118,7 +128,18 @@ impl MaterialFlow for Drain {
             context.time.as_secs(),
             context.time.subsec_millis()
         );
+        // An MU it was receiving arrives, even while it is interrupted. Only then does what it is
+        // doing change.
+        if self.incoming > 0 {
+            self.incoming -= 1;
+            self.update_statistics(context.time);
+        }
         Ok(None)
+    }
+    fn reserve(&mut self, mu_id: u32, context: &mut EventContext) {
+        self.incoming += 1;
+        context.record(OccurrenceKind::Reserved { object_id: self.base.object_id, mu_id });
+        self.update_statistics(context.time);
     }
     fn add_blocked(&mut self, id_blocked: u32, since: SimTime, answering_retry: bool) {
         list_blocked(&mut self.blockedlist, id_blocked, since, answering_retry);

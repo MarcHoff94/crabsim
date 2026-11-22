@@ -65,6 +65,8 @@ pub struct MultiStation {
 	batch_closed: bool,
 	/// A finished MU was refused by every successor, so the Station waits in their lines.
 	waiting: bool,
+	/// Places reserved for MUs conveyors are handing over, which count as taken (ADR 0023).
+	incoming: u16,
 	pub succ: Vec<u32>,
 	pub succ_pointer: usize,
 	pub distribution: Distributing,
@@ -86,6 +88,7 @@ impl MultiStation {
 			stop_count: 0,
 			batch_closed: false,
 			waiting: false,
+			incoming: 0,
 			succ: Vec::new(),
 			succ_pointer: 0,
 			distribution: Distributing::RoundRobin,
@@ -122,6 +125,8 @@ impl MultiStation {
 			ProcessState::Processing
 		} else if self.waiting {
 			ProcessState::Blocked
+		} else if self.incoming > 0 {
+			ProcessState::Receiving
 		} else {
 			ProcessState::Idle
 		}
@@ -326,7 +331,7 @@ impl MultiStation {
 
 impl MaterialFlow for MultiStation {
 	fn is_entrance_allowed(&self) -> bool {
-		!self.is_interrupted() && !self.batch_closed && self.held() < self.capacity
+		!self.is_interrupted() && !self.batch_closed && self.held() + u64::from(self.incoming) < self.capacity
 	}
 	fn is_exit_allowed(&self) -> bool {
 		self.waiting && !self.is_interrupted()
@@ -334,16 +339,28 @@ impl MaterialFlow for MultiStation {
 	fn process_mu_entrance(&mut self, mu: MoveableUnit, context: &mut EventContext) -> Result<Option<EventTemplate>, MaterialflowError> {
 		log::info!("MU {} entered Station {}", mu.id, self.base.object_id);
 		let was_blocked = self.process_state() == ProcessState::Blocked;
+		// An MU it was receiving takes its reserved place.
+		self.incoming = self.incoming.saturating_sub(1);
 		self.places.push(Place { mu, work: Work::Waiting });
 		self.statistics.count_mu_in();
 		let exit = match self.start {
 			StartMode::Individual => Some(self.start_work(self.places.len() - 1, context)),
 			StartMode::Batch => self.start_batch_if_full(context),
 		};
+		// An MU it was receiving arrives even while it is interrupted, and its work waits frozen
+		// until the interruption ends, the exit just scheduled stale.
+		if self.is_interrupted() {
+			self.freeze_work(context);
+		}
 		// Work outranks blocking, so new work ends a Station's blocking.
 		self.report_blocking(was_blocked, context);
 		self.update_statistics(context.time);
 		Ok(exit)
+	}
+	fn reserve(&mut self, mu_id: u32, context: &mut EventContext) {
+		self.incoming += 1;
+		context.record(OccurrenceKind::Reserved { object_id: self.base.object_id, mu_id });
+		self.update_statistics(context.time);
 	}
 	fn add_blocked(&mut self, id_blocked: u32, since: SimTime, answering_retry: bool) {
 		list_blocked(&mut self.blockedlist, id_blocked, since, answering_retry);
@@ -387,6 +404,7 @@ impl EventInterface for MultiStation {
 		self.stop_count = 0;
 		self.batch_closed = false;
 		self.waiting = false;
+		self.incoming = 0;
 		self.interruptions.reset();
 		self.succ_pointer = 0;
 		self.blockedlist.clear();
@@ -423,6 +441,7 @@ impl EventInterface for MultiStation {
 			configured_process_time: Some(self.configured_proc_time),
 			statistics: self.statistics.read(now),
 			fill: None,
+			positions: Vec::new(),
 		}
 	}
 	fn get_object_id(&self) -> &u32 {
@@ -480,6 +499,9 @@ impl SuccessorContainer for MultiStation {
 			_ => SimTime::ZERO,
 		})
 	}
+	fn offered_kind(&self, _now: SimTime) -> Option<crate::flows::MuKindId> {
+		self.offered().map(|at| self.places[at].mu.kind)
+	}
 }
 
 #[cfg(test)]
@@ -532,8 +554,9 @@ mod tests {
 		// Every object in a run takes the size of the largest, so a Station with capacity mustn't
 		// grow every object, and the statistics' new fields mustn't grow a SingleStation.
 		assert!(size_of::<MultiStation>() <= size_of::<SingleStation>(), "{} bytes", size_of::<MultiStation>());
-		// 1,280 until a SingleStation's failure profile moved into its boxed `Interruptions`, and
-		// 1,080 until a Buffer's fill keeper was boxed: a Buffer is the largest object.
-		assert_eq!(size_of::<ModelObject>(), 584);
+		// 1,280 until a SingleStation's failure profile moved into its boxed `Interruptions`,
+		// 1,080 until a Buffer's fill keeper was boxed, and 584 until the statistics kept time
+		// receiving from a conveyor (spec issue 133): a Buffer is the largest object.
+		assert_eq!(size_of::<ModelObject>(), 592);
 	}
 }

@@ -57,6 +57,8 @@ fn valid_files() -> Vec<Value> {
             { "name": "S", "class": "Store" },
             { "name": "Out", "class": "Drain", "attributes": { "description": "the end" } },
             { "name": "Yard", "class": "Open store", "attributes": { "capacity": -1 } },
+            { "name": "Belt", "class": "Conveyor", "attributes": { "path": [{ "straight": 6 }, { "straight": 1.5 }], "width": 0.8, "speed": 0.75, "gap": 0.05,
+                "state_notes": { "blocked": "the end waits" } } },
         ],
         "connections": [
             { "from": "In", "to": "A", "exit": 1, "entrance": 1 },
@@ -67,7 +69,8 @@ fn valid_files() -> Vec<Value> {
             { "from": "B", "to": "S", "exit": 1, "entrance": 3 },
             { "from": "C", "to": "S", "exit": 1, "entrance": 2 },
             { "from": "D", "to": "S", "exit": 1, "entrance": 1 },
-            { "from": "S", "to": "Out", "exit": 1, "entrance": 1 },
+            { "from": "S", "to": "Belt", "exit": 1, "entrance": 1 },
+            { "from": "Belt", "to": "Out", "exit": 1, "entrance": 1 },
         ],
     });
     vec![demo, everything]
@@ -153,6 +156,11 @@ fn shape_mistakes_fail_the_schema_as_well_as_the_reader() {
         ("an MU class as a number", Box::new(|file| file["instances"][0]["attributes"]["mu_class"] = json!(3))),
         ("an MU value there is none of", Box::new(|file| file["instances"][0]["attributes"]["mu_values"]["height"] = json!(1))),
         ("an MU value that isn't a number", Box::new(|file| file["instances"][0]["attributes"]["mu_values"]["width"] = json!("wide"))),
+        ("a conveyor without a path", Box::new(|file| file["instances"][9]["attributes"]["path"] = json!([]))),
+        ("a straight of 0", Box::new(|file| file["instances"][9]["attributes"]["path"][0]["straight"] = json!(0))),
+        ("a conveyor standing still", Box::new(|file| file["instances"][9]["attributes"]["speed"] = json!(0))),
+        ("a gap below 0", Box::new(|file| file["instances"][9]["attributes"]["gap"] = json!(-1))),
+        ("a segment of two kinds", Box::new(|file| file["instances"][9]["attributes"]["path"][0]["curve"] = json!(1))),
     ];
     for (what, change) in mistakes {
         let mut file = base();

@@ -55,6 +55,12 @@ pub(crate) fn build(model: &Model) -> ModelDescription {
                 buffer
             }
             "Drain" => description.add_drain(),
+            "Conveyor" => {
+                let path = attributes.path.as_deref().unwrap_or(&crate::DEFAULT_PATH);
+                let conveyor = description.add_conveyor(crate::path_length(path), attributes.width.unwrap_or(0.6), attributes.speed.unwrap_or(0.5));
+                description.set_conveyor_gap(conveyor, attributes.gap.unwrap_or(0.0));
+                conveyor
+            }
             other => unreachable!("checked: `{other}` is a built-in class"),
         };
         // A Station gets a placeholder profile when it is added, which this list replaces.
@@ -66,8 +72,9 @@ pub(crate) fn build(model: &Model) -> ModelDescription {
         if let Some(position) = instance.position {
             description.set_position(id, position);
         }
-        // A built-in default size is what the description gives an object without one anyway.
-        if let Some(dimensions) = attributes.dimensions.filter(|_| resolved.origin(Attribute::Dimensions) != &Origin::BuiltIn) {
+        // A built-in default size is what the description gives an object without one anyway, and
+        // a conveyor's is its path's length and its width, which resolving has given it.
+        if let Some(dimensions) = attributes.dimensions.filter(|_| resolved.origin(Attribute::Dimensions) != &Origin::BuiltIn || resolved.built_in == "Conveyor") {
             description.set_dimensions(id, dimensions);
         }
     }

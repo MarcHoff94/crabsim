@@ -7,7 +7,7 @@
 
 use crate::distribution::{DistributionRule, Ranking};
 use crate::flows::{FailureProfile, MoveableUnit, MuKindId};
-use crate::materialflow_objects::{Buffer, Drain, ModelObject, MultiStation, SingleStation, Source, StartMode};
+use crate::materialflow_objects::{Buffer, Conveyor, Drain, ModelObject, MultiStation, SingleStation, Source, StartMode};
 use crate::materialflow_objects::ExitStrategy;
 use crate::random_numbers::Distribution;
 use crate::report::{Capacity, ObjectKind};
@@ -41,6 +41,8 @@ impl Dimensions {
             ObjectKind::Source | ObjectKind::Drain => (1.0, 1.0, 1.0),
             ObjectKind::Station => (2.0, 1.5, 1.5),
             ObjectKind::Buffer => (2.0, 1.0, 1.0),
+            // A conveyor's length and width are its own, which `add_conveyor` gives it.
+            ObjectKind::Conveyor => (5.0, 0.6, 0.5),
         };
         Dimensions { length, width, height, rotation_degrees: 0.0 }
     }
@@ -264,6 +266,7 @@ impl ModelDescription {
             Some(ModelObject::Source(source)) => source.set_failures(failures),
             Some(ModelObject::Buffer(buffer)) => buffer.set_failures(failures),
             Some(ModelObject::Drain(drain)) => drain.set_failures(failures),
+            Some(ModelObject::Conveyor(conveyor)) => conveyor.set_failures(failures),
             Some(_) => panic!("object {id} is a Station, whose failures come with it"),
             None => panic!("object {id} is not in the model"),
         }
@@ -273,6 +276,24 @@ impl ModelDescription {
         match self.objects.get_mut(id as usize) {
             Some(ModelObject::Buffer(buffer)) => buffer,
             Some(_) => panic!("object {id} is not a Buffer"),
+            None => panic!("object {id} is not in the model"),
+        }
+    }
+
+    /// A straight conveyor of `length` and `width` in metres, moving its MUs at `speed` metres per
+    /// second (spec issue 133), accumulating at its end, with no gap between MUs. Its length and
+    /// width are its dimensions too, whatever is set later.
+    pub fn add_conveyor(&mut self, length: f64, width: f64, speed: f64) -> u32 {
+        let id = self.add(ModelObject::Conveyor(Box::new(Conveyor::new(self.next_id(), length, width, speed))));
+        self.layout_mut(id).dimensions = Some(Dimensions { length, width, height: 0.5, rotation_degrees: 0.0 });
+        id
+    }
+
+    /// Sets the least space between two MUs on a conveyor, in metres.
+    pub fn set_conveyor_gap(&mut self, id: u32, gap: f64) {
+        match self.objects.get_mut(id as usize) {
+            Some(ModelObject::Conveyor(conveyor)) => conveyor.gap = gap,
+            Some(_) => panic!("object {id} is not a conveyor"),
             None => panic!("object {id} is not in the model"),
         }
     }
@@ -289,6 +310,7 @@ impl ModelDescription {
             Some(ModelObject::Station(station)) => &mut station.succ,
             Some(ModelObject::MultiStation(station)) => &mut station.succ,
             Some(ModelObject::Buffer(buffer)) => &mut buffer.succ,
+            Some(ModelObject::Conveyor(conveyor)) => &mut conveyor.succ,
             Some(_) => panic!("object {from} can't have successors"),
             None => panic!("object {from} is not in the model"),
         };
@@ -298,7 +320,14 @@ impl ModelDescription {
     /// Builds a run of this model, in its default state. Names, positions and dimensions stay
     /// behind: the run has no use for them.
     pub fn build(&self, seed: u64) -> SimulationRun {
-        SimulationRun::new(self.objects.clone(), seed, self.streams.clone(), self.distributions.clone())
+        let mut objects = self.objects.clone();
+        // Each conveyor reads MUs' sizes from its own copy of the kinds, so a run shares nothing.
+        for object in &mut objects {
+            if let ModelObject::Conveyor(conveyor) = object {
+                conveyor.kinds = self.mu_kinds.clone();
+            }
+        }
+        SimulationRun::new(objects, seed, self.streams.clone(), self.distributions.clone())
     }
 
     /// Sets how the object picks the successor for its MU (ADR 0016). Round robin unless set.
@@ -344,6 +373,7 @@ impl ModelDescription {
             ModelObject::Station(_) | ModelObject::MultiStation(_) => ObjectKind::Station,
             ModelObject::Buffer(_) => ObjectKind::Buffer,
             ModelObject::Drain(_) => ObjectKind::Drain,
+            ModelObject::Conveyor(_) => ObjectKind::Conveyor,
             #[cfg(test)]
             ModelObject::RecordsThenFails(_) => ObjectKind::Station,
         }
@@ -368,6 +398,7 @@ impl ModelDescription {
             ModelObject::Station(station) => &station.succ,
             ModelObject::MultiStation(station) => &station.succ,
             ModelObject::Buffer(buffer) => &buffer.succ,
+            ModelObject::Conveyor(conveyor) => &conveyor.succ,
             ModelObject::Drain(_) => &[],
             #[cfg(test)]
             ModelObject::RecordsThenFails(_) => &[],

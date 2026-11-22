@@ -217,6 +217,7 @@ impl EventInterface for Source {
 			configured_process_time: None,
 			statistics: self.statistics.read(now),
 			fill: None,
+			positions: Vec::new(),
 		}
 	}
 	fn get_object_id(&self) -> &u32 {
@@ -282,6 +283,9 @@ impl SuccessorContainer for Source {
 	}
 	fn offered_since(&self, _now: SimTime) -> Option<SimTime> {
 		self.content.as_ref().map(|_| self.ready_since)
+	}
+	fn offered_kind(&self, _now: SimTime) -> Option<MuKindId> {
+		self.content.as_ref().map(|mu| mu.kind)
 	}
 	fn statistics_mut(&mut self) -> &mut StatisticsKeeper {
 		&mut self.statistics

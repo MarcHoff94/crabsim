@@ -2,7 +2,7 @@
 //! stopping at the first. What can't be read is left at its default, and noted in `Broken`, so the
 //! checks that follow don't report it a second time.
 
-use crate::{Attributes, DistributionStrategy, MuValues, WeightedStrategy, WEIGHABLE, BUILT_IN_CLASSES, Class, Connection, Failures, Instance, Model, Problem, RepairTime, State, StateNotes, FORMAT_VERSION, escape};
+use crate::{Attributes, DistributionStrategy, MuValues, Segment, WeightedStrategy, WEIGHABLE, BUILT_IN_CLASSES, Class, Connection, Failures, Instance, Model, Problem, RepairTime, State, StateNotes, FORMAT_VERSION, escape};
 use crabsim::time::parse_time;
 use crate::{exit_strategy_from_name, start_from_name, Capacity, ExitStrategy, StartMode};
 use crabsim::{Dimensions, Position, SimTime};
@@ -38,7 +38,7 @@ const TOP_LEVEL: [&str; 6] = ["$schema", "format_version", "description", "class
 const INSTANCE: [&str; 5] = ["name", "class", "stream", "position", "attributes"];
 const CONNECTION: [&str; 5] = ["from", "to", "exit", "entrance", "description"];
 const CLASS: [&str; 3] = ["name", "parent", "attributes"];
-const ATTRIBUTES: [&str; 19] = [
+const ATTRIBUTES: [&str; 22] = [
     "interval",
     "process_time",
     "failures",
@@ -58,7 +58,13 @@ const ATTRIBUTES: [&str; 19] = [
     "length",
     "width",
     "booking_point",
+    "path",
+    "speed",
+    "gap",
 ];
+/// The kinds of segment a path will have (ADR 0024), straights the only one read so far, with
+/// their names as people say them.
+const SEGMENTS_LATER: [(&str, &str); 3] = [("arc", "arcs"), ("transition", "transition curves"), ("helix", "helices")];
 /// The values a Source can change for the MUs it makes.
 const MU_VALUES: [&str; 3] = ["length", "width", "booking_point"];
 
@@ -334,6 +340,9 @@ impl Reader {
                 "length" => self.number_value(value, &at, name).map(|length| attributes.length = Some(length)),
                 "width" => self.number_value(value, &at, name).map(|width| attributes.width = Some(width)),
                 "booking_point" => self.number_value(value, &at, name).map(|share| attributes.booking_point = Some(share)),
+                "path" => self.path(value, &at, name).map(|path| attributes.path = Some(path)),
+                "speed" => self.number_value(value, &at, name).map(|speed| attributes.speed = Some(speed)),
+                "gap" => self.number_value(value, &at, name).map(|gap| attributes.gap = Some(gap)),
                 _ => unreachable!("every attribute is read"),
             };
             if read.is_none() {
@@ -432,6 +441,48 @@ impl Reader {
             self.problem(pointer.to_owned(), name, format!("{value} should be a number"));
         }
         number
+    }
+
+    /// A conveyor's path: a list of segments, each `{"straight": metres}` so far.
+    fn path(&mut self, value: &Value, pointer: &str, name: Option<&str>) -> Option<Vec<Segment>> {
+        const SAY: &str = r#"a path is a list of segments, such as [{"straight": 10}], in metres"#;
+        let Some(items) = value.as_array() else {
+            self.problem(pointer.to_owned(), name, SAY);
+            return None;
+        };
+        let mut path = Vec::new();
+        let mut ok = true;
+        for (index, item) in items.iter().enumerate() {
+            let at = format!("{pointer}/{index}");
+            let Some(fields) = item.as_object() else {
+                self.problem(at, name, SAY);
+                ok = false;
+                continue;
+            };
+            let mut kinds = fields.iter();
+            let (Some((kind, length)), None) = (kinds.next(), kinds.next()) else {
+                self.problem(at, name, "a segment is one of its kinds, such as {\"straight\": 10}");
+                ok = false;
+                continue;
+            };
+            match kind.as_str() {
+                "straight" => match self.number_value(length, &format!("{at}/straight"), name) {
+                    Some(metres) => path.push(Segment::Straight(metres)),
+                    None => ok = false,
+                },
+                later if SEGMENTS_LATER.iter().any(|(name, _)| *name == later) => {
+                    let said = SEGMENTS_LATER.iter().find(|(name, _)| *name == later).map_or(later, |(_, said)| said);
+                    self.problem(format!("{at}/{}", escape(kind)), name, format!("a conveyor's path is straight so far: {said} come with curved paths"));
+                    ok = false;
+                }
+                other => {
+                    let guess = crate::suggest::did_you_mean(other, ["straight"]);
+                    self.problem(format!("{at}/{}", escape(other)), name, format!("unknown segment `{other}`{guess}"));
+                    ok = false;
+                }
+            }
+        }
+        ok.then_some(path)
     }
 
     /// A Source's own values for its MUs, each optional. The values that can be read are kept.

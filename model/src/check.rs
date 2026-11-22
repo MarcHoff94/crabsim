@@ -276,6 +276,22 @@ impl<'m> Checker<'m> {
         {
             self.mu_class(owner, class);
         }
+        if let Some(path) = &attributes.path {
+            if path.is_empty() {
+                self.problem(owner, "/attributes/path", "a path needs at least one segment, such as [{\"straight\": 10}]");
+            }
+            for (index, segment) in path.iter().enumerate() {
+                if !(segment.length() > 0.0 && segment.length().is_finite()) {
+                    self.problem(owner, &format!("/attributes/path/{index}/straight"), "a straight must be above 0, in metres");
+                }
+            }
+        }
+        if attributes.speed.is_some_and(|speed| !(speed > 0.0 && speed.is_finite())) {
+            self.problem(owner, "/attributes/speed", "a speed must be above 0, in metres per second");
+        }
+        if attributes.gap.is_some_and(|gap| !(gap >= 0.0 && gap.is_finite())) {
+            self.problem(owner, "/attributes/gap", "a gap must be 0 or more, in metres");
+        }
         if built_in == "Buffer" && attributes.capacity == Some(Capacity::Limited(0)) {
             self.problem(owner, "/attributes/capacity", "a capacity must be at least 1, or \"unlimited\"");
         }
@@ -436,6 +452,12 @@ impl<'m> Checker<'m> {
                     self.problem(owner, "/to", format!("`{}` is a Source, which creates MUs and can't take any in", connection.to));
                 } else if self.built_in(from) == Some("Drain") {
                     self.problem(owner, "/from", format!("`{}` is a Drain, which takes MUs out of the model, so no connection can leave it", connection.from));
+                } else if self.built_in(from) == Some("Conveyor") && self.built_in(to) == Some("Conveyor") {
+                    self.problem(
+                        owner,
+                        "/to",
+                        "a conveyor can't lead straight into another conveyor yet, which comes with handing MUs over between them: put a Station or Buffer between them for now",
+                    );
                 }
             }
             match seen.get(&(connection.from.as_str(), connection.to.as_str())) {

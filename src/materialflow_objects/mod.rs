@@ -1,3 +1,4 @@
+pub mod conveyor;
 pub mod drain;
 pub mod flows;
 pub mod interruptions;
@@ -9,6 +10,7 @@ pub mod source;
 pub mod station;
 pub mod buffer;
 
+pub use conveyor::Conveyor;
 pub use drain::Drain;
 pub use flows::{Distributing, DistributionStrategy, LowestIndexStrategy, MoveableUnit, Ranked, RoundRobinStrategy, ProcessState};
 pub use self::flows::BaseObject;

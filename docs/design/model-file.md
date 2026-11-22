@@ -66,7 +66,7 @@ A file holds the model only: classes, instances, their attributes, names, positi
 { "name": "CNC mill", "parent": "Station", "attributes": { "process_time": "0:45", "description": "5-axis" } }
 ```
 
-- The built-in classes are Source, Station, Buffer and Drain. A derived class names its `parent`, a built-in or another derived class, so chains are allowed.
+- The built-in classes are Source, Station, Buffer, Drain and Conveyor (spec issue 133), and MU for MU classes. A derived class names its `parent`, a built-in or another derived class, so chains are allowed.
 - A class named like a built-in class, with no `parent`, is this model's own values for that built-in class (ADR 0015), such as `{ "name": "Station", "attributes": { "process_time": "0:10" } }`. Every class and instance built on the built-in class inherits them, between its own chain and the built-in's defaults, so a model can change what a Station is without a class of its own. A model has at most one for each built-in class, and one that names a `parent` is a validation error. `edit_model` makes it when a value is set on the built-in class's name and removes it when the last is restored, and the window's class library shows it as the built-in class. A new model made in the window starts with one for Station at 10 s, and so does a model when the first Station is placed or a class is first derived from Station.
 - **MU classes** (ADR 0021, spec issue 133) derive from the built-in class `MU`, or from each other, and say what a Source's MUs are: `{ "name": "Tote", "parent": "MU", "attributes": { "length": 0.6, "width": 0.4 } }`. They are never placed as instances, which is a validation error, and have only an MU's attributes. A class named `MU` with no parent is the model's own values for the built-in MU, which a Source makes unless set to another. `edit_model`'s `rename_class` renames an MU class wherever a `mu_class` names it, and `remove_class` refuses while a Source or a class of them makes its MUs, unless asked to remove dependents, when they make the MUs they inherit again (`also_removed.mu_classes_from`).
 - Classes can appear in any order. A cycle in the class tree is a validation error.
@@ -104,6 +104,10 @@ Which attributes an instance has depends on its built-in class at the root of it
 | `mu_values` | Source | none | Any of `length`, `width` and `booking_point`, changing its MU class's values for its MUs alone. Inherited as a whole |
 | `length` | MU class | 0.6 | Metres above 0: the footprint's length along the way it travels |
 | `width` | MU class | 0.4 | Metres above 0: the footprint's width across the way it travels |
+| `path` | Conveyor | `[{"straight": 5}]` | Its segments from its start, in metres, straights only so far, each above 0 (ADR 0024). Its length is theirs added up |
+| `width` | Conveyor | 0.6 | Metres above 0: an MU wider than this doesn't fit |
+| `speed` | Conveyor | 0.5 | Metres per second, above 0 |
+| `gap` | Conveyor | 0 | The least space between two MUs on it, in metres, 0 or more |
 | `booking_point` | MU class | 0.5 | A share of the MU's length from its front, 0 at the front to 1 at the rear: where it passes from one object to the next (ADR 0023) |
 
 - **Times** are strings in the UI's syntax, read by the same `parse_time` as the UI and the CLI: `"10"`, `"1:30"`, `"2:00:00"`, `"2d 06:00:00"`, `"0:00:12.5"`. Exact to the millisecond.
@@ -128,6 +132,7 @@ Which attributes an instance has depends on its built-in class at the root of it
   ```
   A weighted object ranks its successors and offers the MU to the best one that can take it, those ranking equal taking turns, and waits only when all are blocked. `by` is `process_time`, `interval`, `starting_mus` or `capacity`, resolved through inheritance on each object weighed, which weighs 0 without it. `order` is `smallest`, the default, or `largest`. `rank` is `route`, the default, a successor's best route onward to a Drain with itself included, or `successor`, its own weight only. `drains`, optional and not empty, names the Drains a route counts: left out, every Drain. A name that isn't a Drain is ignored, and `validate_model` warns about it. A successor with no route to a counted Drain ranks last. Inherited as a whole. Saving writes `order` and `rank` out.
 - **Starting MUs** are a count. MU ids belong to a run, and are handed out when a run is built, in file order. They are of the built-in MU class, with the model's own values for it.
+- **A conveyor's size** is its path's length and its width: its `dimensions` give only its height and rotation. A conveyor can't lead straight into another conveyor until handing MUs over between them is built (PR 3 of spec issue 133), which is a problem. `Model::warnings` warns about a Source whose MUs are too wide or too long for a conveyor it reaches through objects without geometry, which would refuse them for good.
 - **An MU's values** reach the engine as its MU kind: each different set of values a Source makes is one entry in the run's table of them, and every MU carries its entry's number. Only objects whose geometry counts read them, such as conveyors, so until those are built they change no result.
 - **Visual only:** `position`, `dimensions`, `description` and `state_notes` never reach a run, so they can't change a result. The 3D model path will be one more inheritable attribute when there is a 3D view, a path and never embedded.
 

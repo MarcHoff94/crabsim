@@ -70,6 +70,10 @@ pub struct Buffer {
     stop_count: u32,
     /// When the interruption in progress began.
     interrupted_at: SimTime,
+    /// Places reserved for MUs conveyors are handing over, which count as taken (ADR 0023). A
+    /// byte, so a Buffer stays no larger than it was: with 255 reserved it takes no more until one
+    /// arrives.
+    incoming: u8,
 }
 
 impl Buffer {
@@ -93,6 +97,7 @@ impl Buffer {
             stop_freezes_dwelling: false,
             stop_count: 0,
             interrupted_at: SimTime::ZERO,
+            incoming: 0,
         }
     }
 
@@ -198,6 +203,8 @@ impl Buffer {
     fn process_state(&self) -> ProcessState {
         if self.blocked {
             ProcessState::Blocked
+        } else if self.content.is_empty() && self.incoming > 0 {
+            ProcessState::Receiving
         } else if self.content.is_empty() {
             ProcessState::Idle
         } else {
@@ -223,9 +230,9 @@ impl MaterialFlow for Buffer {
     fn is_entrance_allowed(&self) -> bool {
         let room = match self.capacity {
             Capacity::Unlimited => true,
-            Capacity::Limited(limit) => (self.content.len() as u64) < limit,
+            Capacity::Limited(limit) => (self.content.len() as u64 + u64::from(self.incoming)) < limit,
         };
-        room && !self.interruptions.is_interrupted()
+        room && !self.interruptions.is_interrupted() && self.incoming < u8::MAX
     }
     fn is_exit_allowed(&self) -> bool {
         self.blocked && !self.interruptions.is_interrupted()
@@ -233,11 +240,18 @@ impl MaterialFlow for Buffer {
     /// Takes the MU and schedules the end of its dwelling time, when it tries to leave.
     fn process_mu_entrance(&mut self, mu: MoveableUnit, context: &mut EventContext) -> Result<Option<EventTemplate>, MaterialflowError> {
         log::info!("MU {} entered Buffer {}", mu.id, self.base.object_id);
+        // An MU it was receiving takes its reserved place, even while it is interrupted.
+        self.incoming = self.incoming.saturating_sub(1);
         let exit = self.exit_event(mu.id, self.dwelling_time);
         self.content.push_back(Held { mu, ready_at: context.time + self.dwelling_time });
         self.statistics.count_mu_in();
         self.update_statistics(context.time);
         Ok(Some(exit))
+    }
+    fn reserve(&mut self, mu_id: u32, context: &mut EventContext) {
+        self.incoming += 1;
+        context.record(OccurrenceKind::Reserved { object_id: self.base.object_id, mu_id });
+        self.update_statistics(context.time);
     }
     fn add_blocked(&mut self, id_blocked: u32, since: SimTime, answering_retry: bool) {
         list_blocked(&mut self.blockedlist, id_blocked, since, answering_retry);
@@ -278,6 +292,9 @@ impl SuccessorContainer for Buffer {
     fn offered_since(&self, now: SimTime) -> Option<SimTime> {
         self.offered(now).map(|at| self.content[at].ready_at)
     }
+    fn offered_kind(&self, now: SimTime) -> Option<crate::flows::MuKindId> {
+        self.offered(now).map(|at| self.content[at].mu.kind)
+    }
 }
 
 impl EventInterface for Buffer {
@@ -302,6 +319,7 @@ impl EventInterface for Buffer {
         self.interruptions.reset();
         self.stop_count = 0;
         self.interrupted_at = SimTime::ZERO;
+        self.incoming = 0;
     }
     fn clear_statistics(&mut self, now: SimTime) {
         self.interruptions.clear_statistics(now, &self.statistics);
@@ -326,6 +344,7 @@ impl EventInterface for Buffer {
             configured_process_time: None,
             statistics: self.statistics.read(now),
             fill: Some(Box::new(self.fill.read(self.statistics.in_progress(now)))),
+            positions: Vec::new(),
         }
     }
     fn get_object_id(&self) -> &u32 {

@@ -100,6 +100,8 @@ pub enum EventType {
     /// Someone stops a Station by hand, or ends that.
     StopOn,
     StopOff,
+    /// One of a conveyor's own events, for the plan it was queued in.
+    Conveyor(crate::materialflow_objects::conveyor::ConveyorTicket),
 }
 
 /// An event an object wants to happen, `exec_time` from now.

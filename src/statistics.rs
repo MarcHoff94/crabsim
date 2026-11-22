@@ -23,6 +23,9 @@ pub struct ObjectStatistics {
     pub time_busy_partly_blocked: SimTime,
     pub time_blocked: SimTime,
     pub time_idle: SimTime,
+    /// A place reserved for an MU a conveyor is handing over, and nothing else going on
+    /// (ADR 0023).
+    pub time_receiving: SimTime,
     pub time_failed: SimTime,
     pub time_paused: SimTime,
     /// Time spent at capacity. It says how full the object is rather than what it is doing, so
@@ -57,7 +60,7 @@ pub struct DrainStatistics {
 impl ObjectStatistics {
     /// The time these numbers cover.
     pub fn measured_time(&self) -> SimTime {
-        self.time_busy + self.time_blocked + self.time_idle + self.time_failed + self.time_paused
+        self.time_busy + self.time_blocked + self.time_idle + self.time_receiving + self.time_failed + self.time_paused
     }
 
     /// Busy with every place in work: all its busy time unless it has a capacity above 1.
@@ -111,6 +114,8 @@ pub enum MachineState {
     BusyPartlyBlocked,
     Blocked,
     Idle,
+    /// Receiving an MU a conveyor is handing over, with nothing else going on.
+    Receiving,
     Failed,
     Paused,
 }
@@ -124,6 +129,7 @@ impl MachineState {
             (None, ProcessState::Processing) => MachineState::Busy,
             (None, ProcessState::Blocked) => MachineState::Blocked,
             (None, ProcessState::Idle) => MachineState::Idle,
+            (None, ProcessState::Receiving) => MachineState::Receiving,
         }
     }
 }
@@ -278,6 +284,7 @@ fn add_time(statistics: &mut ObjectStatistics, state: MachineState, contents: u6
         }
         MachineState::Blocked => (&mut statistics.time_blocked, &mut statistics.mu_time_blocked),
         MachineState::Idle => (&mut statistics.time_idle, &mut statistics.mu_time_waiting),
+        MachineState::Receiving => (&mut statistics.time_receiving, &mut statistics.mu_time_waiting),
         MachineState::Failed => (&mut statistics.time_failed, &mut statistics.mu_time_interrupted),
         MachineState::Paused => (&mut statistics.time_paused, &mut statistics.mu_time_interrupted),
     };
@@ -512,6 +519,7 @@ pub struct PeriodFigures {
     pub busy_partly_blocked: Spread,
     pub blocked: Spread,
     pub idle: Spread,
+    pub receiving: Spread,
     pub failed: Spread,
     pub paused: Spread,
     /// Failed or paused.
@@ -534,6 +542,7 @@ impl PeriodFigures {
         self.busy_partly_blocked.add(share(|s| s.time_busy_partly_blocked));
         self.blocked.add(share(|s| s.time_blocked));
         self.idle.add(share(|s| s.time_idle));
+        self.receiving.add(share(|s| s.time_receiving));
         self.failed.add(failed);
         self.paused.add(paused);
         self.interrupted.add(failed + paused);

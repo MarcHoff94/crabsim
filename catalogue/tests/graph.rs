@@ -587,7 +587,7 @@ fn the_class_tree_runs_from_the_built_in_classes_down() {
     let tree = query(&setup, "branch.json", json!({ "kind": "class_tree" }));
     let classes = tree["classes"].as_array().unwrap();
     let outline: Vec<(&str, u64)> = classes.iter().map(|class| (class["name"].as_str().unwrap(), class["depth"].as_u64().unwrap())).collect();
-    assert_eq!(outline, [("Source", 0), ("Station", 0), ("Press", 1), ("Fast press", 2), ("Unused", 1), ("Buffer", 0), ("Drain", 0), ("MU", 0)], "the MU classes in a tree of their own");
+    assert_eq!(outline, [("Source", 0), ("Station", 0), ("Press", 1), ("Fast press", 2), ("Unused", 1), ("Buffer", 0), ("Drain", 0), ("Conveyor", 0), ("MU", 0)], "the MU classes in a tree of their own");
     let press = classes.iter().find(|class| class["name"] == "Press").unwrap();
     assert_eq!(press["parent"], "Station");
     assert_eq!(press["sets"], json!({ "process_time": "00:00:05", "description": "Hydraulic press" }));

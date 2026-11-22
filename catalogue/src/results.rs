@@ -17,7 +17,7 @@ pub(crate) fn entries() -> Vec<Entry> {
 }
 
 /// Every statistic the store keeps, in the order results show them.
-pub const STATISTICS: [&str; 19] = [
+pub const STATISTICS: [&str; 20] = [
     "mus_in",
     "mus_out",
     "working_share",
@@ -26,6 +26,7 @@ pub const STATISTICS: [&str; 19] = [
     "working_partly_blocked_share",
     "blocked_share",
     "idle_share",
+    "receiving_share",
     "failed_share",
     "paused_share",
     "failures",
@@ -63,6 +64,7 @@ pub(crate) fn figures(object: &ObjectState, now: SimTime) -> Vec<(&'static str, 
             ("working_share", statistics.time_busy),
             ("blocked_share", statistics.time_blocked),
             ("idle_share", statistics.time_idle),
+            ("receiving_share", statistics.time_receiving),
             ("failed_share", statistics.time_failed),
             ("paused_share", statistics.time_paused),
         ] {
@@ -190,7 +192,7 @@ pub struct ObjectResults {
     /// Why it's in these results.
     pub why: Vec<Why>,
     /// By statistic: mus_in, mus_out, working_share, blocked_share, idle_share, failed_share,
-    /// paused_share, failures, availability, for Drains throughput_per_hour and
+    /// paused_share, receiving_share, failures, availability, for Drains throughput_per_hour and
     /// mean_lead_time_s, and for Buffers mean_mus, min_mus, max_mus, median_mus and full_share,
     /// named as in the store. Shares and availability are from 0 to 1, times in seconds. A figure
     /// that is 0 in every observation is left out.

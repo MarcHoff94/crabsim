@@ -36,6 +36,29 @@ pub struct ObjectPicture {
     /// stopped the work left on it, frozen. A Station with capacity has several, a Source the
     /// MU it is making.
     work: Vec<(u32, SimTime)>,
+    /// Each MU on a conveyor, front first, and how it moves (ADR 0022).
+    motion: Vec<Motion>,
+    /// The MUs it reserved a place for, which a conveyor is handing over (ADR 0023).
+    reserved: Vec<u32>,
+}
+
+/// How an MU on a conveyor moves, from its latest `MotionPlanned`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Motion {
+    pub mu_id: u32,
+    pub kind: crate::flows::MuKindId,
+    /// Where its front was at `since`, in metres from the start.
+    pub front: f64,
+    /// Metres per second, 0 standing.
+    pub speed: f64,
+    pub since: SimTime,
+}
+
+impl Motion {
+    /// Where its front is at `now`.
+    pub fn front_at(&self, now: SimTime) -> f64 {
+        self.front + self.speed * now.saturating_sub(self.since).as_millis() as f64 / 1000.0
+    }
 }
 
 impl Picture {
@@ -112,17 +135,42 @@ impl Picture {
                 } else {
                     ProcessState::Idle
                 };
+                object.motion.retain(|motion| motion.mu_id != mu_id);
                 object.hold();
+                object.follow_belt();
                 if let Some(object) = objects.get_mut(to as usize) {
                     object.contents.push(mu_id);
+                    // An MU it was receiving has arrived.
+                    object.reserved.retain(|&id| id != mu_id);
+                    if object.reserved.is_empty() && object.process == ProcessState::Receiving {
+                        object.process = ProcessState::Idle;
+                    }
                     object.hold();
+                    object.follow_belt();
                 }
             }
             OccurrenceKind::MuLeft { mu_id, at, .. } => objects[at as usize].contents.retain(|&id| id != mu_id),
             OccurrenceKind::WorkStarted { mu_id, at, duration } => {
                 let object = &mut objects[at as usize];
                 object.process = ProcessState::Processing;
-                object.work.push((mu_id, now + duration));
+                // An MU a Station received while interrupted waits with all its work left.
+                object.work.push((mu_id, if object.is_interrupted() { duration } else { now + duration }));
+            }
+            OccurrenceKind::Reserved { object_id, mu_id } => {
+                let object = &mut objects[object_id as usize];
+                object.reserved.push(mu_id);
+                if object.process == ProcessState::Idle {
+                    object.process = ProcessState::Receiving;
+                }
+            }
+            OccurrenceKind::MotionPlanned { mu_id, at, front, speed, kind } => {
+                let object = &mut objects[at as usize];
+                let motion = Motion { mu_id, kind, front: f64::from(front), speed: f64::from(speed), since: now };
+                match object.motion.iter_mut().find(|motion| motion.mu_id == mu_id) {
+                    Some(known) => *known = motion,
+                    None => object.motion.push(motion),
+                }
+                object.follow_belt();
             }
             OccurrenceKind::WorkFinished { mu_id, at } => objects[at as usize].work.retain(|&(id, _)| id != mu_id),
             OccurrenceKind::Blocked { object_id } => {
@@ -130,6 +178,7 @@ impl Picture {
                 let object = &mut objects[object_id as usize];
                 object.process = ProcessState::Blocked;
                 object.work.clear();
+                object.follow_belt();
             }
             OccurrenceKind::Unblocked { object_id } => {
                 // A Source unblocks by creating its next MU, which has already set what it is doing.
@@ -137,6 +186,7 @@ impl Picture {
                 if object.process == ProcessState::Blocked {
                     object.process = ProcessState::Idle;
                     object.hold();
+                    object.follow_belt();
                 }
             }
             OccurrenceKind::InterruptionBegan { object_id, cause, profile } => {
@@ -205,7 +255,31 @@ impl ObjectPicture {
             .into_iter()
             .map(|(mu_id, left)| (mu_id, if stopped { left } else { now + left }))
             .collect(),
+            motion: state
+                .positions
+                .iter()
+                .map(|position| Motion { mu_id: position.mu_id, kind: position.kind, front: position.front, speed: position.speed, since: now })
+                .collect(),
+            reserved: Vec::new(),
         }
+    }
+
+    /// A conveyor is empty, moving MUs, or has every MU standing, which a run reports as blocked.
+    fn follow_belt(&mut self) {
+        if self.kind == ObjectKind::Conveyor {
+            self.process = if self.contents.is_empty() {
+                ProcessState::Idle
+            } else if self.motion.iter().any(|motion| motion.speed > 0.0) {
+                ProcessState::Processing
+            } else {
+                ProcessState::Blocked
+            };
+        }
+    }
+
+    /// Each MU on a conveyor, front first, and how it moves.
+    pub fn motion(&self) -> &[Motion] {
+        &self.motion
     }
 
     /// A Buffer that isn't blocked is holding while it has MUs, which a run reports as

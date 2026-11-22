@@ -92,7 +92,7 @@ fn a_refusal_names_the_command_by_its_place() {
     assert!(refused("connect In > Out; connect Mill > Out").starts_with("2nd command (connect Mill > Out): `Mill` could be `Mill 1`, `Mill 2`"), "{}", refused("connect In > Out; connect Mill > Out"));
     assert!(refused("remove Nobody").contains("no instance is called anything like `Nobody`"));
     assert!(refused("fly In").contains("there is no command `fly`"));
-    assert!(refused("set In.speed 4").contains("name.attribute"), "{}", refused("set In.speed 4"));
+    assert!(refused("set In.pace 4").contains("name.attribute"), "{}", refused("set In.pace 4"));
     assert!(refused("connect In Out").contains("write it as connect … > …"));
     assert!(refused("add Mill; goto 2d").contains("give it a line of its own"), "a line is model changes or one window command");
 }

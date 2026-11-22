@@ -20,7 +20,7 @@
       "type": "string"
     },
     "classes": {
-      "description": "The model's own classes, in any order. Each derives from a built-in class (Source, Station, Buffer, Drain, or MU for an MU class) or from another class here.",
+      "description": "The model's own classes, in any order. Each derives from a built-in class (Source, Station, Buffer, Drain, Conveyor, or MU for an MU class) or from another class here.",
       "type": "array",
       "items": {
         "$ref": "#/$defs/ClassFile"
@@ -52,11 +52,11 @@
       "type": "object",
       "properties": {
         "name": {
-          "description": "Unique among classes. Source, Station, Buffer, Drain or MU makes it this model's own values for that built-in class.",
+          "description": "Unique among classes. Source, Station, Buffer, Drain, Conveyor or MU makes it this model's own values for that built-in class.",
           "$ref": "#/$defs/Name"
         },
         "parent": {
-          "description": "The class it derives from: Source, Station, Buffer, Drain, MU or another class in the file. Left out only on a class named like a built-in class, and required on every other.",
+          "description": "The class it derives from: Source, Station, Buffer, Drain, Conveyor, MU or another class in the file. Left out only on a class named like a built-in class, and required on every other.",
           "type": "string"
         },
         "attributes": {
@@ -135,7 +135,7 @@
           "$ref": "#/$defs/StateNotesFile"
         },
         "distribution": {
-          "description": "Source, Station: which successor receives the MU it passes on (ADR 0016). Round robin by default. Inherited as a whole.",
+          "description": "Source, Station, Conveyor: which successor receives the MU it passes on (ADR 0016). Round robin by default. Inherited as a whole.",
           "$ref": "#/$defs/DistributionFile"
         },
         "mu_class": {
@@ -153,7 +153,7 @@
           "exclusiveMinimum": 0
         },
         "width": {
-          "description": "MU class: its footprint's width across the way it travels, in metres. 0.4 by default.",
+          "description": "MU class: its footprint's width across the way it travels, in metres, 0.4 by default. Conveyor: how wide it is, in metres, 0.6 by default: an MU wider than this doesn't fit.",
           "type": "number",
           "format": "double",
           "exclusiveMinimum": 0
@@ -164,6 +164,26 @@
           "format": "double",
           "minimum": 0,
           "maximum": 1
+        },
+        "path": {
+          "description": "Conveyor: the line its MUs follow, as segments from its start, whose lengths add up to the conveyor's (ADR 0024). Straights only so far. One straight of 5 m by default.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SegmentFile"
+          },
+          "minItems": 1
+        },
+        "speed": {
+          "description": "Conveyor: how fast it moves its MUs, in metres per second, above 0. 0.5 by default.",
+          "type": "number",
+          "format": "double",
+          "exclusiveMinimum": 0
+        },
+        "gap": {
+          "description": "Conveyor: the least space between two MUs on it, in metres, 0 or more. 0 by default.",
+          "type": "number",
+          "format": "double",
+          "minimum": 0
         }
       },
       "additionalProperties": false
@@ -496,6 +516,11 @@
           "description": "Any object.",
           "type": "string",
           "minLength": 1
+        },
+        "receiving": {
+          "description": "Station, Buffer, Drain: a place reserved for an MU a conveyor is handing over.",
+          "type": "string",
+          "minLength": 1
         }
       },
       "additionalProperties": false
@@ -607,6 +632,22 @@
       },
       "additionalProperties": false
     },
+    "SegmentFile": {
+      "description": "One piece of a conveyor's path.",
+      "type": "object",
+      "properties": {
+        "straight": {
+          "description": "This many metres straight on, above 0.",
+          "type": "number",
+          "format": "double",
+          "exclusiveMinimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "straight"
+      ]
+    },
     "InstanceFile": {
       "description": "One material-flow object.",
       "type": "object",
@@ -616,7 +657,7 @@
           "$ref": "#/$defs/Name"
         },
         "class": {
-          "description": "Source, Station, Buffer, Drain or a class in the file derived from one: not an MU class.",
+          "description": "Source, Station, Buffer, Drain, Conveyor or a class in the file derived from one: not an MU class.",
           "type": "string"
         },
         "stream": {

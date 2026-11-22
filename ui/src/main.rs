@@ -79,8 +79,8 @@ fn shade_colour32(shade: Shade) -> egui::Color32 {
     egui::Color32::from_rgb(r, g, b)
 }
 
-const SHADES: [Shade; 8] =
-    [Shade::Unknown, Shade::Idle, Shade::Busy, Shade::Holding, Shade::Blocked, Shade::Paused, Shade::Failed, Shade::Stopped];
+const SHADES: [Shade; 9] =
+    [Shade::Unknown, Shade::Idle, Shade::Busy, Shade::Holding, Shade::Blocked, Shade::Receiving, Shade::Paused, Shade::Failed, Shade::Stopped];
 
 fn main() {
     let opts = Opts::parse();
@@ -210,6 +210,7 @@ fn main() {
                 place_camera,
                 draw_connections,
                 place_mus,
+                place_belt_mus,
             )
                 .chain(),
         )
@@ -621,6 +622,8 @@ const PREFERRED: Color = Color::srgb(0.55, 0.9, 0.55);
 const CLICK_SLOP: f32 = 4.0;
 const SELECTION: Color = Color::srgb(1.0, 1.0, 1.0);
 const MU_COLOUR: Color = Color::srgb(0.96, 0.96, 0.93);
+/// The arrow along a conveyor saying which way it goes: faint, under its MUs.
+const BELT_DIRECTION: Color = Color::srgba(1.0, 1.0, 1.0, 0.35);
 
 /// The model file open and the edit state, which a thread of its own watches while the window is
 /// idle.
@@ -715,6 +718,16 @@ struct MuPool {
     material: Handle<StandardMaterial>,
 }
 
+/// Entities drawing MUs on conveyors, each a square of a metre scaled to the MU's footprint,
+/// reused from frame to frame: the first `shown` are visible.
+#[derive(Resource)]
+struct BeltPool {
+    entities: Vec<Entity>,
+    shown: usize,
+    mesh: Handle<Mesh>,
+    material: Handle<StandardMaterial>,
+}
+
 fn setup(
     mut commands: Commands,
     ui: Res<Ui>,
@@ -740,6 +753,12 @@ fn setup(
         entities: Vec::new(),
         shown: 0,
         mesh: meshes.add(Circle::new(MU_METRES as f32 / 2.0)),
+        material: material_assets.add(StandardMaterial { base_color: MU_COLOUR, unlit: true, ..default() }),
+    });
+    commands.insert_resource(BeltPool {
+        entities: Vec::new(),
+        shown: 0,
+        mesh: meshes.add(Rectangle::new(1.0, 1.0)),
         material: material_assets.add(StandardMaterial { base_color: MU_COLOUR, unlit: true, ..default() }),
     });
 }
@@ -1103,7 +1122,53 @@ fn place_mus(
     }
     pool.shown = markers.len();
 }
+
+/// Draws each MU on a conveyor at its own size and place, reusing the entities from the frame
+/// before. Only what changed touches the ECS.
+fn place_belt_mus(
+    mut commands: Commands,
+    ui: Res<Ui>,
+    mut pool: ResMut<BeltPool>,
+    mut drawn: Query<(&mut Transform, &mut Visibility)>,
+) {
+    let markers = ui.camera.map(|camera| ui.view.belt_markers(&camera)).unwrap_or_default();
+    let pool = &mut *pool;
+    for (index, marker) in markers.iter().enumerate() {
+        let wanted = Transform {
+            translation: Vec3::new(marker.at.x as f32, marker.at.y as f32, 0.2),
+            rotation: Quat::from_rotation_z((marker.rotation_degrees as f32).to_radians()),
+            // A little short of its footprint, so MUs closed up still show apart.
+            scale: Vec3::new((marker.length as f32 * 0.94).max(0.05), (marker.width as f32 * 0.94).max(0.05), 1.0),
+        };
+        match pool.entities.get(index) {
+            Some(&entity) => {
+                if let Ok((mut transform, mut visibility)) = drawn.get_mut(entity) {
+                    if *transform != wanted {
+                        *transform = wanted;
+                    }
+                    if *visibility != Visibility::Inherited {
+                        *visibility = Visibility::Inherited;
+                    }
+                }
+            }
+            None => {
+                let entity = commands.spawn((Mesh3d(pool.mesh.clone()), MeshMaterial3d(pool.material.clone()), wanted)).id();
+                pool.entities.push(entity);
+            }
+        }
+    }
+    for &entity in pool.entities.iter().take(pool.shown).skip(markers.len()) {
+        if let Ok((_, mut visibility)) = drawn.get_mut(entity) {
+            *visibility = Visibility::Hidden;
+        }
+    }
+    pool.shown = markers.len();
+}
 fn draw_connections(mut gizmos: Gizmos, ui: Res<Ui>) {
+    // Each conveyor's direction, along its middle.
+    for (start, end) in ui.view.belt_directions() {
+        gizmos.arrow(Vec3::new(start.x as f32, start.y as f32, 0.05), Vec3::new(end.x as f32, end.y as f32, 0.05), BELT_DIRECTION).with_tip_length(0.3);
+    }
     for connection in ui.view.connections() {
         let start = Vec3::new(connection.start.x as f32, connection.start.y as f32, 0.0);
         let end = Vec3::new(connection.end.x as f32, connection.end.y as f32, 0.0);
@@ -4148,6 +4213,9 @@ fn attribute_label(attribute: &str) -> &str {
         "length" => "Length m",
         "width" => "Width m",
         "booking_point" => "Booking point",
+        "path" => "Path",
+        "speed" => "Speed m/s",
+        "gap" => "Gap m",
         other => other,
     }
 }

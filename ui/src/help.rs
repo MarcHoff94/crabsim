@@ -24,6 +24,7 @@ pub fn built_in(kind: ObjectKind) -> &'static str {
         ObjectKind::Station => "Station",
         ObjectKind::Buffer => "Buffer",
         ObjectKind::Drain => "Drain",
+        ObjectKind::Conveyor => "Conveyor",
     }
 }
 
@@ -58,6 +59,13 @@ pub fn meaning(kind: ObjectKind, state: State) -> &'static str {
         (ObjectKind::Drain, State::Failed) => "Interrupted by a random failure until its repair is done. It takes no MU, so what feeds it waits.",
         (ObjectKind::Drain, State::Stopped) => "Stopped by hand, until someone ends it. It takes no MU. It counts as a failure in the statistics.",
         (ObjectKind::Drain, State::Paused) => "Paused until someone resumes it. It takes no MU, so what feeds it waits.",
+        (ObjectKind::Conveyor, State::Busy) => "Moving at least one MU along its path.",
+        (ObjectKind::Conveyor, State::Blocked) => "Holding MUs, none of which moves: the one at its end waits for a successor to take it, and the rest have closed up behind it.",
+        (ObjectKind::Conveyor, State::Idle) => "Empty: no MU is on it.",
+        (ObjectKind::Conveyor, State::Failed) => "Interrupted by a random failure until its repair is done. Every MU on it stands, and it takes and passes on none.",
+        (ObjectKind::Conveyor, State::Stopped) => "Stopped by hand, until someone ends it. Every MU on it stands, and it takes and passes on none. It counts as a failure in the statistics.",
+        (ObjectKind::Conveyor, State::Paused) => "Paused until someone resumes it. Every MU on it stands, and it takes and passes on none.",
+        (_, State::Receiving) => "A place is taken for an MU a conveyor is handing over, until the MU's booking point arrives, and nothing else is going on. Once begun, the MU always arrives, even if it is interrupted meanwhile.",
         (_, State::Busy) => "Working on an MU.",
         (_, State::Blocked) => "Holding an MU whose work is done, but no successor can take it.",
         (_, State::Idle) => "Not busy, blocked or interrupted: waiting for an MU to arrive.",

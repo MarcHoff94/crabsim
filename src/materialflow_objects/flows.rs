@@ -148,6 +148,9 @@ pub enum ProcessState {
 	Processing,
 	Blocked,
 	Idle,
+	/// A place is reserved for an MU a conveyor is handing over, whose booking point hasn't
+	/// arrived yet (ADR 0023), and the object is doing nothing else.
+	Receiving,
 }
 pub trait EventInterface {
 	/// Prepares the object for a run and returns its first events. Called from the default state.
@@ -174,6 +177,20 @@ pub trait EventInterface {
 
 pub trait MaterialFlow: EventInterface {
 	fn is_entrance_allowed(&self) -> bool;
+	/// Whether it can take an MU of this kind at `now`. Only an object whose geometry counts asks
+	/// about the MU (ADR 0021): the rest take any MU they have room for.
+	fn accepts(&self, _kind: MuKindId, _now: SimTime) -> bool {
+		self.is_entrance_allowed()
+	}
+	/// Reserves a place for the MU `mu_id` a conveyor is handing over, which it takes through
+	/// `process_mu_entrance` once its booking point arrives (ADR 0023). Asked only after `accepts`
+	/// said yes. A transfer once begun always finishes, even if the object is interrupted.
+	fn reserve(&mut self, _mu_id: u32, _context: &mut EventContext) {}
+	/// The event that wakes it, if it needs one, after a predecessor it refused has joined its
+	/// line: a conveyor works out when there will be room for it.
+	fn wake_on_listing(&mut self) -> Option<EventTemplate> {
+		None
+	}
 	fn is_exit_allowed(&self) -> bool;
 	fn process_mu_entrance(&mut self, mu: MoveableUnit, context: &mut EventContext) -> Result<Option<EventTemplate>, MaterialflowError>;
 	/// Lists a predecessor it refused, whose MU has been ready to leave since `since`.
@@ -272,6 +289,9 @@ pub trait SuccessorContainer {
 	/// When the MU it would hand over at `now` became ready to leave, or `None` if it has none
 	/// that may leave.
 	fn offered_since(&self, now: SimTime) -> Option<SimTime>;
+	/// The kind of the MU it would hand over at `now`, which a successor whose geometry counts
+	/// needs to say whether it fits. `None` if it has none to hand over.
+	fn offered_kind(&self, now: SimTime) -> Option<MuKindId>;
 	fn statistics_mut(&mut self) -> &mut StatisticsKeeper;
 }
 
@@ -368,7 +388,11 @@ pub fn try_to_move_to_successor_with_strategy<
 	let mut chosen = None;
 	for idx in strategy.order(n, obj.succ_pointer()) {
 		let succ_id = obj.successors()[idx];
-		if others.get(succ_id).is_entrance_allowed() {
+		// Only a successor whose geometry counts needs to know which MU (ADR 0021), so the rest
+		// keep the cheaper question on this, the busiest path of every run.
+		let successor = others.get(succ_id);
+		let allowed = if successor.reads_mu_kind() { accepts_offered(obj, successor, context.time) } else { successor.is_entrance_allowed() };
+		if allowed {
 			// We selected a successor that appears able to accept an MU.
 			// Now take the MU from the predecessor and attempt the transfer.
 			if let Some(mu) = obj.take_content(context.time) {
@@ -409,7 +433,13 @@ pub fn try_to_move_to_successor_with_strategy<
 				pred_id
 			);
 			if let Some(since) = obj.offered_since(context.time) {
-				others.get_mut(succ_id).add_blocked(pred_id, since, strategy.answers_retry());
+				let successor = others.get_mut(succ_id);
+				successor.add_blocked(pred_id, since, strategy.answers_retry());
+				if !strategy.answers_retry() {
+					if let Some(wake) = successor.wake_on_listing() {
+						context.schedule(wake);
+					}
+				}
 			}
 		}
 	}
@@ -421,6 +451,14 @@ pub fn try_to_move_to_successor_with_strategy<
 		}
 		None => Ok(None),
 	}
+}
+
+/// Whether a successor whose geometry counts takes the MU `obj` offers. Kept out of the move loop,
+/// which every run goes through for every move, so models without conveyors pay nothing for it.
+#[cold]
+#[inline(never)]
+fn accepts_offered<T: SuccessorContainer>(obj: &T, successor: &crate::materialflow_objects::ModelObject, now: SimTime) -> bool {
+	obj.offered_kind(now).is_some_and(|kind| successor.accepts(kind, now))
 }
 
 /// Tries only one successor, whichever the other rules would have picked, and tells the object's
@@ -465,6 +503,72 @@ fn with_ranked<T: SuccessorContainer, R>(obj: &mut T, move_it: impl FnOnce(&mut 
 	let result = move_it(obj, ranked);
 	*obj.distribution_mut() = distribution;
 	result
+}
+
+/// Offers the MU it would hand over to its successors in the order of its distribution strategy,
+/// as a conveyor does when its front MU reaches its end, and has the first that can take it
+/// reserve a place for it, rather than moving it now (ADR 0023). Those that can't take it list it
+/// as waiting. With `only`, it offers it to that successor alone, answering its retry. Returns the
+/// successor that reserved a place.
+pub fn try_to_reserve_successor<T: SuccessorContainer + EventInterface>(
+	obj: &mut T,
+	context: &mut EventContext,
+	others: &mut OtherObjects<'_>,
+	mu_id: u32,
+	only: Option<u32>,
+) -> Option<u32> {
+	let index = match only {
+		Some(from) => Some(obj.successors().iter().position(|&succ| succ == from)?),
+		None => None,
+	};
+	if let Distributing::RoundRobin = obj.distribution_mut() {
+		return match index {
+			Some(index) => reserve_with_strategy(obj, context, others, mu_id, &mut OnlySuccessor(index, &mut RoundRobinStrategy)),
+			None => reserve_with_strategy(obj, context, others, mu_id, &mut RoundRobinStrategy),
+		};
+	}
+	with_ranked(obj, |obj, ranked| match index {
+		Some(index) => reserve_with_strategy(obj, context, others, mu_id, &mut OnlySuccessor(index, ranked)),
+		None => reserve_with_strategy(obj, context, others, mu_id, ranked),
+	})
+}
+
+fn reserve_with_strategy<T: SuccessorContainer + EventInterface, S: DistributionStrategy>(
+	obj: &mut T,
+	context: &mut EventContext,
+	others: &mut OtherObjects<'_>,
+	mu_id: u32,
+	strategy: &mut S,
+) -> Option<u32> {
+	let n = obj.successors().len();
+	let kind = obj.offered_kind(context.time)?;
+	let pred_id = *obj.get_object_id();
+	let answering = strategy.answers_retry();
+	let mut chosen = None;
+	for idx in strategy.order(n, obj.succ_pointer()) {
+		let succ_id = obj.successors()[idx];
+		if others.get(succ_id).accepts(kind, context.time) {
+			chosen = Some((idx, succ_id));
+			break;
+		}
+		if let Some(since) = obj.offered_since(context.time) {
+			let successor = others.get_mut(succ_id);
+			successor.add_blocked(pred_id, since, answering);
+			if !answering {
+				if let Some(wake) = successor.wake_on_listing() {
+					context.schedule(wake);
+				}
+			}
+		}
+	}
+	let (idx, succ_id) = chosen?;
+	others.get_mut(succ_id).reserve(mu_id, context);
+	// Its MU no longer waits anywhere.
+	for &refused_by in obj.successors() {
+		others.get_mut(refused_by).relist_blocked(pred_id, None);
+	}
+	strategy.moved(idx, n, obj.succ_pointer_mut());
+	Some(succ_id)
 }
 
 /// Backwards-compatible default that uses round-robin ordering.

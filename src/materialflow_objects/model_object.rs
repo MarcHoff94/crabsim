@@ -4,7 +4,8 @@
 use super::flows::{BaseObject, EventInterface, MaterialFlow, MoveableUnit};
 #[cfg(test)]
 use super::records_then_fails::RecordsThenFails;
-use super::{Buffer, Drain, MultiStation, SingleStation, Source};
+use super::{Buffer, Conveyor, Drain, MultiStation, SingleStation, Source};
+use super::flows::{MuKindId, SuccessorContainer};
 use crate::flows::FailureProfile;
 use crate::error::{InitError, MaterialflowError, RunTimeError};
 use crate::event::{EventContext, EventTemplate, EventType};
@@ -21,6 +22,9 @@ pub enum ModelObject {
     MultiStation(MultiStation),
     Buffer(Buffer),
     Drain(Drain),
+    /// Boxed: it holds its MUs and the model's MU kinds, and every object in a run takes the size
+    /// of the largest.
+    Conveyor(Box<Conveyor>),
     /// No real object fails part way through an event, so only tests can exercise that.
     #[cfg(test)]
     RecordsThenFails(RecordsThenFails),
@@ -35,6 +39,7 @@ macro_rules! on_the_object {
             ModelObject::MultiStation($object) => $body,
             ModelObject::Buffer($object) => $body,
             ModelObject::Drain($object) => $body,
+            ModelObject::Conveyor($object) => $body,
             #[cfg(test)]
             ModelObject::RecordsThenFails($object) => $body,
         }
@@ -80,6 +85,7 @@ impl ModelObject {
             ModelObject::Source(source) => source.interruptions.failure_profiles(),
             ModelObject::Buffer(buffer) => buffer.interruptions.failure_profiles(),
             ModelObject::Drain(drain) => drain.interruptions.failure_profiles(),
+            ModelObject::Conveyor(conveyor) => conveyor.interruptions.failure_profiles(),
             #[cfg(test)]
             ModelObject::RecordsThenFails(_) => &[],
         }
@@ -93,6 +99,7 @@ impl ModelObject {
             ModelObject::Source(source) => source.interruptions.set_failure_profiles(failures),
             ModelObject::Buffer(buffer) => buffer.interruptions.set_failure_profiles(failures),
             ModelObject::Drain(drain) => drain.interruptions.set_failure_profiles(failures),
+            ModelObject::Conveyor(conveyor) => conveyor.interruptions.set_failure_profiles(failures),
             #[cfg(test)]
             ModelObject::RecordsThenFails(_) => {}
         }
@@ -116,9 +123,28 @@ impl ModelObject {
             ModelObject::Station(station) => &station.succ,
             ModelObject::MultiStation(station) => &station.succ,
             ModelObject::Buffer(buffer) => &buffer.succ,
+            ModelObject::Conveyor(conveyor) => &conveyor.succ,
             ModelObject::Drain(_) => &[],
             #[cfg(test)]
             ModelObject::RecordsThenFails(_) => &[],
+        }
+    }
+
+    /// Whether it asks which MU it is offered before taking one: an object whose geometry counts.
+    #[inline]
+    pub fn reads_mu_kind(&self) -> bool {
+        matches!(self, ModelObject::Conveyor(_))
+    }
+
+    /// The kind of MU it would pass on at `now`, if it has one to pass on.
+    pub fn offered_kind(&self, now: SimTime) -> Option<MuKindId> {
+        match self {
+            ModelObject::Source(source) => source.offered_kind(now),
+            ModelObject::Station(station) => station.offered_kind(now),
+            ModelObject::MultiStation(station) => station.offered_kind(now),
+            ModelObject::Buffer(buffer) => buffer.offered_kind(now),
+            ModelObject::Conveyor(conveyor) => conveyor.offered_kind(now),
+            _ => None,
         }
     }
 
@@ -129,6 +155,7 @@ impl ModelObject {
             ModelObject::Station(station) => Some(&mut station.distribution),
             ModelObject::MultiStation(station) => Some(&mut station.distribution),
             ModelObject::Buffer(buffer) => Some(&mut buffer.distribution),
+            ModelObject::Conveyor(conveyor) => Some(&mut conveyor.distribution),
             _ => None,
         }
     }
@@ -172,6 +199,15 @@ impl MaterialFlow for ModelObject {
     }
     fn is_exit_allowed(&self) -> bool {
         on_the_object!(self, object => object.is_exit_allowed())
+    }
+    fn accepts(&self, kind: MuKindId, now: SimTime) -> bool {
+        on_the_object!(self, object => object.accepts(kind, now))
+    }
+    fn reserve(&mut self, mu_id: u32, context: &mut EventContext) {
+        on_the_object!(self, object => object.reserve(mu_id, context))
+    }
+    fn wake_on_listing(&mut self) -> Option<EventTemplate> {
+        on_the_object!(self, object => object.wake_on_listing())
     }
     fn process_mu_entrance(&mut self, mu: MoveableUnit, context: &mut EventContext) -> Result<Option<EventTemplate>, MaterialflowError> {
         on_the_object!(self, object => object.process_mu_entrance(mu, context))

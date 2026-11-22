@@ -27,6 +27,13 @@ pub enum OccurrenceKind {
     WorkFinished { mu_id: u32, at: u32 },
     Blocked { object_id: u32 },
     Unblocked { object_id: u32 },
+    /// The object reserved a place for the MU `mu_id`, which a conveyor is handing over, and is
+    /// receiving it until the MU's booking point arrives, which is its `MuMoved` (ADR 0023).
+    Reserved { object_id: u32, mu_id: u32 },
+    /// An MU on a conveyor began to move or stand: where its front is now, in metres from the
+    /// conveyor's start, its speed in metres per second, 0 standing, and its MU kind. A view works
+    /// out where it is later from this, until the next for it (ADR 0022).
+    MotionPlanned { mu_id: u32, at: u32, front: f32, speed: f32, kind: crate::flows::MuKindId },
     /// A failure, stop or pause began. The object is interrupted while any interruption is active, so
     /// overlapping ones are one stop.
     /// `profile` is the failure profile's index in the object's list, for a random failure.
@@ -47,6 +54,8 @@ pub enum OccurrenceType {
     Unblocked,
     InterruptionBegan,
     InterruptionEnded,
+    Reserved,
+    MotionPlanned,
 }
 
 impl OccurrenceKind {
@@ -62,6 +71,8 @@ impl OccurrenceKind {
             OccurrenceKind::Unblocked { .. } => OccurrenceType::Unblocked,
             OccurrenceKind::InterruptionBegan { .. } => OccurrenceType::InterruptionBegan,
             OccurrenceKind::InterruptionEnded { .. } => OccurrenceType::InterruptionEnded,
+            OccurrenceKind::Reserved { .. } => OccurrenceType::Reserved,
+            OccurrenceKind::MotionPlanned { .. } => OccurrenceType::MotionPlanned,
         }
     }
 }
@@ -121,6 +132,7 @@ pub enum ObjectKind {
     Station,
     Buffer,
     Drain,
+    Conveyor,
 }
 
 /// How many MUs an object can hold.
@@ -215,6 +227,20 @@ pub struct ObjectState {
     /// How full a Buffer was: the fewest MUs it held and its histogram. `None` for other objects,
     /// which then allocate nothing for it.
     pub fill: Option<Box<FillStatistics>>,
+    /// Each MU on a conveyor, front first, and how it moves now. Empty for other objects, which
+    /// then allocate nothing for it.
+    pub positions: Vec<BeltPosition>,
+}
+
+/// Where an MU on a conveyor is at a state's time and how it moves (ADR 0022).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BeltPosition {
+    pub mu_id: u32,
+    /// Where its front is, in metres from the conveyor's start.
+    pub front: f64,
+    /// Metres per second, 0 standing.
+    pub speed: f64,
+    pub kind: crate::flows::MuKindId,
 }
 
 /// The full current state of a simulation run.

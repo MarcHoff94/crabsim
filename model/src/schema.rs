@@ -40,7 +40,7 @@ pub struct ModelFile {
     /// What the model is, as a whole.
     pub description: Option<String>,
     /// The model's own classes, in any order. Each derives from a built-in class (Source,
-    /// Station, Buffer, Drain, or MU for an MU class) or from another class here.
+    /// Station, Buffer, Drain, Conveyor, or MU for an MU class) or from another class here.
     pub classes: Option<Vec<ClassFile>>,
     /// The material-flow objects, in the order a run initialises them.
     pub instances: Vec<InstanceFile>,
@@ -74,10 +74,11 @@ pub struct ConnectionFile {
 #[derive(JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ClassFile {
-    /// Unique among classes. Source, Station, Buffer, Drain or MU makes it this model's own values
-    /// for that built-in class.
+    /// Unique among classes. Source, Station, Buffer, Drain, Conveyor or MU makes it this model's
+    /// own values for that built-in class.
     pub name: Name,
-    /// The class it derives from: Source, Station, Buffer, Drain, MU or another class in the file.
+    /// The class it derives from: Source, Station, Buffer, Drain, Conveyor, MU or another class in
+    /// the file.
     /// Left out only on a class named like a built-in class, and required on every other.
     pub parent: Option<String>,
     /// Only the values this class changes from its parent.
@@ -90,7 +91,8 @@ pub struct ClassFile {
 pub struct InstanceFile {
     /// Unique among instances.
     pub name: Name,
-    /// Source, Station, Buffer, Drain or a class in the file derived from one: not an MU class.
+    /// Source, Station, Buffer, Drain, Conveyor or a class in the file derived from one: not an MU
+    /// class.
     pub class: String,
     /// Its stream: with a run's seed, it gives the instance's random numbers, so runs of two
     /// variants with the same seed draw the same numbers for it. Unique in the model. crabsim
@@ -155,8 +157,8 @@ pub struct AttributesFile {
     /// crabsim's definition of the state. Only states its built-in class can be in, each note not
     /// empty. Inherited as a whole. Visual only.
     pub state_notes: Option<StateNotesFile>,
-    /// Source, Station: which successor receives the MU it passes on (ADR 0016). Round robin by
-    /// default. Inherited as a whole.
+    /// Source, Station, Conveyor: which successor receives the MU it passes on (ADR 0016). Round
+    /// robin by default. Inherited as a whole.
     pub distribution: Option<DistributionFile>,
     /// Source: the MU class whose MUs it makes, `MU` or a class derived from it. `MU` by default.
     pub mu_class: Option<String>,
@@ -165,7 +167,8 @@ pub struct AttributesFile {
     /// MU class: its footprint's length along the way it travels, in metres. 0.6 by default.
     #[schemars(extend("exclusiveMinimum" = 0))]
     pub length: Option<f64>,
-    /// MU class: its footprint's width across the way it travels, in metres. 0.4 by default.
+    /// MU class: its footprint's width across the way it travels, in metres, 0.4 by default.
+    /// Conveyor: how wide it is, in metres, 0.6 by default: an MU wider than this doesn't fit.
     #[schemars(extend("exclusiveMinimum" = 0))]
     pub width: Option<f64>,
     /// MU class: where its booking point is, as a share of its length from its front, 0 at the
@@ -173,6 +176,25 @@ pub struct AttributesFile {
     /// 0.5 by default, its centre.
     #[schemars(range(min = 0, max = 1))]
     pub booking_point: Option<f64>,
+    /// Conveyor: the line its MUs follow, as segments from its start, whose lengths add up to the
+    /// conveyor's (ADR 0024). Straights only so far. One straight of 5 m by default.
+    #[schemars(length(min = 1))]
+    pub path: Option<Vec<SegmentFile>>,
+    /// Conveyor: how fast it moves its MUs, in metres per second, above 0. 0.5 by default.
+    #[schemars(extend("exclusiveMinimum" = 0))]
+    pub speed: Option<f64>,
+    /// Conveyor: the least space between two MUs on it, in metres, 0 or more. 0 by default.
+    #[schemars(range(min = 0))]
+    pub gap: Option<f64>,
+}
+
+/// One piece of a conveyor's path.
+#[derive(JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SegmentFile {
+    /// This many metres straight on, above 0.
+    #[schemars(extend("exclusiveMinimum" = 0))]
+    pub straight: f64,
 }
 
 /// A Source's own values for the MUs it makes, each changing its MU class's when set.
@@ -321,6 +343,9 @@ pub struct StateNotesFile {
     /// Any object.
     #[schemars(length(min = 1))]
     pub paused: Option<String>,
+    /// Station, Buffer, Drain: a place reserved for an MU a conveyor is handing over.
+    #[schemars(length(min = 1))]
+    pub receiving: Option<String>,
 }
 
 /// Failure profiles: a list of named ones, which are independent of each other, or, as older files

@@ -62,6 +62,8 @@ pub enum Shade {
     /// A Buffer with MUs in it, none of which is kept from leaving.
     Holding,
     Blocked,
+    /// A place taken for an MU a conveyor is handing over.
+    Receiving,
     Paused,
     Failed,
     Stopped,
@@ -169,6 +171,19 @@ pub struct MuMarker {
     pub at: Point,
 }
 
+/// An MU on a conveyor, drawn at its own size where its motion puts it at shown time, turned with
+/// the conveyor (ADR 0022).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BeltMarker {
+    pub mu: u32,
+    pub holder: u32,
+    /// Its footprint's centre.
+    pub at: Point,
+    pub length: f64,
+    pub width: f64,
+    pub rotation_degrees: f64,
+}
+
 /// How long the window keeps drawing frames after something happens while halted, so that the
 /// answer to a command reaches the screen. After that a halted window draws nothing.
 const SETTLE: Duration = Duration::from_secs(1);
@@ -202,6 +217,8 @@ const FALLBACK_SPACING: f64 = 3.0;
 pub struct ViewState {
     objects: Vec<ObjectView>,
     connections: Vec<Connection>,
+    /// The model's kinds of MU, for an MU's size on a conveyor (ADR 0021).
+    mu_kinds: Vec<crabsim::MuKind>,
     picture: Picture,
     status: SessionStatus,
     initialised: bool,
@@ -403,6 +420,9 @@ impl Inspection {
             interruption_rows.push(("Availability", format!("{:.1} %", availability * 100.0)));
         }
         let unless_never = |rows: Vec<(&'static str, String)>| if interrupted { rows } else { Vec::new() };
+        // Only an object a conveyor hands MUs to is ever receiving.
+        let receiving: Vec<(&'static str, String)> =
+            if statistics.time_receiving > SimTime::ZERO { vec![("Receiving", share(statistics.time_receiving))] } else { Vec::new() };
         match self.kind {
             ObjectKind::Source => {
                 let mut rows = vec![("MUs out", statistics.mus_out.to_string()), ("Blocked", share(statistics.time_blocked))];
@@ -412,6 +432,19 @@ impl Inspection {
             ObjectKind::Drain => {
                 let throughput = statistics.mus_per_hour(details.as_of).map_or_else(|| "–".to_string(), |per_hour| format!("{per_hour:.1} an hour"));
                 let mut rows: Vec<_> = [("MUs in", statistics.mus_in.to_string()), ("Throughput", throughput)].into_iter().chain(lead_time).collect();
+                rows.extend(receiving);
+                rows.extend(unless_never(interruption_rows));
+                rows
+            }
+            ObjectKind::Conveyor => {
+                let mut rows = vec![
+                    ("MUs in", statistics.mus_in.to_string()),
+                    ("MUs out", statistics.mus_out.to_string()),
+                    ("Busy", share(statistics.time_busy)),
+                    ("Blocked", share(statistics.time_blocked)),
+                    ("Empty", share(statistics.time_idle)),
+                    ("Most MUs", statistics.max_contents.to_string()),
+                ];
                 rows.extend(unless_never(interruption_rows));
                 rows
             }
@@ -437,6 +470,7 @@ impl Inspection {
                 if details.limited {
                     rows.push(("Full", share(statistics.time_full)));
                 }
+                rows.extend(receiving);
                 rows.extend(unless_never(interruption_rows));
                 rows
             }
@@ -455,6 +489,7 @@ impl Inspection {
                     ]);
                 }
                 rows.extend([("Blocked", share(statistics.time_blocked)), ("Idle", share(statistics.time_idle))]);
+                rows.extend(receiving);
                 rows.extend(interruption_rows);
                 rows
             }
@@ -483,6 +518,7 @@ impl Inspection {
             ObjectKind::Buffer => pick(&[("Mean MUs", "Mean MUs"), ("Most MUs", "Most MUs"), ("Empty", "Empty")]),
             ObjectKind::Source => pick(&[("MUs out", "MUs out"), ("Blocked", "Blocked")]),
             ObjectKind::Drain => pick(&[("Throughput", "Throughput"), ("Lead time", "Mean lead time")]),
+            ObjectKind::Conveyor => pick(&[("Busy", "Busy"), ("Blocked", "Blocked"), ("Most MUs", "Most MUs")]),
         }
     }
 }
@@ -696,6 +732,7 @@ impl ViewState {
         ViewState {
             objects,
             connections,
+            mu_kinds: model.mu_kinds().to_vec(),
             picture: Picture::new(),
             status: SessionStatus::Halted,
             initialised: false,
@@ -992,6 +1029,7 @@ impl ViewState {
                 ProcessState::Processing => Shade::Busy,
                 ProcessState::Blocked => Shade::Blocked,
                 ProcessState::Idle => Shade::Idle,
+                ProcessState::Receiving => Shade::Receiving,
             },
         }
     }
@@ -1069,12 +1107,51 @@ impl ViewState {
         self.picture
             .objects()
             .iter()
-            .filter(|pictured| !pictured.contents().is_empty() && pictured.kind() != ObjectKind::Buffer)
+            .filter(|pictured| !pictured.contents().is_empty() && !matches!(pictured.kind(), ObjectKind::Buffer | ObjectKind::Conveyor))
             .flat_map(|pictured| {
                 let holder = pictured.id();
                 let spots = self.objects[holder as usize].mu_spots(pictured.contents().len());
                 pictured.contents().iter().zip(spots).map(move |(&mu, at)| MuMarker { mu, holder, at })
             })
+            .collect()
+    }
+
+    /// Every MU on a conveyor, at its own size where it is at shown time, or none when MUs
+    /// aren't shown. Its front is where its latest motion puts it, from the conveyor's start, its
+    /// rear an MU length behind, so one entering shows part of itself behind the start.
+    pub fn belt_markers(&self, camera: &Camera) -> Vec<BeltMarker> {
+        if !self.shows_mus(camera) {
+            return Vec::new();
+        }
+        let now = self.picture.shown();
+        self.picture
+            .objects()
+            .iter()
+            .filter(|pictured| pictured.kind() == ObjectKind::Conveyor)
+            .flat_map(|pictured| {
+                let belt = &self.objects[pictured.id() as usize];
+                pictured.motion().iter().map(move |motion| {
+                    let kind = self.mu_kinds.get(usize::from(motion.kind)).copied().unwrap_or_default();
+                    let centre = motion.front_at(now) - kind.length / 2.0;
+                    BeltMarker {
+                        mu: motion.mu_id,
+                        holder: belt.id,
+                        at: belt.from_local(Point { x: centre - belt.length / 2.0, y: 0.0 }),
+                        length: kind.length,
+                        width: kind.width,
+                        rotation_degrees: belt.rotation_degrees,
+                    }
+                })
+            })
+            .collect()
+    }
+
+    /// Where each conveyor goes, from its start to its end, for the arrow drawn along it.
+    pub fn belt_directions(&self) -> Vec<(Point, Point)> {
+        self.objects
+            .iter()
+            .filter(|object| object.kind == ObjectKind::Conveyor)
+            .map(|belt| (belt.from_local(Point { x: -belt.length * 0.3, y: 0.0 }), belt.from_local(Point { x: belt.length * 0.3, y: 0.0 })))
             .collect()
     }
 
@@ -1284,7 +1361,9 @@ impl ViewState {
                 ProcessState::Processing if object.kind == ObjectKind::Buffer => "Holding",
                 ProcessState::Processing => "Busy",
                 ProcessState::Blocked => "Blocked",
+                ProcessState::Idle if object.kind == ObjectKind::Conveyor => "Empty",
                 ProcessState::Idle => "Idle",
+                ProcessState::Receiving => "Receiving",
             },
         };
         let blocked = pictured.filter(|pictured| pictured.process() == ProcessState::Blocked).map(|pictured| {
@@ -1642,6 +1721,7 @@ impl Shade {
             State::Failed => Shade::Failed,
             State::Stopped => Shade::Stopped,
             State::Paused => Shade::Paused,
+            State::Receiving => Shade::Receiving,
         }
     }
 
@@ -1656,6 +1736,7 @@ impl Shade {
             Shade::Paused => State::Paused.label(),
             Shade::Failed => State::Failed.label(),
             Shade::Stopped => State::Stopped.label(),
+            Shade::Receiving => State::Receiving.label(),
         }
     }
 }
@@ -1673,6 +1754,7 @@ pub fn rgb(shade: Shade) -> [f32; 3] {
         Shade::Paused => [0.25, 0.45, 0.95],
         Shade::Failed => [0.90, 0.15, 0.15],
         Shade::Stopped => [0.55, 0.08, 0.08],
+        Shade::Receiving => [0.60, 0.45, 0.85],
     }
 }
 
@@ -1686,6 +1768,7 @@ fn doing(shade: Shade) -> &'static str {
         Shade::Paused => "is paused",
         Shade::Failed => "has failed",
         Shade::Stopped => "is stopped",
+        Shade::Receiving => "is receiving an MU from a conveyor",
     }
 }
 

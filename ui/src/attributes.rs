@@ -30,6 +30,10 @@ pub fn summary(value: &Value) -> String {
     if let Value::Bool(freezes) = value {
         return if *freezes { "freezes" } else { "runs on" }.to_string();
     }
+    // A conveyor's path, by its straights.
+    if let Some(straights) = straights(value) {
+        return format!("{} m straight", straights.iter().map(|&metres| self::number(metres)).collect::<Vec<_>>().join(" + "));
+    }
     // Failure profiles, each by name.
     if let Value::Array(profiles) = value
         && profiles.iter().all(|profile| profile.get("availability").is_some())
@@ -236,6 +240,12 @@ impl Form {
     }
 }
 
+/// A path's straights in metres, if `value` is a path of straights only.
+fn straights(value: &Value) -> Option<Vec<f64>> {
+    let segments = value.as_array().filter(|segments| !segments.is_empty())?;
+    segments.iter().map(|segment| segment.get("straight").and_then(Value::as_f64).filter(|_| segment.as_object().is_some_and(|fields| fields.len() == 1))).collect()
+}
+
 /// A booking point typed as a share of an MU's length from its front, or what is wrong with it.
 fn booking_point(typed: &str) -> Result<f64, String> {
     typed
@@ -341,7 +351,12 @@ impl Form {
                 let field = |key: &str| value.and_then(|values| values.get(key)).and_then(Value::as_f64).map_or(String::new(), number);
                 (vec![part("length m", field("length")), part("width m", field("width")), part("booking point", field("booking_point"))], None)
             }
-            "length" | "width" | "booking_point" => (vec![part("", value.and_then(Value::as_f64).map_or(String::new(), number))], None),
+            "length" | "width" | "booking_point" | "speed" | "gap" => (vec![part("", value.and_then(Value::as_f64).map_or(String::new(), number))], None),
+            // Its straights in metres, such as "4, 2.5".
+            "path" => {
+                let typed = value.and_then(straights).map_or(String::new(), |straights| straights.iter().map(|&metres| number(metres)).collect::<Vec<_>>().join(", "));
+                (vec![part("straights m", typed)], None)
+            }
             _ => (vec![part("", text_of(value))], None),
         };
         let options: &[(&str, &str)] = match attribute {
@@ -498,6 +513,24 @@ impl Form {
                 _ => Err(format!("`{}` isn't a {}: type metres above 0", text(0), self.attribute)),
             },
             "booking_point" => booking_point(text(0)).map(|share| json!(share)),
+            "speed" => match float(0)? {
+                speed if speed > 0.0 => Ok(json!(speed)),
+                _ => Err(format!("`{}` isn't a speed: type metres per second above 0", text(0))),
+            },
+            "gap" => match float(0)? {
+                gap if gap >= 0.0 => Ok(json!(gap)),
+                _ => Err(format!("`{}` isn't a gap: type metres, 0 or more", text(0))),
+            },
+            "path" => {
+                let mut segments = Vec::new();
+                for typed in text(0).split(',').map(str::trim) {
+                    match typed.parse::<f64>() {
+                        Ok(metres) if metres > 0.0 && metres.is_finite() => segments.push(json!({ "straight": metres })),
+                        _ => return Err(format!("`{typed}` isn't a straight: type each in metres above 0, such as 10, or 4, 2.5")),
+                    }
+                }
+                Ok(Value::Array(segments))
+            }
             // None of them is no values of its own at all, which a model file says by leaving it out.
             "mu_values" => {
                 let mut values = Map::new();

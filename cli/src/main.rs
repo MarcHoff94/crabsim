@@ -728,8 +728,8 @@ fn read_model(path: &PathBuf) -> Result<ModelDescription, Vec<String>> {
 fn report(model: &ModelDescription, state: &RunState) -> String {
     let mut text = format!("\nStatistics from {} to {}\n", crabsim::time::format_time(state.statistics_since), format_time_exact(state.time));
     text += &format!(
-        "{:>4}  {:<12} {:<8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>9} {:>13}\n",
-        "ID", "Name", "Type", "MUs in", "MUs out", "Working", "Blocked", "Idle", "Failed", "Paused", "Failures", "Availability"
+        "{:>4}  {:<12} {:<8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>9} {:>8} {:>8} {:>9} {:>13}\n",
+        "ID", "Name", "Type", "MUs in", "MUs out", "Working", "Blocked", "Idle", "Receiving", "Failed", "Paused", "Failures", "Availability"
     );
     for object in &state.objects {
         let statistics = &object.statistics;
@@ -740,7 +740,7 @@ fn report(model: &ModelDescription, state: &RunState) -> String {
         };
         let availability = statistics.achieved_availability().map_or("-".to_string(), |a| format!("{:.1} %", a * 100.0));
         text += &format!(
-            "{:>4}  {:<12} {:<8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>9} {:>13}\n",
+            "{:>4}  {:<12} {:<8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>9} {:>8} {:>8} {:>9} {:>13}\n",
             object.id,
             model.name(object.id).unwrap_or("-"),
             kind(object.kind),
@@ -749,6 +749,7 @@ fn report(model: &ModelDescription, state: &RunState) -> String {
             share(statistics.time_busy),
             share(statistics.time_blocked),
             share(statistics.time_idle),
+            share(statistics.time_receiving),
             share(statistics.time_failed),
             share(statistics.time_paused),
             statistics.failures,
@@ -774,6 +775,7 @@ fn kind(kind: ObjectKind) -> &'static str {
         ObjectKind::Station => "Station",
         ObjectKind::Buffer => "Buffer",
         ObjectKind::Drain => "Drain",
+        ObjectKind::Conveyor => "Conveyor",
     }
 }
 

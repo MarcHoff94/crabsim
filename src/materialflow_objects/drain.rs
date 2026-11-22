@@ -79,6 +79,7 @@ impl EventInterface for Drain {
             id: self.base.object_id,
             kind: ObjectKind::Drain,
             contents: Vec::new(),
+            content_kinds: Vec::new(),
             process: self.process_state(),
             interrupted: self.interruptions.most_serious(),
             interruptions: self.interruptions.list(),

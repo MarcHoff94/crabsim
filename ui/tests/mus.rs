@@ -6,7 +6,7 @@ mod common;
 use common::{Watched, SOURCE, STATION_1};
 use crabsim::{demo, SessionStatus, SimTime, SessionOutput};
 use crabsim_ui::camera::Camera;
-use crabsim_ui::view::{Point, ViewState, MU_MAX_SPEED, MU_METRES, MU_MIN_PIXELS_PER_METRE};
+use crabsim_ui::view::{Point, ViewState, MU_MAX_SPEED, MU_MIN_PIXELS_PER_METRE};
 use std::time::Duration;
 
 fn camera(pixels_per_metre: f64) -> Camera {
@@ -93,7 +93,8 @@ fn mus_show_only_when_zoomed_in_far_enough() {
     let watched = halted_at(12);
     assert!(!watched.view.mu_markers(&close()).is_empty());
     assert!(watched.view.mu_markers(&camera(MU_MIN_PIXELS_PER_METRE * 0.9)).is_empty());
-    assert!(MU_METRES * MU_MIN_PIXELS_PER_METRE >= 3.0, "an MU is at least 3 pixels across when shown");
+    let built_in = crabsim::MuKind::default();
+    assert!(built_in.width.min(built_in.length) * MU_MIN_PIXELS_PER_METRE >= 3.0, "the built-in MU is at least 3 pixels across when shown");
 }
 
 #[test]

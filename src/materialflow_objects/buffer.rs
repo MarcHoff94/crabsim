@@ -331,6 +331,7 @@ impl EventInterface for Buffer {
             id: self.base.object_id,
             kind: ObjectKind::Buffer,
             contents: self.content.iter().map(|held| held.mu.id).collect(),
+            content_kinds: self.content.iter().map(|held| held.mu.kind).collect(),
             process: self.process_state(),
             interrupted: self.interruptions.most_serious(),
             interruptions: self.interruptions.list(),

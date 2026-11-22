@@ -51,13 +51,12 @@ fn close() -> Camera {
 fn an_mu_on_a_conveyor_is_drawn_at_its_size_where_it_is_at_shown_time() {
     let watched = halted_at(15_000);
 
-    let markers = watched.view.belt_markers(&close());
+    let markers: Vec<_> = watched.view.mu_markers(&close()).into_iter().filter(|marker| marker.holder == BELT).collect();
     assert_eq!(markers.len(), 1);
     let marker = markers[0];
     assert_eq!((marker.mu, marker.holder, marker.length, marker.width), (1, BELT, 0.8, 0.4));
     // Its front 0.4 m in at 10 s, then 2.5 m on: 2.9 m from the start, its centre 0.4 m behind.
     assert!((marker.at.x - 7.5).abs() < 1e-3 && marker.at.y.abs() < 1e-9, "{marker:?}");
-    assert!(watched.view.mu_markers(&close()).iter().all(|marker| marker.holder != BELT), "drawn once, at its own size");
     assert_eq!(watched.view.shade(BELT), Shade::Busy);
     assert_eq!(watched.view.inspection_of(BELT).unwrap().state, "Busy");
 }
@@ -98,4 +97,53 @@ fn a_conveyors_path_speed_and_gap_are_fields() {
     let mut gap = Form::new("gap", Some(&json!(0.0)));
     gap.parts[0].text = "0.1".into();
     assert_eq!(gap.value(), Ok(json!(0.1)));
+}
+
+/// In (an MU every 10 s, 0.8 by 0.4 m) -> Belt (10 m at 0.5 m/s) -> Mill, a Station working 100 s
+/// on each, halted at `millis`. MU 1 enters the Mill at 30 s.
+fn into_a_station_at(millis: u64) -> Watched {
+    let mut model = ModelDescription::new();
+    let tote = model.add_mu_kind(MuKind { length: 0.8, width: 0.4, booking_point: 0.5 });
+    let source = model.add_source(SimTime::from_secs(10));
+    model.set_mu_kind(source, tote);
+    let belt = model.add_conveyor(10.0, 0.6, 0.5);
+    let mill = model.add_station(SimTime::from_secs(100), crabsim::FailureProfile::new(1.0, crabsim::random_numbers::Distribution::CONSTANT { value: 0.0 }, 0));
+    for (id, name, x) in [(source, "In", 2.0), (belt, "Belt", 10.0), (mill, "Mill", 17.0)] {
+        model.set_name(id, name);
+        model.set_position(id, Position { x, y: 0.0, z: 0.0 });
+    }
+    model.connect(source, belt);
+    model.connect(belt, mill);
+    let view = ViewState::new(&model);
+    let clock = FakeClock::default();
+    let session = LiveSession::new(move || model.build(0), clock.clone());
+    let mut watched = Watched { session, clock, view };
+    watched.session.start().unwrap();
+    watched.session.sync().unwrap();
+    watched.clock.set(std::time::Duration::from_millis(millis));
+    watched.frame();
+    watched.session.halt().unwrap();
+    watched.frame();
+    watched
+}
+
+#[test]
+fn an_mu_keeps_its_shape_from_a_conveyor_into_a_station_and_after_a_full_state() {
+    let size = |watched: &Watched, holder: u32| -> (f64, f64) {
+        let markers = watched.view.mu_markers(&close());
+        let marker = markers.iter().find(|marker| marker.mu == 1).unwrap_or_else(|| panic!("MU 1 in {markers:?}"));
+        assert_eq!(marker.holder, holder);
+        (marker.length, marker.width)
+    };
+    let on_belt = into_a_station_at(20_000);
+    assert_eq!(size(&on_belt, BELT), (0.8, 0.4));
+    let mut in_mill = into_a_station_at(40_000);
+    assert_eq!(size(&in_mill, 2), (0.8, 0.4), "the same rectangle in the Station");
+    assert_eq!(size(&in_mill, 2), size(&on_belt, BELT));
+    // A full state, as after going back, knows each MU's kind too.
+    in_mill.details();
+    assert_eq!(size(&in_mill, 2), (0.8, 0.4));
+    // The Source's next MU is of its kind as well.
+    let source_mu = in_mill.view.mu_markers(&close()).into_iter().find(|marker| marker.holder == SOURCE).unwrap();
+    assert_eq!((source_mu.length, source_mu.width), (0.8, 0.4));
 }

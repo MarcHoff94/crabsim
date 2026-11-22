@@ -719,8 +719,8 @@ impl ViewState {
                 Connection {
                     from: from.id,
                     to: to.id,
-                    start: from.edge_towards(to.centre),
-                    end: to.edge_towards(from.centre),
+                    start: from.leaving_towards(to.centre),
+                    end: to.entering_from(from.centre),
                 }
             })
             .collect();
@@ -1180,8 +1180,8 @@ impl ViewState {
         let objects = &self.objects;
         for connection in self.connections.iter_mut().filter(|connection| connection.from == id || connection.to == id) {
             let (from, to) = (&objects[connection.from as usize], &objects[connection.to as usize]);
-            connection.start = from.edge_towards(to.centre);
-            connection.end = to.edge_towards(from.centre);
+            connection.start = from.leaving_towards(to.centre);
+            connection.end = to.entering_from(from.centre);
         }
     }
 
@@ -1813,6 +1813,24 @@ impl ObjectView {
     fn holds(&self, floor: Point) -> bool {
         let local = rotate(Point { x: floor.x - self.centre.x, y: floor.y - self.centre.y }, -self.rotation_degrees);
         local.x.abs() <= self.length / 2.0 && local.y.abs() <= self.width / 2.0
+    }
+
+    /// Where a connection leaves the object: a conveyor's end, otherwise where a line towards
+    /// `target` crosses its outline.
+    fn leaving_towards(&self, target: Point) -> Point {
+        if self.kind == ObjectKind::Conveyor {
+            return self.from_local(Point { x: self.length / 2.0, y: 0.0 });
+        }
+        self.edge_towards(target)
+    }
+
+    /// Where a connection arrives at the object: a conveyor's start, otherwise where a line from
+    /// `source` crosses its outline.
+    fn entering_from(&self, source: Point) -> Point {
+        if self.kind == ObjectKind::Conveyor {
+            return self.from_local(Point { x: -self.length / 2.0, y: 0.0 });
+        }
+        self.edge_towards(source)
     }
 
     /// Where a line from the centre towards `target` crosses the object's outline.

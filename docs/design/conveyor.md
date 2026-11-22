@@ -1,17 +1,18 @@
 # The conveyor
 
-Spec issue 133, increment 1. The decisions are in ADR 0021 to ADR 0024. This note records how the engine carries them out, for PR 2 onwards. PR 2 builds a straight conveyor at constant speed between objects without geometry. PR 3 adds conveyor to conveyor and non-accumulating conveyors with interruptions while an MU is on two at once, and PR 4 adds the conveyor's statistics.
+Spec issue 133, increment 1. The decisions are in ADR 0021 to ADR 0024. This note records how the engine carries them out, for PR 2 onwards. PR 2 builds a straight conveyor at constant speed between objects without geometry. PR 3 adds conveyor to conveyor and non-accumulating conveyors with interruptions while an MU is on two at once (built), and PR 4 adds the conveyor's statistics.
 
 ## Inside
 
-- **One dimension.** An MU's place on a conveyor is where its front is, in metres from the start along the path. The conveyor holds its MUs front first. Each MU has a position at a time and whether it moves: it moves at the conveyor's speed or stands, so its position at any later time is a formula (ADR 0022). An MU's rear is its front less its length, and its booking point its front less its booking point's share of its length.
+- **One dimension.** An MU's place on a conveyor is where its front is, in metres from the start along the path. The conveyor holds its MUs front first. Each MU has a position at a time and a speed: the conveyor's, the slower speed of an MU on two conveyors, or 0 standing, so its position at any later time is a formula (ADR 0022). An MU's rear is its front less its length, and its booking point its front less its booking point's share of its length.
 - **Its MU kinds.** A conveyor has its own copy of the model's table of MU kinds, given when the run is built, so it can read an MU's length, width and booking point without shared ownership.
-- **Who moves.** The front MU moves unless it has reached the end and no successor has taken it. Every MU behind moves unless it has closed up to the gap behind a standing MU. A conveyor at constant speed moves every moving MU alike, so a moving MU only ever reaches a standing one, and the standing MUs are a block at the front. When the front MU moves again, the whole block moves with it at once.
-- **Its events.** At most three are queued at a time, each worked out again whenever anything on the conveyor changes, with a count on each so that an older one is ignored when it fires, as `MUExit` does with `stop_count`:
+- **Who moves.** Every MU moves at its own speed unless it has closed up to the one ahead, when it moves at that one's speed and no faster, keeping the gap. The front MU stands at the end while no successor has taken it. So a standing front MU brings the MUs behind it to a stop one by one. Each pass (`settle`) walks the MUs from the front, gives each its speed, and works out the first that is faster than the one ahead and when it will close up. An event rounded up to a millisecond may find an MU a little past where it closes up, so one that has closed up is put back at the gap.
+- **Its events.** At most four are queued at a time, each worked out again whenever anything on the conveyor changes, with a count on each so that an older one is ignored when it fires, as `MUExit` does with `stop_count`:
   - the front MU's front reaching the end, or once a successor has taken it, its booking point crossing the end;
-  - the first moving MU behind the block closing up to it;
-  - room at the start for the first predecessor waiting that can fit, when the last MU's rear has passed the start by that MU's length ahead of its booking point plus the gap.
-  A change replans these few events and the MUs whose movement changed, never the whole conveyor. Times are rounded up to the next millisecond, so a position is never short of where an event says it is, and positions are set exactly when the event fires.
+  - the first MU that is faster than the one ahead closing up to it, never sooner than a millisecond;
+  - the last MU, handed over by a conveyor before this one, passing the point where that conveyor stops holding it back, and then where its rear is clear by the gap (`Straddle`);
+  - room at the start for the first predecessor waiting that can fit, when the last MU's rear has passed the start by that MU's length ahead of its booking point plus the gap, or by the gap alone for a conveyor's MU, which enters with its front at the start.
+  A change replans these few events and the MUs whose movement changed. Times are rounded up to the next millisecond, so a position is never short of where an event says it is.
 
 ## Taking an MU in
 
@@ -25,13 +26,21 @@ Spec issue 133, increment 1. The decisions are in ADR 0021 to ADR 0024. This not
 - **Refused,** the front MU stands at the end, ready since its front arrived, in each successor's line, and is offered again on a retry.
 - **Receiving** is a process state of its own (`ProcessState::Receiving`) and a statistic of its own (`time_receiving`). A Station of capacity 1 locks its entrance for it. A Station with capacity, a Buffer and a Drain count the places reserved. A Station working while it receives counts as working. A transfer once begun always finishes: an object without geometry that is interrupted while receiving still takes the MU, and a Station holds it with its work frozen until it is no longer interrupted.
 
+## Conveyor to conveyor
+
+- **Reserving.** An MU reaching the end of a conveyor `A` is offered to the conveyor `B` after it as to any successor, but `B` accepts it when the last MU on `B` has its rear a gap past the start, since it enters front first (`accepts` is asked with `from_belt`). `B` reserves the space under the MU's front from when it touches the start: nothing else may enter `B` until `A` has handed the MU over.
+- **Until the booking point crosses the end,** the MU is `A`'s, in `A`'s belt, its front already on `B`. It moves at the slower of the two speeds, but while `B` is interrupted at `A`'s own. It must not run into `B`'s last MU either, so `A` asks `B` for its rear and speed (`tail_lead`) as for an MU ahead, and stands if `B`'s last MU stands too close to the start.
+- **From then on** the MU is `B`'s, with its rear still on `A` if it is longer than what its booking point has left behind. It moves at `B`'s speed or, while its rear is on `A` and `A` is running, the slower of the two. `A`'s MUs behind it close up to its rear as to an MU ahead (`led_by`, `lead`), until `B` says its rear is a gap past the start.
+- **Neighbours are woken, never polled.** What one conveyor does to the other's MUs changes only when the other's MUs move differently: an interruption beginning or ending, the straddling MU passing a point, `B`'s last MU moving differently while `A`'s MU waits to enter. Each wakes the other once through an ordinary event, and a woken conveyor wakes nobody, so there is no loop.
+- **Non-accumulating** conveyors move every MU as one: at the slowest speed any MU on it is held to, which is 0 while the front MU waits at the end or stands behind another's. They start again together.
+
 ## Interruptions
 
-An interrupted conveyor stops every MU it holds, takes no MU and passes none on. A retry that finds it interrupted is answered as refused, so it keeps its place. When it is no longer interrupted, its MUs move again by the rules above, and the front MU at the end is offered again. An MU handed over part way stops with the conveyor, and its successor stays Receiving.
+An interrupted conveyor stops every MU it holds, takes no MU and passes none on. A retry that finds it interrupted is answered as refused, so it keeps its place. When it is no longer interrupted, its MUs move again by the rules above, and the front MU at the end is offered again. An MU handed over part way stops with the conveyor, and its successor stays Receiving. An MU on two conveyors follows the one it belongs to (ADR 0023): with its booking point still on the stopped one it stops there; having crossed to a stopped one it stands; having crossed to a running one it goes on over the stopped one, at the running one's speed.
 
-## Not in PR 2
+## Not yet
 
-A conveyor's successor can't be another conveyor yet, which a model file says is a problem until PR 3. Non-accumulating conveyors, the busy time in three parts, fill and crossing times come with PR 3 and PR 4.
+The busy time in three parts, fill and crossing times come with PR 4.
 
 ## What a view sees
 

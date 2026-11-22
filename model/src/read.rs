@@ -38,7 +38,7 @@ const TOP_LEVEL: [&str; 6] = ["$schema", "format_version", "description", "class
 const INSTANCE: [&str; 5] = ["name", "class", "stream", "position", "attributes"];
 const CONNECTION: [&str; 5] = ["from", "to", "exit", "entrance", "description"];
 const CLASS: [&str; 3] = ["name", "parent", "attributes"];
-const ATTRIBUTES: [&str; 22] = [
+const ATTRIBUTES: [&str; 23] = [
     "interval",
     "process_time",
     "failures",
@@ -61,6 +61,7 @@ const ATTRIBUTES: [&str; 22] = [
     "path",
     "speed",
     "gap",
+    "accumulating",
 ];
 /// The kinds of segment a path will have (ADR 0024), straights the only one read so far, with
 /// their names as people say them.
@@ -343,6 +344,7 @@ impl Reader {
                 "path" => self.path(value, &at, name).map(|path| attributes.path = Some(path)),
                 "speed" => self.number_value(value, &at, name).map(|speed| attributes.speed = Some(speed)),
                 "gap" => self.number_value(value, &at, name).map(|gap| attributes.gap = Some(gap)),
+                "accumulating" => self.yes_or_no(value, &at, name).map(|accumulating| attributes.accumulating = Some(accumulating)),
                 _ => unreachable!("every attribute is read"),
             };
             if read.is_none() {

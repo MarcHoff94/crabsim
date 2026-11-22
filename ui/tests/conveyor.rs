@@ -147,3 +147,14 @@ fn an_mu_keeps_its_shape_from_a_conveyor_into_a_station_and_after_a_full_state()
     let source_mu = in_mill.view.mu_markers(&close()).into_iter().find(|marker| marker.holder == SOURCE).unwrap();
     assert_eq!((source_mu.length, source_mu.width), (0.8, 0.4));
 }
+
+#[test]
+fn connections_meet_a_conveyors_start_and_leave_from_its_end() {
+    let watched = halted_at(0);
+
+    let connections = watched.view.connections();
+    let (into, out_of) = (&connections[0], &connections[1]);
+    // The belt is 10 m long with its centre at x = 10: start at 5, end at 15.
+    assert!((into.end.x - 5.0).abs() < 1e-9 && into.end.y.abs() < 1e-9, "{into:?}");
+    assert!((out_of.start.x - 15.0).abs() < 1e-9 && out_of.start.y.abs() < 1e-9, "{out_of:?}");
+}

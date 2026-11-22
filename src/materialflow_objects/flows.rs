@@ -178,8 +178,9 @@ pub trait EventInterface {
 pub trait MaterialFlow: EventInterface {
 	fn is_entrance_allowed(&self) -> bool;
 	/// Whether it can take an MU of this kind at `now`. Only an object whose geometry counts asks
-	/// about the MU (ADR 0021): the rest take any MU they have room for.
-	fn accepts(&self, _kind: MuKindId, _now: SimTime) -> bool {
+	/// about the MU (ADR 0021): the rest take any MU they have room for. `from_belt` says it comes
+	/// from another conveyor, with its front at the start rather than its booking point.
+	fn accepts(&self, _kind: MuKindId, _now: SimTime, _from_belt: bool) -> bool {
 		self.is_entrance_allowed()
 	}
 	/// Reserves a place for the MU `mu_id` a conveyor is handing over, which it takes through
@@ -292,6 +293,10 @@ pub trait SuccessorContainer {
 	/// The kind of the MU it would hand over at `now`, which a successor whose geometry counts
 	/// needs to say whether it fits. `None` if it has none to hand over.
 	fn offered_kind(&self, now: SimTime) -> Option<MuKindId>;
+	/// Whether it is a conveyor, whose MUs hand over to another conveyor with their front first.
+	fn on_belt(&self) -> bool {
+		false
+	}
 	fn statistics_mut(&mut self) -> &mut StatisticsKeeper;
 }
 
@@ -458,7 +463,7 @@ pub fn try_to_move_to_successor_with_strategy<
 #[cold]
 #[inline(never)]
 fn accepts_offered<T: SuccessorContainer>(obj: &T, successor: &crate::materialflow_objects::ModelObject, now: SimTime) -> bool {
-	obj.offered_kind(now).is_some_and(|kind| successor.accepts(kind, now))
+	obj.offered_kind(now).is_some_and(|kind| successor.accepts(kind, now, obj.on_belt()))
 }
 
 /// Tries only one successor, whichever the other rules would have picked, and tells the object's
@@ -547,7 +552,7 @@ fn reserve_with_strategy<T: SuccessorContainer + EventInterface, S: Distribution
 	let mut chosen = None;
 	for idx in strategy.order(n, obj.succ_pointer()) {
 		let succ_id = obj.successors()[idx];
-		if others.get(succ_id).accepts(kind, context.time) {
+		if others.get(succ_id).accepts(kind, context.time, obj.on_belt()) {
 			chosen = Some((idx, succ_id));
 			break;
 		}

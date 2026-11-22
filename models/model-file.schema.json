@@ -184,6 +184,10 @@
           "type": "number",
           "format": "double",
           "minimum": 0
+        },
+        "accumulating": {
+          "description": "Conveyor: whether MUs behind a stopped one close up and stop while the rest still move, true by default, or every MU stops as a whole when the first can't leave and they all start again together.",
+          "type": "boolean"
         }
       },
       "additionalProperties": false

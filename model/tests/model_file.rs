@@ -1580,14 +1580,40 @@ fn a_conveyors_values_are_checked_and_curves_come_later() {
 }
 
 #[test]
-fn a_conveyor_cant_lead_into_a_conveyor_yet() {
+fn a_conveyor_can_lead_into_a_conveyor() {
     let text = file(json!([
         { "name": "In", "class": "Source", "successors": ["A"], "attributes": { "interval": "10" } },
-        { "name": "A", "class": "Conveyor", "successors": ["B"] },
+        { "name": "A", "class": "Conveyor", "successors": ["B"], "attributes": { "speed": 1.0 } },
         { "name": "B", "class": "Conveyor", "successors": ["Out"] },
         { "name": "Out", "class": "Drain" },
     ]));
-    assert_found(&text, "/connections/1/to", "can't lead straight into another conveyor yet");
+    let model = load(&text).unwrap();
+    assert_eq!(model.resolve(1).unwrap().attributes.speed, Some(1.0));
+    // And it runs: an MU every 10 s, 10 s then 20 s on the conveyors.
+    let mut run = model.to_description().build(0);
+    run.init().unwrap();
+    run.advance_to(SimTime::from_secs(100)).unwrap();
+    assert!(run.state().objects[3].statistics.mus_in > 0);
+}
+
+#[test]
+fn a_conveyor_accumulates_unless_the_file_says_it_doesnt() {
+    let belt = |attributes: serde_json::Value| {
+        file(json!([
+            { "name": "In", "class": "Source", "successors": ["Belt"], "attributes": { "interval": "10" } },
+            { "name": "Belt", "class": "Conveyor", "successors": ["Out"], "attributes": attributes },
+            { "name": "Out", "class": "Drain" },
+        ]))
+    };
+    let model = load(&belt(json!({}))).unwrap();
+    assert_eq!(model.resolve(1).unwrap().attributes.accumulating, Some(true));
+    let model = load(&belt(json!({ "accumulating": false }))).unwrap();
+    assert_eq!(model.resolve(1).unwrap().attributes.accumulating, Some(false));
+    let saved = model.save();
+    assert!(saved.contains(r#""accumulating": false"#), "{saved}");
+    assert_found(&belt(json!({ "accumulating": "no" })), "/instances/1/attributes/accumulating", "true or false");
+    let station = file(json!([{ "name": "S", "class": "Station", "attributes": { "accumulating": true } }]));
+    assert_found(&station, "/instances/0/attributes/accumulating", "a Station has no attribute");
 }
 
 #[test]

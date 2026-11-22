@@ -277,6 +277,10 @@ pub const STARTS: [(&str, &str); 2] = [("individual", "Each MU on entry"), ("bat
 /// label in the window.
 pub const DWELLING_IN_A_STOP: [(&str, &str); 2] = [("false", "Runs on"), ("true", "Freezes")];
 
+/// What a Conveyor does with the MUs behind one that stops: close up and stop while the rest move
+/// on, or stop as a whole.
+pub const ACCUMULATION: [(&str, &str); 2] = [("true", "Accumulating"), ("false", "Stops as a whole")];
+
 /// What can be weighed, by name in a model file, with its label in the window.
 pub const WEIGHABLE: [(&str, &str); 4] = [("process_time", "Process time"), ("interval", "Interval"), ("starting_mus", "Starting MUs"), ("capacity", "Capacity")];
 
@@ -346,6 +350,7 @@ impl Form {
             "exit_strategy" => (vec![part("", value.and_then(Value::as_str).unwrap_or(EXIT_STRATEGIES[0].0))], None),
             "start" => (vec![part("", value.and_then(Value::as_str).unwrap_or(STARTS[0].0))], None),
             "stop_freezes_dwelling" => (vec![part("", if value.and_then(Value::as_bool) == Some(true) { "true" } else { "false" })], None),
+            "accumulating" => (vec![part("", if value.and_then(Value::as_bool) == Some(false) { "false" } else { "true" })], None),
             // Each may be left empty, taking the MU class's.
             "mu_values" => {
                 let field = |key: &str| value.and_then(|values| values.get(key)).and_then(Value::as_f64).map_or(String::new(), number);
@@ -363,6 +368,7 @@ impl Form {
             "exit_strategy" => &EXIT_STRATEGIES,
             "start" => &STARTS,
             "stop_freezes_dwelling" => &DWELLING_IN_A_STOP,
+            "accumulating" => &ACCUMULATION,
             _ => &[],
         };
         Form { attribute: attribute.to_string(), parts, repair, distribution: None, options, profiles: None, choices: Vec::new() }
@@ -508,6 +514,7 @@ impl Form {
                 Ok(Value::Object(size))
             }
             "stop_freezes_dwelling" => Ok(json!(text(0) == "true")),
+            "accumulating" => Ok(json!(text(0) != "false")),
             "length" | "width" => match float(0)? {
                 metres if metres > 0.0 => Ok(json!(metres)),
                 _ => Err(format!("`{}` isn't a {}: type metres above 0", text(0), self.attribute)),

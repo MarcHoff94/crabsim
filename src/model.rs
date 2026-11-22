@@ -298,6 +298,16 @@ impl ModelDescription {
         }
     }
 
+    /// Sets whether a conveyor accumulates: MUs behind a stopped one close up and stop while the
+    /// rest still move, which is the default, or every MU stops as a whole when the first does.
+    pub fn set_conveyor_accumulating(&mut self, id: u32, accumulating: bool) {
+        match self.objects.get_mut(id as usize) {
+            Some(ModelObject::Conveyor(conveyor)) => conveyor.accumulating = accumulating,
+            Some(_) => panic!("object {id} is not a conveyor"),
+            None => panic!("object {id} is not in the model"),
+        }
+    }
+
     pub fn add_drain(&mut self) -> u32 {
         self.add(ModelObject::Drain(Drain::new(self.next_id())))
     }

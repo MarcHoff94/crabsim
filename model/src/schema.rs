@@ -186,6 +186,10 @@ pub struct AttributesFile {
     /// Conveyor: the least space between two MUs on it, in metres, 0 or more. 0 by default.
     #[schemars(range(min = 0))]
     pub gap: Option<f64>,
+    /// Conveyor: whether MUs behind a stopped one close up and stop while the rest still move,
+    /// true by default, or every MU stops as a whole when the first can't leave and they all start
+    /// again together.
+    pub accumulating: Option<bool>,
 }
 
 /// One piece of a conveyor's path.

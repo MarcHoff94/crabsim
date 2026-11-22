@@ -341,3 +341,303 @@ fn predecessors_waiting_for_room_on_a_conveyor_go_in_the_order_their_mus_were_re
         assert!((pair[1] - pair[0] - 1.2).abs() < 1e-9, "{times:?}");
     }
 }
+
+// ---------- Conveyor to conveyor, non-accumulating and interruptions (spec issue 133, PR 3) ----------
+
+/// Source (an MU every `interval`) -> a conveyor of 10 m at `first` m/s -> one at `second` m/s -> Drain.
+fn two_conveyors(interval: SimTime, first: f64, second: f64) -> (ModelDescription, u32, u32, u32) {
+    let mut model = ModelDescription::new();
+    let source = model.add_source(interval);
+    let a = model.add_conveyor(10.0, 0.6, first);
+    let b = model.add_conveyor(10.0, 0.6, second);
+    let out = model.add_drain();
+    model.connect(source, a);
+    model.connect(a, b);
+    model.connect(b, out);
+    (model, a, b, out)
+}
+
+/// What a millimetre of rounding to a millisecond can do.
+const TOLERANCE: f64 = 1e-3;
+
+/// Nothing overlaps another MU on a conveyor, nor, across the two, the last MU of the second, whose
+/// rear may be on the first. Every MU is 0.6 m long.
+fn assert_nothing_overlaps(state: &RunState, a: u32, b: u32, gap: f64, at: SimTime) {
+    for id in [a, b] {
+        for pair in object(state, id).positions.windows(2) {
+            assert!(pair[0].front - 0.6 - pair[1].front >= gap - TOLERANCE, "on {id} at {at:?}: {pair:?}");
+        }
+    }
+    if let (Some(first_on_a), Some(last_on_b)) = (object(state, a).positions.first(), object(state, b).positions.last()) {
+        // In the first conveyor's metres, the second one's start is at 10.
+        assert!(first_on_a.front <= 10.0 + (last_on_b.front - 0.6) - gap + TOLERANCE, "between the conveyors at {at:?}: {first_on_a:?} and {last_on_b:?}");
+    }
+}
+
+#[test]
+fn an_mu_passes_between_conveyors_of_one_speed_without_stopping() {
+    let (model, a, b, out) = two_conveyors(secs(10), 0.5, 0.5);
+    let mut run = recorded(model.build(0));
+
+    let occurrences = run_until(&mut run, secs(75));
+
+    // 20 s on each, by its booking point.
+    assert_eq!(moves(&occurrences, a, b), [30.0, 40.0, 50.0, 60.0, 70.0]);
+    assert_eq!(moves(&occurrences, b, out), [50.0, 60.0, 70.0]);
+}
+
+#[test]
+fn an_mu_on_two_conveyors_moves_at_the_slower_speed() {
+    // Entering at 100 s. On the first, at 1 m/s, its front reaches the end 9.7 s later, and its
+    // booking point crosses 0.3 m after that, at 0.5 m/s since it is on the second too, 0.6 s later.
+    // Then 10 m to its booking point crossing the end of the second, 20 s.
+    let (model, a, b, out) = two_conveyors(secs(100), 1.0, 0.5);
+    let mut run = recorded(model.build(0));
+
+    let occurrences = run_until(&mut run, secs(145));
+
+    assert_eq!(moves(&occurrences, a, b), [110.3]);
+    assert_eq!(moves(&occurrences, b, out), [130.3]);
+}
+
+#[test]
+fn an_mu_behind_one_on_two_conveyors_closes_up_to_its_rear_and_follows_it() {
+    let (model, a, b, _) = two_conveyors(secs(1), 1.0, 0.5);
+    let mut run = recorded(model.build(0));
+
+    let occurrences = run_until(&mut run, secs(25));
+
+    // MU 1, entering at 1 s, is handed over at 11.3 s. MU 2, 1 m behind, closes up to its rear 0.2 s
+    // later and follows it at 0.5 m/s, so its front reaches the end at 11.9 s, as MU 1's rear
+    // clears it, and its booking point crosses 0.6 s after that.
+    assert_eq!(moves(&occurrences, a, b)[..2], [11.3, 12.5]);
+}
+
+#[test]
+fn mus_never_overlap_across_conveyors_of_different_speeds_with_a_gap_and_a_slow_end() {
+    for (first, second, gap) in [(1.0, 0.5, 0.0), (0.5, 1.0, 0.1), (0.8, 0.3, 0.2), (0.4, 0.4, 0.05)] {
+        let mut model = ModelDescription::new();
+        let source = model.add_source(millis(700));
+        let a = model.add_conveyor(10.0, 0.6, first);
+        let b = model.add_conveyor(10.0, 0.6, second);
+        model.set_conveyor_gap(a, gap);
+        model.set_conveyor_gap(b, gap);
+        let mill = station(&mut model, 6);
+        let out = model.add_drain();
+        model.connect(source, a);
+        model.connect(a, b);
+        model.connect(b, mill);
+        model.connect(mill, out);
+        let mut run = recorded(model.build(0));
+        run.init().unwrap();
+        let mut at = SimTime::ZERO;
+        while at < secs(400) {
+            at += millis(100);
+            run.advance_to(at).unwrap();
+            assert_nothing_overlaps(&run.state(), a, b, gap, at);
+        }
+        assert!(object(&run.state(), mill).statistics.mus_in > 30, "speeds {first} and {second}");
+    }
+}
+
+#[test]
+fn a_full_conveyor_holds_the_mu_that_has_reserved_a_place_on_it_until_it_fits() {
+    let mut model = ModelDescription::new();
+    let source = model.add_source(secs(5));
+    let a = conveyor(&mut model);
+    let b = model.add_conveyor(2.0, 0.6, 0.5);
+    let mill = station(&mut model, 1_000);
+    model.connect(source, a);
+    model.connect(a, b);
+    model.connect(b, mill);
+    let mut run = recorded(model.build(0));
+
+    let occurrences = run_until(&mut run, secs(200));
+
+    // The first MU goes through to the Station, the second stops at the end of the short conveyor,
+    // and the others close up behind it: three on the second, a fourth with its front on it but
+    // belonging to the first, which waits there.
+    assert_eq!(moves(&occurrences, b, mill), [29.0]);
+    let state = run.state();
+    let on_b: Vec<f64> = object(&state, b).positions.iter().map(|position| (position.front * 1e3).round() / 1e3).collect();
+    assert_eq!(on_b, [2.0, 1.4, 0.8]);
+    let first_on_a = &object(&state, a).positions[0];
+    assert!((first_on_a.front - 10.2).abs() < 1e-6, "{first_on_a:?}");
+    for position in object(&state, a).positions.iter().chain(object(&state, b).positions.iter()) {
+        assert_eq!(position.speed, 0.0, "{position:?}");
+    }
+    assert_nothing_overlaps(&state, a, b, 0.0, secs(200));
+}
+
+#[test]
+fn a_non_accumulating_conveyor_stops_as_a_whole_when_its_first_mu_cannot_leave() {
+    let mut model = ModelDescription::new();
+    let source = model.add_source(secs(5));
+    let belt = conveyor(&mut model);
+    model.set_conveyor_accumulating(belt, false);
+    let mill = station(&mut model, 1_000);
+    model.connect(source, belt);
+    model.connect(belt, mill);
+    let mut run = recorded(model.build(0));
+
+    run_until(&mut run, secs(40));
+
+    // MU 1 went into the Station at 25 s. MU 2 reached the end at 29.4 s and was refused, and the
+    // others stopped where they were, as MU 6 did when it entered at 30 s.
+    let state = run.state();
+    let positions = &object(&state, belt).positions;
+    let fronts: Vec<f64> = positions.iter().map(|position| (position.front * 1000.0).round() / 1000.0).collect();
+    assert_eq!(object(&state, belt).contents, [2, 3, 4, 5, 6]);
+    assert_eq!(fronts, [10.0, 7.5, 5.0, 2.5, 0.3]);
+    assert!(positions.iter().all(|position| position.speed == 0.0));
+    assert_eq!(object(&state, belt).process, ProcessState::Blocked);
+}
+
+#[test]
+fn an_accumulating_conveyor_lets_the_mus_behind_close_up_where_a_non_accumulating_one_stops() {
+    let mut model = ModelDescription::new();
+    let source = model.add_source(secs(5));
+    let belt = conveyor(&mut model);
+    let mill = station(&mut model, 1_000);
+    model.connect(source, belt);
+    model.connect(belt, mill);
+    let mut run = recorded(model.build(0));
+
+    run_until(&mut run, secs(40));
+
+    let state = run.state();
+    let fronts: Vec<f64> = object(&state, belt).positions.iter().map(|position| (position.front * 1000.0).round() / 1000.0).collect();
+    assert_eq!(fronts[..4], [10.0, 9.4, 8.8, 7.8], "MU 5 entered at 25 s and hasn't closed up yet");
+}
+
+#[test]
+fn a_non_accumulating_conveyor_starts_all_its_mus_together_when_the_first_can_leave() {
+    let mut model = ModelDescription::new();
+    let source = model.add_source(secs(5));
+    let belt = conveyor(&mut model);
+    model.set_conveyor_accumulating(belt, false);
+    let mill = station(&mut model, 40);
+    let out = model.add_drain();
+    model.connect(source, belt);
+    model.connect(belt, mill);
+    model.connect(mill, out);
+    let mut run = recorded(model.build(0));
+
+    let occurrences = run_until(&mut run, secs(66));
+
+    // The Station takes MU 1 at 25 s and is free at 65 s, when MU 2, waiting since 29.4 s, goes in,
+    // its booking point crossing 0.6 s later, and the whole belt moves on together, as far apart
+    // as it was.
+    assert_eq!(moves(&occurrences, belt, mill)[..2], [25.0, 65.6]);
+    let state = run.state();
+    let positions = &object(&state, belt).positions;
+    assert!(positions.iter().all(|position| position.speed == 0.5), "{positions:?}");
+    let fronts: Vec<f64> = positions.iter().take(3).map(|position| position.front).collect();
+    assert!(fronts.iter().zip([8.0, 5.5, 3.0]).all(|(front, expected)| (front - expected).abs() < 1e-6), "{fronts:?}");
+}
+
+#[test]
+fn a_straddling_mu_carries_on_at_its_own_conveyors_speed_onto_a_stopped_one() {
+    // The second conveyor is paused from 29.6 s to 40 s. MU 1, entering at 10 s, reached the end of
+    // the first at 29.4 s and belongs to it until its booking point crosses at 30 s, going on at
+    // 0.5 m/s though the second is stopped. Then it belongs to the stopped one, and stands there.
+    let (model, a, b, out) = two_conveyors(secs(10), 0.5, 0.5);
+    let mut run = recorded(model.build(0));
+    let mut occurrences = run.init().unwrap();
+    run.schedule_event(millis(29_600), EventType::PauseOn, b).unwrap();
+    run.schedule_event(secs(40), EventType::PauseOff, b).unwrap();
+
+    occurrences.extend(run.advance_to(secs(35)).unwrap());
+
+    assert_eq!(moves(&occurrences, a, b), [30.0]);
+    let state = run.state();
+    let on_b = &object(&state, b).positions;
+    assert_eq!(on_b.len(), 1);
+    assert_eq!(on_b[0].speed, 0.0);
+    assert!((on_b[0].front - 0.3).abs() < 1e-6, "{on_b:?}");
+
+    // Paused 10 s of its 20 s on the second.
+    occurrences.extend(run.advance_to(secs(70)).unwrap());
+    assert_eq!(moves(&occurrences, b, out)[0], 60.0);
+}
+
+#[test]
+fn a_straddling_mu_that_belongs_to_the_second_conveyor_carries_on_over_a_stopped_first_one() {
+    // The first conveyor is paused from 30.4 s to 40 s. MU 1's booking point crossed at 30 s, with
+    // 0.3 m of its rear still on the first: it goes on at the second's speed over the stopped one.
+    let (model, a, b, _) = two_conveyors(secs(10), 0.5, 0.5);
+    let mut run = recorded(model.build(0));
+    run.init().unwrap();
+    run.schedule_event(millis(30_400), EventType::PauseOn, a).unwrap();
+    run.schedule_event(secs(40), EventType::PauseOff, a).unwrap();
+
+    run.advance_to(secs(35)).unwrap();
+
+    let state = run.state();
+    let on_b = &object(&state, b).positions[0];
+    assert_eq!(on_b.speed, 0.5);
+    assert!((on_b.front - (0.3 + 0.5 * 5.0)).abs() < 1e-6, "{on_b:?}");
+    // MU 2 entered the first conveyor at 20 s and stood where it was when it stopped.
+    let on_a = &object(&state, a).positions[0];
+    assert_eq!(on_a.speed, 0.0);
+    assert!((on_a.front - 5.5).abs() < 1e-6, "{on_a:?}");
+}
+
+#[test]
+fn a_straddling_mu_belonging_to_a_stopped_conveyor_stands_and_so_do_those_behind() {
+    // The first conveyor stops at 20.7 s, while MU 1, entering at 1 s, has its front 0.15 m over the
+    // second and its booking point not yet across: it stands, and the MU behind it stops.
+    let (model, a, b, _) = two_conveyors(secs(1), 0.5, 0.5);
+    let mut run = recorded(model.build(0));
+    run.init().unwrap();
+    run.schedule_event(millis(20_700), EventType::PauseOn, a).unwrap();
+    run.schedule_event(secs(40), EventType::PauseOff, a).unwrap();
+
+    run.advance_to(secs(30)).unwrap();
+
+    let state = run.state();
+    for position in object(&state, a).positions.iter() {
+        assert_eq!(position.speed, 0.0, "{position:?}");
+    }
+    assert!((object(&state, a).positions[0].front - 10.15).abs() < 1e-6, "MU 1 stands with its front on the second conveyor");
+    assert_nothing_overlaps(&state, a, b, 0.0, secs(30));
+}
+
+#[test]
+fn mus_never_overlap_while_either_of_two_conveyors_is_stopped() {
+    for stopped in [0, 1] {
+        let (model, a, b, _) = two_conveyors(millis(1_300), 0.5, 0.5);
+        let mut run = recorded(model.build(0));
+        run.init().unwrap();
+        let belt = [a, b][stopped];
+        run.schedule_event(secs(30), EventType::PauseOn, belt).unwrap();
+        run.schedule_event(secs(55), EventType::PauseOff, belt).unwrap();
+        run.schedule_event(secs(70), EventType::PauseOn, belt).unwrap();
+        run.schedule_event(secs(75), EventType::PauseOff, belt).unwrap();
+        let mut at = SimTime::ZERO;
+        while at < secs(200) {
+            at += millis(100);
+            run.advance_to(at).unwrap();
+            assert_nothing_overlaps(&run.state(), a, b, 0.0, at);
+        }
+        assert!(run.state().objects[3].statistics.mus_in > 50);
+    }
+}
+
+#[test]
+fn reset_forgets_what_two_conveyors_were_doing_and_replays_the_same() {
+    let (model, a, b, _) = two_conveyors(secs(1), 1.0, 0.5);
+    let mut run = recorded(model.build(0));
+    run.init().unwrap();
+    run.schedule_event(secs(30), EventType::PauseOn, b).unwrap();
+    run.schedule_event(secs(40), EventType::PauseOff, b).unwrap();
+    run.advance_to(secs(35)).unwrap();
+
+    run.reset();
+    let state = run.state();
+    assert!(object(&state, a).positions.is_empty() && object(&state, b).positions.is_empty());
+    let mut again = run.init().unwrap();
+    again.extend(run.advance_to(secs(100)).unwrap());
+
+    assert_eq!(again, run_until(&mut recorded(model.build(0)), secs(100)));
+}

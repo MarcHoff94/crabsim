@@ -4162,6 +4162,7 @@ fn attribute_label(attribute: &str) -> &str {
         "path" => "Path",
         "speed" => "Speed m/s",
         "gap" => "Gap m",
+        "accumulating" => "Accumulation",
         other => other,
     }
 }

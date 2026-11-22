@@ -59,6 +59,7 @@ pub(crate) fn build(model: &Model) -> ModelDescription {
                 let path = attributes.path.as_deref().unwrap_or(&crate::DEFAULT_PATH);
                 let conveyor = description.add_conveyor(crate::path_length(path), attributes.width.unwrap_or(0.6), attributes.speed.unwrap_or(0.5));
                 description.set_conveyor_gap(conveyor, attributes.gap.unwrap_or(0.0));
+                description.set_conveyor_accumulating(conveyor, attributes.accumulating.unwrap_or(true));
                 conveyor
             }
             other => unreachable!("checked: `{other}` is a built-in class"),

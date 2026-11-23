@@ -94,7 +94,8 @@ fn main() {
             }
         },
     };
-    let view = ViewState::new(workspace.description());
+    let mut view = ViewState::new(workspace.description());
+    view.set_shapes(workspace.shapes());
     let session = workspace.session(WallClock::new());
     session.set_speed(DEFAULT_SPEED).expect("a positive speed");
     let seed_text = workspace.seed().to_string();
@@ -747,7 +748,8 @@ fn setup(
     });
 }
 
-/// An entity for each object of the view, unshaded. Objects of the same size share a mesh.
+/// An entity for each object of the view, unshaded. Objects of the same size share a mesh, and a
+/// conveyor has one of its own, a band along its path.
 fn spawn_objects(
     commands: &mut Commands,
     view: &ViewState,
@@ -758,15 +760,44 @@ fn spawn_objects(
     view.objects()
         .iter()
         .map(|object| {
-            let mesh = sizes
-                .entry((object.length.to_bits(), object.width.to_bits()))
-                .or_insert_with(|| meshes.add(Rectangle::new(object.length as f32, object.width as f32)))
-                .clone();
-            let transform = Transform::from_xyz(object.centre.x as f32, object.centre.y as f32, 0.0)
-                .with_rotation(Quat::from_rotation_z((object.rotation_degrees as f32).to_radians()));
+            let (mesh, rotation) = match &object.shape {
+                Some(shape) => (meshes.add(band_mesh(shape)), 0.0),
+                None => {
+                    let mesh = sizes
+                        .entry((object.length.to_bits(), object.width.to_bits()))
+                        .or_insert_with(|| meshes.add(Rectangle::new(object.length as f32, object.width as f32)))
+                        .clone();
+                    (mesh, object.rotation_degrees)
+                }
+            };
+            let transform = Transform::from_xyz(object.centre.x as f32, object.centre.y as f32, 0.0).with_rotation(Quat::from_rotation_z((rotation as f32).to_radians()));
             commands.spawn((Mesh3d(mesh), MeshMaterial3d(materials[&Shade::Unknown].clone()), transform)).id()
         })
         .collect()
+}
+
+/// A flat band as wide as a conveyor along its path, relative to its centre: two triangles
+/// between each two points of its centreline.
+fn band_mesh(shape: &crabsim_ui::view::Shape) -> Mesh {
+    let half = shape.width / 2.0;
+    let mut positions = Vec::with_capacity(shape.points.len() * 2);
+    for point in &shape.points {
+        let (sin, cos) = point.heading_degrees.to_radians().sin_cos();
+        for sign in [1.0, -1.0] {
+            positions.push([(point.at.x - sin * half * sign) as f32, (point.at.y + cos * half * sign) as f32, 0.0]);
+        }
+    }
+    let count = positions.len();
+    let mut indices = Vec::with_capacity(shape.points.len().saturating_sub(1) * 6);
+    for piece in 0..shape.points.len().saturating_sub(1) as u32 {
+        let (left, right, next_left, next_right) = (piece * 2, piece * 2 + 1, piece * 2 + 2, piece * 2 + 3);
+        indices.extend([left, right, next_right, left, next_right, next_left]);
+    }
+    Mesh::new(bevy::mesh::PrimitiveTopology::TriangleList, bevy::asset::RenderAssetUsages::default())
+        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0.0f32, 0.0, 1.0]; count])
+        .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, vec![[0.0f32, 0.0]; count])
+        .with_inserted_indices(bevy::mesh::Indices::U32(indices))
 }
 
 /// Draws the objects afresh after the view changed model or seed: the old entities and MUs go.
@@ -1901,6 +1932,7 @@ fn replace_session(ui: &mut Ui, session: &Session, new_model: bool, wall: Durati
     }
     ui.history = None;
     let mut view = ViewState::with_settings_of(ui.workspace.description(), &ui.view);
+    view.set_shapes(ui.workspace.shapes());
     // The same model, reloaded or with another seed, keeps the object selected, found by its name.
     if !new_model {
         // Everything selected stays selected, found by name, unless an undo or redo says what it
@@ -3151,8 +3183,10 @@ fn dock_summary(ui: &mut egui::Ui, inspection: Option<&Inspection>, dock: Option
             let Some(value) = &view.value else { continue };
             ui.horizontal(|row| {
                 row.label(egui::RichText::new(attribute_label(&view.attribute)).strong());
-                let line = row.add(egui::Label::new(crabsim_ui::attributes::summary(value)).truncate().sense(egui::Sense::click()));
-                if line.on_hover_text("Open its window at this field").clicked() {
+                // Cut short to the panel, with all of it on hover, such as a long path.
+                let summary = crabsim_ui::attributes::summary(value);
+                let line = row.add(egui::Label::new(summary.as_str()).truncate().sense(egui::Sense::click()));
+                if line.on_hover_text(format!("{summary}\n\nClick to open its window at this field")).clicked() {
                     asked = Some(DockAsk::OpenAt(view.attribute.clone()));
                 }
             });
@@ -3282,6 +3316,12 @@ fn object_window_contents(
         row.label("State");
         row.label(egui::RichText::new(inspection.state).strong());
     });
+    // How a conveyor's ends sit against its neighbours: information, never a warning.
+    for line in &inspection.ends {
+        window
+            .add(egui::Label::new(egui::RichText::new(line).small()).wrap())
+            .on_hover_text("Where its neighbour is against where it would meet this end. The run treats every connection as touching, so this changes no result");
+    }
     inspector.sync_name(&inspection.name);
     let notes = match &inspector.attributes {
         Some(Ok(attributes)) => attributes.iter().find(|view| view.attribute == "state_notes").and_then(|view| view.value.clone()),
@@ -4315,6 +4355,9 @@ fn attributes_section(
         return None;
     }
     let mut asked = None;
+    // A conveyor's width and limits, which its path's rows are checked against.
+    let number_of = |name: &str| attributes.iter().find(|view| view.attribute == name).and_then(|view| view.value.as_ref()).and_then(serde_json::Value::as_f64);
+    let limits = (number_of("width").unwrap_or(0.6), number_of("min_radius"), number_of("max_incline").unwrap_or(30.0));
     for view in attributes {
         ui.add_space(4.0);
         let from = match &view.from {
@@ -4338,6 +4381,10 @@ fn attributes_section(
         ui.scope(|fields| {
             if form.profiles.is_some() {
                 commit |= profile_fields(fields, form, &format!("{salt}{}", view.attribute));
+                return;
+            }
+            if let Some(rows) = form.path.as_mut() {
+                commit |= path_fields(fields, rows, limits, &format!("{salt}{}", view.attribute));
                 return;
             }
             if let Some(choice) = form.distribution.as_mut() {
@@ -4396,6 +4443,10 @@ fn attributes_section(
                         "Its class gives it failures, and a model file can't take them off one instance. Change the class, or give this one its own class.",
                     );
                 }
+                // A path breaking its conveyor's limits says so on its rows, and isn't saved.
+                Ok(_) if form.path.as_ref().is_some_and(|rows| rows.problems(limits.0, limits.1, limits.2).iter().any(|found| !found.is_empty())) => {
+                    ui.label(egui::RichText::new("Change the segments marked first.").weak());
+                }
                 Ok(value) => {
                     let apply = ui.small_button("Apply").on_hover_text("Saves it to the model file, cutting its inheritance");
                     if commit || apply.clicked() {
@@ -4423,6 +4474,107 @@ fn attributes_section(
         }
     }
     asked
+}
+
+/// What a row of the path editor asks for besides its typed values.
+enum RowAction {
+    Kind(usize, crabsim_ui::attributes::SegmentKind),
+    /// Swap the row with the one after it.
+    Down(usize),
+    Remove(usize),
+}
+
+/// A conveyor's path as a row of fields per segment: its kind, its values and its rise, with Up,
+/// Down and Remove, what is wrong with it beneath, Add segment, a field for the whole path in its
+/// short form, and the path's figures. `limits` are the conveyor's width, min_radius and
+/// max_incline. Returns whether to apply it now, as when a field is left or a row changed.
+fn path_fields(ui: &mut egui::Ui, rows: &mut crabsim_ui::attributes::PathRows, limits: (f64, Option<f64>, f64), salt: &str) -> bool {
+    use crabsim_ui::attributes::SegmentKind;
+    let mut commit = false;
+    let mut action = None;
+    let problems = rows.problems(limits.0, limits.1, limits.2);
+    let count = rows.rows.len();
+    let problem_colour = egui::Color32::from_rgb(240, 120, 120);
+    // In a grid, so each column lines up whatever kind each row is.
+    egui::Grid::new((salt, "segments")).num_columns(8).spacing([4.0, 2.0]).show(ui, |grid| {
+        for (index, row) in rows.rows.iter_mut().enumerate() {
+            grid.push_id((salt, "segment", index), |line| {
+                line.label(egui::RichText::new(format!("{}", index + 1)).weak());
+            });
+            egui::ComboBox::from_id_salt((salt, "kind", index))
+                .selected_text(row.kind.label())
+                .width(84.0)
+                .show_ui(grid, |menu| {
+                    for kind in SegmentKind::ALL {
+                        if menu.selectable_label(row.kind == kind, kind.label()).on_hover_text(kind.hint()).clicked() {
+                            action = Some(RowAction::Kind(index, kind));
+                        }
+                    }
+                })
+                .response
+                .on_hover_text(row.kind.hint());
+            let [first, second] = row.kind.fields();
+            let field = |grid: &mut egui::Ui, text: &mut String, hint: &str, width: f32| grid.add(egui::TextEdit::singleline(text).hint_text(hint).desired_width(width)).on_hover_text(hint).lost_focus();
+            commit |= field(grid, &mut row.first, first, 46.0);
+            if second.is_empty() {
+                // A straight has one value.
+                grid.label("");
+            } else {
+                commit |= field(grid, &mut row.second, second, 52.0);
+            }
+            commit |= grid
+                .add(egui::TextEdit::singleline(&mut row.rise).hint_text("rise").desired_width(44.0))
+                .on_hover_text("How far it climbs over its length, in metres, negative falling. Empty is flat")
+                .lost_focus();
+            if grid.add_enabled(index > 0, egui::Button::new("Up").small()).on_hover_text("Move this segment one earlier along the path").clicked() {
+                action = Some(RowAction::Down(index - 1));
+            }
+            if grid.add_enabled(index + 1 < count, egui::Button::new("Down").small()).on_hover_text("Move this segment one later along the path").clicked() {
+                action = Some(RowAction::Down(index));
+            }
+            if grid.add_enabled(count > 1, egui::Button::new("Remove").small()).on_hover_text("Take this segment out of the path").clicked() {
+                action = Some(RowAction::Remove(index));
+            }
+            grid.end_row();
+        }
+    });
+    // What is wrong with each segment, under them all, each naming its segment.
+    for (index, found) in problems.iter().enumerate() {
+        for problem in found {
+            let line = if problem.starts_with("segment ") { problem.clone() } else { format!("segment {}: {problem}", index + 1) };
+            ui.add(egui::Label::new(egui::RichText::new(line).color(problem_colour).small()).wrap());
+        }
+    }
+    match action {
+        Some(RowAction::Kind(index, kind)) => rows.set_kind(index, kind),
+        Some(RowAction::Down(index)) => rows.swap_with_next(index),
+        Some(RowAction::Remove(index)) => rows.remove(index),
+        None => {}
+    }
+    commit |= action.is_some();
+    if ui.small_button("Add segment").on_hover_text("A straight of 1 m after the last segment, to change as wanted").clicked() {
+        rows.add();
+        commit = true;
+    }
+    if commit {
+        rows.refresh_text();
+    }
+    ui.horizontal(|line| {
+        line.label("Whole path").on_hover_text("The path in one line: segments separated by commas, a number a straight, such as 4, arc 2 90, transition 1 to 2, helix 1.2 2 rise 3, 2 rise 0.5. Negative angles, radii and turns go right");
+        let field = line.add(egui::TextEdit::singleline(&mut rows.text).hint_text("such as 4, arc 2 90").desired_width(220.0));
+        if field.lost_focus() {
+            let before = rows.rows.clone();
+            rows.read_text();
+            commit |= rows.text_problem.is_none() && rows.rows != before;
+        }
+    });
+    if let Some(problem) = &rows.text_problem {
+        ui.add(egui::Label::new(egui::RichText::new(problem).color(problem_colour).small()).wrap());
+    }
+    if let Some(figures) = rows.figures() {
+        ui.add(egui::Label::new(egui::RichText::new(figures.describe()).weak().small()).wrap());
+    }
+    commit
 }
 
 /// The keys typed this frame, taken out of egui's input so no widget acts on them too: every
@@ -5537,13 +5689,17 @@ fn labels(ctx: &egui::Context, view: &ViewState, camera: &ViewCamera, canvas: eg
     let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Background, egui::Id::new("labels"))).with_clip_rect(canvas);
     let size = Point { x: canvas.width() as f64, y: canvas.height() as f64 };
     for object in view.objects() {
-        let (sin, cos) = object.rotation_degrees.to_radians().sin_cos();
-        let below = (sin.abs() * object.length + cos.abs() * object.width) / 2.0;
-        let floor = Point { x: object.centre.x, y: object.centre.y - below };
+        let floor = Point { x: object.centre.x, y: object.lowest() };
         let at = camera.to_screen(floor, size);
         let at = egui::pos2(canvas.min.x + at.x as f32, canvas.min.y + at.y as f32 + text_size / 4.0);
         let font = egui::FontId::proportional(text_size);
         painter.text(at, egui::Align2::CENTER_TOP, &object.name, font, egui::Color32::LIGHT_GRAY);
+    }
+    // Along each conveyor, its rises, helices and heights, smaller than names.
+    for (floor, text) in view.path_labels() {
+        let at = camera.to_screen(floor, size);
+        let at = egui::pos2(canvas.min.x + at.x as f32, canvas.min.y + at.y as f32);
+        painter.text(at, egui::Align2::CENTER_CENTER, text, egui::FontId::proportional(text_size * 0.85), egui::Color32::from_rgb(200, 200, 140));
     }
     // Where MUs can't be followed, each holder shows how many it holds, in its middle.
     for (id, count) in view.counts(camera) {

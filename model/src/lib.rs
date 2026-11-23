@@ -906,9 +906,8 @@ impl Model {
 
 impl Model {
     /// Where a view draws the instance at `index` placed at `position`: the centre of its
-    /// footprint. A conveyor's position is where its path starts (spec issue 141), and a view
-    /// draws it as a straight band of its length along its rotation, so its centre is half its
-    /// length on from its start. Anything else is drawn where it is placed.
+    /// footprint. A conveyor's position is where its path starts (spec issue 141), and its
+    /// centre is the centre of its path's bounds. Anything else is drawn where it is placed.
     pub fn drawn_position(&self, index: usize, position: Position) -> Position {
         let (dx, dy) = self.start_to_centre(index);
         Position { x: position.x + dx, y: position.y + dy, z: position.z }
@@ -934,12 +933,54 @@ impl Model {
     }
 }
 
-/// How far a view's centre of an object with these values is from its position: half a
-/// conveyor's length along its rotation, and nothing for anything else.
+/// How far a view's centre of an object with these values is from its position: the centre of a
+/// conveyor's path's bounds, and nothing for anything else.
 fn start_to_centre(resolved: &Resolved) -> (f64, f64) {
-    let Some(size) = resolved.attributes.dimensions.filter(|_| resolved.built_in == "Conveyor") else { return (0.0, 0.0) };
-    let (sin, cos) = size.rotation_degrees.to_radians().sin_cos();
-    (cos * size.length / 2.0, sin * size.length / 2.0)
+    conveyor_bounds(resolved, Position { x: 0.0, y: 0.0, z: 0.0 }).map_or((0.0, 0.0), |bounds| bounds.centre())
+}
+
+/// How a conveyor with these values lies when its path starts at `at`, none for anything else.
+fn conveyor_laid(resolved: &Resolved, at: Position) -> Option<(Vec<Segment>, path::Laid)> {
+    if resolved.built_in != "Conveyor" {
+        return None;
+    }
+    let attributes = &resolved.attributes;
+    let path = attributes.path.clone()?;
+    let rotation = attributes.dimensions.map_or(0.0, |size| size.rotation_degrees);
+    let origin = path::Pose { x: at.x, y: at.y, z: at.z, heading_degrees: rotation };
+    Some((path, path::Laid { origin, width: attributes.width.unwrap_or(0.6), direction: attributes.direction.unwrap_or_default() }))
+}
+
+/// The bounds of a conveyor with these values whose path starts at `at`, none for anything else
+/// or a path with a segment whose values are wrong.
+pub(crate) fn conveyor_bounds(resolved: &Resolved, at: Position) -> Option<path::Bounds> {
+    let (path, laid) = conveyor_laid(resolved, at)?;
+    path.iter().all(|&segment| path::sound(segment)).then(|| path::geometry(&path, laid).bounds)
+}
+
+impl Model {
+    /// What a view draws for the conveyor at `index`, with every point relative to where the view
+    /// draws its centre (`drawn_position`), so it follows the conveyor wherever the view puts it.
+    /// None for anything else, or a path with a segment whose values are wrong.
+    pub fn drawing(&self, index: usize) -> Option<path::Drawing> {
+        let resolved = self.resolve(index)?;
+        let z = self.instances.get(index)?.position.map_or(0.0, |position| position.z);
+        let (path, laid) = conveyor_laid(&resolved, Position { x: 0.0, y: 0.0, z })?;
+        if !path.iter().all(|&segment| path::sound(segment)) {
+            return None;
+        }
+        let mut drawing = path::drawing(&path, laid, 2.0);
+        let (cx, cy) = drawing.bounds.centre();
+        for (_, pose) in &mut drawing.points {
+            (pose.x, pose.y) = (pose.x - cx, pose.y - cy);
+        }
+        for label in &mut drawing.labels {
+            (label.x, label.y) = (label.x - cx, label.y - cy);
+        }
+        let bounds = drawing.bounds;
+        drawing.bounds = path::Bounds { min_x: bounds.min_x - cx, min_y: bounds.min_y - cy, max_x: bounds.max_x - cx, max_y: bounds.max_y - cy };
+        Some(drawing)
+    }
 }
 
 /// Escapes a key for a JSON Pointer.

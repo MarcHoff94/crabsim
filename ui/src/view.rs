@@ -41,6 +41,79 @@ pub struct ObjectView {
     pub width: f64,
     /// Counterclockwise, seen from above.
     pub rotation_degrees: f64,
+    /// How high it stands, in metres, from its position.
+    pub z: f64,
+    /// A conveyor's path, which it is drawn along, and which places its MUs, its ends and where a
+    /// click finds it. Nothing for any other object.
+    pub shape: Option<Shape>,
+}
+
+/// A conveyor's path as the view draws it (spec issue 141): points along its centreline, in the
+/// order its MUs travel, relative to its centre so they move with it, and labels for its rises,
+/// helices and heights.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Shape {
+    pub width: f64,
+    pub points: Vec<ShapePoint>,
+    pub labels: Vec<(Point, String)>,
+}
+
+/// One point along a conveyor's centreline.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ShapePoint {
+    /// How far along it from where its MUs enter, in metres in 3D, as an MU's place on it is.
+    pub along: f64,
+    /// Relative to the conveyor's centre.
+    pub at: Point,
+    /// The way its MUs head there, counterclockwise from the x axis.
+    pub heading_degrees: f64,
+    pub z: f64,
+}
+
+impl Shape {
+    /// A straight conveyor of `length` and `width`, turned by `rotation_degrees`, centred on its
+    /// middle: what a conveyor is without a drawing of its path.
+    pub fn straight(length: f64, width: f64, rotation_degrees: f64) -> Shape {
+        let end = |x: f64, along: f64| ShapePoint { along, at: rotate(Point { x, y: 0.0 }, rotation_degrees), heading_degrees: rotation_degrees, z: 0.0 };
+        Shape { width, points: vec![end(-length / 2.0, 0.0), end(length / 2.0, length)], labels: Vec::new() }
+    }
+
+    /// Its length, along it in 3D.
+    pub fn length(&self) -> f64 {
+        self.points.last().map_or(0.0, |point| point.along)
+    }
+
+    /// Where a place `along` it is, relative to its centre, and the way MUs head there, between
+    /// the two points around it. Clamped to its ends.
+    pub fn at(&self, along: f64) -> (Point, f64) {
+        let Some(first) = self.points.first() else { return (Point::default(), 0.0) };
+        let after = self.points.partition_point(|point| point.along < along);
+        if after == 0 {
+            return (first.at, first.heading_degrees);
+        }
+        let Some(&next) = self.points.get(after) else {
+            let last = self.points[self.points.len() - 1];
+            return (last.at, last.heading_degrees);
+        };
+        let previous = self.points[after - 1];
+        let share = if next.along > previous.along { (along - previous.along) / (next.along - previous.along) } else { 0.0 };
+        let at = Point { x: previous.at.x + (next.at.x - previous.at.x) * share, y: previous.at.y + (next.at.y - previous.at.y) * share };
+        // Between two points the heading turns evenly, the short way round.
+        let turn = (next.heading_degrees - previous.heading_degrees + 540.0).rem_euclid(360.0) - 180.0;
+        (at, previous.heading_degrees + turn * share)
+    }
+
+    /// The band it covers, `half` metres to each side of its centreline, going round: along its
+    /// left side, then back along its right, relative to its centre.
+    pub fn band(&self, half: f64) -> Vec<Point> {
+        let side = |point: &ShapePoint, sign: f64| {
+            let (sin, cos) = point.heading_degrees.to_radians().sin_cos();
+            Point { x: point.at.x - sin * half * sign, y: point.at.y + cos * half * sign }
+        };
+        let mut band: Vec<Point> = self.points.iter().map(|point| side(point, 1.0)).collect();
+        band.extend(self.points.iter().rev().map(|point| side(point, -1.0)));
+        band
+    }
 }
 
 /// A connection drawn from the edge of one object to the edge of its successor.
@@ -273,6 +346,60 @@ impl Deletion {
     }
 }
 
+/// How one end of a conveyor sits against a neighbour connected there: where the neighbour is
+/// against where attaching would put it. Nothing requires them to meet.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EndFit {
+    /// Whether it is the conveyor's start, where its MUs enter, rather than its end.
+    pub start: bool,
+    pub neighbour: String,
+    /// Whether the neighbour is a conveyor, met end to start, rather than an object without
+    /// geometry, met centre half its length past the end.
+    pub neighbour_is_conveyor: bool,
+    /// How far apart, in metres on the floor.
+    pub apart: f64,
+    /// How far the neighbour is turned against the way MUs pass between them, in degrees, in
+    /// (-180, 180].
+    pub turned: f64,
+    /// How much higher the neighbour is, in metres, negative lower.
+    pub higher: f64,
+}
+
+impl EndFit {
+    /// Whether they meet, to the centimetre and the degree.
+    pub fn meets(&self) -> bool {
+        self.apart < 0.005 && self.turned.abs() < 0.5 && self.higher.abs() < 0.005
+    }
+
+    /// One line saying it, such as "Start: 0.30 m from Feed's end, turned 10°, 0.50 m higher", or
+    /// for an object without geometry "End: Mill is 0.30 m from where it would meet this end".
+    pub fn describe(&self) -> String {
+        let end = if self.start { "Start" } else { "End" };
+        if self.meets() {
+            return format!("{end}: meets {}", self.neighbour);
+        }
+        let first = match (self.neighbour_is_conveyor, self.start) {
+            (true, true) => format!("{:.2} m from {}'s end", self.apart, self.neighbour),
+            (true, false) => format!("{:.2} m from {}'s start", self.apart, self.neighbour),
+            (false, _) => format!("{} is {:.2} m from where it would meet this end", self.neighbour, self.apart),
+        };
+        let mut parts = vec![first];
+        if self.turned.abs() >= 0.5 {
+            parts.push(format!("turned {:.0}°", self.turned));
+        }
+        if self.higher.abs() >= 0.005 {
+            parts.push(format!("{:.2} m {}", self.higher.abs(), if self.higher > 0.0 { "higher" } else { "lower" }));
+        }
+        format!("{end}: {}", parts.join(", "))
+    }
+}
+
+/// Degrees in (-180, 180].
+fn turn_between(from: f64, to: f64) -> f64 {
+    let turned = (to - from).rem_euclid(360.0);
+    if turned > 180.0 { turned - 360.0 } else { turned }
+}
+
 /// How far `point` is from the segment from `start` to `end`.
 fn distance_to_segment(point: Point, start: Point, end: Point) -> f64 {
     let (dx, dy) = (end.x - start.x, end.y - start.y);
@@ -301,6 +428,9 @@ pub struct Inspection {
     pub details: Option<Details>,
     /// The interventions on offer, and which are on. `None` where there are none.
     pub interventions: Option<Offered>,
+    /// For a conveyor, how each of its ends sits against each neighbour connected there, such as
+    /// "Start: meets Feed" (`ViewState::end_fits`).
+    pub ends: Vec<String>,
 }
 
 /// What only a full state says about an object, as of `as_of`.
@@ -757,6 +887,8 @@ impl ViewState {
                     length: size.length,
                     width: size.width,
                     rotation_degrees: size.rotation_degrees,
+                    z: model.position(id).map_or(0.0, |position| position.z),
+                    shape: (kind == ObjectKind::Conveyor).then(|| Shape::straight(size.length, size.width, size.rotation_degrees)),
                 }
             })
             .collect();
@@ -800,6 +932,77 @@ impl ViewState {
             animate: true,
             statistics_open: false,
             watched: Vec::new(),
+        }
+    }
+
+    /// How each end of the conveyor `id` sits against each neighbour connected there, its
+    /// predecessors at its start and its successors at its end. Empty for anything else.
+    pub fn end_fits(&self, id: u32) -> Vec<EndFit> {
+        let Some(object) = self.objects.get(id as usize) else { return Vec::new() };
+        let Some(((start, start_heading), (end, end_heading))) = object.ends() else { return Vec::new() };
+        let shape = object.shape.as_ref().expect("a conveyor with ends has a shape");
+        let (start_z, end_z) = (shape.points.first().map_or(0.0, |point| point.z), shape.points.last().map_or(0.0, |point| point.z));
+        let mut fits = Vec::new();
+        for connection in &self.connections {
+            let at_start = connection.to == id;
+            if !(at_start || connection.from == id) || connection.from == connection.to {
+                continue;
+            }
+            let other = &self.objects[(if at_start { connection.from } else { connection.to }) as usize];
+            let (here, heading, z) = if at_start { (start, start_heading, start_z) } else { (end, end_heading, end_z) };
+            let fit = match other.ends() {
+                // A conveyor meets end to start, heading the same way.
+                Some(((other_start, other_start_heading), (other_end, other_end_heading))) => {
+                    let other_shape = other.shape.as_ref().expect("a conveyor with ends has a shape");
+                    let (there, there_heading, there_z) = if at_start {
+                        (other_end, other_end_heading, other_shape.points.last().map_or(0.0, |point| point.z))
+                    } else {
+                        (other_start, other_start_heading, other_shape.points.first().map_or(0.0, |point| point.z))
+                    };
+                    EndFit {
+                        start: at_start,
+                        neighbour: other.name.clone(),
+                        neighbour_is_conveyor: true,
+                        apart: ((there.x - here.x).powi(2) + (there.y - here.y).powi(2)).sqrt(),
+                        turned: turn_between(heading, there_heading),
+                        higher: there_z - z,
+                    }
+                }
+                // Anything else meets with its centre half its length past the end, or before the
+                // start, turned the way MUs go.
+                None => {
+                    let (sin, cos) = heading.to_radians().sin_cos();
+                    let reach = if at_start { -other.length / 2.0 } else { other.length / 2.0 };
+                    let wanted = Point { x: here.x + cos * reach, y: here.y + sin * reach };
+                    EndFit {
+                        start: at_start,
+                        neighbour: other.name.clone(),
+                        neighbour_is_conveyor: false,
+                        apart: ((other.centre.x - wanted.x).powi(2) + (other.centre.y - wanted.y).powi(2)).sqrt(),
+                        turned: turn_between(heading, other.rotation_degrees),
+                        higher: other.z - z,
+                    }
+                }
+            };
+            fits.push(fit);
+        }
+        fits.sort_by_key(|fit| !fit.start);
+        fits
+    }
+
+    /// Draws each conveyor named along its path, as the model file lays it, rather than straight
+    /// along its rotation, and its connections from and to its ends.
+    pub fn set_shapes(&mut self, shapes: Vec<(u32, Shape)>) {
+        for (id, shape) in shapes {
+            if let Some(object) = self.objects.get_mut(id as usize).filter(|object| object.kind == ObjectKind::Conveyor) {
+                object.shape = Some(shape);
+            }
+        }
+        let objects = &self.objects;
+        for connection in &mut self.connections {
+            let (from, to) = (&objects[connection.from as usize], &objects[connection.to as usize]);
+            connection.start = from.leaving_towards(to.centre);
+            connection.end = to.entering_from(from.centre);
         }
     }
 
@@ -1158,17 +1361,22 @@ impl ViewState {
         let mut markers = Vec::new();
         for pictured in self.picture.objects().iter().filter(|pictured| !pictured.contents().is_empty() && pictured.kind() != ObjectKind::Buffer) {
             let holder = &self.objects[pictured.id() as usize];
-            if pictured.kind() == ObjectKind::Conveyor {
+            if let Some(shape) = holder.shape.as_ref().filter(|_| pictured.kind() == ObjectKind::Conveyor) {
                 for motion in pictured.motion() {
                     let kind = self.mu_kinds.get(usize::from(motion.kind)).copied().unwrap_or_default();
+                    // Its centre's place along the path, turned the way the path heads there. One
+                    // entering is still partly behind the start: it carries on straight back.
                     let centre = motion.front_at(now) - kind.length / 2.0;
+                    let (at, heading) = shape.at(centre.max(0.0));
+                    let (sin, cos) = heading.to_radians().sin_cos();
+                    let before = centre.min(0.0);
                     markers.push(MuMarker {
                         mu: motion.mu_id,
                         holder: holder.id,
-                        at: holder.from_local(Point { x: centre - holder.length / 2.0, y: 0.0 }),
+                        at: Point { x: holder.centre.x + at.x + cos * before, y: holder.centre.y + at.y + sin * before },
                         length: kind.length,
                         width: kind.width,
-                        rotation_degrees: holder.rotation_degrees,
+                        rotation_degrees: heading,
                     });
                 }
                 continue;
@@ -1189,12 +1397,35 @@ impl ViewState {
         markers
     }
 
-    /// Where each conveyor goes, from its start to its end, for the arrow drawn along it.
+    /// Which way each conveyor goes, as arrows along it: one about every 4 m, each across the
+    /// middle of its stretch, the way its MUs travel.
     pub fn belt_directions(&self) -> Vec<(Point, Point)> {
+        let mut arrows = Vec::new();
+        for belt in self.objects.iter() {
+            let Some(shape) = &belt.shape else { continue };
+            let length = shape.length();
+            let count = (length / 4.0).round().max(1.0);
+            let stretch = length / count;
+            let half = (stretch * 0.3).min(0.6);
+            let world = |along: f64| {
+                let at = shape.at(along).0;
+                Point { x: belt.centre.x + at.x, y: belt.centre.y + at.y }
+            };
+            for piece in 0..count as usize {
+                let middle = (piece as f64 + 0.5) * stretch;
+                arrows.push((world(middle - half), world(middle + half)));
+            }
+        }
+        arrows
+    }
+
+    /// The labels drawn along each conveyor, on the floor: its rises, its helices' turns and
+    /// rises, and its ends' heights where they aren't 0.
+    pub fn path_labels(&self) -> Vec<(Point, &str)> {
         self.objects
             .iter()
-            .filter(|object| object.kind == ObjectKind::Conveyor)
-            .map(|belt| (belt.from_local(Point { x: -belt.length * 0.3, y: 0.0 }), belt.from_local(Point { x: belt.length * 0.3, y: 0.0 })))
+            .filter_map(|object| Some((object, object.shape.as_ref()?)))
+            .flat_map(|(object, shape)| shape.labels.iter().map(move |(at, text)| (Point { x: object.centre.x + at.x, y: object.centre.y + at.y }, text.as_str())))
             .collect()
     }
 
@@ -1318,6 +1549,11 @@ impl ViewState {
         let object = self.objects.get(id as usize).filter(|object| object.kind != ObjectKind::Drain)?;
         if !self.allows_building() {
             return None;
+        }
+        // Just past a conveyor's end, the way its MUs leave.
+        if let Some(last) = object.shape.as_ref().and_then(|shape| shape.points.last()) {
+            let (sin, cos) = last.heading_degrees.to_radians().sin_cos();
+            return Some(Point { x: object.centre.x + last.at.x + cos * HANDLE_GAP, y: object.centre.y + last.at.y + sin * HANDLE_GAP });
         }
         Some(object.from_local(Point { x: object.length / 2.0 + HANDLE_GAP, y: 0.0 }))
     }
@@ -1460,6 +1696,7 @@ impl ViewState {
             blocked,
             interrupted_by,
             details: self.details_of(id),
+            ends: self.end_fits(id).iter().map(EndFit::describe).collect(),
             interventions: pictured.filter(|_| offered).map(|pictured| {
                 let on = |cause| pictured.interruptions().iter().any(|interruption| interruption.cause == cause);
                 Offered { paused: on(Interruption::Paused), stopped: on(Interruption::Stopped) }
@@ -1856,15 +2093,33 @@ fn cause_name(cause: Interruption) -> &'static str {
 }
 
 impl ObjectView {
-    fn corners(&self) -> [Point; 4] {
+    fn corners(&self) -> Vec<Point> {
         self.outline(0.0)
     }
 
-    /// The footprint's corners, grown by `margin` metres on every side, going round.
-    pub fn outline(&self, margin: f64) -> [Point; 4] {
+    /// The footprint's outline, grown by `margin` metres on every side, going round: a
+    /// conveyor's band along its path, or anything else's rectangle.
+    pub fn outline(&self, margin: f64) -> Vec<Point> {
+        if let Some(shape) = &self.shape {
+            return shape.band(shape.width / 2.0 + margin).into_iter().map(|at| Point { x: self.centre.x + at.x, y: self.centre.y + at.y }).collect();
+        }
         let (half_length, half_width) = (self.length / 2.0 + margin, self.width / 2.0 + margin);
         [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)]
             .map(|(sx, sy)| self.from_local(Point { x: sx * half_length, y: sy * half_width }))
+            .to_vec()
+    }
+
+    /// How far down its footprint reaches on the floor, for its name drawn beneath it.
+    pub fn lowest(&self) -> f64 {
+        self.corners().iter().map(|corner| corner.y).fold(f64::MAX, f64::min)
+    }
+
+    /// Where its MUs enter and leave a conveyor, on the floor, with the way they head there.
+    pub fn ends(&self) -> Option<((Point, f64), (Point, f64))> {
+        let shape = self.shape.as_ref()?;
+        let (first, last) = (shape.points.first()?, shape.points.last()?);
+        let world = |point: &ShapePoint| (Point { x: self.centre.x + point.at.x, y: self.centre.y + point.at.y }, point.heading_degrees);
+        Some((world(first), world(last)))
     }
 
     /// Where `count` MUs sit in the footprint: spread over a grid, in the order held, starting
@@ -1892,6 +2147,10 @@ impl ObjectView {
     }
 
     fn holds(&self, floor: Point) -> bool {
+        if let Some(shape) = &self.shape {
+            let local = Point { x: floor.x - self.centre.x, y: floor.y - self.centre.y };
+            return shape.points.windows(2).any(|pair| distance_to_segment(local, pair[0].at, pair[1].at) <= shape.width / 2.0);
+        }
         let local = rotate(Point { x: floor.x - self.centre.x, y: floor.y - self.centre.y }, -self.rotation_degrees);
         local.x.abs() <= self.length / 2.0 && local.y.abs() <= self.width / 2.0
     }
@@ -1899,8 +2158,8 @@ impl ObjectView {
     /// Where a connection leaves the object: a conveyor's end, otherwise where a line towards
     /// `target` crosses its outline.
     fn leaving_towards(&self, target: Point) -> Point {
-        if self.kind == ObjectKind::Conveyor {
-            return self.from_local(Point { x: self.length / 2.0, y: 0.0 });
+        if let Some((_, (end, _))) = self.ends() {
+            return end;
         }
         self.edge_towards(target)
     }
@@ -1908,8 +2167,8 @@ impl ObjectView {
     /// Where a connection arrives at the object: a conveyor's start, otherwise where a line from
     /// `source` crosses its outline.
     fn entering_from(&self, source: Point) -> Point {
-        if self.kind == ObjectKind::Conveyor {
-            return self.from_local(Point { x: -self.length / 2.0, y: 0.0 });
+        if let Some(((start, _), _)) = self.ends() {
+            return start;
         }
         self.edge_towards(source)
     }

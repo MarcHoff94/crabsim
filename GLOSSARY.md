@@ -193,10 +193,19 @@ What a conveyor does with the MUs behind one that stops. **Accumulating**, the d
 What moves the MUs on a conveyor. **Conveyor-driven**: the conveyor's own speed, acceleration, deceleration and jerk move every MU on it, as a belt or roller conveyor does. **MU-driven**: each MU moves by its own motion limits, as a shuttle or carrier does, and the conveyor is only the way it follows.
 
 **Path**:
-The line a conveyor's MUs follow, made of segments joined without kinks, any of them rising or falling. Only its length, and the limits it sets, such as its tightest bend and steepest incline, affect results.
+The line a conveyor's MUs follow, made of segments joined without kinks, any of them rising or falling. Only its length, and the limits it sets, such as its tightest bend and steepest incline, affect results: a path that breaks its conveyor's `min_radius` or `max_incline` can't run.
 
 **Segment**:
-One piece of a path: a straight, an arc, a transition curve or a helix.
+One piece of a path: a straight, an arc, a transition curve or a helix, each of which may rise or fall. Its length is in plan, as it is laid out from above, and the conveyor's length counts each segment in 3D, rise included. A path starts at its conveyor's position, heading along its rotation.
+
+**Transition curve**:
+A segment whose bend changes evenly along its length (a clothoid), from the bend the segment before it ended with to a radius it names, or back to straight, so a curve can begin and end without a jolt. Optional: a straight may also run directly into an arc.
+
+**Direction**:
+Which way a conveyor's MUs travel along its path: forward, from its first segment to its last, or backward. Its start and end are where its MUs enter and leave, so they swap with its direction. It is set before a run.
+
+**Attach**:
+To move and turn an object, and set its height, so that its end meets a connected neighbour's: a conveyor's start onto the end of the one before it, or a Station's centre half its length past a conveyor's end. Nothing requires neighbours to meet: attaching is how the user lines them up when they want to.
 
 **Straddle**:
 An MU straddles two geometry-aware objects while its footprint is on both. It belongs to the one its booking point is on, and moves at the slower of the two speeds unless one is interrupted, when the one it belongs to decides.

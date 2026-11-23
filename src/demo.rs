@@ -115,3 +115,41 @@ pub fn buffered_line() -> ModelDescription {
     }
     model
 }
+
+/// A line with conveyors (spec issue 133), for the benchmark's `conveyor-line` scenario and the
+/// conveyor's tests: a Source making a 0.6 by 0.4 m tote every 5 s, a feed conveyor to a Saw that
+/// fails now and then, a chain of two conveyors, the second slower, to a Mill, the slowest machine,
+/// so totes accumulate in front of it, and an outfeed conveyor to the Drain. Every conveyor
+/// accumulates.
+pub fn conveyor_line() -> ModelDescription {
+    let mut model = ModelDescription::new();
+    let place = |model: &mut ModelDescription, id: u32, name: &str, x: f64| {
+        model.set_name(id, name);
+        model.set_position(id, Position { x, y: 0.0, z: 0.0 });
+        id
+    };
+    let failures = |availability: f32, repair_secs: f64| FailureProfile::new(availability, Distribution::ERLANG { mean: repair_secs * 1_000.0, k: 2 }, 0);
+    let tote = model.add_mu_kind(crate::model::MuKind { length: 0.6, width: 0.4, booking_point: 0.5 });
+    let source = model.add_source(SimTime::from_secs(5));
+    model.set_mu_kind(source, tote);
+    place(&mut model, source, "In", 0.0);
+    let feed = model.add_conveyor(10.0, 0.6, 0.5);
+    model.set_conveyor_gap(feed, 0.1);
+    place(&mut model, feed, "Feed", 6.5);
+    let saw = model.add_station(SimTime::from_secs(4), failures(0.9, 60.0));
+    place(&mut model, saw, "Saw", 13.0);
+    let link = model.add_conveyor(6.0, 0.6, 0.8);
+    place(&mut model, link, "Link", 17.0);
+    let approach = model.add_conveyor(6.0, 0.6, 0.4);
+    place(&mut model, approach, "Approach", 23.0);
+    let mill = model.add_station(SimTime::from_secs(6), failures(0.85, 90.0));
+    place(&mut model, mill, "Mill", 27.0);
+    let outfeed = model.add_conveyor(8.0, 0.6, 0.8);
+    place(&mut model, outfeed, "Outfeed", 32.0);
+    let drain = model.add_drain();
+    place(&mut model, drain, "Out", 37.0);
+    for (from, to) in [(source, feed), (feed, saw), (saw, link), (link, approach), (approach, mill), (mill, outfeed), (outfeed, drain)] {
+        model.connect(from, to);
+    }
+    model
+}

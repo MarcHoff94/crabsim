@@ -1,8 +1,8 @@
 //! The likely bottleneck, by one rule for everyone: the window applies it to a live run's state,
 //! and `find_bottleneck` to a run in the results store, so a person and an agent never disagree.
 //!
-//! The rule: among Stations, the one busy and full or interrupted (failed, stopped or paused) the largest share
-//! of the time. A Station with capacity working with free places isn't what limits the flow. The glossary's bottleneck is what limits the flow, with what is upstream of it mostly
+//! The rule: among Stations and Conveyors, the one busy and full or interrupted (failed, stopped or paused) the largest share
+//! of the time. A Station with capacity working with free places isn't what limits the flow, and nor is a Conveyor moving MUs with room at its start, or accumulating behind a slow successor. The glossary's bottleneck is what limits the flow, with what is upstream of it mostly
 //! blocked and what is downstream mostly starved, so its direct neighbours' shares come with it as
 //! evidence. It is likely, not certain: changing it and comparing runs settles it.
 
@@ -19,20 +19,20 @@ pub(crate) fn entries() -> Vec<Entry> {
     vec![entry::<FindBottleneck>()]
 }
 
-/// How many Stations the ranking lists.
+/// How many Stations and Conveyors the ranking lists.
 const RANKING_LENGTH: usize = 5;
 
 /// What the rule says, for anyone reading its answer.
-pub const RULE: &str = "The likely bottleneck is the Station busy and full or interrupted (failed, stopped or paused) the largest share of the time: a Station with a capacity above 1 counts only the time every place was in work, not time working with free places or while a finished MU couldn't leave. It is likely, not certain: what is upstream of a bottleneck is mostly blocked and what is downstream mostly idle, waiting for MUs, so check its neighbours, and settle it by running the model with it faster and comparing the runs.";
+pub const RULE: &str = "The likely bottleneck is the Station or Conveyor busy and full or interrupted (failed, stopped or paused) the largest share of the time: a Station with a capacity above 1 counts only the time every place was in work, not time working with free places or while a finished MU couldn't leave, and a Conveyor only the time it moved MUs with its start taken, so that no MU could enter, not time moving with room at its start or while the MU at its end waited for a successor. It is likely, not certain: what is upstream of a bottleneck is mostly blocked and what is downstream mostly idle, waiting for MUs, so check its neighbours, and settle it by running the model with it faster and comparing the runs.";
 
 /// One object's shares of the time measured, from 0 to 1, for judging the bottleneck.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Shares {
     pub name: String,
-    /// Source, Station, Buffer or Drain.
+    /// Source, Station, Buffer, Drain or Conveyor.
     pub built_in: String,
     pub working: f64,
-    /// Working with every place in work: all of `working` for a Station of capacity 1.
+    /// Working with every place in work: all of `working` for a Station of capacity 1. For a Conveyor, working with its start taken.
     pub working_full: f64,
     pub blocked: f64,
     pub idle: f64,
@@ -61,14 +61,14 @@ pub struct LikelyBottleneck {
     pub upstream: Vec<(String, f64)>,
     /// Each direct successor but a Drain with its idle share: waiting for MUs.
     pub downstream: Vec<(String, f64)>,
-    /// The Stations most busy or interrupted, most first, at most five, with that share.
+    /// The Stations and Conveyors most busy or interrupted, most first, at most five, with that share.
     pub ranking: Vec<(String, f64)>,
 }
 
 /// The likely bottleneck among `objects`, with `connections` from predecessor to successor by
-/// name, or `None` without Stations. A tie goes to the one listed first.
+/// name, or `None` without Stations or Conveyors. A tie goes to the one listed first.
 pub fn likely_bottleneck(objects: &[Shares], connections: &[(String, String)]) -> Option<LikelyBottleneck> {
-    let mut stations: Vec<&Shares> = objects.iter().filter(|object| object.built_in == "Station").collect();
+    let mut stations: Vec<&Shares> = objects.iter().filter(|object| object.built_in == "Station" || object.built_in == "Conveyor").collect();
     // Stable, so a tie keeps the order the objects were listed in.
     stations.sort_by(|a, b| b.full_or_interrupted().total_cmp(&a.full_or_interrupted()));
     let found = *stations.first()?;
@@ -128,7 +128,7 @@ pub struct Likely {
     /// Busy and full plus failed plus paused, from 0 to 1.
     pub full_or_interrupted_share: f64,
     pub working_share: f64,
-    /// Working with every place in work: the same as working_share for a Station of capacity 1.
+    /// Working with every place in work: the same as working_share for a Station of capacity 1. For a Conveyor, working with its start taken.
     pub working_full_share: f64,
     pub failed_share: f64,
     pub paused_share: f64,
@@ -150,15 +150,15 @@ pub struct FindBottleneckOutput {
     pub run: String,
     /// How the answer was found, and how to make sure of it.
     pub rule: String,
-    /// None when the model has no Station, or no observation has ended yet.
+    /// None when the model has no Station or Conveyor, or no observation has ended yet.
     pub likely: Option<Likely>,
-    /// The Stations most busy and full or interrupted, most first, at most five.
+    /// The Stations and Conveyors most busy and full or interrupted, most first, at most five.
     pub ranking: Vec<Ranked>,
 }
 
 impl Operation for FindBottleneck {
     const NAME: &'static str = "find_bottleneck";
-    const DESCRIPTION: &'static str = "Names a run's likely bottleneck: the Station busy and full or interrupted (failed, stopped or paused) the largest share of the time, from the means over its observations (a Station with a capacity above 1 counts only the time every place was in work), with its direct predecessors' blocked shares and direct successors' idle shares as evidence (a bottleneck's upstream is mostly blocked and its downstream mostly idle), and the five Stations most busy and full or interrupted. Shares are from 0 to 1, to 4 significant digits. It is likely, not certain: settle it by running the model with that Station faster and comparing the runs with compare_runs. The window's statistics window uses the same rule.";
+    const DESCRIPTION: &'static str = "Names a run's likely bottleneck: the Station or Conveyor busy and full or interrupted (failed, stopped or paused) the largest share of the time, from the means over its observations (a Station with a capacity above 1 counts only the time every place was in work, and a Conveyor only the time it moved MUs with its start taken so that no MU could enter), with its direct predecessors' blocked shares and direct successors' idle shares as evidence (a bottleneck's upstream is mostly blocked and its downstream mostly idle), and the five Stations and Conveyors most busy and full or interrupted. Shares are from 0 to 1, to 4 significant digits. It is likely, not certain: settle it by running the model with that Station or Conveyor faster and comparing the runs with compare_runs. The window's statistics window uses the same rule.";
     const EFFECT: Effect = Effect::ReadOnly;
     type Input = FindBottleneckInput;
     type Output = FindBottleneckOutput;
@@ -183,7 +183,7 @@ impl Operation for FindBottleneck {
         )?;
         let rows = statement.query_map([&id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, f64>(3)?)))?;
         let mut index: HashMap<String, usize> = HashMap::new();
-        // Only a Station with capacity has its full share stored: for the rest it is all working.
+        // Only a Station with capacity or a Conveyor has its full share stored: for the rest it is all working.
         let mut full_stored: Vec<bool> = Vec::new();
         for row in rows {
             let (name, built_in, statistic, mean) = row?;

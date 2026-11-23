@@ -345,6 +345,7 @@ impl EventInterface for Buffer {
             configured_process_time: None,
             statistics: self.statistics.read(now),
             fill: Some(Box::new(self.fill.read(self.statistics.in_progress(now)))),
+            belt: None,
             positions: Vec::new(),
         }
     }

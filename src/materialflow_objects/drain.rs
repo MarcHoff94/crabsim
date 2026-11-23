@@ -93,6 +93,7 @@ impl EventInterface for Drain {
             configured_process_time: None,
             statistics: self.statistics.read(now),
             fill: None,
+            belt: None,
             positions: Vec::new(),
         }
     }

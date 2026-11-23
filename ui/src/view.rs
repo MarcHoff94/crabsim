@@ -318,8 +318,10 @@ pub struct Details {
     pub limited: bool,
     /// How many MUs a Station works on at once.
     pub capacity: u64,
-    /// A Buffer's fewest MUs and fill histogram.
+    /// A Buffer's or Conveyor's fewest MUs and fill histogram.
     pub fill: Option<FillStatistics>,
+    /// How much of a Conveyor's length its MUs took and how long they took to cross it.
+    pub belt: Option<crabsim::BeltStatistics>,
     /// Each failure profile that can fail, with its figures.
     pub failure_profiles: Vec<crabsim::report::FailureProfileState>,
 }
@@ -431,15 +433,33 @@ impl Inspection {
                 rows.extend(unless_never(interruption_rows));
                 rows
             }
+            // Busy splits into three parts that add up to it, as a Station's with capacity, and
+            // it shows how full it was, as a Buffer does, and how long MUs took to cross it.
             ObjectKind::Conveyor => {
                 let mut rows = vec![
                     ("MUs in", statistics.mus_in.to_string()),
                     ("MUs out", statistics.mus_out.to_string()),
                     ("Busy", share(statistics.time_busy)),
+                    ("  start taken", share(statistics.time_busy_full())),
+                    ("  room at its start", share(statistics.time_busy_not_full)),
+                    ("  partly blocked", share(statistics.time_busy_partly_blocked)),
                     ("Blocked", share(statistics.time_blocked)),
                     ("Empty", share(statistics.time_idle)),
                     ("Most MUs", statistics.max_contents.to_string()),
                 ];
+                if let Some(mean) = statistics.average_contents() {
+                    rows.push(("Mean MUs", format!("{mean:.1}")));
+                }
+                if let Some(fill) = &details.fill {
+                    rows.push(("Median MUs", median_text(fill)));
+                }
+                if let Some(belt) = &details.belt {
+                    let taken = belt.mean_share_taken(measured).map_or_else(|| "–".to_string(), |taken| format!("{:.1} %", taken * 100.0));
+                    rows.push(("Length taken", taken));
+                    rows.push(("Most length taken", format!("{:.1} %", belt.max_share_taken() * 100.0)));
+                    rows.push(("Mean crossing", belt.crossing_mean().map_or_else(|| "–".to_string(), format_time_exact)));
+                    rows.push(("Longest crossing", format_time_exact(belt.crossing_max)));
+                }
                 rows.extend(unless_never(interruption_rows));
                 rows
             }
@@ -513,7 +533,7 @@ impl Inspection {
             ObjectKind::Buffer => pick(&[("Mean MUs", "Mean MUs"), ("Most MUs", "Most MUs"), ("Empty", "Empty")]),
             ObjectKind::Source => pick(&[("MUs out", "MUs out"), ("Blocked", "Blocked")]),
             ObjectKind::Drain => pick(&[("Throughput", "Throughput"), ("Lead time", "Mean lead time")]),
-            ObjectKind::Conveyor => pick(&[("Busy", "Busy"), ("Blocked", "Blocked"), ("Most MUs", "Most MUs")]),
+            ObjectKind::Conveyor => pick(&[("Busy, full", "  start taken"), ("Blocked", "Blocked"), ("Crossing", "Mean crossing")]),
         }
     }
 }
@@ -589,6 +609,31 @@ pub struct StationResult {
     pub idle: f64,
     pub failed: f64,
     pub paused: f64,
+    /// Receiving an MU a conveyor hands over, with nothing else going on.
+    pub receiving: f64,
+    /// From the spread between measuring periods, once `MIN_PERIODS` are complete.
+    pub intervals: Option<StationIntervals>,
+}
+
+/// A Conveyor's line in the statistics window: its shares of the time measured, from 0 to 1, how
+/// full it was and how long MUs took to cross it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConveyorResult {
+    pub id: u32,
+    pub name: String,
+    pub busy: f64,
+    /// Busy with its start taken, so that no MU could enter: what the likely-bottleneck rule counts.
+    pub busy_full: f64,
+    pub blocked: f64,
+    pub idle: f64,
+    /// Failed or paused.
+    pub interrupted: f64,
+    pub mean_mus: Option<f64>,
+    pub most: u64,
+    /// The mean share of its length its MUs took.
+    pub length_taken: Option<f64>,
+    pub mean_crossing: Option<SimTime>,
+    pub longest_crossing: SimTime,
     /// From the spread between measuring periods, once `MIN_PERIODS` are complete.
     pub intervals: Option<StationIntervals>,
 }
@@ -663,8 +708,12 @@ pub struct Results {
     pub stations: Vec<StationResult>,
     /// Some Station has a capacity above 1, so its full share differs from its busy share.
     pub with_capacity: bool,
+    /// Some Station has been receiving, so the Stations' table has a column for it.
+    pub with_receiving: bool,
     /// In model order.
     pub buffers: Vec<BufferResult>,
+    /// In model order.
+    pub conveyors: Vec<ConveyorResult>,
     /// By the catalogue's rule, the same `find_bottleneck` gives agents.
     pub bottleneck: Option<LikelyBottleneck>,
     /// How far measuring periods have got, when the run measures in them.
@@ -1431,6 +1480,7 @@ impl ViewState {
             limited: object.capacity != crabsim::Capacity::Unlimited,
             capacity: object.capacity.limit(),
             fill: object.fill.as_deref().cloned(),
+            belt: object.belt.as_deref().copied(),
             failure_profiles: object.failure_profiles.clone(),
         })
     }
@@ -1466,6 +1516,7 @@ impl ViewState {
                 "blocked_share" => share(statistics.time_blocked),
                 "idle_share" => share(statistics.time_idle),
                 "failed_share" => share(statistics.time_failed),
+                "receiving_share" => share(statistics.time_receiving),
                 "mus_in" => Some(statistics.mus_in as f64),
                 "mus_out" => Some(statistics.mus_out as f64),
                 _ => None,
@@ -1502,7 +1553,9 @@ impl ViewState {
         let mut drains = Vec::new();
         let mut stations = Vec::new();
         let mut buffers = Vec::new();
+        let mut conveyors = Vec::new();
         let mut with_capacity = false;
+        let mut with_receiving = false;
         for object in &state.objects {
             let Some(view) = self.objects.get(object.id as usize) else { continue };
             let statistics = &object.statistics;
@@ -1520,6 +1573,19 @@ impl ViewState {
                 paused: share(statistics.time_paused),
             });
             with_capacity |= view.kind == ObjectKind::Station && object.capacity.limit() > 1;
+            with_receiving |= view.kind == ObjectKind::Station && statistics.time_receiving > SimTime::ZERO;
+            let intervals = || {
+                figures(object.id).and_then(|figures| {
+                    Some(StationIntervals {
+                        busy: Interval::of(figures.busy)?,
+                        busy_full: Interval::of(figures.busy_full)?,
+                        blocked: Interval::of(figures.blocked)?,
+                        idle: Interval::of(figures.idle)?,
+                        interrupted: Interval::of(figures.interrupted)?,
+                        full_or_interrupted: Interval::of(figures.full_or_interrupted)?,
+                    })
+                })
+            };
             match view.kind {
                 ObjectKind::Drain => drains.push(DrainResult {
                     id: object.id,
@@ -1546,16 +1612,23 @@ impl ViewState {
                     idle: share(statistics.time_idle),
                     failed: share(statistics.time_failed),
                     paused: share(statistics.time_paused),
-                    intervals: figures(object.id).and_then(|figures| {
-                        Some(StationIntervals {
-                            busy: Interval::of(figures.busy)?,
-                            busy_full: Interval::of(figures.busy_full)?,
-                            blocked: Interval::of(figures.blocked)?,
-                            idle: Interval::of(figures.idle)?,
-                            interrupted: Interval::of(figures.interrupted)?,
-                            full_or_interrupted: Interval::of(figures.full_or_interrupted)?,
-                        })
-                    }),
+                    receiving: share(statistics.time_receiving),
+                    intervals: intervals(),
+                }),
+                ObjectKind::Conveyor => conveyors.push(ConveyorResult {
+                    id: object.id,
+                    name: view.name.clone(),
+                    busy: share(statistics.time_busy),
+                    busy_full: share(statistics.time_busy_full()),
+                    blocked: share(statistics.time_blocked),
+                    idle: share(statistics.time_idle),
+                    interrupted: share(statistics.time_failed + statistics.time_paused),
+                    mean_mus: statistics.average_contents(),
+                    most: statistics.max_contents,
+                    length_taken: object.belt.as_deref().and_then(|belt| belt.mean_share_taken(statistics.measured_time())),
+                    mean_crossing: object.belt.as_deref().and_then(|belt| belt.crossing_mean()),
+                    longest_crossing: object.belt.as_deref().map_or(SimTime::ZERO, |belt| belt.crossing_max),
+                    intervals: intervals(),
                 }),
                 _ => {}
             }
@@ -1566,7 +1639,13 @@ impl ViewState {
             .map(|connection| (self.objects[connection.from as usize].name.clone(), self.objects[connection.to as usize].name.clone()))
             .collect();
         let bottleneck = likely_bottleneck(&shares, &connections);
-        let full_or_interrupted = |name: &str| stations.iter().find(|station| station.name == name)?.intervals.map(|intervals| intervals.full_or_interrupted);
+        let full_or_interrupted = |name: &str| {
+            let intervals = match stations.iter().find(|station| station.name == name) {
+                Some(station) => station.intervals,
+                None => conveyors.iter().find(|conveyor| conveyor.name == name)?.intervals,
+            };
+            intervals.map(|intervals| intervals.full_or_interrupted)
+        };
         let too_close = bottleneck.as_ref().and_then(|likely| {
             let (runner_up, _) = likely.ranking.get(1)?;
             full_or_interrupted(&likely.instance)?.overlaps(&full_or_interrupted(runner_up)?).then(|| runner_up.clone())
@@ -1581,7 +1660,9 @@ impl ViewState {
             drains,
             stations,
             with_capacity,
+            with_receiving,
             buffers,
+            conveyors,
             bottleneck,
             periods: periods.map(|periods| PeriodsSoFar { length: periods.length, complete: periods.complete }),
             too_close,

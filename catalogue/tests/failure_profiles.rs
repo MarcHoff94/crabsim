@@ -94,5 +94,5 @@ fn a_store_of_the_fifth_version_gains_the_time_basis_and_availability_columns() 
     let names: Vec<&str> = columns["rows"].as_array().unwrap().iter().map(|row| row[0].as_str().unwrap()).collect();
     assert_eq!(names, ["run", "observation", "object", "profile", "failures", "failed_s", "time_basis", "availability"]);
     let version = catalogue.call("query_results", json!({ "sql": "SELECT user_version FROM pragma_user_version" })).unwrap();
-    assert_eq!(version["rows"][0][0], 6);
+    assert_eq!(version["rows"][0][0], 7);
 }

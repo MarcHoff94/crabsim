@@ -19,11 +19,21 @@ use crate::flows::{
 use crate::materialflow_objects::OtherObjects;
 use crate::model::MuKind;
 use crate::report::{BeltPosition, Capacity, ObjectKind, ObjectState, OccurrenceKind};
-use crate::statistics::{MachineState, StatisticsKeeper};
+use crate::statistics::{BeltKeeper, MachineState, StatisticsKeeper};
 use crate::time::SimTime;
 
 use super::flows::FailureProfile;
 use super::interruptions::{Interruptible, Interruptions};
+
+/// How many times conveyors worked out their events again and how many MUs those passes walked, for
+/// the benchmark's `conveyor-line` scenario (ADR 0022 says a replan's cost must be measured). Only
+/// with the `counters` feature, so no other build pays for counting.
+#[cfg(feature = "counters")]
+pub mod counters {
+	use std::sync::atomic::AtomicU64;
+	pub static REPLANS: AtomicU64 = AtomicU64::new(0);
+	pub static MUS_WALKED: AtomicU64 = AtomicU64::new(0);
+}
 
 /// Lengths closer than this, in metres, are the same: a tenth of a micrometre.
 const EPSILON: f64 = 1e-7;
@@ -44,6 +54,9 @@ pub enum ConveyorStep {
 	/// An MU straddling this conveyor and the one before it has passed a point that changes how it
 	/// moves or what is behind it: work out the events again.
 	Straddle,
+	/// The last MU's rear has cleared the gap past the start, so no MU of any size is kept out, which
+	/// the statistics tell busy and full from busy with room by.
+	Clear,
 }
 
 /// Names a conveyor's event and the plan it belongs to. Anything that changes the conveyor makes
@@ -64,6 +77,7 @@ impl ConveyorTicket {
 			2 => ConveyorStep::CloseUp,
 			3 => ConveyorStep::Room,
 			5 => ConveyorStep::Straddle,
+			6 => ConveyorStep::Clear,
 			_ => ConveyorStep::Wake,
 		}
 	}
@@ -78,6 +92,8 @@ struct OnBelt {
 	since: SimTime,
 	/// In metres per second, 0 standing: the conveyor's, or the slower speed of an MU on two.
 	speed: f64,
+	/// When its booking point crossed the start, for its crossing time.
+	entered: SimTime,
 }
 
 /// The MU a conveyor handed to the next one, which still has its rear on this one: where its rear
@@ -140,6 +156,11 @@ pub struct Conveyor {
 	/// none.
 	pub interruptions: Interruptions,
 	pub statistics: StatisticsKeeper,
+	/// Its fill, the length its MUs took and their crossing times, boxed so the conveyor stays no
+	/// larger than a Buffer.
+	belt_statistics: Box<BeltKeeper>,
+	/// The whole length of the MUs it holds, in metres.
+	taken: f64,
 	/// The model's kinds of MU, by `MuKindId`, given when a run is built.
 	pub(crate) kinds: Vec<MuKind>,
 }
@@ -171,6 +192,8 @@ impl Conveyor {
 			state: ProcessState::Idle,
 			interruptions: Interruptions::new(None),
 			statistics: StatisticsKeeper::new(0),
+			belt_statistics: Box::new(BeltKeeper::new(length)),
+			taken: 0.0,
 			kinds: vec![MuKind::default()],
 		}
 	}
@@ -320,6 +343,12 @@ impl Conveyor {
 	/// MU that is faster than the one ahead closes up to it, if one does.
 	fn settle(&mut self, lead: Option<Lead>, others: &OtherObjects<'_>, context: &mut EventContext) -> Option<f64> {
 		let now = context.time;
+		#[cfg(feature = "counters")]
+		{
+			use std::sync::atomic::Ordering::Relaxed;
+			counters::REPLANS.fetch_add(1, Relaxed);
+			counters::MUS_WALKED.fetch_add(self.belt.len() as u64, Relaxed);
+		}
 		let mut closes_up: Option<f64> = None;
 		let mut note = |time: f64| closes_up = Some(closes_up.map_or(time, |least| least.min(time)));
 		if self.accumulating {
@@ -390,6 +419,13 @@ impl Conveyor {
 			// one time.
 			let after = SimTime::from_millis(((seconds * 1000.0 - 1e-6).ceil().max(1.0)) as u64);
 			context.schedule(self.event(ConveyorStep::CloseUp, after));
+		}
+		if let Some(last) = self.belt.back().filter(|last| last.speed > 0.0) {
+			// When it moves clear of the start, which changes what the statistics call it.
+			let rear = self.rear(self.belt.len() - 1, now);
+			if rear < self.gap - EPSILON {
+				context.schedule(self.event(ConveyorStep::Clear, Self::time_for(self.gap - rear, last.speed)));
+			}
 		}
 		if let Some(from) = self.straddle_from {
 			self.watch_straddler(from, context, others);
@@ -473,6 +509,8 @@ impl Conveyor {
 		self.handing_to = None;
 		self.front_at_end = false;
 		self.statistics.count_mu_out();
+		self.belt_statistics.crossed(context.time.saturating_sub(on.entered));
+		self.taken -= self.kind(on.mu.kind).length;
 		let from = self.base.object_id;
 		context.record(OccurrenceKind::MuMoved { mu_id: on.mu.id, from, to });
 		log::info!("seq={} MU {} moved from conveyor {} to {}", context.seq, on.mu.id, from, to);
@@ -512,7 +550,7 @@ impl Conveyor {
 						let to = self.handing_to.expect("a successor took the front MU");
 						self.hand_over(to, context, others)?;
 					}
-					ConveyorStep::CloseUp | ConveyorStep::Straddle => {}
+					ConveyorStep::CloseUp | ConveyorStep::Straddle | ConveyorStep::Clear => {}
 					ConveyorStep::Room => {
 						self.retried = true;
 						retries_for_blocked(&mut self.blockedlist, self.base.object_id, context);
@@ -577,8 +615,35 @@ impl Conveyor {
 			_ => {}
 		}
 		self.state = state;
-		let machine = MachineState::of(self.interruptions.most_serious(), &self.state);
-		self.statistics.observe(context.time, machine, self.belt.len() as u64);
+		let machine = self.machine_state(context.time);
+		if let Some((held, time)) = self.statistics.observe_stretch(context.time, machine, self.belt.len() as u64) {
+			self.belt_statistics.stretch(held, time);
+		}
+		if self.belt.is_empty() {
+			// So rounding never leaves a little behind.
+			self.taken = 0.0;
+		}
+		self.belt_statistics.set_taken(self.taken);
+	}
+
+	/// What its statistics call it: interrupted, empty, standing, or moving MUs, which is busy and
+	/// full while its start is taken so that no MU of any size could enter, busy with room otherwise,
+	/// and partly blocked while the MU at its end waits for a successor and others still move.
+	fn machine_state(&self, now: SimTime) -> MachineState {
+		let machine = match self.state {
+			ProcessState::Processing if self.front_at_end && self.handing_to.is_none() => MachineState::BusyPartlyBlocked,
+			ProcessState::Processing => {
+				let taken = self.reserved_by.is_some() || self.belt.back().is_some_and(|_| self.rear(self.belt.len() - 1, now) < self.gap - EPSILON);
+				if taken { MachineState::Busy } else { MachineState::BusyNotFull }
+			}
+			ProcessState::Blocked => MachineState::Blocked,
+			ProcessState::Idle => MachineState::Idle,
+			ProcessState::Receiving => MachineState::Receiving,
+		};
+		match self.interruptions.most_serious() {
+			None => machine,
+			interruption => MachineState::of(interruption, &ProcessState::Idle),
+		}
 	}
 }
 
@@ -601,8 +666,10 @@ impl MaterialFlow for Conveyor {
 	/// Another conveyor's MU has its front at the start: nothing else may enter until it has been
 	/// handed over (ADR 0023).
 	#[inline(never)]
-	fn reserve(&mut self, _mu_id: u32, _context: &mut EventContext) {
+	fn reserve(&mut self, _mu_id: u32, context: &mut EventContext) {
 		self.reserved_by = Some(NOBODY);
+		// Its start is taken from now on.
+		self.update_state(context);
 	}
 	#[inline(never)]
 	fn is_exit_allowed(&self) -> bool {
@@ -627,7 +694,8 @@ impl MaterialFlow for Conveyor {
 		} else {
 			self.belt.front().map_or(self.speed, |first| first.speed)
 		};
-		self.belt.push_back(OnBelt { mu, front, since: context.time, speed });
+		self.taken += self.kind(mu.kind).length;
+		self.belt.push_back(OnBelt { mu, front, since: context.time, speed, entered: context.time });
 		let at = self.belt.len() - 1;
 		self.plan_mu(at, front, speed, context);
 		self.statistics.count_mu_in();
@@ -690,15 +758,19 @@ impl EventInterface for Conveyor {
 		self.state = ProcessState::Idle;
 		self.interruptions.reset();
 		self.statistics.reset();
+		self.belt_statistics.reset();
+		self.taken = 0.0;
 	}
 	#[inline(never)]
 	fn clear_statistics(&mut self, now: SimTime) {
 		self.interruptions.clear_statistics(now, &self.statistics);
 		self.statistics.clear(now);
+		self.belt_statistics.clear();
 	}
 	#[inline(never)]
 	fn report(&self, now: SimTime) -> ObjectState {
 		let stopped = self.interruptions.is_interrupted();
+		let (fill, belt) = self.belt_statistics.read(self.statistics.in_progress(now), self.belt.front().map(|first| now.saturating_sub(first.entered)));
 		ObjectState {
 			id: self.base.object_id,
 			kind: ObjectKind::Conveyor,
@@ -716,7 +788,8 @@ impl EventInterface for Conveyor {
 			process_time: None,
 			configured_process_time: None,
 			statistics: self.statistics.read(now),
-			fill: None,
+			fill: Some(Box::new(fill)),
+			belt: Some(Box::new(belt)),
 			positions: (0..self.belt.len())
 				.map(|at| BeltPosition {
 					mu_id: self.belt[at].mu.id,
@@ -792,6 +865,7 @@ impl SuccessorContainer for Conveyor {
 	#[inline(never)]
 	fn clear_content_and_idle(&mut self) {
 		self.belt.clear();
+		self.taken = 0.0;
 		self.front_at_end = false;
 		self.handing_to = None;
 		self.led_by = None;
@@ -802,7 +876,9 @@ impl SuccessorContainer for Conveyor {
 	#[inline(never)]
 	fn take_content(&mut self, _now: SimTime) -> Option<MoveableUnit> {
 		self.front_at_end = false;
-		self.belt.pop_front().map(|on| on.mu)
+		let on = self.belt.pop_front()?;
+		self.taken -= self.kind(on.mu.kind).length;
+		Some(on.mu)
 	}
 	/// Only its front MU at the end is offered, from when it got there.
 	#[inline(never)]

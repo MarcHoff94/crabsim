@@ -760,7 +760,33 @@ fn report(model: &ModelDescription, state: &RunState) -> String {
     for object in state.objects.iter().filter(|object| object.statistics.drain.is_some()) {
         text += &drain_line(model.name(object.id).unwrap_or("Drain"), &object.statistics, state.time);
     }
+    for object in state.objects.iter().filter(|object| object.belt.is_some()) {
+        text += &conveyor_line(model.name(object.id).unwrap_or("Conveyor"), object);
+    }
     text
+}
+
+/// A conveyor's busy time in its three parts, how full it was and how long MUs took to cross it.
+fn conveyor_line(name: &str, object: &crabsim::ObjectState) -> String {
+    let (statistics, belt) = (&object.statistics, object.belt.as_deref().expect("a conveyor's"));
+    let measured = statistics.measured_time();
+    let share = |time: SimTime| match measured.as_millis() {
+        0 => "-".to_string(),
+        total => format!("{:.1} %", time.as_millis() as f64 * 100.0 / total as f64),
+    };
+    let mean_mus = statistics.average_contents().map_or("-".to_string(), |mean| format!("{mean:.1}"));
+    let taken = belt.mean_share_taken(measured).map_or("-".to_string(), |share| format!("{:.1} %", share * 100.0));
+    let crossing = belt.crossing_mean().map_or("-".to_string(), format_time_exact);
+    format!(
+        "{name}: working full {}, not full {}, partly blocked {}; {mean_mus} MUs on average, at most {}; length taken {taken} on average, at most {:.1} %; crossing {crossing} on average, at most {}
+",
+        share(statistics.time_busy_full()),
+        share(statistics.time_busy_not_full),
+        share(statistics.time_busy_partly_blocked),
+        statistics.max_contents,
+        belt.max_share_taken() * 100.0,
+        format_time_exact(belt.crossing_max)
+    )
 }
 
 fn drain_line(name: &str, statistics: &ObjectStatistics, now: SimTime) -> String {

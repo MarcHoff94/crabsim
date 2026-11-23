@@ -4,7 +4,7 @@
 //! with no egui types, so it is tested without a window. See spec issue 63.
 
 use crabsim::time::parse_time;
-use crabsim_model::State;
+use crabsim_model::{Bend, Segment, State};
 use serde_json::{json, Map, Value};
 
 /// A model file's value as one short line, such as "2 × 1.5 × 1.5 m" or "95 % available, repair
@@ -148,6 +148,257 @@ pub struct Form {
     /// For a value that is one of the model's names, such as a Source's MU class: each name. The
     /// one chosen is the first part's text.
     pub choices: Vec<String>,
+    /// For a conveyor's path: its segments as rows of fields.
+    pub path: Option<PathRows>,
+}
+
+/// The kinds of segment, as the path editor's menu offers them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SegmentKind {
+    Straight,
+    Arc,
+    Transition,
+    Helix,
+}
+
+impl SegmentKind {
+    pub const ALL: [SegmentKind; 4] = [SegmentKind::Straight, SegmentKind::Arc, SegmentKind::Transition, SegmentKind::Helix];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SegmentKind::Straight => "Straight",
+            SegmentKind::Arc => "Arc",
+            SegmentKind::Transition => "Transition",
+            SegmentKind::Helix => "Helix",
+        }
+    }
+
+    /// Its two fields' labels, the second empty for a straight.
+    pub fn fields(self) -> [&'static str; 2] {
+        match self {
+            SegmentKind::Straight => ["length m", ""],
+            SegmentKind::Arc => ["radius m", "angle °"],
+            SegmentKind::Transition => ["length m", "to radius m"],
+            SegmentKind::Helix => ["radius m", "turns"],
+        }
+    }
+
+    /// What it is, for hover text.
+    pub fn hint(self) -> &'static str {
+        match self {
+            SegmentKind::Straight => "Straight on, its length in plan",
+            SegmentKind::Arc => "A circular bend: its radius, and the angle it turns through, positive to the left, negative to the right",
+            SegmentKind::Transition => "A bend that tightens or eases evenly, from the bend before it to the radius given, positive to the left, or to straight",
+            SegmentKind::Helix => "A spiral that climbs or falls: its radius, its turns, positive to the left, and its rise, which can't be 0",
+        }
+    }
+}
+
+/// One segment's fields: its kind, its two values as typed and its rise.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PathRow {
+    pub kind: SegmentKind,
+    pub first: String,
+    pub second: String,
+    pub rise: String,
+}
+
+/// A conveyor's path as rows of fields, one per segment, and the short form for typing a whole
+/// path at once (spec issue 141).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PathRows {
+    pub rows: Vec<PathRow>,
+    /// The path in its short form, such as "4, arc 1.5 90", which the rows follow when it is read.
+    pub text: String,
+    /// What is wrong with the short form last read, if anything.
+    pub text_problem: Option<String>,
+}
+
+/// What a path's worked-out geometry says, for the editor to show beneath its rows.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PathFigures {
+    pub length: f64,
+    pub plan_length: f64,
+    /// Where its last point is from its first, in its own frame: ahead along its rotation, to the
+    /// left of it, and up, in metres, and how far it has turned, in degrees.
+    pub ahead: f64,
+    pub left: f64,
+    pub up: f64,
+    pub turned: f64,
+    pub tightest_radius: Option<f64>,
+    pub steepest_incline: f64,
+}
+
+impl PathFigures {
+    /// In words, such as "9.14 m long (8.71 m in plan). Ends 6 m ahead, 2 m to the left, 1 m up,
+    /// turned 90°. Tightest bend 2 m, steepest 5.7°."
+    pub fn describe(&self) -> String {
+        let mut line = format!("{} m long ({} m in plan). Ends {} m ahead", number2(self.length), number2(self.plan_length), number2(self.ahead));
+        if number2(self.left) != "0" {
+            line += &format!(", {} m {}", number2(self.left.abs()), if self.left > 0.0 { "to the left" } else { "to the right" });
+        }
+        if number2(self.up) != "0" {
+            line += &format!(", {} m {}", number2(self.up.abs()), if self.up > 0.0 { "up" } else { "down" });
+        }
+        line += &format!(", turned {}°.", number2(self.turned));
+        if let Some(radius) = self.tightest_radius {
+            line += &format!(" Tightest bend {} m.", number2(radius));
+        }
+        if self.steepest_incline > 0.0 {
+            line += &format!(" Steepest {:.1}°.", self.steepest_incline);
+        }
+        line
+    }
+}
+
+/// A number to the centimetre, without trailing zeros.
+fn number2(x: f64) -> String {
+    let rounded = (x * 100.0).round() / 100.0;
+    format!("{}", if rounded == 0.0 { 0.0 } else { rounded })
+}
+
+impl PathRows {
+    /// The rows of a path as a model file writes it, or of the default 5 m straight without one.
+    pub fn from_value(value: Option<&Value>) -> PathRows {
+        let path = value.and_then(crabsim_model::path::from_json).unwrap_or_else(|| crabsim_model::DEFAULT_PATH.to_vec());
+        let mut rows = PathRows { rows: path.iter().map(|&segment| PathRows::row_of(segment)).collect(), text: String::new(), text_problem: None };
+        rows.refresh_text();
+        rows
+    }
+
+    fn row_of(segment: Segment) -> PathRow {
+        let rise = if segment.rise() == 0.0 { String::new() } else { number(segment.rise()) };
+        let (kind, first, second) = match segment {
+            Segment::Straight { length, .. } => (SegmentKind::Straight, number(length), String::new()),
+            Segment::Arc { radius, angle, .. } => (SegmentKind::Arc, number(radius), number(angle)),
+            Segment::Transition { length, to, .. } => {
+                let to = match to {
+                    Bend::Straight => "straight".to_string(),
+                    Bend::Radius(radius) => number(radius),
+                };
+                (SegmentKind::Transition, number(length), to)
+            }
+            Segment::Helix { radius, turns, .. } => (SegmentKind::Helix, number(radius), number(turns)),
+        };
+        PathRow { kind, first, second, rise }
+    }
+
+    /// The segment the row at `index` says, or what is wrong with what was typed.
+    pub fn segment(&self, index: usize) -> Result<Segment, String> {
+        let row = &self.rows[index];
+        let [first_label, second_label] = row.kind.fields();
+        let read = |text: &str, label: &str| -> Result<f64, String> {
+            text.trim().parse::<f64>().ok().filter(|x| x.is_finite()).ok_or_else(|| format!("segment {}: `{}` isn't a number, the {label}", index + 1, text.trim()))
+        };
+        let rise = if row.rise.trim().is_empty() { 0.0 } else { read(&row.rise, "rise m")? };
+        let first = read(&row.first, first_label)?;
+        Ok(match row.kind {
+            SegmentKind::Straight => Segment::Straight { length: first, rise },
+            SegmentKind::Arc => Segment::Arc { radius: first, angle: read(&row.second, second_label)?, rise },
+            SegmentKind::Transition if row.second.trim().eq_ignore_ascii_case("straight") => Segment::Transition { length: first, to: Bend::Straight, rise },
+            SegmentKind::Transition => Segment::Transition { length: first, to: Bend::Radius(read(&row.second, "to radius m, or straight")?), rise },
+            SegmentKind::Helix => Segment::Helix { radius: first, turns: read(&row.second, second_label)?, rise },
+        })
+    }
+
+    /// Every row's segment, or what is wrong with the first that can't be read.
+    pub fn segments(&self) -> Result<Vec<Segment>, String> {
+        if self.rows.is_empty() {
+            return Err("a path needs at least one segment: Add segment".to_string());
+        }
+        (0..self.rows.len()).map(|index| self.segment(index)).collect()
+    }
+
+    /// Makes the row at `index` another kind, keeping its first value and its rise, with a value
+    /// to start from for the second: a quarter turn, straight, one turn. A new helix rises 1 m.
+    pub fn set_kind(&mut self, index: usize, kind: SegmentKind) {
+        let row = &mut self.rows[index];
+        if row.kind == kind {
+            return;
+        }
+        row.kind = kind;
+        row.second = match kind {
+            SegmentKind::Straight => String::new(),
+            SegmentKind::Arc => "90".to_string(),
+            SegmentKind::Transition => "straight".to_string(),
+            SegmentKind::Helix => "1".to_string(),
+        };
+        if kind == SegmentKind::Helix && row.rise.trim().is_empty() {
+            row.rise = "1".to_string();
+        }
+        self.refresh_text();
+    }
+
+    /// Adds a straight of 1 m after the last row.
+    pub fn add(&mut self) {
+        self.rows.push(PathRow { kind: SegmentKind::Straight, first: "1".into(), second: String::new(), rise: String::new() });
+        self.refresh_text();
+    }
+
+    pub fn remove(&mut self, index: usize) {
+        self.rows.remove(index);
+        self.refresh_text();
+    }
+
+    /// Swaps the row at `index` with the one after it.
+    pub fn swap_with_next(&mut self, index: usize) {
+        if index + 1 < self.rows.len() {
+            self.rows.swap(index, index + 1);
+            self.refresh_text();
+        }
+    }
+
+    /// Writes the short form from the rows, when they can all be read.
+    pub fn refresh_text(&mut self) {
+        if let Ok(path) = self.segments() {
+            self.text = crabsim_model::path::short_form(&path);
+            self.text_problem = None;
+        }
+    }
+
+    /// Reads the short form typed into the rows, or keeps the rows and says what's wrong with it.
+    pub fn read_text(&mut self) {
+        match crabsim_model::path::read_short_form(&self.text) {
+            Ok(path) => {
+                self.rows = path.iter().map(|&segment| PathRows::row_of(segment)).collect();
+                self.text_problem = None;
+            }
+            Err(problem) => self.text_problem = Some(problem),
+        }
+    }
+
+    /// What is wrong with each row, given the conveyor's width and limits: its own values, then
+    /// the limits it breaks, each in words.
+    pub fn problems(&self, width: f64, min_radius: Option<f64>, max_incline: f64) -> Vec<Vec<String>> {
+        let mut found = vec![Vec::new(); self.rows.len()];
+        let segments: Vec<Option<Segment>> = (0..self.rows.len()).map(|index| self.segment(index).ok()).collect();
+        let Some(path) = segments.iter().copied().collect::<Option<Vec<Segment>>>() else { return found };
+        for problem in crabsim_model::path::value_problems(&path).into_iter().chain(crabsim_model::path::limit_problems(&path, width, min_radius, max_incline)) {
+            found[problem.index].push(problem.message);
+        }
+        found
+    }
+
+    /// The path's worked-out figures, when every row can be read and is sound.
+    pub fn figures(&self) -> Option<PathFigures> {
+        let path = self.segments().ok()?;
+        if !path.iter().all(|&segment| crabsim_model::path::sound(segment)) {
+            return None;
+        }
+        let origin = crabsim_model::path::Pose { x: 0.0, y: 0.0, z: 0.0, heading_degrees: 0.0 };
+        let laid = crabsim_model::path::Laid { origin, width: 0.0, direction: crabsim_model::Direction::Forward };
+        let geometry = crabsim_model::path::geometry(&path, laid);
+        Some(PathFigures {
+            length: geometry.length,
+            plan_length: geometry.plan_length,
+            ahead: geometry.end.x,
+            left: geometry.end.y,
+            up: geometry.end.z,
+            turned: geometry.end.heading_degrees,
+            tightest_radius: geometry.tightest_radius,
+            steepest_incline: geometry.steepest_incline_degrees,
+        })
+    }
 }
 
 /// One failure profile's fields: its name, the stream it keeps, and its availability and repair
@@ -206,7 +457,7 @@ impl Form {
                 form: Form::new("failure", Some(profile)),
             })
             .collect();
-        Form { attribute: "failures".into(), parts: Vec::new(), repair: None, distribution: None, options: &[], profiles: Some(profiles), choices: Vec::new() }
+        Form { attribute: "failures".into(), parts: Vec::new(), repair: None, distribution: None, options: &[], profiles: Some(profiles), choices: Vec::new(), path: None }
     }
 
     /// The profiles as a model file writes them, each with its stream. An empty list is none at
@@ -358,11 +609,8 @@ impl Form {
             "length" | "width" | "booking_point" | "speed" | "gap" | "min_radius" | "max_incline" => {
                 (vec![part("", value.and_then(Value::as_f64).map_or(String::new(), number))], None)
             }
-            // In its short form, such as "4, arc 1.5 90".
-            "path" => {
-                let typed = value.and_then(crabsim_model::path::from_json).map_or(String::new(), |path| crabsim_model::path::short_form(&path));
-                (vec![part("segments", typed)], None)
-            }
+            // Rows of its segments instead of parts.
+            "path" => (Vec::new(), None),
             _ => (vec![part("", text_of(value))], None),
         };
         let options: &[(&str, &str)] = match attribute {
@@ -373,7 +621,8 @@ impl Form {
             "direction" => &DIRECTIONS,
             _ => &[],
         };
-        Form { attribute: attribute.to_string(), parts, repair, distribution: None, options, profiles: None, choices: Vec::new() }
+        let path = (attribute == "path").then(|| PathRows::from_value(value));
+        Form { attribute: attribute.to_string(), parts, repair, distribution: None, options, profiles: None, choices: Vec::new(), path }
     }
 
     /// The fields for `attribute`, whatever it is: state notes need the `states` the object can be
@@ -407,7 +656,7 @@ impl Form {
             successor: field("rank") == Some("successor"),
             drains: ticks,
         };
-        Form { attribute: "distribution".into(), parts: Vec::new(), repair: None, distribution: Some(choice), options: &[], profiles: None, choices: Vec::new() }
+        Form { attribute: "distribution".into(), parts: Vec::new(), repair: None, distribution: Some(choice), options: &[], profiles: None, choices: Vec::new(), path: None }
     }
 
     /// The fields for state notes: one per state the object can be in, labelled with the state and
@@ -417,7 +666,7 @@ impl Form {
             .iter()
             .map(|state| part(state.label(), value.and_then(|notes| notes.get(state.name())).and_then(Value::as_str).unwrap_or_default()))
             .collect();
-        Form { attribute: "state_notes".into(), parts, repair: None, distribution: None, options: &[], profiles: None, choices: Vec::new() }
+        Form { attribute: "state_notes".into(), parts, repair: None, distribution: None, options: &[], profiles: None, choices: Vec::new(), path: None }
     }
 
     /// The states a state notes form has a field for.
@@ -531,7 +780,10 @@ impl Form {
                 _ => Err(format!("`{}` isn't a gap: type metres, 0 or more", text(0))),
             },
             // Whether the segments make a sound path is the model file's rules to say.
-            "path" => crabsim_model::path::read_short_form(text(0)).map(|path| crabsim_model::path::to_json(&path)),
+            "path" => match &self.path {
+                Some(path) => path.segments().map(|path| crabsim_model::path::to_json(&path)),
+                None => Err("a path has rows of segments".to_string()),
+            },
             "direction" => Ok(json!(text(0))),
             // Unset is only the geometric limit, which a model file says by leaving it out.
             "min_radius" if text(0).is_empty() => Ok(Value::Null),
@@ -565,6 +817,10 @@ impl Form {
 
     /// Whether the fields hold what `value` would give, so nothing waits to be applied.
     pub fn matches(&self, value: Option<&Value>) -> bool {
+        // A path matches by its rows: the short form typed and not read yet changes nothing.
+        if let Some(path) = &self.path {
+            return Some(&path.rows) == Form::new(&self.attribute, value).path.as_ref().map(|path| &path.rows);
+        }
         if self.attribute == "state_notes" {
             return *self == Form::state_notes(&self.states(), value);
         }

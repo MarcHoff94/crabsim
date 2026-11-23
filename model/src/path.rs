@@ -457,6 +457,192 @@ pub fn geometry(path: &[Segment], laid: Laid) -> Geometry {
     }
 }
 
+// ---------- Problems ----------
+
+/// What is wrong with one segment of a path.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SegmentProblem {
+    /// Its place in the path, from 0.
+    pub index: usize,
+    /// Where in the segment, as a JSON Pointer below its kind, such as `/radius`, or empty for
+    /// the segment as a whole.
+    pub field: &'static str,
+    /// For a limit broken, the conveyor attribute that sets it, if it isn't the path:
+    /// `width`, `min_radius` or `max_incline`.
+    pub limit: Option<&'static str>,
+    pub message: String,
+}
+
+/// Whether a segment's own values are sound, so its bends and climb can be worked out.
+pub fn sound(segment: Segment) -> bool {
+    let positive = |value: f64| value > 0.0 && value.is_finite();
+    segment.rise().is_finite()
+        && match segment {
+            Segment::Straight { length, .. } | Segment::Transition { length, to: Bend::Straight, .. } => positive(length),
+            Segment::Arc { radius, angle, .. } => positive(radius) && angle != 0.0 && angle.abs() <= 360.0,
+            Segment::Transition { length, to: Bend::Radius(radius), .. } => positive(length) && radius != 0.0 && radius.is_finite(),
+            Segment::Helix { radius, turns, rise } => positive(radius) && turns != 0.0 && turns.is_finite() && rise != 0.0,
+        }
+}
+
+/// What is wrong with each segment's own values, whatever conveyor it is on.
+pub fn value_problems(path: &[Segment]) -> Vec<SegmentProblem> {
+    let positive = |value: f64| value > 0.0 && value.is_finite();
+    let mut problems = Vec::new();
+    for (index, &segment) in path.iter().enumerate() {
+        let mut wrong = |field: &'static str, message: &str| problems.push(SegmentProblem { index, field, limit: None, message: message.to_string() });
+        if !segment.rise().is_finite() {
+            wrong("/rise", "a rise must be a number of metres, negative falling");
+        }
+        match segment {
+            Segment::Straight { length, rise } => {
+                if !positive(length) {
+                    wrong(if rise == 0.0 { "" } else { "/length" }, "a straight must be above 0, in metres");
+                }
+            }
+            Segment::Arc { radius, angle, .. } => {
+                if !positive(radius) {
+                    wrong("/radius", "an arc's radius must be above 0, in metres");
+                }
+                if !(angle != 0.0 && angle.abs() <= 360.0) {
+                    wrong("/angle", "an arc turns through an angle in degrees, not 0 and at most 360 either way, positive to the left: more than a whole turn is a helix");
+                }
+            }
+            Segment::Transition { length, to, .. } => {
+                if !positive(length) {
+                    wrong("/length", "a transition's length must be above 0, in metres");
+                }
+                if let Bend::Radius(radius) = to
+                    && !(radius != 0.0 && radius.is_finite())
+                {
+                    wrong("/to_radius", "a transition eases to a radius in metres, not 0, positive to the left, or to \"straight\"");
+                } else if !transition_eases(path, index) {
+                    wrong("", "this transition ends at the bend it starts at, so it eases nothing: use an arc or a straight instead");
+                }
+            }
+            Segment::Helix { radius, turns, rise } => {
+                if !positive(radius) {
+                    wrong("/radius", "a helix's radius must be above 0, in metres");
+                }
+                if !(turns != 0.0 && turns.is_finite()) {
+                    wrong("/turns", "a helix turns a number of times, not 0, positive to the left");
+                }
+                if rise == 0.0 {
+                    wrong("/rise", "a helix must climb or fall: a flat turn is an arc");
+                }
+            }
+        }
+    }
+    problems
+}
+
+/// Where a path breaks its conveyor's limits: a bend no wider than half its `width` or tighter
+/// than its `min_radius`, or a segment steeper than its `max_incline`. Nothing if any segment's
+/// own values are wrong, which `value_problems` says.
+pub fn limit_problems(path: &[Segment], width: f64, min_radius: Option<f64>, max_incline: f64) -> Vec<SegmentProblem> {
+    if !path.iter().all(|&segment| sound(segment)) {
+        return Vec::new();
+    }
+    let mut problems = Vec::new();
+    for (index, radius) in tightest_radii(path).into_iter().enumerate() {
+        let Some(radius) = radius else { continue };
+        let said = format!("segment {} ({})", index + 1, path[index].kind());
+        if radius <= width / 2.0 {
+            problems.push(SegmentProblem {
+                index,
+                field: "",
+                limit: Some("width"),
+                message: format!("{said} bends to a radius of {radius} m, no more than half its width of {width} m, so its inner edge would fold: make the radius larger or the conveyor narrower"),
+            });
+        } else if let Some(least) = min_radius.filter(|&least| radius < least) {
+            problems.push(SegmentProblem { index, field: "", limit: Some("min_radius"), message: format!("{said} bends to a radius of {radius} m, tighter than its min_radius of {least} m") });
+        }
+    }
+    for (index, &segment) in path.iter().enumerate() {
+        let incline = segment.incline_degrees();
+        if incline > max_incline + 1e-9 {
+            let way = if segment.rise() > 0.0 { "climbs" } else { "falls" };
+            problems.push(SegmentProblem {
+                index,
+                field: "",
+                limit: Some("max_incline"),
+                message: format!("segment {} ({}) {way} at {incline:.1}°, steeper than its max_incline of {max_incline}°", index + 1, segment.kind()),
+            });
+        }
+    }
+    problems
+}
+
+// ---------- What a view draws ----------
+
+/// A conveyor's path as a view draws it, laid where it is: its centreline in the order its MUs
+/// travel, each point with its distance in 3D from where they enter, and labels for its rises,
+/// helices and heights.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Drawing {
+    /// How wide the conveyor is.
+    pub width: f64,
+    pub points: Vec<(f64, Pose)>,
+    pub labels: Vec<Label>,
+    pub bounds: Bounds,
+}
+
+/// A few words drawn at a place on the floor.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Label {
+    pub x: f64,
+    pub y: f64,
+    pub text: String,
+}
+
+/// Metres as a label says them: to the centimetre, without trailing zeros.
+fn metres(value: f64) -> String {
+    let rounded = (value * 100.0).round() / 100.0;
+    format!("{}", if rounded == 0.0 { 0.0 } else { rounded })
+}
+
+/// What a view draws for a conveyor of `path` as `laid`: its centreline, turning at most
+/// `step_degrees` between two points, and labels: each rising or falling segment's rise as its
+/// MUs travel it, at its middle, a helix's turns and rise at its centre, and each end's height
+/// where it isn't 0.
+pub fn drawing(path: &[Segment], laid: Laid, step_degrees: f64) -> Drawing {
+    let total = path_length(path);
+    let mut points = centreline(path, laid.origin, step_degrees);
+    let backward = laid.direction == Direction::Backward;
+    if backward {
+        points.reverse();
+        for (along, pose) in &mut points {
+            *along = total - *along;
+            *pose = turned(*pose);
+        }
+    }
+    let travelled = |rise: f64| if backward { -rise } else { rise };
+    let mut labels = Vec::new();
+    for (segment, start) in walk(path, laid.origin) {
+        let rise = travelled(segment.rise());
+        if let Segment::Helix { radius, turns, .. } = segment {
+            // The centre of its circle, to the side it turns to.
+            let side = turns.signum() * radius;
+            let (x, y) = (start.x - start.theta.sin() * side, start.y + start.theta.cos() * side);
+            let count = turns.abs();
+            labels.push(Label { x, y, text: format!("{} turn{}, {}{} m", metres(count), if count == 1.0 { "" } else { "s" }, if rise > 0.0 { "+" } else { "" }, metres(rise)) });
+        } else if rise != 0.0 {
+            let middle = along(segment, start, segment.plan_length() / 2.0);
+            labels.push(Label { x: middle.x, y: middle.y, text: format!("{}{} m", if rise > 0.0 { "+" } else { "" }, metres(rise)) });
+        }
+    }
+    let (first, last) = (points.first().map(|point| point.1), points.last().map(|point| point.1));
+    for pose in [first, last].into_iter().flatten() {
+        if metres(pose.z) != "0" {
+            labels.push(Label { x: pose.x, y: pose.y, text: format!("{} m high", metres(pose.z)) });
+        }
+    }
+    if first.is_some() && first == last {
+        labels.pop();
+    }
+    Drawing { width: laid.width, points, labels, bounds: bounds(path, laid) }
+}
+
 // ---------- As a file writes it ----------
 
 /// A path as a model file writes it: a flat straight as just its length, every other segment as
@@ -775,5 +961,31 @@ mod tests {
         assert_eq!(from_json(&to_json(&path)), Some(path.to_vec()));
         assert_eq!(from_json(&json!([{ "arc": { "radius": 1 } }])), None);
         assert_eq!(from_json(&json!([{ "availability": 0.9 }])), None);
+    }
+
+    #[test]
+    fn a_drawing_runs_the_way_its_mus_travel_and_labels_rises_and_heights() {
+        let path = [Segment::straight(2.0), Segment::Straight { length: 2.0, rise: 0.5 }, Segment::Helix { radius: 1.0, turns: 1.0, rise: 2.0 }];
+        let forward = drawing(&path, laid(ORIGIN), 2.0);
+        assert_eq!(forward.points.first().map(|point| (point.0, point.1.x)), Some((0.0, 0.0)));
+        let texts: Vec<&str> = forward.labels.iter().map(|label| label.text.as_str()).collect();
+        assert_eq!(texts, ["+0.5 m", "1 turn, +2 m", "2.5 m high"]);
+        // The helix turns left from (4, 0) heading along x, so its centre is at (4, 1).
+        assert!(close(forward.labels[1].x, 4.0) && close(forward.labels[1].y, 1.0), "{:?}", forward.labels[1]);
+        let back = drawing(&path, Laid { direction: Direction::Backward, ..laid(ORIGIN) }, 2.0);
+        let (along, start) = back.points[0];
+        assert!(close(along, 0.0) && close(start.z, 2.5) && close(start.heading_degrees, 180.0), "{start:?}");
+        assert!(close(back.points.last().unwrap().0, path_length(&path)));
+        let texts: Vec<&str> = back.labels.iter().map(|label| label.text.as_str()).collect();
+        assert_eq!(texts, ["-0.5 m", "1 turn, -2 m", "2.5 m high"]);
+    }
+
+    #[test]
+    fn a_paths_problems_name_their_segment_and_the_limit_broken() {
+        let wrong = value_problems(&[Segment::straight(1.0), Segment::Arc { radius: 0.0, angle: 90.0, rise: 0.0 }]);
+        assert_eq!((wrong[0].index, wrong[0].field), (1, "/radius"));
+        let limits = limit_problems(&[Segment::Arc { radius: 0.5, angle: 90.0, rise: 0.0 }, Segment::Straight { length: 1.0, rise: 1.0 }], 0.6, Some(1.0), 30.0);
+        let found: Vec<(usize, Option<&str>)> = limits.iter().map(|problem| (problem.index, problem.limit)).collect();
+        assert_eq!(found, [(0, Some("min_radius")), (1, Some("max_incline"))]);
     }
 }

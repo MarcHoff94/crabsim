@@ -11,6 +11,7 @@
 
 mod build;
 mod check;
+pub mod path;
 mod read;
 pub mod schema;
 mod suggest;
@@ -18,6 +19,7 @@ mod warn;
 mod write;
 
 pub use crabsim::{Capacity, ExitStrategy, StartMode};
+pub use path::{Bend, DEFAULT_PATH, Direction, Segment, path_length};
 use crabsim::{Dimensions, ObjectKind, Position, SimTime};
 use serde::Serialize;
 use std::collections::HashSet;
@@ -221,31 +223,15 @@ pub struct Attributes {
     /// Whether a conveyor's MUs close up behind a stopped one while the rest move on (the
     /// default), or every MU stops as a whole when the first can't leave.
     pub accumulating: Option<bool>,
+    /// Which way a conveyor's MUs travel along its path: forward, from its first segment to its
+    /// last, the default, or backward.
+    pub direction: Option<Direction>,
+    /// The tightest bend a conveyor's path may have, as a radius in metres. None by default: only
+    /// half its width, inside which its inner edge would fold.
+    pub min_radius: Option<f64>,
+    /// The steepest a conveyor's path may climb or fall, in degrees. 30 by default.
+    pub max_incline: Option<f64>,
 }
-
-/// One piece of a conveyor's path (ADR 0024). Straights only so far: arcs, transition curves and
-/// helices come with paths.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Segment {
-    /// This many metres straight on, above 0.
-    Straight(f64),
-}
-
-impl Segment {
-    pub fn length(self) -> f64 {
-        match self {
-            Segment::Straight(metres) => metres,
-        }
-    }
-}
-
-/// A path's length: what a conveyor's MUs travel.
-pub fn path_length(path: &[Segment]) -> f64 {
-    path.iter().map(|segment| segment.length()).sum()
-}
-
-/// A conveyor's path until given one: 5 m straight.
-pub const DEFAULT_PATH: [Segment; 1] = [Segment::Straight(5.0)];
 
 /// A Source's own values for the MUs it makes: any of an MU class's values, each changing its
 /// MU class's when set.
@@ -332,6 +318,9 @@ impl Attributes {
             Attribute::Speed => self.speed.is_some(),
             Attribute::Gap => self.gap.is_some(),
             Attribute::Accumulating => self.accumulating.is_some(),
+            Attribute::Direction => self.direction.is_some(),
+            Attribute::MinRadius => self.min_radius.is_some(),
+            Attribute::MaxIncline => self.max_incline.is_some(),
         }
     }
 
@@ -361,6 +350,9 @@ impl Attributes {
             Attribute::Speed => self.speed = from.speed,
             Attribute::Gap => self.gap = from.gap,
             Attribute::Accumulating => self.accumulating = from.accumulating,
+            Attribute::Direction => self.direction = from.direction,
+            Attribute::MinRadius => self.min_radius = from.min_radius,
+            Attribute::MaxIncline => self.max_incline = from.max_incline,
         }
     }
 }
@@ -391,10 +383,13 @@ pub enum Attribute {
     Speed,
     Gap,
     Accumulating,
+    Direction,
+    MinRadius,
+    MaxIncline,
 }
 
 impl Attribute {
-    pub const ALL: [Attribute; 23] = [
+    pub const ALL: [Attribute; 26] = [
         Attribute::Interval,
         Attribute::ProcessTime,
         Attribute::Failures,
@@ -418,6 +413,9 @@ impl Attribute {
         Attribute::Speed,
         Attribute::Gap,
         Attribute::Accumulating,
+        Attribute::Direction,
+        Attribute::MinRadius,
+        Attribute::MaxIncline,
     ];
 
     /// Its name in a file.
@@ -446,6 +444,9 @@ impl Attribute {
             Attribute::Speed => "speed",
             Attribute::Gap => "gap",
             Attribute::Accumulating => "accumulating",
+            Attribute::Direction => "direction",
+            Attribute::MinRadius => "min_radius",
+            Attribute::MaxIncline => "max_incline",
         }
     }
 
@@ -455,7 +456,18 @@ impl Attribute {
             (built_in, self),
             (BUILT_IN_MU_CLASS, Attribute::Length | Attribute::Width | Attribute::BookingPoint | Attribute::Description)
                 | ("Source" | "Station" | "Buffer" | "Drain" | "Conveyor", Attribute::Dimensions | Attribute::Description | Attribute::StateNotes | Attribute::Failures)
-                | ("Conveyor", Attribute::Path | Attribute::Width | Attribute::Speed | Attribute::Gap | Attribute::Accumulating | Attribute::Distribution)
+                | (
+                    "Conveyor",
+                    Attribute::Path
+                        | Attribute::Width
+                        | Attribute::Speed
+                        | Attribute::Gap
+                        | Attribute::Accumulating
+                        | Attribute::Direction
+                        | Attribute::MinRadius
+                        | Attribute::MaxIncline
+                        | Attribute::Distribution
+                )
                 | ("Source", Attribute::Interval | Attribute::Distribution | Attribute::MuClass | Attribute::MuValues)
                 | ("Station", Attribute::ProcessTime | Attribute::StartingMus | Attribute::Capacity | Attribute::Start | Attribute::Distribution)
                 | (
@@ -872,6 +884,8 @@ impl Model {
             attributes.speed.get_or_insert(0.5);
             attributes.gap.get_or_insert(0.0);
             attributes.accumulating.get_or_insert(true);
+            attributes.direction.get_or_insert(Direction::Forward);
+            attributes.max_incline.get_or_insert(30.0);
             // Its size is its path's length and its width, whatever its dimensions say.
             let length = path_length(attributes.path.as_deref().unwrap_or_default());
             let width = attributes.width.unwrap_or(0.6);
@@ -888,6 +902,44 @@ impl Model {
         attributes.dimensions.get_or_insert(Dimensions::default_for(kind));
         Some(Resolved { built_in, attributes, origins })
     }
+}
+
+impl Model {
+    /// Where a view draws the instance at `index` placed at `position`: the centre of its
+    /// footprint. A conveyor's position is where its path starts (spec issue 141), and a view
+    /// draws it as a straight band of its length along its rotation, so its centre is half its
+    /// length on from its start. Anything else is drawn where it is placed.
+    pub fn drawn_position(&self, index: usize, position: Position) -> Position {
+        let (dx, dy) = self.start_to_centre(index);
+        Position { x: position.x + dx, y: position.y + dy, z: position.z }
+    }
+
+    /// Where to place the instance at `index` for a view to draw it centred at `centre`: the
+    /// other way round from `drawn_position`.
+    pub fn position_drawn_at(&self, index: usize, centre: Position) -> Position {
+        let (dx, dy) = self.start_to_centre(index);
+        Position { x: centre.x - dx, y: centre.y - dy, z: centre.z }
+    }
+
+    /// Where to place a new instance of `class` for a view to draw it centred at `centre`, as
+    /// `position_drawn_at` does for one already placed.
+    pub fn position_drawn_at_for_class(&self, class: &str, centre: Position) -> Position {
+        let (dx, dy) = self.resolve_class(class).map_or((0.0, 0.0), |resolved| start_to_centre(&resolved));
+        Position { x: centre.x - dx, y: centre.y - dy, z: centre.z }
+    }
+
+    /// How far a view's centre of the instance at `index` is from its position.
+    fn start_to_centre(&self, index: usize) -> (f64, f64) {
+        self.resolve(index).map_or((0.0, 0.0), |resolved| start_to_centre(&resolved))
+    }
+}
+
+/// How far a view's centre of an object with these values is from its position: half a
+/// conveyor's length along its rotation, and nothing for anything else.
+fn start_to_centre(resolved: &Resolved) -> (f64, f64) {
+    let Some(size) = resolved.attributes.dimensions.filter(|_| resolved.built_in == "Conveyor") else { return (0.0, 0.0) };
+    let (sin, cos) = size.rotation_degrees.to_radians().sin_cos();
+    (cos * size.length / 2.0, sin * size.length / 2.0)
 }
 
 /// Escapes a key for a JSON Pointer.

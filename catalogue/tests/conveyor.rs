@@ -32,7 +32,7 @@ fn a_conveyor_has_its_attributes_with_defaults_and_they_change_through_edit_mode
     let setup = setup("conveyor-attributes");
     let got = setup.ok("get_attributes", json!({ "path": "line.json", "target": { "instance": "Belt" } }));
     let names: Vec<&str> = got["attributes"].as_array().unwrap().iter().map(|a| a["attribute"].as_str().unwrap()).collect();
-    assert_eq!(names, ["failures", "dimensions", "description", "state_notes", "distribution", "width", "path", "speed", "gap", "accumulating"], "every attribute a Conveyor has");
+    assert_eq!(names, ["failures", "dimensions", "description", "state_notes", "distribution", "width", "path", "speed", "gap", "accumulating", "direction", "min_radius", "max_incline"], "every attribute a Conveyor has");
     assert_eq!(attribute(&setup, "accumulating"), json!({ "attribute": "accumulating", "value": true, "from": "built_in" }));
     assert_eq!(attribute(&setup, "speed"), json!({ "attribute": "speed", "value": 0.5, "from": "built_in" }));
     assert_eq!(attribute(&setup, "path"), json!({ "attribute": "path", "value": [{ "straight": 10.0 }], "from": "instance" }));
@@ -46,7 +46,10 @@ fn a_conveyor_has_its_attributes_with_defaults_and_they_change_through_edit_mode
     assert_eq!(attribute(&setup, "gap"), json!({ "attribute": "gap", "value": 0.2, "from": "class", "class": "Conveyor" }));
     let refused = setup.err("edit_model", json!({ "path": "line.json", "changes": [
         { "change": "set_attribute", "target": { "instance": "Belt" }, "attribute": "path", "value": [{ "helix": { "turns": 2 } }] } ] }));
-    assert!(refused.to_string().contains("helices come with curved paths"), "{refused}");
+    assert!(refused.to_string().contains("`radius` is missing"), "{refused}");
+    assert_eq!(attribute(&setup, "direction"), json!({ "attribute": "direction", "value": "forward", "from": "built_in" }));
+    assert_eq!(attribute(&setup, "max_incline"), json!({ "attribute": "max_incline", "value": 30.0, "from": "built_in" }));
+    assert_eq!(attribute(&setup, "min_radius"), json!({ "attribute": "min_radius", "from": "not_set" }));
 }
 
 #[test]
@@ -154,4 +157,63 @@ fn a_conveyor_that_is_full_all_the_time_is_the_likely_bottleneck_and_compare_run
     let compared = setup.ok("compare_runs", json!({ "a": slow, "b": quick, "objects": ["Belt"] }));
     let belt = compared["objects"].as_array().unwrap().iter().find(|o| o["name"] == "Belt").unwrap_or_else(|| panic!("{compared:#}"));
     assert!(belt["figures"].get("mean_crossing_time_s").is_some(), "{belt:#}");
+}
+
+// ---------- Paths (spec issue 141, PR 1) ----------
+
+#[test]
+fn the_command_line_sets_a_path_in_its_short_form_and_says_what_is_wrong_with_one() {
+    let setup = setup("conveyor-short-form");
+    setup.ok("run_commands", json!({ "path": "line.json", "commands": "set Belt.path 4, arc 1.5 90, transition 1 to straight, helix 1.2 2 rise 3; set Belt.direction backward" }));
+    let model = crabsim_model::load(&setup.folder.read("line.json")).unwrap();
+    let belt = model.resolve(1).unwrap().attributes;
+    assert_eq!(crabsim_model::path::short_form(belt.path.as_deref().unwrap()), "4, arc 1.5 90, transition 1 to straight, helix 1.2 2 rise 3");
+    assert_eq!(belt.direction, Some(crabsim_model::Direction::Backward));
+    let refused = setup.err("run_commands", json!({ "path": "line.json", "commands": "set Belt.path 4, arc 1.5" }));
+    assert!(refused.to_string().contains("segment 2 (`arc 1.5`)"), "{refused}");
+    // A path the short form reads but the model file's rules don't is refused by them.
+    let refused = setup.err("run_commands", json!({ "path": "line.json", "commands": "set Belt.path arc 0.2 90" }));
+    assert!(refused.to_string().contains("its inner edge would fold"), "{refused}");
+}
+
+#[test]
+fn completion_offers_a_paths_words_and_the_two_directions() {
+    let setup = setup("conveyor-completion");
+    let model = crabsim_model::load(&setup.folder.read("line.json")).unwrap();
+    let complete = |line: &str| crabsim_catalogue::commands::complete(line, &model, &[]);
+    assert_eq!(complete("set Belt.path 4, a"), vec!["set Belt.path 4, arc ".to_string()]);
+    assert_eq!(complete("set Belt.path 4, arc 1.5 90, transition 1 t"), vec!["set Belt.path 4, arc 1.5 90, transition 1 to ".to_string()]);
+    assert_eq!(complete("set Belt.path 4, helix 1 2 r"), vec!["set Belt.path 4, helix 1 2 rise ".to_string()]);
+    assert_eq!(complete("set Belt.direction "), vec!["set Belt.direction forward ".to_string(), "set Belt.direction backward ".to_string()]);
+    assert_eq!(complete("set Belt.dir"), vec!["set Belt.direction ".to_string()]);
+}
+
+#[test]
+fn get_attributes_gives_a_conveyors_worked_out_path() {
+    let setup = setup("conveyor-geometry");
+    setup.ok("edit_model", json!({ "path": "line.json", "changes": [
+        { "change": "move_instance", "name": "Belt", "position": { "x": 1, "y": 2, "z": 0.5 } },
+        { "change": "set_attribute", "target": { "instance": "Belt" }, "attribute": "path",
+          "value": [{ "straight": 4 }, { "arc": { "radius": 2, "angle": 90, "rise": 1 } }] } ] }));
+    let got = setup.ok("get_attributes", json!({ "path": "line.json", "target": { "instance": "Belt" } }));
+    let geometry = &got["geometry"];
+    // 4 m on to (5, 2), then a quarter circle to the left of radius 2 to (7, 4), heading up.
+    assert_eq!(geometry["start"], json!({ "x": 1.0, "y": 2.0, "z": 0.5, "heading_degrees": 0.0 }), "{got}");
+    assert_eq!(geometry["end"], json!({ "x": 7.0, "y": 4.0, "z": 1.5, "heading_degrees": 90.0 }), "{got}");
+    let arc = std::f64::consts::PI;
+    assert_eq!(geometry["plan_length"], json!(((4.0 + arc) * 10_000.0_f64).round() / 10_000.0));
+    assert_eq!(geometry["length"], json!(((4.0 + arc.hypot(1.0)) * 10_000.0_f64).round() / 10_000.0));
+    assert_eq!(geometry["bounds"], json!({ "min_x": 1.0, "min_y": 1.7, "max_x": 7.3, "max_y": 4.0 }), "{got}");
+    assert_eq!(geometry["tightest_radius"], json!(2.0));
+    assert_eq!(geometry["placed"], json!(true));
+    // Backward, its MUs enter at the arc's end, heading back down.
+    setup.ok("run_commands", json!({ "path": "line.json", "commands": "set Belt.direction backward" }));
+    let got = setup.ok("get_attributes", json!({ "path": "line.json", "target": { "instance": "Belt" } }));
+    assert_eq!(got["geometry"]["start"], json!({ "x": 7.0, "y": 4.0, "z": 1.5, "heading_degrees": -90.0 }), "{got}");
+    // A class has no place, so its path is laid from (0, 0).
+    let class = setup.ok("get_attributes", json!({ "path": "line.json", "target": { "class": "Conveyor" } }));
+    assert_eq!(class["geometry"]["end"], json!({ "x": 5.0, "y": 0.0, "z": 0.0, "heading_degrees": 0.0 }), "{class}");
+    assert_eq!(class["geometry"]["placed"], json!(false));
+    let station = setup.ok("get_attributes", json!({ "path": "line.json", "target": { "instance": "Mill" } }));
+    assert!(station.get("geometry").is_none(), "{station}");
 }

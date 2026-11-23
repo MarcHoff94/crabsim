@@ -147,7 +147,7 @@ pub(crate) fn attributes(attributes: &Attributes) -> Value {
         }
     }
     if let Some(path) = &attributes.path {
-        fields.insert("path".into(), self::path(path));
+        fields.insert("path".into(), crate::path::to_json(path));
     }
     for (key, value) in [("speed", attributes.speed), ("gap", attributes.gap)] {
         if let Some(value) = value {
@@ -157,18 +157,15 @@ pub(crate) fn attributes(attributes: &Attributes) -> Value {
     if let Some(accumulating) = attributes.accumulating {
         fields.insert("accumulating".into(), json!(accumulating));
     }
+    if let Some(direction) = attributes.direction {
+        fields.insert("direction".into(), json!(direction.name()));
+    }
+    for (key, value) in [("min_radius", attributes.min_radius), ("max_incline", attributes.max_incline)] {
+        if let Some(value) = value {
+            fields.insert(key.into(), json!(value));
+        }
+    }
     Value::Object(fields)
-}
-
-/// A conveyor's path as a file writes it: its segments in order.
-pub(crate) fn path(path: &[crate::Segment]) -> Value {
-    Value::Array(
-        path.iter()
-            .map(|segment| match *segment {
-                crate::Segment::Straight(metres) => json!({ "straight": metres }),
-            })
-            .collect(),
-    )
 }
 
 /// A Source's own values for its MUs, as a file writes them: only those set.

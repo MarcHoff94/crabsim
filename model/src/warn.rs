@@ -118,8 +118,10 @@ impl Model {
         warnings
     }
 
-    /// Warns about each conveyor the Source at `source` reaches through objects without geometry
-    /// whose width or length its MUs don't fit: the conveyor refuses them, and they wait for good.
+    /// Warns about each conveyor the Source at `source` reaches, through objects without geometry
+    /// and conveyors its MUs fit, whose width or length its MUs don't fit: the conveyor refuses
+    /// them, and they wait for good. Also about one in whose tightest bend they stick out past its
+    /// edge.
     fn mus_that_dont_fit(&self, source: usize, successors: &[Vec<usize>], built_in: &[&str], warn: &mut impl FnMut(String, &str, String)) {
         let Some(kind) = self.mu_kind_of(source) else { return };
         let mut seen = vec![false; successors.len()];
@@ -139,6 +141,27 @@ impl Model {
             } else if kind.length > length {
                 format!("{} m long, and conveyor `{}` only {length} m", kind.length, self.instances[at].name)
             } else {
+                // A footprint centred on the path in a bend reaches out furthest at its outer
+                // corners. Only a view sees it: the conveyor still carries the MU.
+                if let Some(radius) = crate::path::tightest_radius(conveyor.path.as_deref().unwrap_or_default()) {
+                    let reach = ((radius + kind.width / 2.0).powi(2) + (kind.length / 2.0).powi(2)).sqrt() - radius;
+                    if reach > width / 2.0 + 1e-9 {
+                        let class = self.resolve(source).expect("checked").attributes.mu_class.unwrap_or_default();
+                        warn(
+                            format!("/instances/{source}"),
+                            &self.instances[source].name,
+                            format!(
+                                "its MUs, of MU class `{class}`, are {} by {} m, and in conveyor `{}`'s tightest bend, of radius {radius} m, their corners stick out {:.2} m past its edge, as it is {width} m wide",
+                                kind.length,
+                                kind.width,
+                                self.instances[at].name,
+                                reach - width / 2.0
+                            ),
+                        );
+                    }
+                }
+                // It fits, so it travels on to what comes after.
+                queue.extend(successors[at].iter().copied());
                 continue;
             };
             let class = self.resolve(source).expect("checked").attributes.mu_class.unwrap_or_default();

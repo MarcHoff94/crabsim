@@ -57,7 +57,9 @@ fn valid_files() -> Vec<Value> {
             { "name": "S", "class": "Store" },
             { "name": "Out", "class": "Drain", "attributes": { "description": "the end" } },
             { "name": "Yard", "class": "Open store", "attributes": { "capacity": -1 } },
-            { "name": "Belt", "class": "Conveyor", "attributes": { "path": [{ "straight": 6 }, { "straight": 1.5 }], "width": 0.8, "speed": 0.75, "gap": 0.05,
+            { "name": "Belt", "class": "Conveyor", "attributes": { "path": [{ "straight": 6 }, { "straight": { "length": 1.5, "rise": 0.25 } }, { "transition": { "length": 1, "to_radius": 2 } },
+                { "arc": { "radius": 2, "angle": -90, "rise": 0.1 } }, { "transition": { "length": 1, "to_radius": "straight" } }, { "helix": { "radius": 1.5, "turns": -1.5, "rise": -1 } }],
+                "width": 0.8, "speed": 0.75, "gap": 0.05, "direction": "backward", "min_radius": 1, "max_incline": 25,
                 "state_notes": { "blocked": "the end waits" } } },
         ],
         "connections": [
@@ -161,6 +163,15 @@ fn shape_mistakes_fail_the_schema_as_well_as_the_reader() {
         ("a conveyor standing still", Box::new(|file| file["instances"][9]["attributes"]["speed"] = json!(0))),
         ("a gap below 0", Box::new(|file| file["instances"][9]["attributes"]["gap"] = json!(-1))),
         ("a segment of two kinds", Box::new(|file| file["instances"][9]["attributes"]["path"][0]["curve"] = json!(1))),
+        ("an arc without an angle", Box::new(|file| file["instances"][9]["attributes"]["path"][3] = json!({ "arc": { "radius": 2 } }))),
+        ("an arc of no radius", Box::new(|file| file["instances"][9]["attributes"]["path"][3]["arc"]["radius"] = json!(0))),
+        ("a field an arc hasn't", Box::new(|file| file["instances"][9]["attributes"]["path"][3]["arc"]["turns"] = json!(1))),
+        ("a transition to a word that isn't straight", Box::new(|file| file["instances"][9]["attributes"]["path"][4]["transition"]["to_radius"] = json!("round"))),
+        ("a helix without a rise", Box::new(|file| file["instances"][9]["attributes"]["path"][5] = json!({ "helix": { "radius": 1, "turns": 1 } }))),
+        ("a straight with a rise as text", Box::new(|file| file["instances"][9]["attributes"]["path"][1]["straight"]["rise"] = json!("up"))),
+        ("a direction there is none of", Box::new(|file| file["instances"][9]["attributes"]["direction"] = json!("sideways"))),
+        ("a min_radius of 0", Box::new(|file| file["instances"][9]["attributes"]["min_radius"] = json!(0))),
+        ("a max_incline of 90", Box::new(|file| file["instances"][9]["attributes"]["max_incline"] = json!(90))),
     ];
     for (what, change) in mistakes {
         let mut file = base();

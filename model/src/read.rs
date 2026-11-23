@@ -2,7 +2,7 @@
 //! stopping at the first. What can't be read is left at its default, and noted in `Broken`, so the
 //! checks that follow don't report it a second time.
 
-use crate::{Attributes, DistributionStrategy, MuValues, Segment, WeightedStrategy, WEIGHABLE, BUILT_IN_CLASSES, Class, Connection, Failures, Instance, Model, Problem, RepairTime, State, StateNotes, FORMAT_VERSION, escape};
+use crate::{Attributes, Bend, Direction, DistributionStrategy, MuValues, Segment, WeightedStrategy, WEIGHABLE, BUILT_IN_CLASSES, Class, Connection, Failures, Instance, Model, Problem, RepairTime, State, StateNotes, FORMAT_VERSION, escape};
 use crabsim::time::parse_time;
 use crate::{exit_strategy_from_name, start_from_name, Capacity, ExitStrategy, StartMode};
 use crabsim::{Dimensions, Position, SimTime};
@@ -38,7 +38,7 @@ const TOP_LEVEL: [&str; 6] = ["$schema", "format_version", "description", "class
 const INSTANCE: [&str; 5] = ["name", "class", "stream", "position", "attributes"];
 const CONNECTION: [&str; 5] = ["from", "to", "exit", "entrance", "description"];
 const CLASS: [&str; 3] = ["name", "parent", "attributes"];
-const ATTRIBUTES: [&str; 23] = [
+const ATTRIBUTES: [&str; 26] = [
     "interval",
     "process_time",
     "failures",
@@ -62,10 +62,12 @@ const ATTRIBUTES: [&str; 23] = [
     "speed",
     "gap",
     "accumulating",
+    "direction",
+    "min_radius",
+    "max_incline",
 ];
-/// The kinds of segment a path will have (ADR 0024), straights the only one read so far, with
-/// their names as people say them.
-const SEGMENTS_LATER: [(&str, &str); 3] = [("arc", "arcs"), ("transition", "transition curves"), ("helix", "helices")];
+/// The kinds of segment a path has (ADR 0024).
+const SEGMENTS: [&str; 4] = ["straight", "arc", "transition", "helix"];
 /// The values a Source can change for the MUs it makes.
 const MU_VALUES: [&str; 3] = ["length", "width", "booking_point"];
 
@@ -345,6 +347,9 @@ impl Reader {
                 "speed" => self.number_value(value, &at, name).map(|speed| attributes.speed = Some(speed)),
                 "gap" => self.number_value(value, &at, name).map(|gap| attributes.gap = Some(gap)),
                 "accumulating" => self.yes_or_no(value, &at, name).map(|accumulating| attributes.accumulating = Some(accumulating)),
+                "direction" => self.direction(value, &at, name).map(|direction| attributes.direction = Some(direction)),
+                "min_radius" => self.number_value(value, &at, name).map(|radius| attributes.min_radius = Some(radius)),
+                "max_incline" => self.number_value(value, &at, name).map(|degrees| attributes.max_incline = Some(degrees)),
                 _ => unreachable!("every attribute is read"),
             };
             if read.is_none() {
@@ -445,9 +450,19 @@ impl Reader {
         number
     }
 
-    /// A conveyor's path: a list of segments, each `{"straight": metres}` so far.
+    fn direction(&mut self, value: &Value, pointer: &str, name: Option<&str>) -> Option<Direction> {
+        let direction = value.as_str().and_then(Direction::from_name);
+        if direction.is_none() {
+            self.problem(pointer.to_owned(), name, format!("{value} is not a direction: use \"forward\" or \"backward\""));
+        }
+        direction
+    }
+
+    /// A conveyor's path: a list of segments, each one of the kinds of `SEGMENTS`, such as
+    /// `{"straight": 10}` or `{"arc": {"radius": 1.5, "angle": 90}}`. Whether the values make a
+    /// sound path is checked later.
     fn path(&mut self, value: &Value, pointer: &str, name: Option<&str>) -> Option<Vec<Segment>> {
-        const SAY: &str = r#"a path is a list of segments, such as [{"straight": 10}], in metres"#;
+        const SAY: &str = r#"a path is a list of segments, such as [{"straight": 10}, {"arc": {"radius": 1.5, "angle": 90}}], in metres and degrees"#;
         let Some(items) = value.as_array() else {
             self.problem(pointer.to_owned(), name, SAY);
             return None;
@@ -462,29 +477,74 @@ impl Reader {
                 continue;
             };
             let mut kinds = fields.iter();
-            let (Some((kind, length)), None) = (kinds.next(), kinds.next()) else {
-                self.problem(at, name, "a segment is one of its kinds, such as {\"straight\": 10}");
+            let (Some((kind, body)), None) = (kinds.next(), kinds.next()) else {
+                self.problem(at, name, "a segment is one of its kinds: straight, arc, transition or helix, such as {\"straight\": 10}");
                 ok = false;
                 continue;
             };
-            match kind.as_str() {
-                "straight" => match self.number_value(length, &format!("{at}/straight"), name) {
-                    Some(metres) => path.push(Segment::Straight(metres)),
-                    None => ok = false,
-                },
-                later if SEGMENTS_LATER.iter().any(|(name, _)| *name == later) => {
-                    let said = SEGMENTS_LATER.iter().find(|(name, _)| *name == later).map_or(later, |(_, said)| said);
-                    self.problem(format!("{at}/{}", escape(kind)), name, format!("a conveyor's path is straight so far: {said} come with curved paths"));
-                    ok = false;
-                }
-                other => {
-                    let guess = crate::suggest::did_you_mean(other, ["straight"]);
-                    self.problem(format!("{at}/{}", escape(other)), name, format!("unknown segment `{other}`{guess}"));
-                    ok = false;
-                }
+            match self.segment(kind, body, &format!("{at}/{}", escape(kind)), name) {
+                Some(segment) => path.push(segment),
+                None => ok = false,
             }
         }
         ok.then_some(path)
+    }
+
+    /// One segment of the kind `kind`, from what it holds.
+    fn segment(&mut self, kind: &str, body: &Value, at: &str, name: Option<&str>) -> Option<Segment> {
+        if kind == "straight" && body.is_number() {
+            return self.number_value(body, at, name).map(Segment::straight);
+        }
+        let fields: &[&str] = match kind {
+            "straight" => &["length", "rise"],
+            "arc" => &["radius", "angle", "rise"],
+            "transition" => &["length", "to_radius", "rise"],
+            "helix" => &["radius", "turns", "rise"],
+            other => {
+                let guess = crate::suggest::did_you_mean(other, SEGMENTS);
+                self.problem(at.to_owned(), name, format!("unknown segment `{other}`{guess}: a segment is a straight, an arc, a transition or a helix"));
+                return None;
+            }
+        };
+        let what = format!("a {kind}");
+        let fields_read = self.object(body, at, name, &what, fields)?;
+        let rise = match fields_read.get("rise") {
+            Some(rise) => self.number_value(rise, &format!("{at}/rise"), name),
+            // A helix always climbs or falls: a flat turn is an arc.
+            None if kind == "helix" => self.number(fields_read, "rise", at, name),
+            None => Some(0.0),
+        };
+        match kind {
+            "straight" => Some(Segment::Straight { length: self.number(fields_read, "length", at, name)?, rise: rise? }),
+            "arc" => {
+                let radius = self.number(fields_read, "radius", at, name);
+                let angle = self.number(fields_read, "angle", at, name);
+                Some(Segment::Arc { radius: radius?, angle: angle?, rise: rise? })
+            }
+            "transition" => {
+                let length = self.number(fields_read, "length", at, name);
+                let to = match fields_read.get("to_radius") {
+                    None => {
+                        self.problem(at.to_owned(), name, "`to_radius` is missing: the radius it eases to, or \"straight\"");
+                        None
+                    }
+                    Some(Value::String(word)) if word == "straight" => Some(Bend::Straight),
+                    Some(value) => match value.as_f64() {
+                        Some(radius) => Some(Bend::Radius(radius)),
+                        None => {
+                            self.problem(format!("{at}/to_radius"), name, format!("{value} should be a radius in metres, or \"straight\""));
+                            None
+                        }
+                    },
+                };
+                Some(Segment::Transition { length: length?, to: to?, rise: rise? })
+            }
+            _ => {
+                let radius = self.number(fields_read, "radius", at, name);
+                let turns = self.number(fields_read, "turns", at, name);
+                Some(Segment::Helix { radius: radius?, turns: turns?, rise: rise? })
+            }
+        }
     }
 
     /// A Source's own values for its MUs, each optional. The values that can be read are kept.

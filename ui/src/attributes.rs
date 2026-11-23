@@ -24,15 +24,15 @@ pub fn summary(value: &Value) -> String {
         });
         return format!("weighted: {what} by {by}, {order} first{drains}");
     }
-    if let Some((_, label)) = EXIT_STRATEGIES.iter().chain(&STARTS).find(|(name, _)| value == *name) {
+    if let Some((_, label)) = EXIT_STRATEGIES.iter().chain(&STARTS).chain(&DIRECTIONS).find(|(name, _)| value == *name) {
         return label.to_lowercase();
     }
     if let Value::Bool(freezes) = value {
         return if *freezes { "freezes" } else { "runs on" }.to_string();
     }
-    // A conveyor's path, by its straights.
-    if let Some(straights) = straights(value) {
-        return format!("{} m straight", straights.iter().map(|&metres| self::number(metres)).collect::<Vec<_>>().join(" + "));
+    // A conveyor's path, in its short form, such as "4, arc 1.5 90".
+    if let Some(path) = crabsim_model::path::from_json(value).filter(|path| !path.is_empty()) {
+        return crabsim_model::path::short_form(&path);
     }
     // Failure profiles, each by name.
     if let Value::Array(profiles) = value
@@ -240,12 +240,6 @@ impl Form {
     }
 }
 
-/// A path's straights in metres, if `value` is a path of straights only.
-fn straights(value: &Value) -> Option<Vec<f64>> {
-    let segments = value.as_array().filter(|segments| !segments.is_empty())?;
-    segments.iter().map(|segment| segment.get("straight").and_then(Value::as_f64).filter(|_| segment.as_object().is_some_and(|fields| fields.len() == 1))).collect()
-}
-
 /// A booking point typed as a share of an MU's length from its front, or what is wrong with it.
 fn booking_point(typed: &str) -> Result<f64, String> {
     typed
@@ -280,6 +274,10 @@ pub const DWELLING_IN_A_STOP: [(&str, &str); 2] = [("false", "Runs on"), ("true"
 /// What a Conveyor does with the MUs behind one that stops: close up and stop while the rest move
 /// on, or stop as a whole.
 pub const ACCUMULATION: [(&str, &str); 2] = [("true", "Accumulating"), ("false", "Stops as a whole")];
+
+/// Which way a Conveyor's MUs travel along its path, by name in a model file, with its label in
+/// the window.
+pub const DIRECTIONS: [(&str, &str); 2] = [("forward", "Forward"), ("backward", "Backward")];
 
 /// What can be weighed, by name in a model file, with its label in the window.
 pub const WEIGHABLE: [(&str, &str); 4] = [("process_time", "Process time"), ("interval", "Interval"), ("starting_mus", "Starting MUs"), ("capacity", "Capacity")];
@@ -356,11 +354,14 @@ impl Form {
                 let field = |key: &str| value.and_then(|values| values.get(key)).and_then(Value::as_f64).map_or(String::new(), number);
                 (vec![part("length m", field("length")), part("width m", field("width")), part("booking point", field("booking_point"))], None)
             }
-            "length" | "width" | "booking_point" | "speed" | "gap" => (vec![part("", value.and_then(Value::as_f64).map_or(String::new(), number))], None),
-            // Its straights in metres, such as "4, 2.5".
+            "direction" => (vec![part("", value.and_then(Value::as_str).unwrap_or(DIRECTIONS[0].0))], None),
+            "length" | "width" | "booking_point" | "speed" | "gap" | "min_radius" | "max_incline" => {
+                (vec![part("", value.and_then(Value::as_f64).map_or(String::new(), number))], None)
+            }
+            // In its short form, such as "4, arc 1.5 90".
             "path" => {
-                let typed = value.and_then(straights).map_or(String::new(), |straights| straights.iter().map(|&metres| number(metres)).collect::<Vec<_>>().join(", "));
-                (vec![part("straights m", typed)], None)
+                let typed = value.and_then(crabsim_model::path::from_json).map_or(String::new(), |path| crabsim_model::path::short_form(&path));
+                (vec![part("segments", typed)], None)
             }
             _ => (vec![part("", text_of(value))], None),
         };
@@ -369,6 +370,7 @@ impl Form {
             "start" => &STARTS,
             "stop_freezes_dwelling" => &DWELLING_IN_A_STOP,
             "accumulating" => &ACCUMULATION,
+            "direction" => &DIRECTIONS,
             _ => &[],
         };
         Form { attribute: attribute.to_string(), parts, repair, distribution: None, options, profiles: None, choices: Vec::new() }
@@ -528,16 +530,19 @@ impl Form {
                 gap if gap >= 0.0 => Ok(json!(gap)),
                 _ => Err(format!("`{}` isn't a gap: type metres, 0 or more", text(0))),
             },
-            "path" => {
-                let mut segments = Vec::new();
-                for typed in text(0).split(',').map(str::trim) {
-                    match typed.parse::<f64>() {
-                        Ok(metres) if metres > 0.0 && metres.is_finite() => segments.push(json!({ "straight": metres })),
-                        _ => return Err(format!("`{typed}` isn't a straight: type each in metres above 0, such as 10, or 4, 2.5")),
-                    }
-                }
-                Ok(Value::Array(segments))
-            }
+            // Whether the segments make a sound path is the model file's rules to say.
+            "path" => crabsim_model::path::read_short_form(text(0)).map(|path| crabsim_model::path::to_json(&path)),
+            "direction" => Ok(json!(text(0))),
+            // Unset is only the geometric limit, which a model file says by leaving it out.
+            "min_radius" if text(0).is_empty() => Ok(Value::Null),
+            "min_radius" => match float(0)? {
+                metres if metres > 0.0 => Ok(json!(metres)),
+                _ => Err(format!("`{}` isn't a radius: type metres above 0, or leave it empty for no limit but half the width", text(0))),
+            },
+            "max_incline" => match float(0)? {
+                degrees if degrees > 0.0 && degrees < 90.0 => Ok(json!(degrees)),
+                _ => Err(format!("`{}` isn't an incline: type degrees above 0 and below 90", text(0))),
+            },
             // None of them is no values of its own at all, which a model file says by leaving it out.
             "mu_values" => {
                 let mut values = Map::new();

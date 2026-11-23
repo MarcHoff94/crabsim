@@ -862,11 +862,87 @@ pub struct GetAttributesOutput {
     /// An instance's predecessors, by entrance.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub predecessors: Option<Vec<String>>,
+    /// A conveyor's path worked out from its segments, read-only: where it starts and ends, how
+    /// long it is, its bounds, its tightest bend and its steepest incline.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub geometry: Option<PathGeometry>,
+}
+
+/// A conveyor's path worked out (spec issue 141), with its direction applied: `start` is where its
+/// MUs enter and `end` where they leave. In metres and degrees, to a tenth of a millimetre.
+#[derive(Serialize, JsonSchema)]
+pub struct PathGeometry {
+    /// Its length in 3D, rise included: what its MUs travel, and what sets how long they take.
+    pub length: f64,
+    /// Its length in plan, as laid out from above.
+    pub plan_length: f64,
+    pub start: PathPose,
+    pub end: PathPose,
+    /// The smallest rectangle along the axes, in plan, that holds its whole width.
+    pub bounds: PathBounds,
+    /// Its tightest bend's radius in plan, left out if it is straight throughout.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tightest_radius: Option<f64>,
+    /// Its steepest climb or fall, in degrees.
+    pub steepest_incline_degrees: f64,
+    /// Whether this is where it lies in the model: false for a class, or an instance with no
+    /// position, whose path is laid from (0, 0) heading along its rotation.
+    pub placed: bool,
+}
+
+/// A point on a path and which way MUs head there.
+#[derive(Serialize, JsonSchema)]
+pub struct PathPose {
+    pub x: f64,
+    pub y: f64,
+    /// Its height, from the conveyor's position's z and the rises before it.
+    pub z: f64,
+    /// Which way MUs head there in plan, in degrees counter-clockwise from the x axis, as
+    /// `rotation_degrees` turns, in (-180, 180].
+    pub heading_degrees: f64,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub struct PathBounds {
+    pub min_x: f64,
+    pub min_y: f64,
+    pub max_x: f64,
+    pub max_y: f64,
+}
+
+/// A conveyor's path worked out as `resolved` lays it, from `position` if it has one.
+fn path_geometry(resolved: &crabsim_model::Resolved, position: Option<crabsim::Position>) -> Option<PathGeometry> {
+    let attributes = &resolved.attributes;
+    let path = attributes.path.as_deref()?;
+    let rotation = attributes.dimensions.map_or(0.0, |size| size.rotation_degrees);
+    let at = position.unwrap_or(crabsim::Position { x: 0.0, y: 0.0, z: 0.0 });
+    let laid = crabsim_model::path::Laid {
+        origin: crabsim_model::path::Pose { x: at.x, y: at.y, z: at.z, heading_degrees: rotation },
+        width: attributes.width.unwrap_or(0.6),
+        direction: attributes.direction.unwrap_or_default(),
+    };
+    let geometry = crabsim_model::path::geometry(path, laid);
+    let round = |value: f64| {
+        let rounded = (value * 10_000.0).round() / 10_000.0;
+        if rounded == 0.0 { 0.0 } else { rounded }
+    };
+    let pose = |pose: crabsim_model::path::Pose| PathPose { x: round(pose.x), y: round(pose.y), z: round(pose.z), heading_degrees: round(pose.heading_degrees) };
+    let bounds = geometry.bounds;
+    Some(PathGeometry {
+        length: round(geometry.length),
+        plan_length: round(geometry.plan_length),
+        start: pose(geometry.start),
+        end: pose(geometry.end),
+        bounds: PathBounds { min_x: round(bounds.min_x), min_y: round(bounds.min_y), max_x: round(bounds.max_x), max_y: round(bounds.max_y) },
+        tightest_radius: geometry.tightest_radius.map(round),
+        steepest_incline_degrees: round(geometry.steepest_incline_degrees),
+        placed: position.is_some(),
+    })
 }
 
 impl Operation for GetAttributes {
     const NAME: &'static str = "get_attributes";
-    const DESCRIPTION: &'static str = "Shows every attribute of an instance or class in a model file, with its value as a model file writes it and where it comes from: `from` is instance (set on it), class (inherited, with the class named), built_in (the built-in default) or not_set. It also gives the chain of classes, nearest first, an instance's stream, position, successors (by exit) and predecessors (by entrance), the file's file_hash, and the model_hash runs of it record. Use it to see why an object behaves as it does before changing it with edit_model.";
+    const DESCRIPTION: &'static str = "Shows every attribute of an instance or class in a model file, with its value as a model file writes it and where it comes from: `from` is instance (set on it), class (inherited, with the class named), built_in (the built-in default) or not_set. It also gives the chain of classes, nearest first, an instance's stream, position, successors (by exit) and predecessors (by entrance), for a Conveyor its path's geometry (where its MUs enter and leave, its length in 3D, bounds, tightest bend and steepest incline), the file's file_hash, and the model_hash runs of it record. Use it to see why an object behaves as it does before changing it with edit_model.";
     const EFFECT: Effect = Effect::ReadOnly;
     type Input = GetAttributesInput;
     type Output = GetAttributesOutput;
@@ -925,6 +1001,7 @@ impl Operation for GetAttributes {
             successors: instance.map(|instance| model.successors(&instance.name).into_iter().map(str::to_owned).collect()),
             predecessors: instance.map(|instance| model.predecessors(&instance.name).into_iter().map(str::to_owned).collect()),
             stream: instance.and_then(|instance| instance.stream),
+            geometry: (built_in == "Conveyor").then(|| path_geometry(&resolved, instance.and_then(|instance| instance.position))).flatten(),
         })
     }
 }

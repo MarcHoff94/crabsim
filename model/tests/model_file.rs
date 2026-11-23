@@ -1844,3 +1844,75 @@ fn write_the_conveyor_example_canonical() {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../models/conveyor-line.json");
     std::fs::write(path, load(&conveyor_example()).unwrap().save()).unwrap();
 }
+
+// ---------- Attaching (spec issue 141, PR 3) ----------
+
+/// In -> Feed, a conveyor 4 m straight then a quarter turn of radius 2 to the left rising 0.5 m
+/// -> Lift, a 3 m conveyor -> Mill, 2 m long -> Out, each wherever `places` puts it.
+fn attach_line() -> crabsim_model::Model {
+    load(&file(json!([
+        { "name": "In", "class": "Source", "successors": ["Feed"], "position": { "x": -3, "y": 1 } },
+        { "name": "Feed", "class": "Conveyor", "successors": ["Lift"], "position": { "x": 0, "y": 0, "z": 1 },
+          "attributes": { "path": [{ "straight": 4 }, { "arc": { "radius": 2, "angle": 90, "rise": 0.5 } }] } },
+        { "name": "Lift", "class": "Conveyor", "successors": ["Mill"], "position": { "x": 20, "y": 20 }, "attributes": { "path": [{ "straight": 3 }] } },
+        { "name": "Mill", "class": "Station", "successors": ["Out"], "position": { "x": 30, "y": 30 }, "attributes": { "dimensions": { "length": 2, "width": 1, "height": 1 } } },
+        { "name": "Out", "class": "Drain", "position": { "x": 40, "y": 40 } },
+    ])))
+    .unwrap()
+}
+
+fn assert_placed(placement: crabsim_model::Placement, x: f64, y: f64, z: f64, rotation: f64) {
+    let close = |a: f64, b: f64| (a - b).abs() < 1e-9;
+    assert!(
+        close(placement.position.x, x) && close(placement.position.y, y) && close(placement.position.z, z) && close(placement.rotation_degrees, rotation),
+        "{placement:?}, wanted ({x}, {y}, {z}) turned {rotation}"
+    );
+}
+
+#[test]
+fn a_conveyor_attached_after_another_starts_where_it_ends_heading_its_way() {
+    let model = attach_line();
+    // Feed ends at (6, 2), heading up the y axis, 1.5 m up.
+    assert_placed(model.attach_placement(2, 1).unwrap(), 6.0, 2.0, 1.5, 90.0);
+    // Attached the other way, Feed's end lands on Lift's start at (20, 20), heading along x.
+    let back = model.attach_placement(1, 2).unwrap();
+    // Laid from the origin heading along x, Feed ends at (6, 2) heading 90°, 0.5 m up: turned by
+    // -90°, its end (6, 2) becomes (2, -6), so it starts at (18, 26), 0.5 m below Lift.
+    assert_placed(back, 18.0, 26.0, -0.5, -90.0);
+}
+
+#[test]
+fn an_object_without_geometry_attaches_by_its_centre_half_its_length_on() {
+    let model = attach_line();
+    // Mill after Lift, which ends at (23, 20) heading along x: its centre 1 m on.
+    assert_placed(model.attach_placement(3, 2).unwrap(), 24.0, 20.0, 0.0, 0.0);
+    // In before Feed, 1 m long by default: its centre 0.5 m before Feed's start, as high.
+    assert_placed(model.attach_placement(0, 1).unwrap(), -0.5, 0.0, 1.0, 0.0);
+    // Lift before Mill: its end half Mill's length before Mill's centre, turned as Mill is, so
+    // its 3 m start at x = 26.
+    assert_placed(model.attach_placement(2, 3).unwrap(), 26.0, 30.0, 0.0, 0.0);
+}
+
+#[test]
+fn attaching_needs_a_connection_a_conveyor_and_a_place() {
+    let model = attach_line();
+    assert!(model.attach_placement(0, 2).unwrap_err().contains("aren't connected"));
+    assert!(model.attach_placement(4, 3).unwrap_err().contains("neither `Out` nor `Mill` is a conveyor"));
+    assert!(model.attach_placement(1, 1).unwrap_err().contains("itself"));
+    let mut unplaced = attach_line();
+    unplaced.instances[2].position = None;
+    assert!(unplaced.attach_placement(3, 2).unwrap_err().contains("`Lift` has no place yet"));
+}
+
+#[test]
+fn a_backward_conveyor_attaches_by_where_its_mus_enter_and_leave() {
+    let mut model = attach_line();
+    model.instances[2].attributes.direction = Some(crabsim_model::Direction::Backward);
+    // Backward, Lift's MUs enter at its path's last point, so its path's last point lands on
+    // Feed's end, heading back along it: the path heads down the y axis from (6, 5).
+    assert_placed(model.attach_placement(2, 1).unwrap(), 6.0, 5.0, 1.5, -90.0);
+    // And placed there, Lift's end of travel is 3 m on from Feed's end.
+    model.place(2, model.attach_placement(2, 1).unwrap());
+    let description = model.to_description();
+    assert!(description.position(2).is_some());
+}

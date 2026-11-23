@@ -457,3 +457,19 @@ fn a_conveyor_is_drawn_from_its_start_and_moving_it_saves_where_its_start_goes()
     let placed = saved["instances"].as_array().unwrap().iter().find(|instance| instance["name"] == name.as_str()).unwrap().clone();
     assert_eq!(placed["position"], serde_json::json!({ "x": 17.5, "y": 0.0 }), "its default 5 m path starts 2.5 m back: {placed}");
 }
+
+#[test]
+fn the_window_offers_to_attach_to_each_neighbour_and_attaching_is_one_line() {
+    let folder = folder("attach-window");
+    folder.write("belt.json", TURNED_BELT);
+    let mut workspace = Workspace::open(&folder.0);
+    assert!(workspace.open_model("belt.json"));
+    workspace.adopt().unwrap();
+    assert_eq!(workspace.attachable("Out"), ["Belt"]);
+    assert_eq!(workspace.attachable("Belt"), ["In", "Out"]);
+    // Belt runs from (2, 1) 10 m up the y axis, so Out's centre goes half its 1 m past its end.
+    workspace.run_commands("attach Out to Belt", None, (0.0, 0.0), false).unwrap();
+    let saved: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(folder.0.join("belt.json")).unwrap()).unwrap();
+    assert_eq!(saved["instances"][2]["position"], serde_json::json!({ "x": 2.0, "y": 11.5 }), "{saved}");
+    assert_eq!(saved["instances"][2]["attributes"]["dimensions"]["rotation_degrees"], serde_json::json!(90.0), "{saved}");
+}

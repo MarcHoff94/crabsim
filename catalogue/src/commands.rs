@@ -20,8 +20,8 @@ pub(crate) fn entries() -> Vec<Entry> {
 }
 
 /// Every command's first words, for completing them.
-pub const VERBS: [&str; 20] = [
-    "add", "connect", "disconnect", "rename", "remove", "set", "restore", "move", "derive", "class rename", "class duplicate",
+pub const VERBS: [&str; 21] = [
+    "add", "connect", "disconnect", "rename", "remove", "set", "restore", "move", "attach", "derive", "class rename", "class duplicate",
     "class remove", "make class", "add failure", "remove failure", "rename failure", "goto", "speed", "seed", "open",
 ];
 
@@ -522,6 +522,10 @@ fn read_command(command: &str, model: &Model, context: &Context, names: &mut Nam
             (placed.x, placed.y) = (x, y);
             Ok(planned(vec![json!({ "change": "move_instance", "name": name, "position": position(x, y) })]))
         }
+        "attach" => {
+            let changes = attach(rest, model, names)?;
+            Ok(planned(changes))
+        }
         "derive" => {
             let (parent, name) = split(rest, "as")?;
             let parent = names.class(&parent)?;
@@ -583,6 +587,94 @@ fn profile_name(text: &str) -> Result<(String, &str), String> {
         return Err("which failure profile? Give its name, in quotes if it has spaces".to_string());
     }
     Ok((name.to_string(), rest))
+}
+
+/// The changes `attach` makes (spec issue 141): `attach A to B` moves and turns A, and sets its
+/// height, so that its end meets B's along their connection; `attach A` does it to A's one
+/// neighbour; `attach A, B, C` lines them up in flow order, the first staying where it is and
+/// each of the others attaching to its predecessor among them, through its first entrance. Each
+/// is a move, with a turn when its rotation changes, worked out on the model as the line has
+/// moved it so far.
+fn attach(rest: &str, model: &Model, names: &mut Names) -> Result<Vec<Value>, String> {
+    let pairs: Vec<(String, String)> = match rest.rsplit_once(" to ") {
+        Some((moving, onto)) => vec![(names.instance(moving)?, names.instance(onto)?)],
+        None => {
+            let moving = instance_list(rest, names)?;
+            match moving.as_slice() {
+                [] => return Err("attach what? Write it as attach … to …".to_string()),
+                [only] => {
+                    let mut neighbours: Vec<&str> = Vec::new();
+                    for neighbour in model.predecessors(only).into_iter().chain(model.successors(only)) {
+                        if !neighbours.contains(&neighbour) {
+                            neighbours.push(neighbour);
+                        }
+                    }
+                    match neighbours.as_slice() {
+                        [neighbour] => vec![(only.clone(), neighbour.to_string())],
+                        [] => return Err(format!("`{only}` has no connection to attach it by")),
+                        several => return Err(format!("`{only}` has {} neighbours: say which, such as attach {only} to {}", several.len(), several[0])),
+                    }
+                }
+                _ => in_flow_order(&moving, model)?,
+            }
+        }
+    };
+    // The model as the line has moved it so far, so each attaches to where the last one went.
+    let mut working = model.clone();
+    for placed in &names.instances {
+        if let Some(instance) = working.instances.iter_mut().find(|instance| instance.name == placed.name)
+            && let Some(position) = instance.position.as_mut()
+        {
+            (position.x, position.y) = (placed.x, placed.y);
+        }
+    }
+    let round = |value: f64| {
+        let rounded = (value * 1_000.0).round() / 1_000.0;
+        if rounded == 0.0 { 0.0 } else { rounded }
+    };
+    let mut changes = Vec::new();
+    for (moving, onto) in pairs {
+        let index = |name: &str| working.instances.iter().position(|instance| instance.name == name).ok_or_else(|| format!("`{name}` is placed in this line: attach it once the line is saved"));
+        let (a, b) = (index(&moving)?, index(&onto)?);
+        let placement = working.attach_placement(a, b).map_err(|reason| format!("can't attach `{moving}` to `{onto}`: {reason}"))?;
+        let turned_before = working.resolve(a).and_then(|resolved| resolved.attributes.dimensions).map_or(0.0, |size| size.rotation_degrees);
+        working.place(a, placement);
+        let at = placement.position;
+        changes.push(json!({ "change": "move_instance", "name": moving, "position": { "x": round(at.x), "y": round(at.y), "z": round(at.z) } }));
+        let turn = (placement.rotation_degrees - turned_before).rem_euclid(360.0);
+        if turn > 1e-9 && turn < 360.0 - 1e-9
+            && let Some(size) = working.instances[a].attributes.dimensions
+        {
+            let mut dimensions = json!({ "length": size.length, "width": size.width, "height": size.height });
+            if round(size.rotation_degrees) != 0.0 {
+                dimensions["rotation_degrees"] = json!(round(size.rotation_degrees));
+            }
+            changes.push(json!({ "change": "set_attribute", "target": { "instance": moving }, "attribute": "dimensions", "value": dimensions }));
+        }
+        if let Some(placed) = names.instances.iter_mut().find(|placed| placed.name == moving) {
+            (placed.x, placed.y) = (at.x, at.y);
+        }
+    }
+    Ok(changes)
+}
+
+/// Each instance of `list` after the first in flow order, with the one it attaches to: its first
+/// predecessor among them, by entrance. The first is the first listed that none of them comes
+/// before.
+fn in_flow_order(list: &[String], model: &Model) -> Result<Vec<(String, String)>, String> {
+    let within = |name: &str| list.iter().any(|listed| listed == name);
+    let before = |name: &str| model.predecessors(name).into_iter().find(|predecessor| within(predecessor)).map(str::to_owned);
+    let first = list.iter().find(|name| before(name).is_none()).unwrap_or(&list[0]).clone();
+    let mut placed = vec![first.clone()];
+    let mut pairs = Vec::new();
+    while let Some((name, onto)) = list.iter().filter(|name| !placed.contains(name)).find_map(|name| before(name).filter(|onto| placed.contains(onto)).map(|onto| (name.clone(), onto))) {
+        placed.push(name.clone());
+        pairs.push((name, onto));
+    }
+    match list.iter().find(|name| !placed.contains(name)) {
+        Some(left) => Err(format!("`{left}` isn't connected after `{first}` within the list: attach it on its own")),
+        None => Ok(pairs),
+    }
 }
 
 /// Instances named in a comma-separated list.
@@ -870,7 +962,7 @@ pub struct RunCommandsOutput {
 
 impl Operation for RunCommands {
     const NAME: &'static str = "run_commands";
-    const DESCRIPTION: &'static str = "Changes a model file with a line of commands in people's words, the same language as the window's : line, applied as one edit_model batch, all or nothing. Commands are separated by ; and are: add <class> [as <name>] [at <x> <y>] (placed beside `selected` or the instance added before it in the line, its length plus 2 m to the right, else at `at`; a new Station's process time starts at 10 s as in the window); connect <a> > <b>; disconnect <a> > <b>; rename <a> to <b>; remove <a> (with its connections); set <name>.<attribute> <value> (on an instance, or else a class, a value written as in a model file, such as 0:45); restore <name>.<attribute>; move <a> to <x> <y> or by <dx> <dy> (metres); derive <class> as <name>; class rename <a> to <b>; class duplicate <a> as <b>; class remove <a> (with what depends on it); make class <name> from <instance>; add failure <profile> to <a>[, <b>…] availability <95%> repair <2:00> [on working time] (a constant repair time, on simulation time unless it says on working or on processing time; each instance gets its own copy, with a stream of its own, and one inheriting its class's profiles gets a copy of them first, said in notes); remove failure <profile> from <a>[, <b>…]; rename failure <profile> of <a>[, <b>…] to <name> (a profile's name in quotes if it has spaces). Names are matched exactly, or by a part only one name holds, ignoring case, and attributes by part of their name, such as proc for process_time. A command that can't apply refuses the line naming it by place, such as 3rd command. goto, speed, seed, open and validate are for the window: use start_run, read_model or validate_model instead. An agent needs its claim, as for edit_model.";
+    const DESCRIPTION: &'static str = "Changes a model file with a line of commands in people's words, the same language as the window's : line, applied as one edit_model batch, all or nothing. Commands are separated by ; and are: add <class> [as <name>] [at <x> <y>] (placed beside `selected` or the instance added before it in the line, its length plus 2 m to the right, else at `at`; a new Station's process time starts at 10 s as in the window); connect <a> > <b>; disconnect <a> > <b>; rename <a> to <b>; remove <a> (with its connections); set <name>.<attribute> <value> (on an instance, or else a class, a value written as in a model file, such as 0:45); restore <name>.<attribute>; move <a> to <x> <y> or by <dx> <dy> (metres); attach <a> to <b> (moves and turns a, and sets its height, so its end meets b's along their connection: a conveyor's start onto the end of the one before it, or an object's centre half its length past a conveyor's end; one of them must be a conveyor), attach <a> (to its one neighbour) or attach <a>, <b>, <c> (lined up in flow order, the first staying put); set <name>.path in the short form, such as 4, arc 1.5 90, transition 1 to 2, helix 1.2 2 rise 3, 2 rise 0.5 (negative angles, radii and turns go right); derive <class> as <name>; class rename <a> to <b>; class duplicate <a> as <b>; class remove <a> (with what depends on it); make class <name> from <instance>; add failure <profile> to <a>[, <b>…] availability <95%> repair <2:00> [on working time] (a constant repair time, on simulation time unless it says on working or on processing time; each instance gets its own copy, with a stream of its own, and one inheriting its class's profiles gets a copy of them first, said in notes); remove failure <profile> from <a>[, <b>…]; rename failure <profile> of <a>[, <b>…] to <name> (a profile's name in quotes if it has spaces). Names are matched exactly, or by a part only one name holds, ignoring case, and attributes by part of their name, such as proc for process_time. A command that can't apply refuses the line naming it by place, such as 3rd command. goto, speed, seed, open and validate are for the window: use start_run, read_model or validate_model instead. An agent needs its claim, as for edit_model.";
     const EFFECT: Effect = Effect::Destructive;
     const CHANGES_MODELS: bool = true;
     type Input = RunCommandsInput;

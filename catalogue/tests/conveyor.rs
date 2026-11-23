@@ -217,3 +217,62 @@ fn get_attributes_gives_a_conveyors_worked_out_path() {
     let station = setup.ok("get_attributes", json!({ "path": "line.json", "target": { "instance": "Mill" } }));
     assert!(station.get("geometry").is_none(), "{station}");
 }
+
+// ---------- Attaching (spec issue 141, PR 3) ----------
+
+/// In -> Feed, a 4 m conveyor with a quarter turn of radius 2 to the left -> Lift, a 3 m conveyor
+/// -> Mill, 2 m long -> Out, all placed apart.
+const APART: &str = r#"{"format_version":2,"instances":[
+  {"name":"In","class":"Source","position":{"x":-3,"y":1}},
+  {"name":"Feed","class":"Conveyor","position":{"x":0,"y":0},"attributes":{"path":[{"straight":4},{"arc":{"radius":2,"angle":90}}]}},
+  {"name":"Lift","class":"Conveyor","position":{"x":20,"y":20},"attributes":{"path":[{"straight":3}]}},
+  {"name":"Mill","class":"Station","position":{"x":30,"y":30},"attributes":{"process_time":"5","dimensions":{"length":2,"width":1,"height":1}}},
+  {"name":"Out","class":"Drain","position":{"x":40,"y":40}}],"connections":[
+  {"from":"In","to":"Feed","exit":1,"entrance":1},
+  {"from":"Feed","to":"Lift","exit":1,"entrance":1},
+  {"from":"Lift","to":"Mill","exit":1,"entrance":1},
+  {"from":"Mill","to":"Out","exit":1,"entrance":1}]}"#;
+
+fn place_of(setup: &Setup, name: &str) -> (Value, Option<Value>) {
+    let got = setup.ok("get_attributes", json!({ "path": "line.json", "target": { "instance": name } }));
+    let dimensions = got["attributes"].as_array().unwrap().iter().find(|a| a["attribute"] == "dimensions").and_then(|a| a["value"].get("rotation_degrees").cloned());
+    (got["position"].clone(), dimensions)
+}
+
+#[test]
+fn attach_moves_and_turns_one_object_so_its_end_meets_its_neighbours() {
+    let setup = Setup::new("attach-one");
+    setup.ok("write_model", json!({ "path": "line.json", "text": APART }));
+    // Lift after Feed, which ends at (6, 2) heading up the y axis.
+    setup.ok("run_commands", json!({ "path": "line.json", "commands": "attach Lift to Feed" }));
+    assert_eq!(place_of(&setup, "Lift"), (json!({ "x": 6.0, "y": 2.0 }), Some(json!(90.0))));
+    // Mill, with one neighbour on each side, needs saying which; Out has one.
+    let refused = setup.err("run_commands", json!({ "path": "line.json", "commands": "attach Mill" }));
+    assert!(refused.to_string().contains("`Mill` has 2 neighbours: say which"), "{refused}");
+    let refused = setup.err("run_commands", json!({ "path": "line.json", "commands": "attach Out" }));
+    assert!(refused.to_string().contains("neither `Out` nor `Mill` is a conveyor"), "{refused}");
+    let refused = setup.err("run_commands", json!({ "path": "line.json", "commands": "attach In to Lift" }));
+    assert!(refused.to_string().contains("aren't connected"), "{refused}");
+    // One undo takes the attach back.
+    setup.ok("undo_model", json!({ "path": "line.json" }));
+    assert_eq!(place_of(&setup, "Lift").0, json!({ "x": 20.0, "y": 20.0 }));
+}
+
+#[test]
+fn attach_lines_up_several_in_flow_order_from_the_first() {
+    let setup = Setup::new("attach-several");
+    setup.ok("write_model", json!({ "path": "line.json", "text": APART }));
+    // Listed in any order: In stays, Feed's start goes half In's length past In's centre, and so on.
+    setup.ok("run_commands", json!({ "path": "line.json", "commands": "attach Mill, Lift, Feed, In" }));
+    assert_eq!(place_of(&setup, "In").0, json!({ "x": -3.0, "y": 1.0 }));
+    assert_eq!(place_of(&setup, "Feed").0, json!({ "x": -2.5, "y": 1.0 }));
+    // Feed ends 6 m on and 2 m up from its start, heading up, so Lift starts at (3.5, 3).
+    assert_eq!(place_of(&setup, "Lift"), (json!({ "x": 3.5, "y": 3.0 }), Some(json!(90.0))));
+    // Lift ends 3 m up at (3.5, 6), so Mill's centre is 1 m on, turned up too.
+    assert_eq!(place_of(&setup, "Mill"), (json!({ "x": 3.5, "y": 7.0 }), Some(json!(90.0))));
+    let refused = setup.err("run_commands", json!({ "path": "line.json", "commands": "attach In, Lift" }));
+    assert!(refused.to_string().contains("`Lift` isn't connected after `In` within the list"), "{refused}");
+    // The command line completes it like any other.
+    let model = crabsim_model::load(&setup.folder.read("line.json")).unwrap();
+    assert_eq!(crabsim_catalogue::commands::complete("atta", &model, &[]), vec!["attach ".to_string()]);
+}

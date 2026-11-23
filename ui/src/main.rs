@@ -1541,6 +1541,7 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
         match asked {
             SeveralAsk::Remove => delete_selected(ui),
             SeveralAsk::MakeClass => ui.asking = Some(Asking { for_what: AskFor::MakeClassFromAll { names }, typed: String::new() }),
+            SeveralAsk::Attach => build(ui, Building::Line { text: format!("attach {}", names.join(", ")), selected: None, at: (0.0, 0.0) }, false),
             SeveralAsk::Set(attribute, value) => {
                 ui.several.0.clear();
                 build(ui, Building::SetAttributeOnAll { names, attribute, value }, false);
@@ -2171,6 +2172,8 @@ enum ConnectionAsk {
 enum SeveralAsk {
     Remove,
     MakeClass,
+    /// Attach them to each other in flow order.
+    Attach,
     /// An attribute's value, set on all of them.
     Set(String, serde_json::Value),
 }
@@ -2216,6 +2219,13 @@ fn several_view(
                 asked = Some(SeveralAsk::Remove);
             }
         });
+        if ui
+            .button("Attach them")
+            .on_hover_text("Line them up in flow order: the first stays where it is, and each of the others moves and turns so its end meets the one before it. At least one of each two must be a conveyor")
+            .clicked()
+        {
+            asked = Some(SeveralAsk::Attach);
+        }
     }
     ui.add_space(8.0);
     ui.separator();
@@ -3051,6 +3061,8 @@ enum DockAsk {
 /// What an object window asks for, about its own instance.
 enum WindowAsk {
     Intervention(Intervention),
+    /// A line of commands to run, such as an attach.
+    Line(String),
     Change(AttributeChange, bool),
     Rename(String),
     Remove,
@@ -3288,6 +3300,7 @@ fn object_windows(ctx: &egui::Context, ui: &mut Ui, session: &Session, canvas: e
                 }
             }
             WindowAsk::Rename(to) => build(ui, Building::RenameInstance { name, to }, false),
+            WindowAsk::Line(text) => build(ui, Building::Line { text, selected: None, at: (0.0, 0.0) }, false),
             WindowAsk::Remove => {
                 ui.view.select(Some(id));
                 delete_selected(ui);
@@ -3316,11 +3329,22 @@ fn object_window_contents(
         row.label("State");
         row.label(egui::RichText::new(inspection.state).strong());
     });
-    // How a conveyor's ends sit against its neighbours: information, never a warning.
-    for line in &inspection.ends {
-        window
-            .add(egui::Label::new(egui::RichText::new(line).small()).wrap())
-            .on_hover_text("Where its neighbour is against where it would meet this end. The run treats every connection as touching, so this changes no result");
+    // How a conveyor's ends sit against its neighbours: information, never a warning, with
+    // Attach where they don't meet.
+    for fit in &inspection.ends {
+        window.horizontal_wrapped(|row| {
+            row.add(egui::Label::new(egui::RichText::new(fit.describe()).small()).wrap())
+                .on_hover_text("Where its neighbour is against where it would meet this end. The run treats every connection as touching, so this changes no result");
+            if !fit.meets() {
+                let attach = row
+                    .add_enabled(editable, egui::Button::new("Attach").small())
+                    .on_hover_text(format!("Move and turn {} so this end meets {}, and set its height", inspection.name, fit.neighbour))
+                    .on_disabled_hover_text(RESET_FIRST);
+                if attach.clicked() {
+                    asked.push(WindowAsk::Line(format!("attach {} to {}", inspection.name, fit.neighbour)));
+                }
+            }
+        });
     }
     inspector.sync_name(&inspection.name);
     let notes = match &inspector.attributes {
@@ -5565,12 +5589,24 @@ fn paths_labels(ctx: &egui::Context, ui: &Ui, camera: &ViewCamera, canvas: egui:
 fn canvas_menu(ctx: &egui::Context, ui: &mut Ui) {
     let Some((id, at)) = ui.canvas_menu else { return };
     let mut close = false;
+    let mut attach_line = None;
     let area = egui::Area::new(egui::Id::new("canvas menu")).fixed_pos(at).order(egui::Order::Foreground).show(ctx, |area| {
         egui::Frame::popup(area.style()).show(area, |menu| {
             menu.label(egui::RichText::new(&ui.view.objects()[id as usize].name).strong());
             if menu.button("Open in window").on_hover_text("Everything about it in a window of its own").clicked() {
                 open_window(ui, id);
                 close = true;
+            }
+            // Attach it to each neighbour it can meet, before Init or after Reset.
+            let name = ui.view.objects()[id as usize].name.clone();
+            if ui.view.allows_building() {
+                for neighbour in ui.workspace.attachable(&name) {
+                    let item = menu.button(format!("Attach to {neighbour}")).on_hover_text(format!("Move and turn {name} so its end meets {neighbour}'s, and set its height"));
+                    if item.clicked() {
+                        attach_line = Some(format!("attach {name} to {neighbour}"));
+                        close = true;
+                    }
+                }
             }
             for (label, from) in [("Paths from here", true), ("Paths to here", false)] {
                 if menu.button(label).clicked() {
@@ -5590,6 +5626,9 @@ fn canvas_menu(ctx: &egui::Context, ui: &mut Ui) {
     // or none, from the canvas.
     if close || (ctx.input(|input| input.pointer.primary_pressed()) && !area.response.contains_pointer()) {
         ui.canvas_menu = None;
+    }
+    if let Some(text) = attach_line {
+        build(ui, Building::Line { text, selected: None, at: (0.0, 0.0) }, false);
     }
 }
 

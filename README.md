@@ -1,8 +1,8 @@
 # crabsim
 
-A discrete-event simulator for any material flow, such as a factory line, written in Rust. A model is made of Sources, Stations, Buffers and Drains that create, work on, hold and take out moveable units (MUs). Any object can fail at random, be paused or be stopped by hand, and every object keeps statistics such as busy, blocked and failed time, lead time and throughput.
+A discrete-event simulator for any material flow, such as a factory line, written in Rust. A model is made of Sources, Stations, Buffers and Drains that create, work on, hold and take out moveable units (MUs), and Conveyors that carry them along curved and rising paths. Any object can fail at random, be paused or be stopped by hand, and every object keeps statistics such as busy, blocked and failed time, lead time and throughput.
 
-crabsim exists to simulate long periods as fast as possible: a year of the demo model takes about 1.2 seconds, at about 13 million events per second, and a run's memory stays flat however long it is. A live session can also play a run at a chosen speed, step forward and back through it, and take interventions while it plays, which is what the window shows.
+crabsim exists to simulate long periods as fast as possible: a year of the demo model takes about 1.2 seconds, at about 12.5 million events per second, and a run's memory stays flat however long it is. A live session can also play a run at a chosen speed, step forward and back through it, and take interventions while it plays, which is what the window shows.
 
 **Status:** the engine, the window, the command line and the server for AI agents all work on the same model files and the same operations.
 
@@ -13,8 +13,10 @@ crabsim exists to simulate long periods as fast as possible: a year of the demo 
 - **Undo and redo** take back any change to a model file, yours or an agent's, from a change history kept beside the models.
 - **Buffers** hold MUs between machines, up to a capacity or without limit, for a dwelling time, first in, first out or last in, first out. `models/buffered-line.json` is an example.
 - **Stations** work on one MU at a time, or on several at once with a capacity, each MU starting as it enters or all together once full.
+- **MU classes** say what the MUs are: their size and their booking point, the point that decides when an MU passes from one object to the next. Each Source makes MUs of one MU class, and may change its values for its own MUs.
+- **Conveyors** carry MUs along a path of straights, arcs, transition curves and helices, rising or falling, at a speed, holding as many as fit. MUs close up behind one that stops, or the whole conveyor stops with it, and pass smoothly from one conveyor to the next. An object taking an MU from a conveyor is Receiving until the MU is in. A conveyor measures how full it was and how long MUs took to cross it, and can be the likely bottleneck. Only a path's length in 3D changes results, so a curve costs nothing more to run. `models/conveyor-line.json` is an example.
 - **Failures** come from named failure profiles, several on one object if you like, such as "Tool wear" and "Jam", each with its own availability, repair time and random numbers, counting down on simulation time, working time or only while busy. The statistics show what each one cost.
-- **Not yet:** failure profiles that take turns, so that a failure due while another is being repaired waits for it ([#129](https://github.com/MarcHoff94/crabsim/issues/129)). The plan for what comes next is in `docs/agents/handoff.md`.
+- **Not yet:** work plans and destinations, which send each MU the way its next step lies, and the cross conveyor, where MUs go straight through or turn ([#148](https://github.com/MarcHoff94/crabsim/issues/148), designed and next); motion profiles with acceleration and MUs that drive themselves; and failure profiles that take turns, so that a failure due while another is being repaired waits for it ([#129](https://github.com/MarcHoff94/crabsim/issues/129)). The plan for what comes next is in `docs/agents/handoff.md`.
 
 ## Requirements
 
@@ -71,10 +73,11 @@ $env:RUST_LOG = 'info'
 Hover over any control to see what it does, and press `?` for the list of keys.
 
 - **Run:** Init, Start, Halt and Reset, a speed, stepping back and forward, and going to a time. With Animate off a run goes as fast as it can.
-- **Look:** click an object for a summary in the inspector, or double-click it for its own window, which shows its state, statistics and every attribute with where its value comes from. The statistics window gives each Drain's throughput, every Station's shares of time, the Buffers' fill and the likely bottleneck. The Paths tab draws routes, weights and distribution strategies on the canvas.
+- **Look:** click an object for a summary in the inspector, or double-click it for its own window, which shows its state, statistics and every attribute with where its value comes from. The statistics window gives each Drain's throughput, every Station's shares of time, the Buffers' and Conveyors' fill, how long MUs took to cross each Conveyor, and the likely bottleneck. The Paths tab draws routes, weights and distribution strategies on the canvas.
 - **Experiment during a run:** pause or stop any object by hand, or change a Station's process time. Each intervention leaves a mark, and going back past one asks first.
 - **Build**, with no run in progress: drag a class onto the canvas, drag from an object's handle to connect it, drag objects to move them, and change values in the inspector. Right-click a class to derive, duplicate, rename or remove it.
-- **From the keyboard:** `h` `j` `k` `l` move between objects, Space starts and halts, and `:` opens a command line, such as `:add Mill; connect Split > Mill 3`. `qa` records the lines you give into a macro and `@a` runs it.
+- **Conveyors** are drawn along their paths, with arrows the way MUs go and labels for rises and heights. A conveyor's window edits its path a segment at a time, or all at once in a short form such as `4, arc 2 90, helix 1.2 2 rise 3`, where a negative angle turns right. It also says how each end sits against its neighbours. Right-click an object and choose Attach to line it up with a neighbour, or select several and choose Attach them.
+- **From the keyboard:** `h` `j` `k` `l` move between objects, Space starts and halts, and `:` opens a command line, such as `:add Mill; connect Split > Mill 3` or `:set Belt.path 4, arc 2 90; attach Mill to Belt`. `qa` records the lines you give into a macro and `@a` runs it.
 - **Undo:** `u` takes back the latest change to the model and Ctrl+R redoes it, with a count such as `3u`. It asks first before taking back an agent's change. The Agents tab lists every change with who made it, and a click on one goes back to it.
 - **Agents:** the Agents tab shows which agent holds which model, its goal and what it's doing, and lets you take the model, revoke the claim or block the agent.
 
@@ -163,8 +166,8 @@ The same seed always gives the same result. For a run to watch, `LiveSession` ta
   - **`live_session.rs`:** plays a run on a clock.
   - **`picture.rs`:** what a UI shows.
   - **`statistics.rs`:** statistics.
-  - **`materialflow_objects/`:** Sources, Stations, Buffers and Drains.
-- `model/` reads, checks and saves model files, and `models/` holds the demo model and the format's schema.
+  - **`materialflow_objects/`:** Sources, Stations, Buffers, Drains and Conveyors.
+- `model/` reads, checks and saves model files, and works out conveyors' paths (`model/src/path.rs`). `models/` holds the example models and the format's schema.
 - `catalogue/` is the operation catalogue: every capability as an operation with typed input and output, which the front-ends below all use.
 - `cli/` is the command line, `mcp/` the MCP server for agents, and `ui/` the window, a Bevy application.
 - `tests/` holds the behaviour tests, and `benches/reference.rs` the benchmark.

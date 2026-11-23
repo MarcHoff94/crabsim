@@ -429,3 +429,31 @@ fn a_new_view_keeps_the_speed_time_mode_and_end_time_of_the_old() {
     assert_eq!(new.time_mode(), crabsim::TimeMode::SKIPPING);
     assert_eq!(new.end_time(), Some(SimTime::from_secs(3_600)));
 }
+
+/// In -> Belt, a 10 m conveyor starting at (2, 1) and heading up the y axis -> Out.
+const TURNED_BELT: &str = r#"{"format_version":2,"instances":[
+  {"name":"In","class":"Source","position":{"x":0,"y":0}},
+  {"name":"Belt","class":"Conveyor","position":{"x":2,"y":1},"attributes":{"path":[{"straight":10}],"dimensions":{"length":1,"width":1,"height":0.8,"rotation_degrees":90}}},
+  {"name":"Out","class":"Drain","position":{"x":2,"y":13}}],"connections":[
+  {"from":"In","to":"Belt","exit":1,"entrance":1},
+  {"from":"Belt","to":"Out","exit":1,"entrance":1}]}"#;
+
+#[test]
+fn a_conveyor_is_drawn_from_its_start_and_moving_it_saves_where_its_start_goes() {
+    let folder = folder("move-conveyor");
+    folder.write("belt.json", TURNED_BELT);
+    let mut workspace = Workspace::open(&folder.0);
+    assert!(workspace.open_model("belt.json"));
+    workspace.adopt().unwrap();
+    // Drawn centred halfway along it: 5 m up from its start.
+    let (x, y) = at(workspace.description(), "Belt");
+    assert!((x - 2.0).abs() < 1e-9 && (y - 6.0).abs() < 1e-9, "({x}, {y})");
+    workspace.move_instance("Belt", Position { x: 5.0, y: 6.0, z: 0.0 }, false).unwrap();
+    let saved: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(folder.0.join("belt.json")).unwrap()).unwrap();
+    assert_eq!(saved["instances"][1]["position"], serde_json::json!({ "x": 5.0, "y": 1.0 }), "{saved}");
+    // A conveyor dropped on the canvas is drawn centred where it was dropped.
+    let name = workspace.add_instance("Conveyor", Position { x: 20.0, y: 0.0, z: 0.0 }, false).unwrap();
+    let saved: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(folder.0.join("belt.json")).unwrap()).unwrap();
+    let placed = saved["instances"].as_array().unwrap().iter().find(|instance| instance["name"] == name.as_str()).unwrap().clone();
+    assert_eq!(placed["position"], serde_json::json!({ "x": 17.5, "y": 0.0 }), "its default 5 m path starts 2.5 m back: {placed}");
+}

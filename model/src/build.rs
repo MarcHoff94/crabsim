@@ -71,11 +71,16 @@ pub(crate) fn build(model: &Model) -> ModelDescription {
         description.set_name(id, instance.name.clone());
         description.set_stream(id, instance.stream.unwrap_or(index as u64));
         if let Some(position) = instance.position {
-            description.set_position(id, position);
+            description.set_position(id, model.drawn_position(index, position));
         }
         // A built-in default size is what the description gives an object without one anyway, and
-        // a conveyor's is its path's length and its width, which resolving has given it.
-        if let Some(dimensions) = attributes.dimensions.filter(|_| resolved.origin(Attribute::Dimensions) != &Origin::BuiltIn || resolved.built_in == "Conveyor") {
+        // a conveyor's is its path's length and its width, which resolving has given it. A view
+        // draws a conveyor along its rotation from its start to its end, so one running backward
+        // is turned round.
+        if let Some(mut dimensions) = attributes.dimensions.filter(|_| resolved.origin(Attribute::Dimensions) != &Origin::BuiltIn || resolved.built_in == "Conveyor") {
+            if attributes.direction == Some(crate::Direction::Backward) {
+                dimensions.rotation_degrees += 180.0;
+            }
             description.set_dimensions(id, dimensions);
         }
     }

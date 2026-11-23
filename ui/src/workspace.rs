@@ -522,8 +522,13 @@ impl Workspace {
         let path = self.opened.clone().ok_or(Refusal::NoModel)?;
         let catalogue = self.catalogue.as_ref().ok_or(Refusal::NoModel)?;
         let read = catalogue.call("read_model", json!({ "path": path })).map_err(|error| Refusal::Invalid(error.to_string()))?;
-        let in_file = crabsim_model::load(read["text"].as_str().unwrap_or_default()).map_err(|_| Refusal::Invalid(format!("{path} has problems now")))?.to_description();
-        let move_to = |name: &str, to: Position| json!({ "change": "move_instance", "name": name, "position": position_json(to) });
+        let model = crabsim_model::load(read["text"].as_str().unwrap_or_default()).map_err(|_| Refusal::Invalid(format!("{path} has problems now")))?;
+        let in_file = model.to_description();
+        // The window draws a conveyor from its centre, and a file places it where its path starts.
+        let move_to = |name: &str, to: Position| {
+            let placed = model.instances.iter().position(|instance| instance.name == name).map_or(to, |index| model.position_drawn_at(index, to));
+            json!({ "change": "move_instance", "name": name, "position": position_json(placed) })
+        };
         let moved = |name: &str| moves.iter().any(|(moving, _)| moving == name);
         let mut changes: Vec<Value> = (0..in_file.object_count())
             .filter(|&id| in_file.position(id).is_none())
@@ -690,7 +695,9 @@ impl Workspace {
             return Err(Refusal::Invalid(format!("`{class}` is an MU class, which isn't placed: a Source makes its MUs once its MU class is set to it")));
         }
         let name = self.next_name(class);
-        let mut change = json!({ "change": "add_instance", "name": name, "class": class, "position": position_json(at) });
+        // A conveyor is placed where its path starts, so it is drawn centred where it is dropped.
+        let placed = self.model.position_drawn_at_for_class(class, at);
+        let mut change = json!({ "change": "add_instance", "name": name, "class": class, "position": position_json(placed) });
         let (mut changes, values) = self.starting_values(class);
         if let Some(values) = values {
             change["attributes"] = values;

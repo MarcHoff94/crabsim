@@ -4216,6 +4216,9 @@ fn attribute_label(attribute: &str) -> &str {
         "speed" => "Speed m/s",
         "gap" => "Gap m",
         "accumulating" => "Accumulation",
+        "direction" => "Direction",
+        "min_radius" => "Min. radius m",
+        "max_incline" => "Max. incline °",
         other => other,
     }
 }

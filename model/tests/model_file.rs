@@ -1533,7 +1533,7 @@ fn a_conveyor_has_a_path_width_speed_and_gap_and_its_size_is_theirs() {
 
     let belt = model.resolve(1).unwrap();
     assert_eq!(belt.built_in, "Conveyor");
-    assert_eq!(belt.attributes.path, Some(vec![crabsim_model::Segment::Straight(10.0)]));
+    assert_eq!(belt.attributes.path, Some(vec![crabsim_model::Segment::straight(10.0)]));
     assert_eq!((belt.attributes.width, belt.attributes.speed, belt.attributes.gap), (Some(0.6), Some(0.5), Some(0.1)));
     let size = belt.attributes.dimensions.unwrap();
     assert_eq!((size.length, size.width, size.height, size.rotation_degrees), (10.0, 0.6, 0.8, 90.0), "its length and width are its own");
@@ -1567,8 +1567,7 @@ fn a_conveyors_path_and_values_survive_saving() {
 }
 
 #[test]
-fn a_conveyors_values_are_checked_and_curves_come_later() {
-    assert_found(&belt_line(json!({ "path": [{ "arc": { "radius": 1, "angle": 90 } }] })), "/instances/1/attributes/path/0/arc", "arcs come with curved paths");
+fn a_conveyors_values_are_checked() {
     assert_found(&belt_line(json!({ "path": [{ "straigt": 3 }] })), "/instances/1/attributes/path/0/straigt", "did you mean `straight`?");
     assert_found(&belt_line(json!({ "path": [{ "straight": 0 }] })), "/instances/1/attributes/path/0/straight", "above 0");
     assert_found(&belt_line(json!({ "path": [] })), "/instances/1/attributes/path", "at least one segment");
@@ -1578,6 +1577,169 @@ fn a_conveyors_values_are_checked_and_curves_come_later() {
     assert_found(&belt_line(json!({ "width": 0 })), "/instances/1/attributes/width", "above 0");
     assert_found(&belt_line(json!({ "process_time": "10" })), "/instances/1/attributes/process_time", "a Conveyor has no attribute");
 }
+
+// ---------- Paths (spec issue 141, PR 1) ----------
+
+#[test]
+fn every_kind_of_segment_reads_and_saves_as_written() {
+    let path = json!([
+        { "straight": 4.0 },
+        { "straight": { "length": 2.0, "rise": 0.5 } },
+        { "transition": { "length": 1.0, "to_radius": 2.0 } },
+        { "arc": { "radius": 2.0, "angle": 90.0 } },
+        { "transition": { "length": 1.0, "to_radius": "straight" } },
+        { "arc": { "radius": 3.0, "angle": -45.0, "rise": -0.25 } },
+        { "helix": { "radius": 1.5, "turns": 2.0, "rise": 3.0 } },
+    ]);
+    let model = load(&belt_line(json!({ "path": path, "direction": "backward", "min_radius": 1.0, "max_incline": 20.0 }))).unwrap();
+    let belt = model.resolve(1).unwrap().attributes;
+    use crabsim_model::{Bend, Direction, Segment};
+    assert_eq!(
+        belt.path.as_deref().unwrap(),
+        [
+            Segment::straight(4.0),
+            Segment::Straight { length: 2.0, rise: 0.5 },
+            Segment::Transition { length: 1.0, to: Bend::Radius(2.0), rise: 0.0 },
+            Segment::Arc { radius: 2.0, angle: 90.0, rise: 0.0 },
+            Segment::Transition { length: 1.0, to: Bend::Straight, rise: 0.0 },
+            Segment::Arc { radius: 3.0, angle: -45.0, rise: -0.25 },
+            Segment::Helix { radius: 1.5, turns: 2.0, rise: 3.0 },
+        ]
+    );
+    assert_eq!((belt.direction, belt.min_radius, belt.max_incline), (Some(Direction::Backward), Some(1.0), Some(20.0)));
+    let saved = model.save();
+    assert_eq!(load(&saved).unwrap(), model);
+    let written: Value = serde_json::from_str(&saved).unwrap();
+    assert_eq!(written["instances"][1]["attributes"]["path"], path);
+    assert_eq!(written["instances"][1]["attributes"]["direction"], json!("backward"));
+}
+
+#[test]
+fn a_conveyor_runs_forward_with_no_bend_limit_and_30_degrees_of_incline_unless_set() {
+    let belt = load(&belt_line(json!({}))).unwrap().resolve(1).unwrap().attributes;
+    assert_eq!((belt.direction, belt.min_radius, belt.max_incline), (Some(crabsim_model::Direction::Forward), None, Some(30.0)));
+}
+
+#[test]
+fn a_rising_path_takes_its_length_in_3d_to_cross() {
+    // 6 m in plan rising 8 m is 10 m along it, which at 0.5 m/s is the 20 s a flat 10 m takes.
+    let text = belt_line(json!({ "path": [{ "straight": { "length": 6, "rise": 8 } }], "max_incline": 60 }));
+    let model = load(&text).unwrap();
+    assert_eq!(model.to_description().dimensions(1).length, 10.0);
+    let (occurrences, _) = run_for(&model.to_description(), 0, secs(55));
+    let left: Vec<f64> = occurrences.iter().filter(|o| matches!(o.kind, OccurrenceKind::MuLeft { .. })).map(|o| o.time.as_secs_f64()).collect();
+    assert_eq!(left, [30.0, 40.0, 50.0]);
+}
+
+#[test]
+fn a_curved_path_is_as_long_as_its_segments_in_3d() {
+    let model = load(&belt_line(json!({ "path": [{ "straight": 2 }, { "arc": { "radius": 2, "angle": 90 } }, { "helix": { "radius": 1.5, "turns": 1, "rise": 2 } }] }))).unwrap();
+    let plan_helix = 1.5 * std::f64::consts::TAU;
+    let expected = 2.0 + std::f64::consts::PI + (plan_helix * plan_helix + 4.0).sqrt();
+    assert!((model.to_description().dimensions(1).length - expected).abs() < 1e-12);
+}
+
+#[test]
+fn each_segments_own_values_are_checked_where_they_are() {
+    let segment = |segment: Value| belt_line(json!({ "path": [{ "straight": 1 }, segment] }));
+    assert_found(&segment(json!({ "arc": { "radius": 0, "angle": 90 } })), "/instances/1/attributes/path/1/arc/radius", "above 0");
+    assert_found(&segment(json!({ "arc": { "radius": 2, "angle": 0 } })), "/instances/1/attributes/path/1/arc/angle", "not 0");
+    assert_found(&segment(json!({ "arc": { "radius": 2, "angle": 400 } })), "/instances/1/attributes/path/1/arc/angle", "a helix");
+    assert_found(&segment(json!({ "arc": { "radius": 2 } })), "/instances/1/attributes/path/1/arc", "`angle` is missing");
+    assert_found(&segment(json!({ "arc": { "radious": 2, "angle": 90 } })), "/instances/1/attributes/path/1/arc/radious", "did you mean `radius`?");
+    assert_found(&segment(json!({ "straight": { "length": 2, "rise": "up" } })), "/instances/1/attributes/path/1/straight/rise", "should be a number");
+    assert_found(&segment(json!({ "straight": { "length": -2, "rise": 1 } })), "/instances/1/attributes/path/1/straight/length", "above 0");
+    assert_found(&segment(json!({ "transition": { "length": 1 } })), "/instances/1/attributes/path/1/transition", "`to_radius` is missing");
+    assert_found(&segment(json!({ "transition": { "length": 1, "to_radius": "round" } })), "/instances/1/attributes/path/1/transition/to_radius", "or \"straight\"");
+    assert_found(&segment(json!({ "transition": { "length": 1, "to_radius": 0 } })), "/instances/1/attributes/path/1/transition/to_radius", "not 0");
+    assert_found(&segment(json!({ "transition": { "length": 1, "to_radius": "straight" } })), "/instances/1/attributes/path/1/transition", "eases nothing");
+    assert_found(&segment(json!({ "helix": { "radius": 2, "turns": 1 } })), "/instances/1/attributes/path/1/helix", "`rise` is missing");
+    assert_found(&segment(json!({ "helix": { "radius": 2, "turns": 1, "rise": 0 } })), "/instances/1/attributes/path/1/helix/rise", "a flat turn is an arc");
+    assert_found(&segment(json!({ "helix": { "radius": 2, "turns": 0, "rise": 1 } })), "/instances/1/attributes/path/1/helix/turns", "not 0");
+    assert_found(&segment(json!({ "spiral": 2 })), "/instances/1/attributes/path/1/spiral", "unknown segment `spiral`");
+    assert_found(&belt_line(json!({ "direction": "left" })), "/instances/1/attributes/direction", "\"forward\" or \"backward\"");
+    assert_found(&belt_line(json!({ "min_radius": 0 })), "/instances/1/attributes/min_radius", "above 0");
+    assert_found(&belt_line(json!({ "max_incline": 90 })), "/instances/1/attributes/max_incline", "below 90");
+    // A transition eases from the bend the arc before it ends with.
+    let eases = belt_line(json!({ "path": [{ "arc": { "radius": 2, "angle": 30 } }, { "transition": { "length": 1, "to_radius": 2 } }] }));
+    assert_found(&eases, "/instances/1/attributes/path/1/transition", "eases nothing");
+}
+
+#[test]
+fn a_path_must_keep_within_its_conveyors_width_and_limits() {
+    let arc = |radius: f64| json!([{ "arc": { "radius": radius, "angle": 90 } }]);
+    // Half its width of 0.6 m is 0.3 m.
+    assert_found(&belt_line(json!({ "path": arc(0.3) })), "/instances/1/attributes/path/0", "its inner edge would fold");
+    assert!(load(&belt_line(json!({ "path": arc(0.31) }))).is_ok());
+    assert_found(&belt_line(json!({ "path": arc(0.8), "min_radius": 1 })), "/instances/1/attributes/path/0", "tighter than its min_radius of 1 m");
+    // 30° by default: a rise of 1 m over 1.5 m is 33.7°.
+    let steep = json!([{ "straight": 1 }, { "straight": { "length": 1.5, "rise": -1 } }]);
+    assert_found(&belt_line(json!({ "path": steep })), "/instances/1/attributes/path/1", "falls at 33.7°, steeper than its max_incline of 30°");
+    assert!(load(&belt_line(json!({ "path": steep, "max_incline": 35 }))).is_ok());
+    let helix = json!([{ "helix": { "radius": 0.5, "turns": 1, "rise": 3 } }]);
+    assert_found(&belt_line(json!({ "path": helix })), "/instances/1/attributes/path/0", "climbs at 43.7°");
+    // A transition's tightest bend is where it is most curved.
+    let into = json!([{ "transition": { "length": 1, "to_radius": -0.25 } }]);
+    assert_found(&belt_line(json!({ "path": into })), "/instances/1/attributes/path/0", "radius of 0.25 m");
+}
+
+#[test]
+fn a_path_inherited_from_a_class_is_checked_against_the_instances_own_width() {
+    let text = with_classes(
+        json!([{ "name": "Curve", "parent": "Conveyor", "attributes": { "path": [{ "arc": { "radius": 0.5, "angle": 90 } }] } }]),
+        json!([
+            { "name": "In", "class": "Source", "successors": ["Belt"], "attributes": { "interval": "10" } },
+            { "name": "Belt", "class": "Curve", "successors": ["Out"], "attributes": { "width": 1.2 } },
+            { "name": "Out", "class": "Drain" },
+        ]),
+    );
+    assert_found(&text, "/instances/1/attributes/width", "no more than half its width of 1.2 m");
+    let no_instance_values = text.replace(r#""attributes":{"width":1.2}"#, r#""attributes":{"min_radius":0.6}"#);
+    assert_found(&no_instance_values, "/instances/1/attributes/min_radius", "tighter than its min_radius of 0.6 m");
+}
+
+#[test]
+fn a_conveyor_is_placed_by_where_its_path_starts_and_drawn_from_there() {
+    // At (1, 2), heading up the y axis: a view draws its 10 m straight centred 5 m on.
+    let text = file(json!([
+        { "name": "In", "class": "Source", "successors": ["Belt"], "position": { "x": 0, "y": 0 } },
+        { "name": "Belt", "class": "Conveyor", "successors": ["Out"], "position": { "x": 1, "y": 2 },
+          "attributes": { "path": [{ "straight": 10 }], "dimensions": { "length": 1, "width": 1, "height": 0.8, "rotation_degrees": 90 } } },
+        { "name": "Out", "class": "Drain", "position": { "x": 1, "y": 14 } },
+    ]));
+    let model = load(&text).unwrap();
+    let description = model.to_description();
+    let centre = description.position(1).unwrap();
+    assert!((centre.x - 1.0).abs() < 1e-12 && (centre.y - 7.0).abs() < 1e-12, "{centre:?}");
+    assert_eq!(description.position(2).unwrap().y, 14.0, "anything else is drawn where it is placed");
+    let back = model.position_drawn_at(1, centre);
+    assert!((back.x - 1.0).abs() < 1e-12 && (back.y - 2.0).abs() < 1e-12, "{back:?}");
+    // Backward, it is drawn turned round, so its MUs and its arrow go from its path's end.
+    let backward = load(&text.replace(r#""path":[{"straight":10}]"#, r#""direction":"backward","path":[{"straight":10}]"#)).unwrap().to_description();
+    assert_eq!(backward.dimensions(1).rotation_degrees, 270.0);
+    assert_eq!(backward.position(1), description.position(1));
+}
+
+#[test]
+fn an_mu_sticking_out_in_a_conveyors_tightest_bend_is_a_warning() {
+    let line = |length: f64| {
+        with_classes(
+            json!([{ "name": "Crate", "parent": "MU", "attributes": { "length": length, "width": 0.4 } }]),
+            json!([
+                { "name": "In", "class": "Source", "successors": ["Straight"], "attributes": { "interval": "10", "mu_class": "Crate" } },
+                { "name": "Straight", "class": "Conveyor", "successors": ["Curve"] },
+                { "name": "Curve", "class": "Conveyor", "successors": ["Out"], "attributes": { "path": [{ "arc": { "radius": 1, "angle": 90 } }] } },
+                { "name": "Out", "class": "Drain" },
+            ]),
+        )
+    };
+    // 1.2 by 0.4 on a radius of 1: its outer corners are sqrt(1.2² + 0.6²) - 1 = 0.34 m out, past
+    // the 0.3 m to the edge. Reached through a straight conveyor it fits.
+    let warnings = load(&line(1.2)).unwrap().warnings();
+    assert!(warnings.iter().any(|w| w.pointer == "/instances/0" && w.message.contains("conveyor `Curve`'s tightest bend, of radius 1 m, their corners stick out 0.04 m")), "{warnings:#?}");
+    assert!(load(&line(0.6)).unwrap().warnings().is_empty());
+}
+
 
 #[test]
 fn a_conveyor_can_lead_into_a_conveyor() {

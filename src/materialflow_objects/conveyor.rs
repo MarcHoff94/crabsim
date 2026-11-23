@@ -19,7 +19,7 @@ use crate::flows::{
 use crate::materialflow_objects::OtherObjects;
 use crate::model::MuKind;
 use crate::report::{BeltPosition, Capacity, ObjectKind, ObjectState, OccurrenceKind};
-use crate::statistics::{BeltKeeper, MachineState, StatisticsKeeper};
+use crate::statistics::{BeltKeeper, MachineState, ObjectStatistics, StatisticsKeeper};
 use crate::time::SimTime;
 
 use super::flows::FailureProfile;
@@ -54,9 +54,6 @@ pub enum ConveyorStep {
 	/// An MU straddling this conveyor and the one before it has passed a point that changes how it
 	/// moves or what is behind it: work out the events again.
 	Straddle,
-	/// The last MU's rear has cleared the gap past the start, so no MU of any size is kept out, which
-	/// the statistics tell busy and full from busy with room by.
-	Clear,
 }
 
 /// Names a conveyor's event and the plan it belongs to. Anything that changes the conveyor makes
@@ -77,7 +74,6 @@ impl ConveyorTicket {
 			2 => ConveyorStep::CloseUp,
 			3 => ConveyorStep::Room,
 			5 => ConveyorStep::Straddle,
-			6 => ConveyorStep::Clear,
 			_ => ConveyorStep::Wake,
 		}
 	}
@@ -161,6 +157,15 @@ pub struct Conveyor {
 	belt_statistics: Box<BeltKeeper>,
 	/// The whole length of the MUs it holds, in metres.
 	taken: f64,
+	/// When the start comes free while it is busy and full, with nothing else happening: the last
+	/// MU's rear clearing the gap past the start. Its statistics split the stretch of busy and full
+	/// there, so it needs no event of its own.
+	clears_at: Option<SimTime>,
+	/// Until when the last MU's rear is short of the gap past the start, so that no MU could enter:
+	/// `SimTime::MAX` while it stands there, `None` while it isn't. Worked out where its position is
+	/// already at hand, when it enters and when the conveyor replans, so telling busy and full from
+	/// busy with room reads no position on any other event.
+	short_until: Option<SimTime>,
 	/// The model's kinds of MU, by `MuKindId`, given when a run is built.
 	pub(crate) kinds: Vec<MuKind>,
 }
@@ -194,6 +199,8 @@ impl Conveyor {
 			statistics: StatisticsKeeper::new(0),
 			belt_statistics: Box::new(BeltKeeper::new(length)),
 			taken: 0.0,
+			clears_at: None,
+			short_until: None,
 			kinds: vec![MuKind::default()],
 		}
 	}
@@ -341,7 +348,7 @@ impl Conveyor {
 	/// Gives every MU the speed it has from now on, which depends on the one ahead of it and, for
 	/// the front one, on what it handed to the next conveyor. Returns in how many seconds the first
 	/// MU that is faster than the one ahead closes up to it, if one does.
-	fn settle(&mut self, lead: Option<Lead>, others: &OtherObjects<'_>, context: &mut EventContext) -> Option<f64> {
+	fn settle(&mut self, lead: Option<Lead>, others: &OtherObjects<'_>, context: &mut EventContext) -> (Option<f64>, Option<(f64, f64)>) {
 		let now = context.time;
 		#[cfg(feature = "counters")]
 		{
@@ -372,6 +379,9 @@ impl Conveyor {
 				self.apply(at, was, front, speed, context);
 				ahead = Some((front - self.kind(self.belt[at].mu.kind).length, speed));
 			}
+			// The last MU's rear and speed, unless the belt is empty and this is what was ahead.
+			let tail = if self.belt.is_empty() { None } else { ahead };
+			return (closes_up, tail);
 		} else if !self.belt.is_empty() {
 			// Every MU rides the belt, which stops when the first can't move on, and goes at the
 			// slowest speed any of them is held to.
@@ -384,12 +394,28 @@ impl Conveyor {
 					note(room / (group - lead.speed));
 				}
 			}
+			let mut last_front = 0.0;
 			for at in 0..self.belt.len() {
 				let front = self.front(at, now);
 				self.apply(at, front, front, group, context);
+				last_front = front;
 			}
+			let last = self.belt.len() - 1;
+			return (closes_up, Some((last_front - self.kind(self.belt[last].mu.kind).length, group)));
 		}
-		closes_up
+		(closes_up, None)
+	}
+
+	/// Until when an MU with its rear at `rear`, moving at `speed`, is short of the gap past the
+	/// start, as an event for when it clears would be queued.
+	fn short_until(&self, rear: f64, speed: f64, now: SimTime) -> Option<SimTime> {
+		if rear >= self.gap - EPSILON {
+			None
+		} else if speed > 0.0 {
+			Some(now + Self::time_for(self.gap - rear, speed))
+		} else {
+			Some(SimTime::MAX)
+		}
 	}
 
 	/// Works out its events again from how its MUs move now, voiding those queued.
@@ -400,7 +426,8 @@ impl Conveyor {
 		}
 		let now = context.time;
 		let lead = self.lead(others, now);
-		let closes_up = self.settle(lead, others, context);
+		let (closes_up, tail) = self.settle(lead, others, context);
+		self.short_until = tail.and_then(|(rear, speed)| self.short_until(rear, speed, now));
 		if let Some(first) = self.belt.front() {
 			if first.speed > 0.0 {
 				let front = self.front(0, now);
@@ -419,13 +446,6 @@ impl Conveyor {
 			// one time.
 			let after = SimTime::from_millis(((seconds * 1000.0 - 1e-6).ceil().max(1.0)) as u64);
 			context.schedule(self.event(ConveyorStep::CloseUp, after));
-		}
-		if let Some(last) = self.belt.back().filter(|last| last.speed > 0.0) {
-			// When it moves clear of the start, which changes what the statistics call it.
-			let rear = self.rear(self.belt.len() - 1, now);
-			if rear < self.gap - EPSILON {
-				context.schedule(self.event(ConveyorStep::Clear, Self::time_for(self.gap - rear, last.speed)));
-			}
 		}
 		if let Some(from) = self.straddle_from {
 			self.watch_straddler(from, context, others);
@@ -506,6 +526,9 @@ impl Conveyor {
 	/// its space on the conveyor is free.
 	fn hand_over(&mut self, to: u32, context: &mut EventContext, others: &mut OtherObjects<'_>) -> Result<(), RunTimeError> {
 		let on = self.belt.pop_front().expect("handing over the front MU");
+		if self.belt.is_empty() {
+			self.short_until = None;
+		}
 		self.handing_to = None;
 		self.front_at_end = false;
 		self.statistics.count_mu_out();
@@ -550,7 +573,7 @@ impl Conveyor {
 						let to = self.handing_to.expect("a successor took the front MU");
 						self.hand_over(to, context, others)?;
 					}
-					ConveyorStep::CloseUp | ConveyorStep::Straddle | ConveyorStep::Clear => {}
+					ConveyorStep::CloseUp | ConveyorStep::Straddle => {}
 					ConveyorStep::Room => {
 						self.retried = true;
 						retries_for_blocked(&mut self.blockedlist, self.base.object_id, context);
@@ -615,15 +638,36 @@ impl Conveyor {
 			_ => {}
 		}
 		self.state = state;
-		let machine = self.machine_state(context.time);
-		if let Some((held, time)) = self.statistics.observe_stretch(context.time, machine, self.belt.len() as u64) {
+		let now = context.time;
+		// The start came free since, with nothing else happening, which ended busy and full there.
+		if let Some(at) = self.clears_at.take_if(|at| *at < now) {
+			if let Some((held, time)) = self.statistics.split(at, MachineState::BusyNotFull) {
+				self.belt_statistics.stretch(held, time);
+			}
+		}
+		let machine = self.machine_state(now);
+		if let Some((held, time)) = self.statistics.observe_stretch(now, machine, self.belt.len() as u64) {
 			self.belt_statistics.stretch(held, time);
 		}
+		// Busy and full only because of the last MU's rear, it comes free when that moves clear.
+		self.clears_at = if machine == MachineState::Busy && self.reserved_by.is_none() { self.short_until.filter(|&at| at != SimTime::MAX) } else { None };
 		if self.belt.is_empty() {
 			// So rounding never leaves a little behind.
 			self.taken = 0.0;
 		}
 		self.belt_statistics.set_taken(self.taken);
+	}
+
+	/// Its statistics as of `now`, with busy and full ending where the start came free since.
+	fn statistics_at(&self, now: SimTime) -> ObjectStatistics {
+		match self.clears_at.filter(|&at| at < now) {
+			Some(at) => {
+				let mut keeper = self.statistics.clone();
+				keeper.split(at, MachineState::BusyNotFull);
+				keeper.read(now)
+			}
+			None => self.statistics.read(now),
+		}
 	}
 
 	/// What its statistics call it: interrupted, empty, standing, or moving MUs, which is busy and
@@ -633,7 +677,7 @@ impl Conveyor {
 		let machine = match self.state {
 			ProcessState::Processing if self.front_at_end && self.handing_to.is_none() => MachineState::BusyPartlyBlocked,
 			ProcessState::Processing => {
-				let taken = self.reserved_by.is_some() || self.belt.back().is_some_and(|_| self.rear(self.belt.len() - 1, now) < self.gap - EPSILON);
+				let taken = self.reserved_by.is_some() || self.short_until.is_some_and(|until| now < until);
 				if taken { MachineState::Busy } else { MachineState::BusyNotFull }
 			}
 			ProcessState::Blocked => MachineState::Blocked,
@@ -695,6 +739,7 @@ impl MaterialFlow for Conveyor {
 			self.belt.front().map_or(self.speed, |first| first.speed)
 		};
 		self.taken += self.kind(mu.kind).length;
+		self.short_until = self.short_until(front - self.kind(mu.kind).length, speed, context.time);
 		self.belt.push_back(OnBelt { mu, front, since: context.time, speed, entered: context.time });
 		let at = self.belt.len() - 1;
 		self.plan_mu(at, front, speed, context);
@@ -760,9 +805,14 @@ impl EventInterface for Conveyor {
 		self.statistics.reset();
 		self.belt_statistics.reset();
 		self.taken = 0.0;
+		self.clears_at = None;
+		self.short_until = None;
 	}
 	#[inline(never)]
 	fn clear_statistics(&mut self, now: SimTime) {
+		if let Some(at) = self.clears_at.take_if(|at| *at < now) {
+			self.statistics.split(at, MachineState::BusyNotFull);
+		}
 		self.interruptions.clear_statistics(now, &self.statistics);
 		self.statistics.clear(now);
 		self.belt_statistics.clear();
@@ -787,7 +837,7 @@ impl EventInterface for Conveyor {
 			capacity: Capacity::Limited(0),
 			process_time: None,
 			configured_process_time: None,
-			statistics: self.statistics.read(now),
+			statistics: self.statistics_at(now),
 			fill: Some(Box::new(fill)),
 			belt: Some(Box::new(belt)),
 			positions: (0..self.belt.len())
@@ -865,6 +915,7 @@ impl SuccessorContainer for Conveyor {
 	#[inline(never)]
 	fn clear_content_and_idle(&mut self) {
 		self.belt.clear();
+		self.short_until = None;
 		self.taken = 0.0;
 		self.front_at_end = false;
 		self.handing_to = None;
@@ -877,6 +928,9 @@ impl SuccessorContainer for Conveyor {
 	fn take_content(&mut self, _now: SimTime) -> Option<MoveableUnit> {
 		self.front_at_end = false;
 		let on = self.belt.pop_front()?;
+		if self.belt.is_empty() {
+			self.short_until = None;
+		}
 		self.taken -= self.kind(on.mu.kind).length;
 		Some(on.mu)
 	}

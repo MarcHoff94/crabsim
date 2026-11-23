@@ -669,6 +669,59 @@ fn a_conveyors_busy_time_is_full_while_its_start_is_taken_and_not_full_after() {
 }
 
 #[test]
+fn a_conveyors_start_coming_free_between_events_ends_busy_and_full_where_it_happened() {
+    let (model, _, belt, _) = conveyor_to_drain();
+    let mut run = model.build(0);
+    run.init().unwrap();
+    // Busy since 10 s, and full for 0.6 s after each MU enters. The MU entering at 50 s has its
+    // rear clear of the start at 50.6 s, and the conveyor has no event of its own until 60 s.
+    run.advance_to(millis(50_300)).unwrap();
+    let statistics = object(&run.state(), belt).statistics;
+    assert_eq!((statistics.time_busy_full(), statistics.time_busy_not_full), (millis(2_700), millis(37_600)));
+    run.advance_to(secs(52)).unwrap();
+    let statistics = object(&run.state(), belt).statistics;
+    assert_eq!((statistics.time_busy_full(), statistics.time_busy_not_full), (millis(3_000), millis(39_000)));
+
+    // Cleared after the start came free, it measures busy with room from then on.
+    run.clear_statistics();
+    run.advance_to(secs(55)).unwrap();
+    let statistics = object(&run.state(), belt).statistics;
+    assert_eq!((statistics.time_busy_full(), statistics.time_busy_not_full), (SimTime::ZERO, secs(3)));
+    assert_eq!(statistics.measured_time(), secs(3));
+    run.advance_to(secs(65)).unwrap();
+    let statistics = object(&run.state(), belt).statistics;
+    // The MU entering at 60 s keeps its start taken until 60.6 s.
+    assert_eq!((statistics.time_busy_full(), statistics.time_busy_not_full), (millis(600), millis(12_400)));
+}
+
+#[test]
+fn a_conveyor_that_stopped_with_its_start_taken_is_full_until_its_last_mu_moves_clear_after_it_starts() {
+    let mut model = ModelDescription::new();
+    let source = model.add_source(secs(5));
+    let belt = conveyor(&mut model);
+    model.set_conveyor_accumulating(belt, false);
+    let mill = station(&mut model, 40);
+    let out = model.add_drain();
+    model.connect(source, belt);
+    model.connect(belt, mill);
+    model.connect(mill, out);
+    let mut run = model.build(0);
+    run.init().unwrap();
+
+    // MUs enter every 5 s from 5 s, each keeping the start taken for 0.6 s while the belt moves.
+    // It stops as a whole at 29.4 s, and MU 6 enters at 30 s standing, its rear 0.3 m short of the
+    // start. The belt moves again at 65 s, when the Station takes MU 2, so MU 6's rear clears the
+    // start at 65.6 s, not 0.6 s after it entered.
+    run.advance_to(millis(65_300)).unwrap();
+    assert_eq!(object(&run.state(), belt).statistics.time_busy_full(), millis(5 * 600 + 300));
+    run.advance_to(secs(66)).unwrap();
+    let statistics = object(&run.state(), belt).statistics;
+    assert_eq!(statistics.time_busy_full(), millis(6 * 600));
+    assert_eq!(statistics.time_blocked, millis(35_600), "standing from 29.4 s to 65 s");
+    let _ = source;
+}
+
+#[test]
 fn a_conveyor_is_partly_blocked_while_its_first_mu_waits_and_others_still_move_then_blocked() {
     let mut model = ModelDescription::new();
     let source = model.add_source(secs(10));

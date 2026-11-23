@@ -191,6 +191,14 @@ impl StatisticsKeeper {
         Some(stretch)
     }
 
+    /// Changes the state as of `at`, between the last change and now, keeping the MUs held: for a
+    /// change that happened with nothing else, such as a conveyor's start coming free, noticed at
+    /// the next event. Hands back the stretch that ended, as `observe_stretch` does.
+    pub(crate) fn split(&mut self, at: SimTime, state: MachineState) -> Option<(u64, SimTime)> {
+        debug_assert!(at >= self.since, "a split lies after the last change");
+        self.observe_stretch(at, state, self.contents)
+    }
+
     /// The MUs held now, and for how long by `now`: the stretch still in progress.
     pub(crate) fn in_progress(&self, now: SimTime) -> (u64, SimTime) {
         (self.contents, now.saturating_sub(self.since))

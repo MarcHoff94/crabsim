@@ -13,7 +13,7 @@
 
 use crate::editing::{ActRefusal, EditAction, Editors};
 use crate::history::{Entry, History};
-use crate::view::{Change, DEFAULT_MEASURING_PERIOD};
+use crate::view::{Change, Point, Shape, ShapePoint, DEFAULT_MEASURING_PERIOD};
 use crabsim::{Clock, Dimensions, LiveSession, ModelDescription, ObjectKind, Position, SimTime};
 use crabsim_catalogue::{Catalogue, ErrorKind, Settings, Source};
 use crabsim_model::{Attribute, Model, BUILT_IN_CLASSES};
@@ -506,6 +506,11 @@ impl Workspace {
     /// file. The instance's other attributes stay as they are.
     pub fn restore(&mut self, instance: &str, attribute: &str, take_over: bool) -> Result<(), Refusal> {
         self.change(json!({ "change": "restore_inheritance", "target": { "instance": instance }, "attribute": attribute }), take_over)
+    }
+
+    /// Each conveyor's path as the view draws it (spec issue 141): `shapes_of` the open model.
+    pub fn shapes(&self) -> Vec<(u32, Shape)> {
+        shapes_of(&self.model)
     }
 
     /// Moves the instance to `to`, saving the model file, with every position rounded to the
@@ -1163,6 +1168,19 @@ fn summarise(summary: &Value) -> Vec<String> {
         }
     }
     lines
+}
+
+/// Each conveyor's path in `model` as the view draws it (spec issue 141), relative to its centre,
+/// by id. A conveyor whose path has a segment with wrong values is left out, and drawn straight.
+pub fn shapes_of(model: &crabsim_model::Model) -> Vec<(u32, Shape)> {
+    (0..model.instances.len())
+        .filter_map(|index| {
+            let drawing = model.drawing(index)?;
+            let point = |&(along, pose): &(f64, crabsim_model::path::Pose)| ShapePoint { along, at: Point { x: pose.x, y: pose.y }, heading_degrees: pose.heading_degrees, z: pose.z };
+            let labels = drawing.labels.into_iter().map(|label| (Point { x: label.x, y: label.y }, label.text)).collect();
+            Some((index as u32, Shape { width: drawing.width, points: drawing.points.iter().map(point).collect(), labels }))
+        })
+        .collect()
 }
 
 /// How far an object reaches from its centre along x and y, with its rotation.

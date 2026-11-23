@@ -1539,7 +1539,10 @@ fn a_conveyor_has_a_path_width_speed_and_gap_and_its_size_is_theirs() {
     assert_eq!((size.length, size.width, size.height, size.rotation_degrees), (10.0, 0.6, 0.8, 90.0), "its length and width are its own");
     let description = model.to_description();
     assert_eq!(description.kind(1), crabsim::ObjectKind::Conveyor);
-    assert_eq!(description.dimensions(1).length, 10.0);
+    // A view draws it along its path, so its size there is its bounds, unturned: 0.6 m across
+    // and 10 m up the y axis.
+    let drawn = description.dimensions(1);
+    assert!((drawn.length - 0.6).abs() < 1e-9 && (drawn.width - 10.0).abs() < 1e-9 && drawn.rotation_degrees == 0.0, "{drawn:?}");
 }
 
 #[test]
@@ -1625,7 +1628,7 @@ fn a_rising_path_takes_its_length_in_3d_to_cross() {
     // 6 m in plan rising 8 m is 10 m along it, which at 0.5 m/s is the 20 s a flat 10 m takes.
     let text = belt_line(json!({ "path": [{ "straight": { "length": 6, "rise": 8 } }], "max_incline": 60 }));
     let model = load(&text).unwrap();
-    assert_eq!(model.to_description().dimensions(1).length, 10.0);
+    assert_eq!(crabsim_model::path_length(model.resolve(1).unwrap().attributes.path.as_deref().unwrap()), 10.0);
     let (occurrences, _) = run_for(&model.to_description(), 0, secs(55));
     let left: Vec<f64> = occurrences.iter().filter(|o| matches!(o.kind, OccurrenceKind::MuLeft { .. })).map(|o| o.time.as_secs_f64()).collect();
     assert_eq!(left, [30.0, 40.0, 50.0]);
@@ -1636,7 +1639,7 @@ fn a_curved_path_is_as_long_as_its_segments_in_3d() {
     let model = load(&belt_line(json!({ "path": [{ "straight": 2 }, { "arc": { "radius": 2, "angle": 90 } }, { "helix": { "radius": 1.5, "turns": 1, "rise": 2 } }] }))).unwrap();
     let plan_helix = 1.5 * std::f64::consts::TAU;
     let expected = 2.0 + std::f64::consts::PI + (plan_helix * plan_helix + 4.0).sqrt();
-    assert!((model.to_description().dimensions(1).length - expected).abs() < 1e-12);
+    assert!((crabsim_model::path_length(model.resolve(1).unwrap().attributes.path.as_deref().unwrap()) - expected).abs() < 1e-12);
 }
 
 #[test]
@@ -1714,10 +1717,33 @@ fn a_conveyor_is_placed_by_where_its_path_starts_and_drawn_from_there() {
     assert_eq!(description.position(2).unwrap().y, 14.0, "anything else is drawn where it is placed");
     let back = model.position_drawn_at(1, centre);
     assert!((back.x - 1.0).abs() < 1e-12 && (back.y - 2.0).abs() < 1e-12, "{back:?}");
-    // Backward, it is drawn turned round, so its MUs and its arrow go from its path's end.
-    let backward = load(&text.replace(r#""path":[{"straight":10}]"#, r#""direction":"backward","path":[{"straight":10}]"#)).unwrap().to_description();
-    assert_eq!(backward.dimensions(1).rotation_degrees, 270.0);
-    assert_eq!(backward.position(1), description.position(1));
+    // Its drawing is relative to that centre, from where its MUs enter: backward, the far end.
+    let drawing = model.drawing(1).unwrap();
+    let (along, first) = drawing.points[0];
+    assert!(along == 0.0 && first.x.abs() < 1e-9 && (first.y + 5.0).abs() < 1e-9, "{first:?}");
+    let backward = load(&text.replace(r#""path":[{"straight":10}]"#, r#""direction":"backward","path":[{"straight":10}]"#)).unwrap();
+    assert_eq!(backward.to_description().position(1), description.position(1));
+    let first = backward.drawing(1).unwrap().points[0].1;
+    assert!((first.y - 5.0).abs() < 1e-9 && (first.heading_degrees + 90.0).abs() < 1e-9, "{first:?}");
+    assert!(model.drawing(0).is_none(), "a Source has no path");
+}
+
+#[test]
+fn a_curved_conveyor_is_drawn_from_the_centre_of_its_bounds() {
+    // From (0, 0) heading along x: 4 m on, then a quarter circle of radius 2 to the left, which
+    // ends at (6, 2). With its 0.6 m width, its bounds run from (0, -0.3) to (6.3, 2).
+    let text = file(json!([
+        { "name": "Belt", "class": "Conveyor", "position": { "x": 0, "y": 0 }, "attributes": { "path": [{ "straight": 4 }, { "arc": { "radius": 2, "angle": 90 } }] } },
+    ]));
+    let model = load(&text).unwrap();
+    let centre = model.to_description().position(0).unwrap();
+    assert!((centre.x - 3.15).abs() < 1e-6 && (centre.y - 0.85).abs() < 1e-6, "{centre:?}");
+    let size = model.to_description().dimensions(0);
+    assert!((size.length - 6.3).abs() < 1e-6 && (size.width - 2.3).abs() < 1e-6, "{size:?}");
+    let back = model.position_drawn_at(0, centre);
+    assert!(back.x.abs() < 1e-9 && back.y.abs() < 1e-9, "{back:?}");
+    let end = model.drawing(0).unwrap().points.last().unwrap().1;
+    assert!((end.x - 2.85).abs() < 1e-6 && (end.y - 1.15).abs() < 1e-6 && (end.heading_degrees - 90.0).abs() < 1e-6, "{end:?}");
 }
 
 #[test]

@@ -2,7 +2,7 @@
 //! out of range, values set nowhere, connections, and a Source that would create MUs forever.
 
 use crate::read::Broken;
-use crate::{Attribute, Attributes, Bend, Capacity, Failures, Model, Problem, RepairTime, Segment, BUILT_IN_CLASSES};
+use crate::{Attribute, Attributes, Capacity, Failures, Model, Problem, RepairTime, Segment, BUILT_IN_CLASSES};
 
 /// More starting MUs than this in one Buffer is refused: each takes memory from Init on.
 const MOST_STARTING_MUS: u64 = 1_000_000;
@@ -258,42 +258,23 @@ impl<'m> Checker<'m> {
         let attributes = &resolved.attributes;
         let (Some(path), Some(width)) = (attributes.path.as_deref(), attributes.width) else { return };
         let limits = [Attribute::Path, Attribute::Width, Attribute::MinRadius, Attribute::MaxIncline];
-        if limits.into_iter().any(|attribute| self.unreadable_in_chain(index, attribute)) || !path.iter().all(|&segment| sound(segment)) {
+        if limits.into_iter().any(|attribute| self.unreadable_in_chain(index, attribute)) {
             return;
         }
         let own = &model.instances[index].attributes;
-        let at = |segment: usize, attribute: Option<&str>| match (own.path.is_some(), attribute) {
-            (true, _) => format!("/attributes/path/{segment}"),
-            (false, Some(attribute)) => format!("/attributes/{attribute}"),
-            (false, None) => String::new(),
-        };
-        for (segment, radius) in crate::path::tightest_radii(path).into_iter().enumerate() {
-            let Some(radius) = radius else { continue };
-            let said = format!("segment {} ({})", segment + 1, path[segment].kind());
-            if radius <= width / 2.0 {
-                let pointer = at(segment, own.width.is_some().then_some("width"));
-                self.problem(
-                    Owner::Instance(index),
-                    &pointer,
-                    format!("{said} bends to a radius of {radius} m, no more than half its width of {width} m, so its inner edge would fold: make the radius larger or the conveyor narrower"),
-                );
-            } else if let Some(least) = attributes.min_radius.filter(|&least| radius < least) {
-                let pointer = at(segment, own.min_radius.is_some().then_some("min_radius"));
-                self.problem(Owner::Instance(index), &pointer, format!("{said} bends to a radius of {radius} m, tighter than its min_radius of {least} m"));
-            }
-        }
-        let steepest = attributes.max_incline.unwrap_or(30.0);
-        for (segment, &piece) in path.iter().enumerate() {
-            let incline = piece.incline_degrees();
-            if incline > steepest + 1e-9 {
-                let pointer = at(segment, own.max_incline.is_some().then_some("max_incline"));
-                let way = if piece.rise() > 0.0 { "climbs" } else { "falls" };
-                self.problem(
-                    Owner::Instance(index),
-                    &pointer,
-                    format!("segment {} ({}) {way} at {incline:.1}°, steeper than its max_incline of {steepest}°", segment + 1, piece.kind()),
-                );
-            }
+        for problem in crate::path::limit_problems(path, width, attributes.min_radius, attributes.max_incline.unwrap_or(30.0)) {
+            let own_limit = match problem.limit {
+                Some("width") => own.width.is_some(),
+                Some("min_radius") => own.min_radius.is_some(),
+                Some("max_incline") => own.max_incline.is_some(),
+                _ => false,
+            };
+            let pointer = match (own.path.is_some(), own_limit) {
+                (true, _) => format!("/attributes/path/{}", problem.index),
+                (false, true) => format!("/attributes/{}", problem.limit.unwrap_or_default()),
+                (false, false) => String::new(),
+            };
+            self.problem(Owner::Instance(index), &pointer, problem.message);
         }
     }
 
@@ -412,51 +393,8 @@ impl<'m> Checker<'m> {
         if path.is_empty() {
             self.problem(owner, "/attributes/path", "a path needs at least one segment, such as [{\"straight\": 10}]");
         }
-        let positive = |value: f64| value > 0.0 && value.is_finite();
-        for (index, &segment) in path.iter().enumerate() {
-            let at = |field: &str| format!("/attributes/path/{index}/{}{field}", segment.kind());
-            let mut wrong = |field: &str, message: &str| self.problem(owner, &at(field), message.to_string());
-            if !segment.rise().is_finite() {
-                wrong("/rise", "a rise must be a number of metres, negative falling");
-            }
-            match segment {
-                Segment::Straight { length, rise } => {
-                    if !positive(length) {
-                        wrong(if rise == 0.0 { "" } else { "/length" }, "a straight must be above 0, in metres");
-                    }
-                }
-                Segment::Arc { radius, angle, .. } => {
-                    if !positive(radius) {
-                        wrong("/radius", "an arc's radius must be above 0, in metres");
-                    }
-                    if !(angle != 0.0 && angle.abs() <= 360.0) {
-                        wrong("/angle", "an arc turns through an angle in degrees, not 0 and at most 360 either way, positive to the left: more than a whole turn is a helix");
-                    }
-                }
-                Segment::Transition { length, to, .. } => {
-                    if !positive(length) {
-                        wrong("/length", "a transition's length must be above 0, in metres");
-                    }
-                    if let Bend::Radius(radius) = to
-                        && !(radius != 0.0 && radius.is_finite())
-                    {
-                        wrong("/to_radius", "a transition eases to a radius in metres, not 0, positive to the left, or to \"straight\"");
-                    } else if !crate::path::transition_eases(path, index) {
-                        wrong("", "this transition ends at the bend it starts at, so it eases nothing: use an arc or a straight instead");
-                    }
-                }
-                Segment::Helix { radius, turns, rise } => {
-                    if !positive(radius) {
-                        wrong("/radius", "a helix's radius must be above 0, in metres");
-                    }
-                    if !(turns != 0.0 && turns.is_finite()) {
-                        wrong("/turns", "a helix turns a number of times, not 0, positive to the left");
-                    }
-                    if rise == 0.0 {
-                        wrong("/rise", "a helix must climb or fall: a flat turn is an arc");
-                    }
-                }
-            }
+        for problem in crate::path::value_problems(path) {
+            self.problem(owner, &format!("/attributes/path/{}/{}{}", problem.index, path[problem.index].kind(), problem.field), problem.message);
         }
     }
 
@@ -691,16 +629,4 @@ impl<'m> Checker<'m> {
         }
         None
     }
-}
-
-/// Whether a segment's own values are sound, so its bends and climb can be worked out.
-fn sound(segment: Segment) -> bool {
-    let positive = |value: f64| value > 0.0 && value.is_finite();
-    segment.rise().is_finite()
-        && match segment {
-            Segment::Straight { length, .. } | Segment::Transition { length, to: Bend::Straight, .. } => positive(length),
-            Segment::Arc { radius, angle, .. } => positive(radius) && angle != 0.0 && angle.abs() <= 360.0,
-            Segment::Transition { length, to: Bend::Radius(radius), .. } => positive(length) && radius != 0.0 && radius.is_finite(),
-            Segment::Helix { radius, turns, rise } => positive(radius) && turns != 0.0 && turns.is_finite() && rise != 0.0,
-        }
 }

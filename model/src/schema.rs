@@ -176,8 +176,9 @@ pub struct AttributesFile {
     /// 0.5 by default, its centre.
     #[schemars(range(min = 0, max = 1))]
     pub booking_point: Option<f64>,
-    /// Conveyor: the line its MUs follow, as segments from its start, whose lengths add up to the
-    /// conveyor's (ADR 0024). Straights only so far. One straight of 5 m by default.
+    /// Conveyor: the line its MUs follow (ADR 0024), as segments from its position, heading along
+    /// its rotation, each starting where the one before ends. Lengths are in plan, and the
+    /// conveyor's length counts each in 3D, rise included. One straight of 5 m by default.
     #[schemars(length(min = 1))]
     pub path: Option<Vec<SegmentFile>>,
     /// Conveyor: how fast it moves its MUs, in metres per second, above 0. 0.5 by default.
@@ -190,15 +191,129 @@ pub struct AttributesFile {
     /// true by default, or every MU stops as a whole when the first can't leave and they all start
     /// again together.
     pub accumulating: Option<bool>,
+    /// Conveyor: which way its MUs travel along its path, "forward", from its first segment to its
+    /// last, the default, or "backward". Its start, where MUs enter, is then the path's last point.
+    pub direction: Option<DirectionFile>,
+    /// Conveyor: the tightest bend its path may have, as a radius in metres. Unset by default:
+    /// then only half its width, inside which its inner edge would fold.
+    #[schemars(extend("exclusiveMinimum" = 0))]
+    pub min_radius: Option<f64>,
+    /// Conveyor: the steepest its path may climb or fall, in degrees. 30 by default.
+    #[schemars(extend("exclusiveMinimum" = 0, "exclusiveMaximum" = 90))]
+    pub max_incline: Option<f64>,
 }
 
-/// One piece of a conveyor's path.
+/// One piece of a conveyor's path: exactly one of a straight, an arc, a transition curve and a
+/// helix. Angles and turns are positive to the left, the way rotation turns, and negative to the
+/// right. A `rise` is the change in height over the segment in metres, negative falling.
+#[derive(JsonSchema)]
+#[serde(untagged)]
+pub enum SegmentFile {
+    Straight(StraightSegmentFile),
+    Arc(ArcSegmentFile),
+    Transition(TransitionSegmentFile),
+    Helix(HelixSegmentFile),
+}
+
+/// Metres, above 0.
+#[derive(JsonSchema)]
+#[schemars(extend("exclusiveMinimum" = 0))]
+pub struct Metres(pub f64);
+
 #[derive(JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct SegmentFile {
-    /// This many metres straight on, above 0.
-    #[schemars(extend("exclusiveMinimum" = 0))]
-    pub straight: f64,
+pub struct StraightSegmentFile {
+    /// Straight on: its length in metres, or its length and rise.
+    pub straight: StraightFile,
+}
+
+#[derive(JsonSchema)]
+#[serde(untagged)]
+pub enum StraightFile {
+    Length(Metres),
+    Rising(RisingStraightFile),
+}
+
+#[derive(JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RisingStraightFile {
+    /// Its length in plan, in metres.
+    pub length: Metres,
+    pub rise: Option<f64>,
+}
+
+#[derive(JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ArcSegmentFile {
+    pub arc: ArcFile,
+}
+
+#[derive(JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ArcFile {
+    /// Its radius in plan, in metres, more than half the conveyor's width.
+    pub radius: Metres,
+    /// How far it turns, in degrees, not 0: positive to the left.
+    pub angle: f64,
+    pub rise: Option<f64>,
+}
+
+#[derive(JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TransitionSegmentFile {
+    /// A clothoid, its bend changing evenly from the bend the segment before ended with, or
+    /// straight for the first, to `to_radius`.
+    pub transition: TransitionFile,
+}
+
+#[derive(JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TransitionFile {
+    /// Its length in plan, in metres.
+    pub length: Metres,
+    /// The radius it eases to in metres, positive to the left, or "straight".
+    pub to_radius: ToRadiusFile,
+    pub rise: Option<f64>,
+}
+
+#[derive(JsonSchema)]
+#[serde(untagged)]
+pub enum ToRadiusFile {
+    Radius(f64),
+    Straight(StraightWordFile),
+}
+
+#[derive(JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum StraightWordFile {
+    Straight,
+}
+
+#[derive(JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct HelixSegmentFile {
+    pub helix: HelixFile,
+}
+
+#[derive(JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct HelixFile {
+    /// Its radius in plan, in metres.
+    pub radius: Metres,
+    /// How many times it turns, not 0: positive to the left.
+    pub turns: f64,
+    /// How far it climbs over its turns, in metres, not 0: negative falling. A flat turn is an
+    /// arc.
+    pub rise: f64,
+}
+
+#[derive(JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DirectionFile {
+    /// From the path's first segment to its last.
+    Forward,
+    /// From the path's last segment to its first.
+    Backward,
 }
 
 /// A Source's own values for the MUs it makes, each changing its MU class's when set.

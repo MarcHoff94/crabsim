@@ -166,7 +166,7 @@
           "maximum": 1
         },
         "path": {
-          "description": "Conveyor: the line its MUs follow, as segments from its start, whose lengths add up to the conveyor's (ADR 0024). Straights only so far. One straight of 5 m by default.",
+          "description": "Conveyor: the line its MUs follow (ADR 0024), as segments from its position, heading along its rotation, each starting where the one before ends. Lengths are in plan, and the conveyor's length counts each in 3D, rise included. One straight of 5 m by default.",
           "type": "array",
           "items": {
             "$ref": "#/$defs/SegmentFile"
@@ -188,6 +188,23 @@
         "accumulating": {
           "description": "Conveyor: whether MUs behind a stopped one close up and stop while the rest still move, true by default, or every MU stops as a whole when the first can't leave and they all start again together.",
           "type": "boolean"
+        },
+        "direction": {
+          "description": "Conveyor: which way its MUs travel along its path, \"forward\", from its first segment to its last, the default, or \"backward\". Its start, where MUs enter, is then the path's last point.",
+          "$ref": "#/$defs/DirectionFile"
+        },
+        "min_radius": {
+          "description": "Conveyor: the tightest bend its path may have, as a radius in metres. Unset by default: then only half its width, inside which its inner edge would fold.",
+          "type": "number",
+          "format": "double",
+          "exclusiveMinimum": 0
+        },
+        "max_incline": {
+          "description": "Conveyor: the steepest its path may climb or fall, in degrees. 30 by default.",
+          "type": "number",
+          "format": "double",
+          "exclusiveMinimum": 0,
+          "exclusiveMaximum": 90
         }
       },
       "additionalProperties": false
@@ -637,19 +654,204 @@
       "additionalProperties": false
     },
     "SegmentFile": {
-      "description": "One piece of a conveyor's path.",
+      "description": "One piece of a conveyor's path: exactly one of a straight, an arc, a transition curve and a helix. Angles and turns are positive to the left, the way rotation turns, and negative to the right. A `rise` is the change in height over the segment in metres, negative falling.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/StraightSegmentFile"
+        },
+        {
+          "$ref": "#/$defs/ArcSegmentFile"
+        },
+        {
+          "$ref": "#/$defs/TransitionSegmentFile"
+        },
+        {
+          "$ref": "#/$defs/HelixSegmentFile"
+        }
+      ]
+    },
+    "StraightSegmentFile": {
       "type": "object",
       "properties": {
         "straight": {
-          "description": "This many metres straight on, above 0.",
-          "type": "number",
-          "format": "double",
-          "exclusiveMinimum": 0
+          "description": "Straight on: its length in metres, or its length and rise.",
+          "$ref": "#/$defs/StraightFile"
         }
       },
       "additionalProperties": false,
       "required": [
         "straight"
+      ]
+    },
+    "StraightFile": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Metres"
+        },
+        {
+          "$ref": "#/$defs/RisingStraightFile"
+        }
+      ]
+    },
+    "Metres": {
+      "description": "Metres, above 0.",
+      "type": "number",
+      "format": "double",
+      "exclusiveMinimum": 0
+    },
+    "RisingStraightFile": {
+      "type": "object",
+      "properties": {
+        "length": {
+          "description": "Its length in plan, in metres.",
+          "$ref": "#/$defs/Metres"
+        },
+        "rise": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "length"
+      ]
+    },
+    "ArcSegmentFile": {
+      "type": "object",
+      "properties": {
+        "arc": {
+          "$ref": "#/$defs/ArcFile"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "arc"
+      ]
+    },
+    "ArcFile": {
+      "type": "object",
+      "properties": {
+        "radius": {
+          "description": "Its radius in plan, in metres, more than half the conveyor's width.",
+          "$ref": "#/$defs/Metres"
+        },
+        "angle": {
+          "description": "How far it turns, in degrees, not 0: positive to the left.",
+          "type": "number",
+          "format": "double"
+        },
+        "rise": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "radius",
+        "angle"
+      ]
+    },
+    "TransitionSegmentFile": {
+      "type": "object",
+      "properties": {
+        "transition": {
+          "description": "A clothoid, its bend changing evenly from the bend the segment before ended with, or straight for the first, to `to_radius`.",
+          "$ref": "#/$defs/TransitionFile"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "transition"
+      ]
+    },
+    "TransitionFile": {
+      "type": "object",
+      "properties": {
+        "length": {
+          "description": "Its length in plan, in metres.",
+          "$ref": "#/$defs/Metres"
+        },
+        "to_radius": {
+          "description": "The radius it eases to in metres, positive to the left, or \"straight\".",
+          "$ref": "#/$defs/ToRadiusFile"
+        },
+        "rise": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "length",
+        "to_radius"
+      ]
+    },
+    "ToRadiusFile": {
+      "anyOf": [
+        {
+          "type": "number",
+          "format": "double"
+        },
+        {
+          "$ref": "#/$defs/StraightWordFile"
+        }
+      ]
+    },
+    "StraightWordFile": {
+      "type": "string",
+      "enum": [
+        "straight"
+      ]
+    },
+    "HelixSegmentFile": {
+      "type": "object",
+      "properties": {
+        "helix": {
+          "$ref": "#/$defs/HelixFile"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "helix"
+      ]
+    },
+    "HelixFile": {
+      "type": "object",
+      "properties": {
+        "radius": {
+          "description": "Its radius in plan, in metres.",
+          "$ref": "#/$defs/Metres"
+        },
+        "turns": {
+          "description": "How many times it turns, not 0: positive to the left.",
+          "type": "number",
+          "format": "double"
+        },
+        "rise": {
+          "description": "How far it climbs over its turns, in metres, not 0: negative falling. A flat turn is an arc.",
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "radius",
+        "turns",
+        "rise"
+      ]
+    },
+    "DirectionFile": {
+      "oneOf": [
+        {
+          "description": "From the path's first segment to its last.",
+          "type": "string",
+          "const": "forward"
+        },
+        {
+          "description": "From the path's last segment to its first.",
+          "type": "string",
+          "const": "backward"
+        }
       ]
     },
     "InstanceFile": {

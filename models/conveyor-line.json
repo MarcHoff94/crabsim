@@ -40,7 +40,7 @@
       "class": "Conveyor",
       "stream": 1,
       "position": {
-        "x": 6.5,
+        "x": 1.5,
         "y": 0.0
       },
       "attributes": {
@@ -95,7 +95,7 @@
       "class": "Conveyor",
       "stream": 5,
       "position": {
-        "x": 23.0,
+        "x": 19.0,
         "y": 0.0
       },
       "attributes": {

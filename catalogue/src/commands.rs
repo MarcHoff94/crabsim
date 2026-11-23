@@ -184,14 +184,21 @@ pub fn attribute(wanted: &str) -> Result<Attribute, String> {
     }
 }
 
-/// A value as a model file writes it, from what was typed: a time as text, anything that reads
-/// as JSON as that, and the rest as text.
-fn value(attribute: Attribute, typed: &str) -> Value {
+/// A value as a model file writes it, from what was typed: a time as text, a path in its short
+/// form, such as `4, arc 1.5 90`, or as JSON, anything else that reads as JSON as that, and the
+/// rest as text. A path that reads as neither says what's wrong with its short form.
+fn value(attribute: Attribute, typed: &str) -> Result<Value, String> {
     let typed = typed.trim();
     if matches!(attribute, Attribute::Interval | Attribute::ProcessTime | Attribute::DwellingTime) {
-        return json!(typed);
+        return Ok(json!(typed));
     }
-    serde_json::from_str(typed).unwrap_or_else(|_| json!(typed))
+    if attribute == Attribute::Path {
+        return match serde_json::from_str::<Value>(typed) {
+            Ok(json) if json.is_array() => Ok(json),
+            _ => crabsim_model::path::read_short_form(typed).map(|path| crabsim_model::path::to_json(&path)),
+        };
+    }
+    Ok(serde_json::from_str(typed).unwrap_or_else(|_| json!(typed)))
 }
 
 /// "1st", "2nd", "3rd", "4th" and so on.
@@ -496,7 +503,7 @@ fn read_command(command: &str, model: &Model, context: &Context, names: &mut Nam
                 if typed.trim().is_empty() {
                     return Err(format!("set it to what? Write it as set {}.{} 0:45", target_name(&target), attribute.name()));
                 }
-                json!({ "change": "set_attribute", "target": target, "attribute": attribute.name(), "value": value(attribute, &typed) })
+                json!({ "change": "set_attribute", "target": target, "attribute": attribute.name(), "value": value(attribute, &typed)? })
             } else {
                 json!({ "change": "restore_inheritance", "target": target, "attribute": attribute.name() })
             };
@@ -772,6 +779,31 @@ pub fn complete(line: &str, model: &Model, macros: &[String]) -> Vec<String> {
     // A name after `>` begins after any spaces, which the completed line keeps as typed.
     let spaces = partial.len() - partial.trim_start().len();
     let (before, partial) = command.split_at(start.min(command.len()) + spaces);
+    // A value after `set object.attribute `: a direction, or a word of a path's short form.
+    let value_typed = partial.match_indices('.').find_map(|(dot, _)| {
+        let (attribute, typed) = partial[dot + 1..].split_once(' ')?;
+        Attribute::ALL.iter().any(|known| known.name() == attribute).then_some((attribute, typed))
+    });
+    if let Some((attribute, typed)) = value_typed
+        && *verb == "set"
+    {
+        let word_at = typed.rfind([' ', ',']).map_or(0, |at| at + 1);
+        let word = &typed[word_at..];
+        let choices: &[&str] = match attribute {
+            "direction" => &["forward", "backward"],
+            "path" => crabsim_model::path::next_words(&typed[typed[..word_at].rfind(',').map_or(0, |at| at + 1)..word_at]),
+            _ => &[],
+        };
+        if word.is_empty() && attribute == "path" {
+            return Vec::new();
+        }
+        let kept = &partial[..partial.len() - word.len()];
+        return choices
+            .iter()
+            .filter(|choice| choice.starts_with(&word.to_lowercase()) && **choice != word)
+            .map(|choice| format!("{lead}{before}{kept}{choice} "))
+            .collect();
+    }
     if let Some(dot) = partial.rfind('.')
         && matches!(*verb, "set" | "restore")
     {

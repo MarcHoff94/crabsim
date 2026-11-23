@@ -83,13 +83,13 @@ fn what_receives_from_a_conveyor_has_its_own_colour() {
 
 #[test]
 fn a_conveyors_path_speed_and_gap_are_fields() {
-    let mut path = Form::new("path", Some(&json!([{ "straight": 4.0 }, { "straight": 2.5 }])));
-    assert_eq!(path.parts[0].text, "4, 2.5");
-    assert_eq!(summary(&json!([{ "straight": 4.0 }, { "straight": 2.5 }])), "4 + 2.5 m straight");
-    path.parts[0].text = "12".into();
-    assert_eq!(path.value(), Ok(json!([{ "straight": 12.0 }])));
-    path.parts[0].text = "12, 0".into();
-    assert!(path.value().unwrap_err().contains("isn't a straight"));
+    let mut path = Form::new("path", Some(&json!([{ "straight": 4.0 }, { "arc": { "radius": 1.5, "angle": 90.0 } }, { "straight": { "length": 2.5, "rise": 0.5 } }])));
+    assert_eq!(path.parts[0].text, "4, arc 1.5 90, 2.5 rise 0.5");
+    assert_eq!(summary(&json!([{ "straight": 4.0 }, { "helix": { "radius": 1.2, "turns": 2, "rise": 3 } }])), "4, helix 1.2 2 rise 3");
+    path.parts[0].text = "12, transition 1 to -2".into();
+    assert_eq!(path.value(), Ok(json!([{ "straight": 12.0 }, { "transition": { "length": 1.0, "to_radius": -2.0 } }])));
+    path.parts[0].text = "12, arc 2".into();
+    assert!(path.value().unwrap_err().contains("segment 2 (`arc 2`)"), "{:?}", path.value());
 
     let mut speed = Form::new("speed", Some(&json!(0.5)));
     speed.parts[0].text = "0".into();
@@ -186,4 +186,21 @@ fn the_object_window_and_the_statistics_window_show_a_conveyors_figures() {
     assert_eq!((belt.id, belt.name.as_str(), belt.mean_crossing), (BELT, "Belt", Some(SimTime::from_secs(20))));
     assert!(belt.busy > 0.8 && belt.busy_full < belt.busy, "{belt:?}");
     assert_eq!(results.bottleneck.as_ref().map(|likely| likely.instance.as_str()), Some("Belt"), "a Conveyor is in the likely-bottleneck rule");
+}
+
+#[test]
+fn a_conveyors_direction_and_limits_are_fields() {
+    let mut direction = Form::new("direction", Some(&json!("backward")));
+    assert_eq!(direction.parts[0].text, "backward");
+    assert_eq!(summary(&json!("backward")), "backward");
+    direction.parts[0].text = "forward".into();
+    assert_eq!(direction.value(), Ok(json!("forward")));
+    let mut least = Form::new("min_radius", None);
+    assert_eq!(least.value(), Ok(serde_json::Value::Null), "unset, only half its width counts");
+    least.parts[0].text = "0".into();
+    assert!(least.value().unwrap_err().contains("above 0"));
+    let mut steepest = Form::new("max_incline", Some(&json!(30.0)));
+    assert_eq!(steepest.parts[0].text, "30");
+    steepest.parts[0].text = "90".into();
+    assert!(steepest.value().unwrap_err().contains("below 90"));
 }

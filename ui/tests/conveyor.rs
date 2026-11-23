@@ -300,6 +300,7 @@ fn a_conveyors_ends_say_how_they_sit_against_their_neighbours() {
     // high as it.
     let fits = curved_at(1_000, (4.0, 2.5, 0.5)).view.end_fits(BELT);
     let lines: Vec<String> = fits.iter().map(|fit| fit.describe()).collect();
+    assert!(fits[1].meets() && !fits[0].meets());
     assert_eq!(lines[1], "End: meets Out");
     assert!(lines[0].starts_with("Start: In is 1.50 m from where it would meet this end"), "{lines:?}");
     // Moved off, the end says by how much, as information only.

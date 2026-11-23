@@ -508,6 +508,21 @@ impl Workspace {
         self.change(json!({ "change": "restore_inheritance", "target": { "instance": instance }, "attribute": attribute }), take_over)
     }
 
+    /// The neighbours the instance `name` can be attached to (spec issue 141), in the order of
+    /// its entrances, then its exits: those connected to it where one of the two is a conveyor
+    /// and the neighbour is placed.
+    pub fn attachable(&self, name: &str) -> Vec<String> {
+        let Some(index) = self.model.instances.iter().position(|instance| instance.name == name) else { return Vec::new() };
+        let mut found: Vec<String> = Vec::new();
+        for neighbour in self.model.predecessors(name).into_iter().chain(self.model.successors(name)) {
+            let Some(other) = self.model.instances.iter().position(|instance| instance.name == neighbour) else { continue };
+            if !found.iter().any(|known| known == neighbour) && self.model.attach_placement(index, other).is_ok() {
+                found.push(neighbour.to_string());
+            }
+        }
+        found
+    }
+
     /// Each conveyor's path as the view draws it (spec issue 141): `shapes_of` the open model.
     pub fn shapes(&self) -> Vec<(u32, Shape)> {
         shapes_of(&self.model)

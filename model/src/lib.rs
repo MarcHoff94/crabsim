@@ -958,7 +958,102 @@ pub(crate) fn conveyor_bounds(resolved: &Resolved, at: Position) -> Option<path:
     path.iter().all(|&segment| path::sound(segment)).then(|| path::geometry(&path, laid).bounds)
 }
 
+/// Where attaching puts an instance (spec issue 141): its position, as a model file writes it,
+/// and its rotation in degrees.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Placement {
+    pub position: Position,
+    pub rotation_degrees: f64,
+}
+
+/// Which way to go `length` metres from `x`, `y` along `heading_degrees`.
+fn ahead(x: f64, y: f64, heading_degrees: f64, length: f64) -> (f64, f64) {
+    let (sin, cos) = heading_degrees.to_radians().sin_cos();
+    (x + cos * length, y + sin * length)
+}
+
 impl Model {
+    /// Where attaching the instance at `a` to the one at `b` puts `a`, so that its end meets
+    /// `b`'s along the connection between them, whichever way it runs (spec issue 141): a
+    /// conveyor's start onto the end of the one before it, or its end onto the start of the one
+    /// after, heading the same way at the same height; an object without geometry with its centre
+    /// half its length past a conveyor's end, or before its start, turned the way MUs go there;
+    /// and a conveyor's start or end the same way against an object without geometry. Refused,
+    /// with the reason, unless they are connected, one is a conveyor and `b` is placed.
+    pub fn attach_placement(&self, a: usize, b: usize) -> Result<Placement, String> {
+        let (first, second) = (self.instances.get(a).ok_or("no such instance")?, self.instances.get(b).ok_or("no such instance")?);
+        if a == b {
+            return Err(format!("`{}` can't be attached to itself", first.name));
+        }
+        // Whether `a` comes after `b`, so its start meets `b`'s end.
+        let after = if self.successors(&second.name).contains(&first.name.as_str()) {
+            true
+        } else if self.successors(&first.name).contains(&second.name.as_str()) {
+            false
+        } else {
+            return Err(format!("`{}` and `{}` aren't connected: attaching lines up the ends of a connection", first.name, second.name));
+        };
+        let (resolved_a, resolved_b) = (self.resolve(a).ok_or("its class is unsound")?, self.resolve(b).ok_or("its class is unsound")?);
+        let (a_conveyor, b_conveyor) = (resolved_a.built_in == "Conveyor", resolved_b.built_in == "Conveyor");
+        if !a_conveyor && !b_conveyor {
+            return Err(format!("neither `{}` nor `{}` is a conveyor: attaching lines up a conveyor's ends with its neighbours", first.name, second.name));
+        }
+        let at_b = second.position.ok_or_else(|| format!("`{}` has no place yet: move it first, or attach it the other way round", second.name))?;
+        let rotation = |resolved: &Resolved| resolved.attributes.dimensions.map_or(0.0, |size| size.rotation_degrees);
+        let length = |resolved: &Resolved| resolved.attributes.dimensions.map_or(1.0, |size| size.length);
+        // Where `a` should meet `b`, and which way MUs head there.
+        let meet = match conveyor_laid(&resolved_b, at_b) {
+            Some((path, laid)) => {
+                if !path.iter().all(|&segment| path::sound(segment)) {
+                    return Err(format!("`{}`'s path has a segment with wrong values", second.name));
+                }
+                let (start, end) = path::travel_ends(&path, laid);
+                if after { end } else { start }
+            }
+            None => {
+                let heading = rotation(&resolved_b);
+                let reach = if after { length(&resolved_b) / 2.0 } else { -length(&resolved_b) / 2.0 };
+                let (x, y) = ahead(at_b.x, at_b.y, heading, reach);
+                path::Pose { x, y, z: at_b.z, heading_degrees: heading }
+            }
+        };
+        let placement = match conveyor_laid(&resolved_a, Position { x: 0.0, y: 0.0, z: 0.0 }) {
+            // A conveyor laid from the origin, heading along x, then turned and moved so its end
+            // lands on the meeting place.
+            Some((path, laid)) => {
+                if !path.iter().all(|&segment| path::sound(segment)) {
+                    return Err(format!("`{}`'s path has a segment with wrong values", first.name));
+                }
+                let laid = path::Laid { origin: path::Pose { heading_degrees: 0.0, ..laid.origin }, ..laid };
+                let (start, end) = path::travel_ends(&path, laid);
+                let own = if after { start } else { end };
+                let turn = meet.heading_degrees - own.heading_degrees;
+                let (sin, cos) = turn.to_radians().sin_cos();
+                let (dx, dy) = (own.x * cos - own.y * sin, own.x * sin + own.y * cos);
+                Placement { position: Position { x: meet.x - dx, y: meet.y - dy, z: meet.z - own.z }, rotation_degrees: turn }
+            }
+            None => {
+                let reach = if after { length(&resolved_a) / 2.0 } else { -length(&resolved_a) / 2.0 };
+                let (x, y) = ahead(meet.x, meet.y, meet.heading_degrees, reach);
+                Placement { position: Position { x, y, z: meet.z }, rotation_degrees: meet.heading_degrees }
+            }
+        };
+        let turned = placement.rotation_degrees.rem_euclid(360.0);
+        Ok(Placement { rotation_degrees: if turned > 180.0 { turned - 360.0 } else { turned }, ..placement })
+    }
+
+    /// The instance at `index` placed where `placement` says, as attaching leaves it in memory:
+    /// its position, and its own dimensions turned, from its resolved ones if it had none.
+    pub fn place(&mut self, index: usize, placement: Placement) {
+        let size = self.resolve(index).and_then(|resolved| resolved.attributes.dimensions);
+        let instance = &mut self.instances[index];
+        instance.position = Some(placement.position);
+        if let Some(mut size) = instance.attributes.dimensions.or(size) {
+            size.rotation_degrees = placement.rotation_degrees;
+            instance.attributes.dimensions = Some(size);
+        }
+    }
+
     /// What a view draws for the conveyor at `index`, with every point relative to where the view
     /// draws its centre (`drawn_position`), so it follows the conveyor wherever the view puts it.
     /// None for anything else, or a path with a segment whose values are wrong.

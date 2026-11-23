@@ -428,9 +428,9 @@ pub struct Inspection {
     pub details: Option<Details>,
     /// The interventions on offer, and which are on. `None` where there are none.
     pub interventions: Option<Offered>,
-    /// For a conveyor, how each of its ends sits against each neighbour connected there, such as
-    /// "Start: meets Feed" (`ViewState::end_fits`).
-    pub ends: Vec<String>,
+    /// For a conveyor, how each of its ends sits against each neighbour connected there
+    /// (`ViewState::end_fits`), each described such as "Start: meets Feed".
+    pub ends: Vec<EndFit>,
 }
 
 /// What only a full state says about an object, as of `as_of`.
@@ -1696,7 +1696,7 @@ impl ViewState {
             blocked,
             interrupted_by,
             details: self.details_of(id),
-            ends: self.end_fits(id).iter().map(EndFit::describe).collect(),
+            ends: self.end_fits(id),
             interventions: pictured.filter(|_| offered).map(|pictured| {
                 let on = |cause| pictured.interruptions().iter().any(|interruption| interruption.cause == cause);
                 Offered { paused: on(Interruption::Paused), stopped: on(Interruption::Stopped) }

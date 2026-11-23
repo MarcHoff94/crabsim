@@ -142,7 +142,14 @@ A point in an MU's footprint. When it crosses from one geometry-aware object to 
 _Avoid_: Transfer point
 
 **Destination**:
-Where an MU is meant to go, a value the MU carries. A routing object chooses the way the MU leaves from it, by a table the user enters.
+Where an MU is meant to go next: an instance, or a class standing for any of its instances. It is the current step of the MU's work plan, or a Station's detour while the MU is on it. An object whose distribution strategy is by destination sends the MU towards a successor from which the destination can be reached (ADR 0025).
+
+**Work plan**:
+The steps an MU of an MU class goes through, in order, each a destination and optionally a process time, which a Source may replace for its own MUs. An MU entering a Station its current step names is worked on for the step's process time, or the Station's own without one, and moves on to its next step when it leaves. At a Station its step doesn't name, it is worked on for the Station's own time and counts as off plan (ADR 0026).
+_Avoid_: Routing (a conveyor's path), recipe
+
+**Detour**:
+A destination a Station sends its MUs to before they carry on with their work plan, such as Rework. It is cleared when the MU reaches it.
 
 **Geometry-aware object**:
 A material-flow object whose results depend on real sizes and paths, such as a conveyor, which cannot take an MU wider than itself. It reads the MU's size. A Source, Station, Buffer or Drain is not one: they take any MU.
@@ -211,7 +218,7 @@ To move and turn an object, and set its height, so that its end meets a connecte
 An MU straddles two geometry-aware objects while its footprint is on both. It belongs to the one its booking point is on, and moves at the slower of the two speeds unless one is interrupted, when the one it belongs to decides.
 
 **Cross conveyor**:
-A geometry-aware routing object with four sides, holding one MU at a time. An MU passes straight through without stopping, or stops at its centre for a switch time and leaves by another side, keeping its orientation.
+A geometry-aware routing object with four sides, holding one MU at a time. Each exit side lists the destinations it takes. An MU whose next destination one or more exit sides list leaves by one of them, chosen by the cross conveyor's own distribution strategy: it stops at the centre for the switch time and leaves sideways, keeping its orientation. Any other MU passes straight through to the side opposite the one it came in by, without stopping.
 _Avoid_: Diverter, transfer unit
 
 **Side**:
@@ -223,6 +230,12 @@ What an object without geometry, such as a Station, is doing between accepting a
 
 **Reversible conveyor**:
 A conveyor whose direction can change during a run, its MUs slowing, stopping and moving back, and its two ends trading places as start and end.
+
+**Switch time**:
+How long an MU turning at a cross conveyor stands at its centre before leaving sideways, such as a lift raising it onto cross rollers.
+
+**Release time**:
+How long a cross conveyor takes no MU after one that turned has left, such as its lift going back down. 0 by default.
 
 **Turntable**:
 A cross conveyor that turns the MU with it as it changes direction, so the MU leaves in a new orientation.
@@ -272,7 +285,7 @@ A successor that can receive an MU chooses which MU it wants from its predecesso
 The rule for which MU leaves an object next. By default, the earliest finished MU leaves first, with ties broken by entry order. A Buffer's is **first in, first out**, the default, or **last in, first out**, each among the MUs whose dwelling time is over.
 
 **Distribution strategy**:
-The rule for which successor receives the MU that is leaving, set per Source or Station as its `distribution` (ADR 0016). **Round robin**, the default, offers each MU to the successors in turn. **Weighted** ranks the successors by a weight, such as each one's best route onward to a Drain by process time, and offers the MU to the best one that can take it, those ranking equal taking turns. **By destination** sends each MU the way a table the user enters gives for its destination, and a default way for any destination not in it.
+The rule for which successor receives the MU that is leaving, set per Source or Station as its `distribution` (ADR 0016). **Round robin**, the default, offers each MU to the successors in turn. **Weighted** ranks the successors by a weight, such as each one's best route onward to a Drain by process time, and offers the MU to the best one that can take it, those ranking equal taking turns. **By destination** narrows the successors to those from which the MU's next destination can be reached along the connections, and then round robin or weighted chooses among them. An MU with no destination left, or one no successor reaches, is offered to every successor.
 
 **Macro**:
 A named list of commands in the command line's language, run as `@name` with arguments for its `$1`, `$2` and so on. Macros live in `macros.json` beside the models, each with its author. An agent's macros last for its work and are then archived, unless the user keeps one.

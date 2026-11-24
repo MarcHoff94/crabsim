@@ -27,6 +27,7 @@ pub(crate) fn check(model: &Model, broken: &Broken) -> Vec<Problem> {
     checker.places(Place::Exit);
     checker.places(Place::Entrance);
     checker.endless_sources();
+    checker.routing_limits();
     checker.problems
 }
 
@@ -300,8 +301,17 @@ impl<'m> Checker<'m> {
             }
         }
         self.mu_values(owner, "/attributes", attributes.length, attributes.width, attributes.booking_point);
-        if let Some(values) = attributes.mu_values {
+        if let Some(values) = &attributes.mu_values {
             self.mu_values(owner, "/attributes/mu_values", values.length, values.width, values.booking_point);
+            if let Some(plan) = &values.work_plan {
+                self.work_plan(owner, "/attributes/mu_values/work_plan", plan);
+            }
+        }
+        if let Some(plan) = &attributes.work_plan {
+            self.work_plan(owner, "/attributes/work_plan", plan);
+        }
+        if let Some(detour) = &attributes.detour {
+            self.destination(owner, "/attributes/detour", detour);
         }
         if built_in == "Source"
             && let Some(class) = &attributes.mu_class
@@ -441,6 +451,75 @@ impl<'m> Checker<'m> {
         }
         if booking_point.is_some_and(|share| !(0.0..=1.0).contains(&share)) {
             self.problem(owner, &format!("{at}/booking_point"), "a booking point is a share of the MU's length, from 0 (its front) to 1 (its rear)");
+        }
+    }
+
+    /// Each step names a place in the model, and only one that can be a Station has a process
+    /// time of its own (ADR 0026).
+    fn work_plan(&mut self, owner: Owner, at: &str, plan: &[crate::WorkStep]) {
+        for (index, step) in plan.iter().enumerate() {
+            let at = format!("{at}/{index}");
+            if self.destination(owner, &format!("{at}/at"), &step.at)
+                && step.process_time.is_some()
+                && self.model.destination_built_in(&step.at) != Some("Station")
+            {
+                self.problem(
+                    owner,
+                    &format!("{at}/process_time"),
+                    format!("`{}` is no Station, so nothing works on the MU there: leave out the step's process time", step.at),
+                );
+            }
+        }
+    }
+
+    /// A destination is an instance, or a class of material-flow objects standing for any of its
+    /// instances (ADR 0025). Whether it names one.
+    fn destination(&mut self, owner: Owner, at: &str, name: &str) -> bool {
+        let model = self.model;
+        if model.destination_members(name).is_some() {
+            return true;
+        }
+        let message = if model.is_mu_class(name) {
+            format!("`{name}` is an MU class, not a place: a destination is an instance, or a class of Sources, Stations, Buffers, Drains or Conveyors")
+        } else {
+            let known = model.instances.iter().map(|instance| instance.name.as_str()).chain(model.classes.iter().map(|class| class.name.as_str()));
+            let guess = crate::suggest::closest(name, known).map_or(String::new(), |known| format!(" (did you mean `{known}`?)"));
+            format!("nothing is called `{name}`{guess}: a destination is an instance or a class")
+        };
+        self.problem(owner, at, message);
+        false
+    }
+
+    /// An MU counts its step and its detour in 16 bits each (ADR 0027), so a model can have at
+    /// most 65,535 destinations and 65,535 work plan steps between its kinds of MU.
+    fn routing_limits(&mut self) {
+        let model = self.model;
+        let destinations = model.destination_names().len();
+        if destinations > usize::from(crabsim::NO_DESTINATION) {
+            self.problems.push(Problem {
+                pointer: String::new(),
+                name: None,
+                message: format!("the model names {destinations} destinations in its work plans and detours, and it can have at most 65,535"),
+            });
+        }
+        // As a run counts them: once for each kind of MU, which a Source's MU class, its own
+        // values and its plan make.
+        let built_in = model.resolve_class(crate::BUILT_IN_MU_CLASS).map(|mu| (crate::mu_kind(&mu.attributes), mu.attributes.work_plan.unwrap_or_default()));
+        let mut kinds: Vec<(crabsim::MuKind, Vec<crate::WorkStep>)> = built_in.into_iter().collect();
+        for index in 0..model.instances.len() {
+            if let (Some(kind), Some(plan)) = (model.mu_kind_of(index), model.work_plan_of(index))
+                && !kinds.iter().any(|(known, known_plan)| *known == kind && *known_plan == plan)
+            {
+                kinds.push((kind, plan));
+            }
+        }
+        let steps: usize = kinds.iter().map(|(_, plan)| plan.len()).sum();
+        if steps > usize::from(crabsim::flows::NO_STEP) {
+            self.problems.push(Problem {
+                pointer: String::new(),
+                name: None,
+                message: format!("the model's kinds of MU have {steps} work plan steps between them, and they can have at most 65,535"),
+            });
         }
     }
 

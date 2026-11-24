@@ -135,7 +135,7 @@
           "$ref": "#/$defs/StateNotesFile"
         },
         "distribution": {
-          "description": "Source, Station, Conveyor: which successor receives the MU it passes on (ADR 0016). Round robin by default. Inherited as a whole.",
+          "description": "Source, Station, Buffer, Conveyor: which successor receives the MU it passes on (ADR 0016). Round robin by default. Inherited as a whole.",
           "$ref": "#/$defs/DistributionFile"
         },
         "mu_class": {
@@ -205,6 +205,17 @@
           "format": "double",
           "exclusiveMinimum": 0,
           "exclusiveMaximum": 90
+        },
+        "work_plan": {
+          "description": "MU class: the steps its MUs follow (ADR 0026), each a destination and an optional process time. An MU entering a Station its next step names is worked on for the step's time, or the Station's own without one, and moves on to its next step. None by default. Inherited as a whole.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/WorkStepFile"
+          }
+        },
+        "detour": {
+          "description": "Station: where every MU it works on goes before carrying on with its plan, such as Rework: an instance, or a class standing for any of its instances (ADR 0025). None by default.",
+          "type": "string"
         }
       },
       "additionalProperties": false
@@ -547,13 +558,16 @@
       "additionalProperties": false
     },
     "DistributionFile": {
-      "description": "`\"round_robin\"`, each successor in turn, or weighted: the best-ranked successor that can take the MU, those ranking equal taking turns.",
+      "description": "`\"round_robin\"`, each successor in turn, weighted: the best-ranked successor that can take the MU, those ranking equal taking turns, or by destination: only the successors from which the MU's next destination can be reached, and among them `then`.",
       "anyOf": [
         {
           "$ref": "#/$defs/RoundRobinFile"
         },
         {
           "$ref": "#/$defs/WeightedFile"
+        },
+        {
+          "$ref": "#/$defs/ByDestinationFile"
         }
       ]
     },
@@ -627,6 +641,39 @@
         "successor"
       ]
     },
+    "ByDestinationFile": {
+      "type": "object",
+      "properties": {
+        "by_destination": {
+          "$ref": "#/$defs/ByDestinationFields"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "by_destination"
+      ]
+    },
+    "ByDestinationFields": {
+      "type": "object",
+      "properties": {
+        "then": {
+          "description": "Round robin or weighted. Round robin when left out.",
+          "$ref": "#/$defs/ThenFile"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ThenFile": {
+      "description": "The strategy that chooses among the successors that reach the MU's destination.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/RoundRobinFile"
+        },
+        {
+          "$ref": "#/$defs/WeightedFile"
+        }
+      ]
+    },
     "MuValuesFile": {
       "description": "A Source's own values for the MUs it makes, each changing its MU class's when set.",
       "type": "object",
@@ -649,9 +696,34 @@
           "format": "double",
           "minimum": 0,
           "maximum": 1
+        },
+        "work_plan": {
+          "description": "Its own work plan for the MUs it makes, in place of its MU class's (ADR 0026).",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/WorkStepFile"
+          }
         }
       },
       "additionalProperties": false
+    },
+    "WorkStepFile": {
+      "description": "One step of a work plan.",
+      "type": "object",
+      "properties": {
+        "at": {
+          "description": "Where the MU goes: an instance, or a class standing for any of its instances (ADR 0025).",
+          "type": "string"
+        },
+        "process_time": {
+          "description": "How long a Station there works on it. Only for a step that can be a Station. Without it, the Station's own process time.",
+          "$ref": "#/$defs/Time"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "at"
+      ]
     },
     "SegmentFile": {
       "description": "One piece of a conveyor's path: exactly one of a straight, an arc, a transition curve and a helix. Angles and turns are positive to the left, the way rotation turns, and negative to the right. A `rise` is the change in height over the segment in metres, negative falling.",

@@ -44,6 +44,7 @@ impl Model {
 
         let mut warnings = Vec::new();
         let mut warn = |pointer: String, name: &str, message: String| warnings.push(Problem { pointer, name: Some(name.to_string()), message });
+        self.destinations_not_reached(&successors, &predecessors, &built_in, &mut warn);
         let description = crate::build::build(self);
         for (i, instance) in self.instances.iter().enumerate() {
             let name = instance.name.as_str();
@@ -89,9 +90,10 @@ impl Model {
                     );
                 }
             }
-            let Some(DistributionStrategy::Weighted(weighted)) = &resolved.attributes.distribution else { continue };
-            let at = match resolved.origin(Attribute::Distribution) {
-                Origin::Instance => format!("/instances/{i}/attributes/distribution/weighted"),
+            let Some(weighted) = resolved.attributes.distribution.as_ref().and_then(DistributionStrategy::weighted) else { continue };
+            let at = match (resolved.origin(Attribute::Distribution), &resolved.attributes.distribution) {
+                (Origin::Instance, Some(DistributionStrategy::ByDestination(_))) => format!("/instances/{i}/attributes/distribution/by_destination/then/weighted"),
+                (Origin::Instance, _) => format!("/instances/{i}/attributes/distribution/weighted"),
                 _ => format!("/instances/{i}"),
             };
             for (place, drain) in weighted.drains.iter().flatten().enumerate() {
@@ -116,6 +118,99 @@ impl Model {
             }
         }
         warnings
+    }
+
+    /// Warns about each object routing by destination that none of its successors leads from to a
+    /// destination MUs can have there (ADR 0025): it then offers them to every successor, which
+    /// is probably not what was meant. Follows each Source's MUs through the model as their plans
+    /// and detours change on the way, up to a limit of places visited, so a large model with
+    /// many plans is only partly looked through.
+    fn destinations_not_reached(&self, successors: &[Vec<usize>], predecessors: &[Vec<usize>], built_in: &[&str], warn: &mut impl FnMut(String, &str, String)) {
+        const MOST_VISITED: usize = 200_000;
+        let count = self.instances.len();
+        let routes: Vec<bool> = (0..count)
+            .map(|i| matches!(self.resolve(i).expect("checked").attributes.distribution, Some(DistributionStrategy::ByDestination(_))))
+            .collect();
+        if !routes.contains(&true) {
+            return;
+        }
+        // Where each destination is, and every instance from which it can be reached.
+        let mut members: HashMap<&str, Vec<bool>> = HashMap::new();
+        let mut reaches: HashMap<&str, Vec<bool>> = HashMap::new();
+        for name in self.destination_names() {
+            let mut is = vec![false; count];
+            let mut seen = vec![false; count];
+            let mut queue: VecDeque<usize> = VecDeque::new();
+            for index in self.destination_members(name).unwrap_or_default() {
+                is[index] = true;
+                seen[index] = true;
+                queue.push_back(index);
+            }
+            while let Some(at) = queue.pop_front() {
+                for &before in &predecessors[at] {
+                    if !seen[before] {
+                        seen[before] = true;
+                        queue.push_back(before);
+                    }
+                }
+            }
+            members.insert(name, is);
+            reaches.insert(name, seen);
+        }
+        let detours: Vec<Option<String>> = (0..count).map(|i| self.resolve(i).expect("checked").attributes.detour).collect();
+        // An MU at an instance: its plan, by place in `plans`, how far along it is, and its detour.
+        let mut plans: Vec<Vec<crate::WorkStep>> = Vec::new();
+        let mut queue: VecDeque<(usize, usize, usize, Option<String>, bool)> = VecDeque::new();
+        for source in (0..count).filter(|&i| built_in[i] == "Source") {
+            let plan = self.work_plan_of(source).unwrap_or_default();
+            let id = plans.iter().position(|known| *known == plan).unwrap_or_else(|| {
+                plans.push(plan);
+                plans.len() - 1
+            });
+            queue.push_back((source, id, 0, None, false));
+        }
+        let mut seen: std::collections::HashSet<(usize, usize, usize, Option<String>)> = std::collections::HashSet::new();
+        let mut warned: std::collections::HashSet<(usize, String)> = std::collections::HashSet::new();
+        while let Some((at, plan, mut step, mut detour, arrived)) = queue.pop_front() {
+            if seen.len() >= MOST_VISITED {
+                return;
+            }
+            if !seen.insert((at, plan, step, detour.clone())) {
+                continue;
+            }
+            let next = |step: usize, detour: &Option<String>| detour.clone().or_else(|| plans[plan].get(step).map(|step| step.at.clone()));
+            if arrived && let Some(going) = next(step, &detour) {
+                if members[going.as_str()][at] {
+                    if detour.is_some() {
+                        detour = None;
+                    } else {
+                        step += 1;
+                    }
+                }
+            }
+            // As the engine does: a Station's detour replaces any the MU had.
+            if built_in[at] == "Station" && detours[at].is_some() {
+                detour = detours[at].clone();
+            }
+            let mut onward: Vec<usize> = successors[at].clone();
+            if routes[at] && let Some(going) = next(step, &detour) {
+                let reaching: Vec<usize> = onward.iter().copied().filter(|&to| reaches[going.as_str()][to]).collect();
+                if reaching.is_empty() {
+                    if warned.insert((at, going.clone())) {
+                        warn(
+                            format!("/instances/{at}"),
+                            &self.instances[at].name,
+                            format!("it routes by destination, but none of its successors leads to `{going}`, where MUs can be going from here, so it offers those to every successor"),
+                        );
+                    }
+                } else {
+                    onward = reaching;
+                }
+            }
+            for to in onward {
+                queue.push_back((to, plan, step, detour.clone(), true));
+            }
+        }
     }
 
     /// Warns about each conveyor the Source at `source` reaches, through objects without geometry

@@ -4,7 +4,7 @@
 use crate::{Attribute, Failures, Model, Origin, RepairTime};
 use crabsim::distribution::{DistributionRule, WeighBy, WeightedRule};
 use crabsim::random_numbers::Distribution;
-use crabsim::{FailureProfile, ModelDescription, SimTime};
+use crabsim::{DestinationId, FailureProfile, ModelDescription, PlanStep, SimTime};
 use std::collections::HashMap;
 
 pub(crate) fn build(model: &Model) -> ModelDescription {
@@ -18,13 +18,8 @@ pub(crate) fn build(model: &Model) -> ModelDescription {
         let resolved = model.resolve(index).expect("checked: every instance's chain of classes is sound");
         let attributes = &resolved.attributes;
         let id = match resolved.built_in {
-            "Source" => {
-                let source = description.add_source(attributes.interval.unwrap_or(SimTime::ZERO));
-                let kind = model.mu_kind_of(index).expect("checked: a Source's MU class is an MU class");
-                let kind = description.add_mu_kind(kind);
-                description.set_mu_kind(source, kind);
-                source
-            }
+            // Its MU kind comes once every instance is there, since a work plan names them.
+            "Source" => description.add_source(attributes.interval.unwrap_or(SimTime::ZERO)),
             "Station" => {
                 let process_time = attributes.process_time.unwrap_or(SimTime::ZERO);
                 let failures = failure_profile(attributes.failures.as_deref().and_then(<[_]>::first));
@@ -84,20 +79,41 @@ pub(crate) fn build(model: &Model) -> ModelDescription {
         }
     }
     let ids: HashMap<&str, u32> = model.instances.iter().enumerate().map(|(id, instance)| (instance.name.as_str(), id as u32)).collect();
-    // Each Source and Station's distribution strategy, its Drains by id. A name that isn't an
-    // instance is left out, and the engine ignores ids that aren't Drains.
+    // Every name a work plan or a detour gives, as the instances it stands for (ADR 0025). Ids
+    // follow file order, so an instance's id is its index.
+    let mut destinations: HashMap<&str, DestinationId> = HashMap::new();
+    for name in model.destination_names() {
+        let members: Vec<u32> = model.destination_members(name).expect("checked: a destination is an instance or a class").into_iter().map(|index| index as u32).collect();
+        destinations.insert(name, description.add_destination(&members));
+    }
+    let plan = |steps: &[crate::WorkStep]| -> Vec<PlanStep> { steps.iter().map(|step| PlanStep { at: destinations[step.at.as_str()], process_time: step.process_time }).collect() };
+    if let Some(steps) = built_in_mu.attributes.work_plan.as_deref() {
+        description.set_built_in_work_plan(plan(steps));
+    }
     for (index, _) in model.instances.iter().enumerate() {
         let resolved = model.resolve(index).expect("checked: every instance's chain of classes is sound");
-        if let Some(crate::DistributionStrategy::Weighted(weighted)) = &resolved.attributes.distribution {
-            let by = match weighted.by {
-                Attribute::Interval => WeighBy::Interval,
-                Attribute::StartingMus => WeighBy::StartingMus,
-                Attribute::Capacity => WeighBy::Capacity,
-                _ => WeighBy::ProcessTime,
-            };
-            let drains = weighted.drains.as_ref().map(|names| names.iter().filter_map(|name| ids.get(name.as_str()).copied()).collect());
-            let rule = WeightedRule { by, order: weighted.order, rank: weighted.rank, drains };
-            description.set_distribution(index as u32, DistributionRule::Weighted(rule));
+        let id = index as u32;
+        match resolved.built_in {
+            "Source" => {
+                let kind = model.mu_kind_of(index).expect("checked: a Source's MU class is an MU class");
+                let steps = model.work_plan_of(index).expect("checked: a Source's MU class is an MU class");
+                let kind = description.add_mu_kind_with_plan(kind, plan(&steps));
+                description.set_mu_kind(id, kind);
+            }
+            "Station" => {
+                if let Some(detour) = &resolved.attributes.detour {
+                    description.set_detour(id, destinations[detour.as_str()]);
+                }
+            }
+            _ => {}
+        }
+        // Its distribution strategy, its Drains by id. A name that isn't an instance is left out,
+        // and the engine ignores ids that aren't Drains.
+        if let Some(strategy) = &resolved.attributes.distribution {
+            let rule = distribution_rule(strategy, &ids);
+            if rule != DistributionRule::RoundRobin {
+                description.set_distribution(id, rule);
+            }
         }
     }
     // Each object offers MUs to its successors in the order of its exits.
@@ -107,6 +123,24 @@ pub(crate) fn build(model: &Model) -> ModelDescription {
         }
     }
     description
+}
+
+/// A distribution strategy as the engine takes it.
+fn distribution_rule(strategy: &crate::DistributionStrategy, ids: &HashMap<&str, u32>) -> DistributionRule {
+    match strategy {
+        crate::DistributionStrategy::RoundRobin => DistributionRule::RoundRobin,
+        crate::DistributionStrategy::Weighted(weighted) => {
+            let by = match weighted.by {
+                Attribute::Interval => WeighBy::Interval,
+                Attribute::StartingMus => WeighBy::StartingMus,
+                Attribute::Capacity => WeighBy::Capacity,
+                _ => WeighBy::ProcessTime,
+            };
+            let drains = weighted.drains.as_ref().map(|names| names.iter().filter_map(|name| ids.get(name.as_str()).copied()).collect());
+            DistributionRule::Weighted(WeightedRule { by, order: weighted.order, rank: weighted.rank, drains })
+        }
+        crate::DistributionStrategy::ByDestination(then) => DistributionRule::ByDestination(Box::new(distribution_rule(then, ids))),
+    }
 }
 
 fn failure_profile(failures: Option<&Failures>) -> FailureProfile {

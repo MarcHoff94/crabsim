@@ -17,7 +17,7 @@ pub(crate) fn entries() -> Vec<Entry> {
 }
 
 /// Every statistic the store keeps, in the order results show them.
-pub const STATISTICS: [&str; 24] = [
+pub const STATISTICS: [&str; 26] = [
     "mus_in",
     "mus_out",
     "working_share",
@@ -42,6 +42,8 @@ pub const STATISTICS: [&str; 24] = [
     "max_length_taken_share",
     "mean_crossing_time_s",
     "max_crossing_time_s",
+    "mus_on_plan",
+    "mus_off_plan",
 ];
 
 /// How many of the busiest, the most blocked and the most failed objects a summary shows.
@@ -109,6 +111,12 @@ pub(crate) fn figures(object: &ObjectState, now: SimTime) -> Vec<(&'static str, 
         if object.kind == ObjectKind::Buffer && object.capacity != crabsim::Capacity::Unlimited && measured > 0.0 {
             figures.push(("full_share", statistics.time_full.as_millis() as f64 / measured));
         }
+    }
+    // Only a Station that worked on MUs going somewhere (spec issue 148), so a model without work
+    // plans or detours stores nothing more.
+    if let Some(plan) = object.plan.filter(|plan| plan.on_plan + plan.off_plan > 0) {
+        figures.push(("mus_on_plan", plan.on_plan as f64));
+        figures.push(("mus_off_plan", plan.off_plan as f64));
     }
     if let Some(belt) = &object.belt {
         if let Some(share) = belt.mean_share_taken(statistics.measured_time()) {

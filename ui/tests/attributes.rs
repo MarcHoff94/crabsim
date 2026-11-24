@@ -68,7 +68,7 @@ fn every_attribute_comes_with_its_value_and_where_it_comes_from() {
     let names: Vec<String> = workspace.attributes("P1").unwrap().into_iter().map(|view| view.attribute).collect();
     assert_eq!(
         names,
-        ["process_time", "failures", "starting_mus", "capacity", "start", "dimensions", "description", "state_notes", "distribution"],
+        ["process_time", "failures", "starting_mus", "capacity", "start", "dimensions", "description", "state_notes", "distribution", "detour"],
         "a Station's attributes, in a fixed order"
     );
     assert_eq!(of(&workspace, "P1", "process_time"), (Some(json!("00:00:05")), ValueFrom::Class("Press".into())));
@@ -529,7 +529,7 @@ fn an_mus_footprint_is_metres_above_0_and_its_booking_point_a_share_of_its_lengt
 #[test]
 fn a_sources_own_mu_values_are_those_typed_and_none_typed_is_none() {
     let mut form = Form::new("mu_values", Some(&json!({ "width": 0.45 })));
-    assert_eq!(form.parts.iter().map(|part| part.text.as_str()).collect::<Vec<_>>(), ["", "0.45", ""]);
+    assert_eq!(form.parts.iter().map(|part| part.text.as_str()).collect::<Vec<_>>(), ["", "0.45", "", ""]);
     assert!(form.matches(Some(&json!({ "width": 0.45 }))));
     form.parts[2].text = "0".into();
     assert_eq!(form.value(), Ok(json!({ "width": 0.45, "booking_point": 0.0 })));
@@ -538,6 +538,26 @@ fn a_sources_own_mu_values_are_those_typed_and_none_typed_is_none() {
     }
     assert_eq!(form.value(), Ok(Value::Null), "nothing of its own");
     assert_eq!(summary(&json!({ "length": 1.2, "booking_point": 0 })), "length 1.2 m, booking point 0");
+}
+
+#[test]
+fn a_sources_own_work_plan_is_kept_when_its_other_values_change() {
+    let plan = json!([{ "at": "Saw", "process_time": "00:00:40" }, { "at": "Out" }]);
+    let mut form = Form::new("mu_values", Some(&json!({ "width": 0.45, "work_plan": plan })));
+    assert!(form.matches(Some(&json!({ "width": 0.45, "work_plan": plan }))));
+    form.parts[1].text = "0.5".into();
+    assert_eq!(form.value(), Ok(json!({ "width": 0.5, "work_plan": plan })), "the plan stays");
+}
+
+#[test]
+fn a_work_plan_is_typed_as_json_until_it_has_rows() {
+    let plan = json!([{ "at": "Saw" }]);
+    let mut form = Form::new("work_plan", Some(&plan));
+    assert_eq!(form.value(), Ok(plan));
+    form.parts[0].text = "Saw 0:40".into();
+    assert!(form.value().unwrap_err().contains("isn't a work plan"));
+    form.parts[0].text.clear();
+    assert_eq!(form.value(), Ok(json!([])), "no steps");
 }
 
 #[test]

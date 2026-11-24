@@ -351,7 +351,24 @@ pub struct DescribeModelOutput {
     pub unreachable: Listed,
     /// Instances, other than Drains, with no successor, where an MU can't go on.
     pub dead_ends: Listed,
+    /// Where MUs go (spec issue 148): left out for a model without work plans, detours or routing
+    /// by destination.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub routing: Option<RoutingSummary>,
     pub problems: Problems,
+}
+
+/// A model's work plans, detours and routing by destination, summed up.
+#[derive(Serialize, JsonSchema)]
+pub struct RoutingSummary {
+    /// How many places the work plans and detours name, instances and classes.
+    pub destinations: usize,
+    /// The MU classes and Sources with a work plan of their own.
+    pub work_plans: Listed,
+    /// The Stations with a detour.
+    pub detours: Listed,
+    /// The instances routing by destination.
+    pub by_destination: Listed,
 }
 
 fn is_zero(n: &usize) -> bool {
@@ -491,6 +508,21 @@ fn describe(model: &Model, problems: &[crabsim_model::Problem]) -> DescribeModel
     let dead_ends = (0..count).filter(|&i| !graph.is(i, "Drain") && graph.successors[i].is_empty()).collect();
 
     let (classes, more_classes) = class_counts(model, &graph);
+    let resolved: Vec<Option<crabsim_model::Resolved>> = (0..model.instances.len()).map(|index| model.resolve(index)).collect();
+    let has = |test: &dyn Fn(&crabsim_model::Attributes) -> bool| -> Vec<usize> {
+        (0..count).filter(|&i| resolved.get(i).and_then(Option::as_ref).is_some_and(|resolved| test(&resolved.attributes))).collect()
+    };
+    let detours = has(&|attributes| attributes.detour.is_some());
+    let by_destination = has(&|attributes| matches!(attributes.distribution, Some(crabsim_model::DistributionStrategy::ByDestination(_))));
+    let mut planned: Vec<String> = model.classes.iter().filter(|class| class.attributes.work_plan.is_some()).map(|class| class.name.clone()).collect();
+    planned.extend(model.instances.iter().filter(|instance| instance.attributes.mu_values.as_ref().is_some_and(|values| values.work_plan.is_some())).map(|instance| instance.name.clone()));
+    let destinations = model.destination_names().len();
+    let routing = (destinations > 0 || !by_destination.is_empty()).then(|| RoutingSummary {
+        destinations,
+        work_plans: Listed { count: planned.len(), names: planned.into_iter().take(LISTED).collect() },
+        detours: some(detours),
+        by_destination: some(by_destination),
+    });
     DescribeModelOutput {
         valid: problems.is_empty(),
         description: model.description.clone(),
@@ -505,6 +537,7 @@ fn describe(model: &Model, problems: &[crabsim_model::Problem]) -> DescribeModel
         loops: Loops { count: loop_starts.len(), examples },
         unreachable: some(unreachable),
         dead_ends: some(dead_ends),
+        routing,
         problems: Problems { count: problems.len(), first: problems.iter().take(LISTED).map(ModelProblem::from).collect() },
     }
 }
@@ -809,9 +842,9 @@ pub enum QueryModelOutput {
     },
     Distribution {
         name: String,
-        /// `round_robin` or `weighted`.
+        /// `round_robin`, `weighted` or `by_destination`.
         strategy: String,
-        /// For a weighted one: the strategy as a model file writes it.
+        /// For a weighted one, or by destination: the strategy as a model file writes it.
         #[serde(skip_serializing_if = "Option::is_none")]
         weighted: Option<Value>,
         /// Its successors: in exit order for round robin, which takes them in turn, and in
@@ -876,6 +909,11 @@ pub struct RankedSuccessor {
     /// a counted Drain, which ranks last.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total: Option<f64>,
+    /// For an instance routing by destination: the destinations its work plans and detours name
+    /// that can be reached through this successor, so MUs going there may take it. Left out
+    /// otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reaches: Option<Vec<String>>,
 }
 
 #[derive(Serialize, JsonSchema)]
@@ -1527,8 +1565,24 @@ fn distribution(model: &Model, at: usize, name: String) -> Result<QueryModelOutp
     let successors = model.successors(&name);
     let strategy = resolved.attributes.distribution.clone().unwrap_or(crabsim_model::DistributionStrategy::RoundRobin);
     let description = model.to_description();
-    let (strategy, weighted, listed) = match (&strategy, description.ranking(at as u32)) {
-        (crabsim_model::DistributionStrategy::Weighted(weighted), Some(ranking)) => {
+    let by_destination = matches!(strategy, crabsim_model::DistributionStrategy::ByDestination(_));
+    // Through each successor, the destinations that can be reached, for one routing by destination.
+    let reaches = |exit: usize| -> Option<Vec<String>> {
+        by_destination.then(|| {
+            let index = model.instances.iter().position(|instance| instance.name == successors[exit]).expect("a successor is an instance");
+            model
+                .destination_names()
+                .into_iter()
+                .filter(|name| {
+                    let members = model.destination_members(name).unwrap_or_default();
+                    downstream(model, index).iter().any(|reached| members.contains(reached))
+                })
+                .map(str::to_string)
+                .collect()
+        })
+    };
+    let (kind, weighted, listed) = match (strategy.weighted(), description.ranking(at as u32)) {
+        (Some(weighted), Some(ranking)) => {
             let in_seconds = matches!(weighted.by, Attribute::ProcessTime | Attribute::Interval);
             let total = |exit: usize| ranking.totals[exit].map(|total| if in_seconds { total as f64 / 1000.0 } else { total as f64 });
             let listed = ranking
@@ -1536,16 +1590,38 @@ fn distribution(model: &Model, at: usize, name: String) -> Result<QueryModelOutp
                 .iter()
                 .enumerate()
                 .flat_map(|(place, group)| group.iter().map(move |&exit| (place, exit)))
-                .map(|(place, exit)| RankedSuccessor { name: successors[exit].to_string(), exit: exit + 1, place: place + 1, total: total(exit) })
+                .map(|(place, exit)| RankedSuccessor { name: successors[exit].to_string(), exit: exit + 1, place: place + 1, total: total(exit), reaches: reaches(exit) })
                 .collect();
-            ("weighted", Some(crabsim_model::write_distribution(&strategy)), listed)
+            (if by_destination { "by_destination" } else { "weighted" }, Some(crabsim_model::write_distribution(&strategy)), listed)
         }
         _ => {
-            let listed = successors.iter().enumerate().map(|(exit, to)| RankedSuccessor { name: to.to_string(), exit: exit + 1, place: 1, total: None }).collect();
-            ("round_robin", None, listed)
+            let listed = successors
+                .iter()
+                .enumerate()
+                .map(|(exit, to)| RankedSuccessor { name: to.to_string(), exit: exit + 1, place: 1, total: None, reaches: reaches(exit) })
+                .collect();
+            if by_destination { ("by_destination", Some(crabsim_model::write_distribution(&strategy)), listed) } else { ("round_robin", None, listed) }
         }
     };
-    Ok(QueryModelOutput::Distribution { name, strategy: strategy.to_string(), weighted, successors: listed })
+    Ok(QueryModelOutput::Distribution { name, strategy: kind.to_string(), weighted, successors: listed })
+}
+
+/// Every instance reachable from the one at `index` along the connections, itself included.
+fn downstream(model: &Model, index: usize) -> Vec<usize> {
+    let mut seen = vec![false; model.instances.len()];
+    let mut work = vec![index];
+    seen[index] = true;
+    while let Some(at) = work.pop() {
+        for name in model.successors(&model.instances[at].name) {
+            if let Some(next) = model.instances.iter().position(|instance| instance.name == name)
+                && !seen[next]
+            {
+                seen[next] = true;
+                work.push(next);
+            }
+        }
+    }
+    (0..seen.len()).filter(|&i| seen[i]).collect()
 }
 
 fn class_tree(model: &Model, what: &str, class: Option<String>, with_instances: bool) -> Result<QueryModelOutput, OperationError> {

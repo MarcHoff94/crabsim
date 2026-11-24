@@ -4283,6 +4283,8 @@ fn attribute_label(attribute: &str) -> &str {
         "direction" => "Direction",
         "min_radius" => "Min. radius m",
         "max_incline" => "Max. incline °",
+        "work_plan" => "Work plan",
+        "detour" => "Detour",
         other => other,
     }
 }

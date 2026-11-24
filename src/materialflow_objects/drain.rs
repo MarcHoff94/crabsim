@@ -4,6 +4,7 @@ use crate::report::{Capacity, ObjectKind, ObjectState, OccurrenceKind};
 use crate::statistics::{MachineState, StatisticsKeeper};
 use super::flows::FailureProfile;
 use super::interruptions::{Interruptible, Interruptions};
+use crate::routing::Arrival;
 use crate::time::SimTime;
 use super::flows::BaseObject;
 use crate::materialflow_objects::OtherObjects;
@@ -92,6 +93,7 @@ impl EventInterface for Drain {
             process_time: None,
             configured_process_time: None,
             statistics: self.statistics.read(now),
+            plan: None,
             fill: None,
             belt: None,
             positions: Vec::new(),
@@ -119,9 +121,10 @@ impl MaterialFlow for Drain {
     fn process_mu_entrance(
         &mut self,
         mu: MoveableUnit,
+        _arrival: Arrival,
         context: &mut EventContext,
     ) -> Result<Option<EventTemplate>, MaterialflowError> {
-        let lead_time = context.time.saturating_sub(mu.left_source);
+        let lead_time = context.time.saturating_sub(mu.left_source());
         self.statistics.count_exit(context.time, lead_time);
         context.record(OccurrenceKind::MuLeft { mu_id: mu.id, at: self.base.object_id, lead_time });
         log::info!(

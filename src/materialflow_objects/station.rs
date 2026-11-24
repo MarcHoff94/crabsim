@@ -6,8 +6,9 @@ use crate::time::SimTime;
 use super::flows::BaseObject;
 use crate::materialflow_objects::OtherObjects;
 use super::interruptions::{Interruptible, Interruptions};
+use crate::routing::{Arrival, PlanCounts};
 use crate::flows::{
-	EventInterface, FailureProfile, MaterialFlow, MoveableUnit, MuKindId, ProcessState, SuccessorContainer, Distributing, Waiting, list_blocked, relist_blocked, waiting_ids, retries_for_blocked, retry_move_to_successor, try_to_move_to_successor
+	DestinationId, NO_DESTINATION, EventInterface, FailureProfile, MaterialFlow, MoveableUnit, MuKindId, ProcessState, SuccessorContainer, Distributing, Waiting, list_blocked, relist_blocked, waiting_ids, retries_for_blocked, retry_move_to_successor, try_to_move_to_successor
 };
 
 /// When a Station's work ends, or ended, or how much is left of it. One field for all three, since
@@ -47,6 +48,11 @@ pub struct SingleStation {
 	pub exitlocked: bool,
 	pub state: ProcessState,
 	pub statistics: StatisticsKeeper,
+	/// Where MUs go before carrying on with their plan, set on each as it enters (ADR 0026), or
+	/// `NO_DESTINATION`.
+	pub detour: DestinationId,
+	/// MUs worked on for their plan and off it, since statistics began.
+	plan: PlanCounts,
 }
 
 impl SingleStation {
@@ -75,6 +81,8 @@ impl SingleStation {
 			exitlocked: false,
 			state: ProcessState::Idle,
 			statistics: StatisticsKeeper::new(1),
+			detour: NO_DESTINATION,
+			plan: PlanCounts::default(),
 		}
 	}
 	fn exit_event(&self, mu_id: u32, after: SimTime) -> EventTemplate {
@@ -90,13 +98,14 @@ impl SingleStation {
 		ticket.stop_count != self.stop_count
 			|| self.content.as_ref().is_some_and(|mu| mu.id != ticket.mu_id)
 	}
-	/// Begins work on the MU now in the station and returns the exit for its completion time.
-	fn start_work(&mut self, mu_id: u32, context: &mut EventContext) -> EventTemplate {
-		self.finish = Finish::At(context.time + self.proc_time);
+	/// Begins `duration` of work on the MU now in the station and returns the exit for its
+	/// completion time.
+	fn start_work(&mut self, mu_id: u32, duration: SimTime, context: &mut EventContext) -> EventTemplate {
+		self.finish = Finish::At(context.time + duration);
 		self.entrancelocked = true;
 		self.state = ProcessState::Processing;
-		context.record(OccurrenceKind::WorkStarted { mu_id, at: self.base.object_id, duration: self.proc_time });
-		self.exit_event(mu_id, self.proc_time)
+		context.record(OccurrenceKind::WorkStarted { mu_id, at: self.base.object_id, duration });
+		self.exit_event(mu_id, duration)
 	}
 	/// Schedules what it does through `context`, in the order the queue's ties need.
 	fn handle_event(
@@ -270,14 +279,19 @@ impl MaterialFlow for SingleStation {
 	}
 	fn process_mu_entrance(
 		&mut self,
-		mu: MoveableUnit,
+		mut mu: MoveableUnit,
+		arrival: Arrival,
 		context: &mut EventContext,
 	) -> Result<Option<EventTemplate>, MaterialflowError> {
 		log::info!("MU {} entered SingleStation {}", mu.id, self.base.object_id);
 		let mu_id = mu.id;
+		self.plan.count(arrival);
+		if self.detour != NO_DESTINATION {
+			mu.detour = self.detour;
+		}
 		self.content = Some(mu);
 		self.statistics.count_mu_in();
-		let exit = self.start_work(mu_id, context);
+		let exit = self.start_work(mu_id, arrival.process_time(self.proc_time), context);
 		// An MU it was receiving arrives even while it is interrupted, and waits with its work
 		// frozen until the interruption ends. The exit just scheduled is then stale.
 		if self.is_interrupted() {
@@ -309,7 +323,7 @@ impl EventInterface for SingleStation {
 		let mut events: Vec<EventTemplate> = self.interruptions.first_failure(self.base.object_id).into_iter().collect();
 		if let Some(mu_id) = self.content.as_ref().map(|mu| mu.id) {
 			self.statistics.count_mu_in();
-			events.push(self.start_work(mu_id, context));
+			events.push(self.start_work(mu_id, self.proc_time, context));
 		}
 		self.update_statistics(context.time);
 		Ok(events)
@@ -336,10 +350,12 @@ impl EventInterface for SingleStation {
 		self.state = ProcessState::Idle;
 		self.interruptions.reset();
 		self.statistics.reset();
+		self.plan = PlanCounts::default();
 	}
 	fn clear_statistics(&mut self, now: SimTime) {
 		self.interruptions.clear_statistics(now, &self.statistics);
 		self.statistics.clear(now);
+		self.plan = PlanCounts::default();
 	}
 	fn report(&self, now: SimTime) -> ObjectState {
 		let remaining = match self.finish {
@@ -351,7 +367,7 @@ impl EventInterface for SingleStation {
 			id: self.base.object_id,
 			kind: ObjectKind::Station,
 			contents: self.content.iter().map(|mu| mu.id).collect(),
-			content_kinds: self.content.iter().map(|mu| mu.kind).collect(),
+			content_kinds: self.content.iter().map(|mu| mu.kind()).collect(),
 			process: self.state.clone(),
 			interrupted: self.interruptions.most_serious(),
 			interruptions: self.interruptions.list(),
@@ -364,6 +380,7 @@ impl EventInterface for SingleStation {
 			process_time: Some(self.proc_time),
 			configured_process_time: Some(self.configured_proc_time),
 			statistics: self.statistics.read(now),
+			plan: Some(self.plan),
 			fill: None,
 			belt: None,
 			positions: Vec::new(),
@@ -420,7 +437,10 @@ impl SuccessorContainer for SingleStation {
 		})
 	}
 	fn offered_kind(&self, _now: SimTime) -> Option<MuKindId> {
-		self.content.as_ref().map(|mu| mu.kind)
+		self.content.as_ref().map(|mu| mu.kind())
+	}
+	fn offered_mu(&self, _now: SimTime) -> Option<&MoveableUnit> {
+		self.content.as_ref()
 	}
 	fn statistics_mut(&mut self) -> &mut StatisticsKeeper {
 		&mut self.statistics

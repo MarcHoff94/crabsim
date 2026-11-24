@@ -12,6 +12,8 @@ use super::interruptions::{Interruptible, Interruptions};
 use crate::materialflow_objects::OtherObjects;
 use crate::report::{Capacity, ObjectKind, ObjectState, OccurrenceKind, WorkLeft};
 use crate::statistics::{MachineState, StatisticsKeeper};
+use crate::routing::{Arrival, PlanCounts};
+use crate::flows::{DestinationId, NO_DESTINATION};
 use crate::time::SimTime;
 
 /// When a Station with capacity begins work on its MUs.
@@ -43,6 +45,9 @@ enum Work {
 struct Place {
 	mu: MoveableUnit,
 	work: Work,
+	/// Its work plan step's process time, if it was worked on for one with a time of its own
+	/// (ADR 0026). Otherwise the Station's process time when its work starts.
+	step_time: Option<SimTime>,
 }
 
 #[derive(Clone)]
@@ -72,6 +77,11 @@ pub struct MultiStation {
 	pub distribution: Distributing,
 	pub blockedlist: Vec<Waiting>,
 	pub statistics: StatisticsKeeper,
+	/// Where MUs go before carrying on with their plan, set on each as it enters (ADR 0026), or
+	/// `NO_DESTINATION`.
+	pub detour: DestinationId,
+	/// MUs worked on for their plan and off it, since statistics began.
+	plan: PlanCounts,
 }
 
 impl MultiStation {
@@ -94,6 +104,8 @@ impl MultiStation {
 			distribution: Distributing::RoundRobin,
 			blockedlist: Vec::new(),
 			statistics: StatisticsKeeper::new(capacity),
+			detour: NO_DESTINATION,
+			plan: PlanCounts::default(),
 		}
 	}
 
@@ -102,7 +114,7 @@ impl MultiStation {
 	pub fn set_starting_mus(&mut self, mus: Vec<u32>) {
 		self.places = mus
 			.iter()
-			.map(|&id| Place { mu: MoveableUnit { id, left_source: SimTime::ZERO, kind: 0 }, work: Work::Waiting })
+			.map(|&id| Place { mu: MoveableUnit::starting(id), work: Work::Waiting, step_time: None })
 			.collect();
 		self.starting_mus = mus;
 	}
@@ -148,23 +160,39 @@ impl MultiStation {
 		EventTemplate { eventtype: EventType::MUExit(ExitTicket { mu_id, stop_count: self.stop_count }), exec_time: after, object_id: self.base.object_id }
 	}
 
-	/// Begins work on the place at `at`, and returns its exit.
-	fn start_work(&mut self, at: usize, context: &mut EventContext) -> EventTemplate {
-		let place = &mut self.places[at];
-		place.work = Work::At(context.time + self.proc_time);
-		let mu_id = place.mu.id;
-		context.record(OccurrenceKind::WorkStarted { mu_id, at: self.base.object_id, duration: self.proc_time });
-		self.exit_event(mu_id, self.proc_time)
+	/// How long the place at `at` is worked on: its step's time, or the Station's own.
+	fn duration(&self, at: usize) -> SimTime {
+		self.places[at].step_time.unwrap_or(self.proc_time)
 	}
 
-	/// With batch start and every place taken, begins work on all of them, with one exit, since
-	/// they finish together. Otherwise nothing.
+	/// Begins work on the place at `at`, and returns its exit.
+	fn start_work(&mut self, at: usize, context: &mut EventContext) -> EventTemplate {
+		let duration = self.duration(at);
+		let place = &mut self.places[at];
+		place.work = Work::At(context.time + duration);
+		let mu_id = place.mu.id;
+		context.record(OccurrenceKind::WorkStarted { mu_id, at: self.base.object_id, duration });
+		self.exit_event(mu_id, duration)
+	}
+
+	/// With batch start and every place taken, begins work on all of them, returning the first
+	/// one's exit. MUs whose work plan steps give them times of their own finish at those times,
+	/// each later finish time with an exit of its own, scheduled here.
 	fn start_batch_if_full(&mut self, context: &mut EventContext) -> Option<EventTemplate> {
 		if self.start != StartMode::Batch || self.held() < self.capacity || self.batch_closed {
 			return None;
 		}
 		self.batch_closed = true;
-		(0..self.places.len()).map(|at| self.start_work(at, context)).reduce(|first, _| first)
+		let mut first = None;
+		for at in 0..self.places.len() {
+			let exit = self.start_work(at, context);
+			if first.is_none() {
+				first = Some(exit);
+			} else if !(0..at).any(|earlier| self.duration(earlier) == exit.exec_time) {
+				context.schedule(exit);
+			}
+		}
+		first
 	}
 
 	/// Notes whether a finished MU is waiting, reporting the Station's own change into or out of
@@ -336,12 +364,20 @@ impl MaterialFlow for MultiStation {
 	fn is_exit_allowed(&self) -> bool {
 		self.waiting && !self.is_interrupted()
 	}
-	fn process_mu_entrance(&mut self, mu: MoveableUnit, context: &mut EventContext) -> Result<Option<EventTemplate>, MaterialflowError> {
+	fn process_mu_entrance(&mut self, mut mu: MoveableUnit, arrival: Arrival, context: &mut EventContext) -> Result<Option<EventTemplate>, MaterialflowError> {
 		log::info!("MU {} entered Station {}", mu.id, self.base.object_id);
 		let was_blocked = self.process_state() == ProcessState::Blocked;
 		// An MU it was receiving takes its reserved place.
 		self.incoming = self.incoming.saturating_sub(1);
-		self.places.push(Place { mu, work: Work::Waiting });
+		self.plan.count(arrival);
+		if self.detour != NO_DESTINATION {
+			mu.detour = self.detour;
+		}
+		let step_time = match arrival {
+			Arrival::OnPlan(time) => time,
+			_ => None,
+		};
+		self.places.push(Place { mu, work: Work::Waiting, step_time });
 		self.statistics.count_mu_in();
 		let exit = match self.start {
 			StartMode::Individual => Some(self.start_work(self.places.len() - 1, context)),
@@ -409,10 +445,12 @@ impl EventInterface for MultiStation {
 		self.succ_pointer = 0;
 		self.blockedlist.clear();
 		self.statistics.reset();
+		self.plan = PlanCounts::default();
 	}
 	fn clear_statistics(&mut self, now: SimTime) {
 		self.interruptions.clear_statistics(now, &self.statistics);
 		self.statistics.clear(now);
+		self.plan = PlanCounts::default();
 	}
 	fn report(&self, now: SimTime) -> ObjectState {
 		let work: Vec<WorkLeft> = self
@@ -428,7 +466,7 @@ impl EventInterface for MultiStation {
 			id: self.base.object_id,
 			kind: ObjectKind::Station,
 			contents: self.places.iter().map(|place| place.mu.id).collect(),
-			content_kinds: self.places.iter().map(|place| place.mu.kind).collect(),
+			content_kinds: self.places.iter().map(|place| place.mu.kind()).collect(),
 			process: self.process_state(),
 			interrupted: self.interruptions.most_serious(),
 			interruptions: self.interruptions.list(),
@@ -441,6 +479,7 @@ impl EventInterface for MultiStation {
 			process_time: Some(self.proc_time),
 			configured_process_time: Some(self.configured_proc_time),
 			statistics: self.statistics.read(now),
+			plan: Some(self.plan),
 			fill: None,
 			belt: None,
 			positions: Vec::new(),
@@ -502,7 +541,10 @@ impl SuccessorContainer for MultiStation {
 		})
 	}
 	fn offered_kind(&self, _now: SimTime) -> Option<crate::flows::MuKindId> {
-		self.offered().map(|at| self.places[at].mu.kind)
+		self.offered().map(|at| self.places[at].mu.kind())
+	}
+	fn offered_mu(&self, _now: SimTime) -> Option<&MoveableUnit> {
+		self.offered().map(|at| &self.places[at].mu)
 	}
 }
 

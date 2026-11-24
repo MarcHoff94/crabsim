@@ -149,7 +149,7 @@ fn attribute_properties(attributes: &Attributes, has: impl Fn(Attribute) -> bool
     if let Some(class) = attributes.mu_class.as_ref().filter(|_| has(Attribute::MuClass)) {
         properties.push(("mu_class", Value::Text(class.clone())));
     }
-    if let Some(values) = attributes.mu_values.filter(|_| has(Attribute::MuValues)) {
+    if let Some(values) = attributes.mu_values.as_ref().filter(|_| has(Attribute::MuValues)) {
         for (key, value) in [("mu_length", values.length), ("mu_width", values.width), ("mu_booking_point", values.booking_point)] {
             if let Some(value) = value {
                 properties.push((key, Value::Double(value)));

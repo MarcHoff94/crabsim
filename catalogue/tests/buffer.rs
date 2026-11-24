@@ -36,7 +36,7 @@ fn a_buffer_has_its_attributes_with_defaults_and_takes_minus_1_for_no_limit() {
     let setup = setup("buffer-attributes");
     let got = setup.ok("get_attributes", json!({ "path": "line.json", "target": { "instance": "Store" } }));
     let names: Vec<&str> = got["attributes"].as_array().unwrap().iter().map(|a| a["attribute"].as_str().unwrap()).collect();
-    assert_eq!(names, ["failures", "starting_mus", "capacity", "dwelling_time", "exit_strategy", "histogram_bar_width", "stop_freezes_dwelling", "dimensions", "description", "state_notes"], "every attribute a Buffer has");
+    assert_eq!(names, ["failures", "starting_mus", "capacity", "dwelling_time", "exit_strategy", "histogram_bar_width", "stop_freezes_dwelling", "dimensions", "description", "state_notes", "distribution"], "every attribute a Buffer has");
     assert_eq!(attribute(&setup, "capacity"), json!({ "attribute": "capacity", "value": "unlimited", "from": "built_in" }));
     assert_eq!(attribute(&setup, "dwelling_time"), json!({ "attribute": "dwelling_time", "value": "00:00:00", "from": "built_in" }));
     assert_eq!(attribute(&setup, "exit_strategy"), json!({ "attribute": "exit_strategy", "value": "first_in_first_out", "from": "built_in" }));

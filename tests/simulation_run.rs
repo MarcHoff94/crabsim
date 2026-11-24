@@ -1326,6 +1326,47 @@ fn a_run_stuck_in_a_zero_time_loop_keeps_refusing() {
     assert_eq!(run.state(), state, "refusing processes nothing");
 }
 
+/// A Source making an MU every 3,000 years into a Drain, so a run reaches the time an MU can hold
+/// as its departure (ADR 0027) in a few events.
+fn every_three_thousand_years() -> SimulationRun {
+    let mut model = ModelDescription::new();
+    let source = model.add_source(SimTime::from_secs(3_000 * 365 * 86_400));
+    let drain = drain(&mut model);
+    model.connect(source, drain);
+    recorded(model.build(0))
+}
+
+#[test]
+fn a_run_refuses_to_advance_beyond_the_time_an_mu_can_hold() {
+    let mut run = every_three_thousand_years();
+    run.init().unwrap();
+    let left = exit_times(&run.advance_to(crabsim::flows::TIME_LIMIT).unwrap());
+    assert_eq!(left.len(), 2, "MUs leave at 3,000 and 6,000 years, within the limit");
+    let beyond = crabsim::flows::TIME_LIMIT + SimTime::from_millis(1);
+    assert_eq!(run.advance_to(beyond).unwrap_err().error, RunError::BeyondTimeLimit { time: beyond });
+    assert_eq!(run.time(), crabsim::flows::TIME_LIMIT, "the clock stays where it was");
+    let next = SimTime::from_secs(9_000 * 365 * 86_400);
+    assert_eq!(run.step().unwrap_err().error, RunError::BeyondTimeLimit { time: next }, "the next event is beyond it");
+    assert!(RunError::BeyondTimeLimit { time: next }.to_string().contains("8,900 years"));
+}
+
+#[test]
+fn an_mu_keeps_its_lead_time_late_in_a_long_run() {
+    let mut run = every_three_thousand_years();
+    run.init().unwrap();
+    let occurrences = run.advance_to(crabsim::flows::TIME_LIMIT).unwrap();
+    let lead_times: Vec<SimTime> = occurrences
+        .iter()
+        .filter_map(|o| match o.kind {
+            OccurrenceKind::MuLeft { lead_time, .. } => Some(lead_time),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(lead_times, vec![SimTime::ZERO, SimTime::ZERO], "each leaves its Source and enters the Drain at once");
+    let drain = &run.state().objects[1];
+    assert_eq!(drain.statistics.mus_in, 2);
+}
+
 #[test]
 fn only_events_at_one_time_count_towards_a_zero_time_loop() {
     let mut model = ModelDescription::new();

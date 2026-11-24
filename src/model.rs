@@ -6,7 +6,8 @@
 //! nothing.
 
 use crate::distribution::{DistributionRule, Ranking};
-use crate::flows::{FailureProfile, MoveableUnit, MuKindId};
+use crate::flows::{DestinationId, FailureProfile, MoveableUnit, MuKindId, NO_DESTINATION};
+use crate::routing::{PlanStep, Routing};
 use crate::materialflow_objects::{Buffer, Conveyor, Drain, ModelObject, MultiStation, SingleStation, Source, StartMode};
 use crate::materialflow_objects::ExitStrategy;
 use crate::random_numbers::Distribution;
@@ -92,11 +93,24 @@ pub struct ModelDescription {
     /// The kinds of MU in the model, each once, by `MuKindId`. The first is the built-in MU's,
     /// which starting MUs and every Source not given another have.
     mu_kinds: Vec<MuKind>,
+    /// Each MU kind's work plan, by `MuKindId` (ADR 0026): empty for a kind without one. Two kinds
+    /// alike but for their plans are two kinds.
+    plans: Vec<Vec<PlanStep>>,
+    /// The objects each destination stands for, by `DestinationId` (ADR 0025).
+    destinations: Vec<Vec<u32>>,
 }
 
 impl Default for ModelDescription {
     fn default() -> ModelDescription {
-        ModelDescription { objects: Vec::new(), layout: Vec::new(), streams: Vec::new(), distributions: Vec::new(), mu_kinds: vec![MuKind::default()] }
+        ModelDescription {
+            objects: Vec::new(),
+            layout: Vec::new(),
+            streams: Vec::new(),
+            distributions: Vec::new(),
+            mu_kinds: vec![MuKind::default()],
+            plans: vec![Vec::new()],
+            destinations: Vec::new(),
+        }
     }
 }
 
@@ -110,18 +124,28 @@ impl ModelDescription {
         &self.mu_kinds
     }
 
-    /// Adds a kind of MU, or finds the same one already there, and returns its id. Sets the first,
-    /// the built-in MU's, when the model changes the built-in MU class's values: a kind equal to
-    /// it is it.
+    /// Adds a kind of MU without a work plan, or finds the same one already there, and returns
+    /// its id. A kind equal to the built-in MU's is it.
     ///
     /// # Panics
     /// Past 65,536 kinds, which an id can't count.
     pub fn add_mu_kind(&mut self, kind: MuKind) -> MuKindId {
-        if let Some(found) = self.mu_kinds.iter().position(|known| *known == kind) {
+        self.add_mu_kind_with_plan(kind, Vec::new())
+    }
+
+    /// Adds a kind of MU whose MUs follow this work plan (ADR 0026), or finds the same one already
+    /// there, and returns its id.
+    ///
+    /// # Panics
+    /// Past 65,536 kinds, or if a step names a destination the model doesn't have.
+    pub fn add_mu_kind_with_plan(&mut self, kind: MuKind, plan: Vec<PlanStep>) -> MuKindId {
+        assert!(plan.iter().all(|step| usize::from(step.at) < self.destinations.len()), "a work plan step names a destination the model doesn't have");
+        if let Some(found) = self.mu_kinds.iter().zip(&self.plans).position(|(known, known_plan)| *known == kind && *known_plan == plan) {
             return found as MuKindId;
         }
         assert!(self.mu_kinds.len() <= usize::from(MuKindId::MAX), "a model can have at most 65,536 kinds of MU");
         self.mu_kinds.push(kind);
+        self.plans.push(plan);
         (self.mu_kinds.len() - 1) as MuKindId
     }
 
@@ -129,6 +153,62 @@ impl ModelDescription {
     /// kind have, as a model does by refining the built-in MU class.
     pub fn set_built_in_mu_kind(&mut self, kind: MuKind) {
         self.mu_kinds[0] = kind;
+    }
+
+    /// Gives the built-in MU a work plan, which every Source not given another kind's MUs follow.
+    /// Starting MUs have no plan.
+    pub fn set_built_in_work_plan(&mut self, plan: Vec<PlanStep>) {
+        assert!(plan.iter().all(|step| usize::from(step.at) < self.destinations.len()), "a work plan step names a destination the model doesn't have");
+        self.plans[0] = plan;
+    }
+
+    /// The work plan of an MU kind: empty for one without.
+    pub fn work_plan(&self, kind: MuKindId) -> &[PlanStep] {
+        &self.plans[usize::from(kind)]
+    }
+
+    /// Adds a destination standing for these objects, by id (ADR 0025): one instance, or every
+    /// instance of a class. Returns its id, the same for the same objects.
+    ///
+    /// # Panics
+    /// Past 65,535 destinations, or with an object not in the model.
+    pub fn add_destination(&mut self, objects: &[u32]) -> DestinationId {
+        assert!(objects.iter().all(|&id| (id as usize) < self.objects.len()), "a destination stands for objects in the model");
+        let mut objects = objects.to_vec();
+        objects.sort_unstable();
+        objects.dedup();
+        if let Some(found) = self.destinations.iter().position(|known| *known == objects) {
+            return found as DestinationId;
+        }
+        assert!(self.destinations.len() < usize::from(NO_DESTINATION), "a model can have at most 65,535 destinations");
+        self.destinations.push(objects);
+        (self.destinations.len() - 1) as DestinationId
+    }
+
+    /// The objects each destination stands for, by id.
+    pub fn destinations(&self) -> &[Vec<u32>] {
+        &self.destinations
+    }
+
+    /// Gives a Station a detour (ADR 0026): every MU it works on goes to `destination` first,
+    /// before carrying on with its plan. `NO_DESTINATION` takes it away.
+    pub fn set_detour(&mut self, id: u32, destination: DestinationId) {
+        assert!(destination == NO_DESTINATION || usize::from(destination) < self.destinations.len(), "the model has no destination {destination}");
+        match self.objects.get_mut(id as usize) {
+            Some(ModelObject::Station(station)) => station.detour = destination,
+            Some(ModelObject::MultiStation(station)) => station.detour = destination,
+            Some(_) => panic!("object {id} is not a Station"),
+            None => panic!("object {id} is not in the model"),
+        }
+    }
+
+    /// A Station's detour, or `NO_DESTINATION`.
+    pub fn detour(&self, id: u32) -> DestinationId {
+        match self.object(id) {
+            ModelObject::Station(station) => station.detour,
+            ModelObject::MultiStation(station) => station.detour,
+            _ => NO_DESTINATION,
+        }
     }
 
     /// Makes every MU the Source `id` creates of this kind.
@@ -164,7 +244,7 @@ impl ModelDescription {
     /// A Station whose default state holds an MU, which it works on from Init.
     pub fn add_station_holding(&mut self, process_time: SimTime, failures: FailureProfile, mu_id: u32) -> u32 {
         let id = self.next_id();
-        let mu = MoveableUnit { id: mu_id, left_source: SimTime::ZERO, kind: 0 };
+        let mu = MoveableUnit::starting(mu_id);
         self.add(ModelObject::Station(SingleStation::new(id, process_time, failures, Some(mu), Vec::new())))
     }
 
@@ -175,13 +255,13 @@ impl ModelDescription {
         assert!(capacity >= 1, "a Station's capacity is at least 1");
         let object = self.objects.get_mut(id as usize).unwrap_or_else(|| panic!("object {id} is not in the model"));
         let failures = object.failure_profiles().to_vec();
-        let (proc_time, succ, mus) = match object {
-            ModelObject::Station(station) => (station.configured_proc_time, station.succ.clone(), station.starting_content.iter().map(|mu| mu.id).collect()),
-            ModelObject::MultiStation(station) => (station.configured_proc_time, station.succ.clone(), station.starting_mus.clone()),
+        let (proc_time, succ, mus, detour) = match object {
+            ModelObject::Station(station) => (station.configured_proc_time, station.succ.clone(), station.starting_content.iter().map(|mu| mu.id).collect(), station.detour),
+            ModelObject::MultiStation(station) => (station.configured_proc_time, station.succ.clone(), station.starting_mus.clone(), station.detour),
             _ => panic!("object {id} is not a Station"),
         };
         *object = if capacity == 1 {
-            let mu = mus.first().map(|&mu_id| MoveableUnit { id: mu_id, left_source: SimTime::ZERO, kind: 0 });
+            let mu = mus.first().map(|&mu_id| MoveableUnit::starting(mu_id));
             ModelObject::Station(SingleStation::new(id, proc_time, FailureProfile::new(1.0, Distribution::CONSTANT { value: 0.0 }, 0), mu, succ))
         } else {
             let mut station = MultiStation::new(id, proc_time, FailureProfile::new(1.0, Distribution::CONSTANT { value: 0.0 }, 0), capacity, start);
@@ -190,6 +270,7 @@ impl ModelDescription {
             ModelObject::MultiStation(station)
         };
         object.set_failure_profiles(failures);
+        self.set_detour(id, detour);
     }
 
     /// Builds every Station with capacity 1 as a `MultiStation`, for tests that check it behaves
@@ -202,6 +283,7 @@ impl ModelDescription {
                 let mut general = MultiStation::new(station.base.object_id, station.configured_proc_time, FailureProfile::new(1.0, Distribution::CONSTANT { value: 0.0 }, 0), 1, StartMode::Individual);
                 general.interruptions.set_failure_profiles(station.interruptions.failure_profiles().to_vec());
                 general.succ = station.succ.clone();
+                general.detour = station.detour;
                 general.set_starting_mus(station.starting_content.iter().map(|mu| mu.id).collect());
                 *object = ModelObject::MultiStation(general);
             }
@@ -223,7 +305,7 @@ impl ModelDescription {
             Some(ModelObject::MultiStation(station)) => station.set_starting_mus(mus.to_vec()),
             Some(ModelObject::Station(station)) => {
                 assert!(mus.len() <= 1, "a Station of capacity 1 holds one MU at most");
-                station.starting_content = mus.first().map(|&mu_id| MoveableUnit { id: mu_id, left_source: SimTime::ZERO, kind: 0 });
+                station.starting_content = mus.first().map(|&mu_id| MoveableUnit::starting(mu_id));
                 station.content = station.starting_content.clone();
             }
             Some(_) => panic!("object {id} can't hold starting MUs"),
@@ -337,7 +419,8 @@ impl ModelDescription {
                 conveyor.kinds = self.mu_kinds.clone();
             }
         }
-        SimulationRun::new(objects, seed, self.streams.clone(), self.distributions.clone())
+        let routing = if self.destinations.is_empty() && self.plans.iter().all(Vec::is_empty) { Routing::default() } else { Routing::new(&self.plans, &self.destinations) };
+        SimulationRun::new(objects, seed, self.streams.clone(), self.distributions.clone(), std::sync::Arc::new(routing))
     }
 
     /// Sets how the object picks the successor for its MU (ADR 0016). Round robin unless set.
@@ -353,10 +436,7 @@ impl ModelDescription {
     /// How a weighted object ranks its successors, as a run of this model starts: `None` for one
     /// that takes them round robin.
     pub fn ranking(&self, id: u32) -> Option<Ranking> {
-        match self.distribution(id) {
-            DistributionRule::RoundRobin => None,
-            DistributionRule::Weighted(rule) => Some(crate::distribution::ranking(&self.objects, id, rule)),
-        }
+        self.distribution(id).weighted().map(|rule| crate::distribution::ranking(&self.objects, id, rule))
     }
 
     /// Sets the object's stream: with the run's seed, it gives the object's random numbers, so

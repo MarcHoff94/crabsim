@@ -138,7 +138,7 @@ pub(crate) fn attributes(attributes: &Attributes) -> Value {
     if let Some(class) = &attributes.mu_class {
         fields.insert("mu_class".into(), json!(class));
     }
-    if let Some(values) = attributes.mu_values {
+    if let Some(values) = &attributes.mu_values {
         fields.insert("mu_values".into(), mu_values(values));
     }
     for (key, value) in [("length", attributes.length), ("width", attributes.width), ("booking_point", attributes.booking_point)] {
@@ -165,18 +165,43 @@ pub(crate) fn attributes(attributes: &Attributes) -> Value {
             fields.insert(key.into(), json!(value));
         }
     }
+    if let Some(plan) = &attributes.work_plan {
+        fields.insert("work_plan".into(), work_plan(plan));
+    }
+    if let Some(detour) = &attributes.detour {
+        fields.insert("detour".into(), json!(detour));
+    }
     Value::Object(fields)
 }
 
 /// A Source's own values for its MUs, as a file writes them: only those set.
-pub(crate) fn mu_values(values: crate::MuValues) -> Value {
+pub(crate) fn mu_values(values: &crate::MuValues) -> Value {
     let mut fields = Map::new();
     for (key, value) in [("length", values.length), ("width", values.width), ("booking_point", values.booking_point)] {
         if let Some(value) = value {
             fields.insert(key.into(), json!(value));
         }
     }
+    if let Some(plan) = &values.work_plan {
+        fields.insert("work_plan".into(), work_plan(plan));
+    }
     Value::Object(fields)
+}
+
+/// A work plan as a file writes it: each step `{"at": ...}`, with its process time if it has one.
+pub(crate) fn work_plan(plan: &[crate::WorkStep]) -> Value {
+    Value::Array(
+        plan.iter()
+            .map(|step| {
+                let mut fields = Map::new();
+                fields.insert("at".into(), json!(step.at));
+                if let Some(process_time) = step.process_time {
+                    fields.insert("process_time".into(), time(process_time));
+                }
+                Value::Object(fields)
+            })
+            .collect(),
+    )
 }
 
 /// A capacity as a file writes it: a number, or `"unlimited"`.
@@ -203,6 +228,7 @@ pub(crate) fn distribution(strategy: &crate::DistributionStrategy) -> Value {
             }
             json!({ "weighted": fields })
         }
+        crate::DistributionStrategy::ByDestination(then) => json!({ "by_destination": { "then": distribution(then) } }),
     }
 }
 

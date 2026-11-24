@@ -2,7 +2,7 @@
 //! stopping at the first. What can't be read is left at its default, and noted in `Broken`, so the
 //! checks that follow don't report it a second time.
 
-use crate::{Attributes, Bend, Direction, DistributionStrategy, MuValues, Segment, WeightedStrategy, WEIGHABLE, BUILT_IN_CLASSES, Class, Connection, Failures, Instance, Model, Problem, RepairTime, State, StateNotes, FORMAT_VERSION, escape};
+use crate::{Attributes, Bend, Direction, DistributionStrategy, MuValues, Segment, WeightedStrategy, WEIGHABLE, BUILT_IN_CLASSES, Class, Connection, Failures, Instance, Model, Problem, RepairTime, State, StateNotes, WorkStep, FORMAT_VERSION, escape};
 use crabsim::time::parse_time;
 use crate::{exit_strategy_from_name, start_from_name, Capacity, ExitStrategy, StartMode};
 use crabsim::{Dimensions, Position, SimTime};
@@ -38,7 +38,7 @@ const TOP_LEVEL: [&str; 6] = ["$schema", "format_version", "description", "class
 const INSTANCE: [&str; 5] = ["name", "class", "stream", "position", "attributes"];
 const CONNECTION: [&str; 5] = ["from", "to", "exit", "entrance", "description"];
 const CLASS: [&str; 3] = ["name", "parent", "attributes"];
-const ATTRIBUTES: [&str; 26] = [
+const ATTRIBUTES: [&str; 28] = [
     "interval",
     "process_time",
     "failures",
@@ -65,11 +65,13 @@ const ATTRIBUTES: [&str; 26] = [
     "direction",
     "min_radius",
     "max_incline",
+    "work_plan",
+    "detour",
 ];
 /// The kinds of segment a path has (ADR 0024).
 const SEGMENTS: [&str; 4] = ["straight", "arc", "transition", "helix"];
 /// The values a Source can change for the MUs it makes.
-const MU_VALUES: [&str; 3] = ["length", "width", "booking_point"];
+const MU_VALUES: [&str; 4] = ["length", "width", "booking_point", "work_plan"];
 
 pub(crate) fn read(text: &str) -> (Model, Vec<Problem>, Broken) {
     let mut reader = Reader::default();
@@ -350,6 +352,8 @@ impl Reader {
                 "direction" => self.direction(value, &at, name).map(|direction| attributes.direction = Some(direction)),
                 "min_radius" => self.number_value(value, &at, name).map(|radius| attributes.min_radius = Some(radius)),
                 "max_incline" => self.number_value(value, &at, name).map(|degrees| attributes.max_incline = Some(degrees)),
+                "work_plan" => self.work_plan(value, &at, name).map(|plan| attributes.work_plan = Some(plan)),
+                "detour" => self.text(value, &at, name).map(|detour| attributes.detour = Some(detour)),
                 _ => unreachable!("every attribute is read"),
             };
             if read.is_none() {
@@ -555,7 +559,43 @@ impl Reader {
         values.length = read("length");
         values.width = read("width");
         values.booking_point = read("booking_point");
+        values.work_plan = fields.get("work_plan").and_then(|plan| self.work_plan(plan, &format!("{pointer}/work_plan"), name));
         Some(values)
+    }
+
+    /// A work plan: a list of steps, each `{"at": name}` with an optional `"process_time"`. Whether
+    /// the names are places in the model is checked later.
+    fn work_plan(&mut self, value: &Value, pointer: &str, name: Option<&str>) -> Option<Vec<WorkStep>> {
+        const SAY: &str = r#"a work plan is a list of steps, such as [{"at": "Saw", "process_time": "0:40"}, {"at": "Shipping"}]"#;
+        let Some(items) = value.as_array() else {
+            self.problem(pointer.to_owned(), name, SAY);
+            return None;
+        };
+        let mut plan = Vec::new();
+        let mut ok = true;
+        for (index, item) in items.iter().enumerate() {
+            let at = format!("{pointer}/{index}");
+            let Some(fields) = self.object(item, &at, name, "a work plan step", &["at", "process_time"]) else {
+                ok = false;
+                continue;
+            };
+            let place = match fields.get("at") {
+                None => {
+                    self.problem(at.clone(), name, "`at` is missing: a step names where the MU goes, an instance or a class");
+                    None
+                }
+                Some(place) => self.text(place, &format!("{at}/at"), name),
+            };
+            let process_time = match fields.get("process_time") {
+                None => Some(None),
+                Some(time) => self.time(time, &format!("{at}/process_time"), name).map(Some),
+            };
+            match (place, process_time) {
+                (Some(place), Some(process_time)) => plan.push(WorkStep { at: place, process_time }),
+                _ => ok = false,
+            }
+        }
+        ok.then_some(plan)
     }
 
     fn position(&mut self, value: &Value, pointer: &str, name: Option<&str>) -> Option<Position> {
@@ -566,10 +606,11 @@ impl Reader {
         Some(Position { x: x?, y: y?, z: z? })
     }
 
-    /// `"round_robin"`, or `{"weighted": {"by": ..., "order": ..., "rank": ..., "drains": [...]}}`
-    /// with all but `by` optional.
+    /// `"round_robin"`, `{"weighted": {"by": ..., "order": ..., "rank": ..., "drains": [...]}}`
+    /// with all but `by` optional, or `{"by_destination": {"then": ...}}` with either of the
+    /// others as `then`, round robin when left out.
     fn distribution(&mut self, value: &Value, pointer: &str, name: Option<&str>) -> Option<DistributionStrategy> {
-        const SAY: &str = r#"a distribution is "round_robin" or {"weighted": {"by": "process_time"}}, with "order", "rank" and "drains" optional"#;
+        const SAY: &str = r#"a distribution is "round_robin", {"weighted": {"by": "process_time"}}, with "order", "rank" and "drains" optional, or {"by_destination": {"then": "round_robin"}}"#;
         if value.as_str() == Some("round_robin") {
             return Some(DistributionStrategy::RoundRobin);
         }
@@ -577,7 +618,20 @@ impl Reader {
             self.problem(pointer.to_owned(), name, format!("unknown distribution `{text}`: {SAY}"));
             return None;
         }
-        let fields = self.object(value, pointer, name, "a distribution", &["weighted"])?;
+        let fields = self.object(value, pointer, name, "a distribution", &["weighted", "by_destination"])?;
+        if let Some(by_destination) = fields.get("by_destination") {
+            let at = format!("{pointer}/by_destination");
+            let fields = self.object(by_destination, &at, name, "a distribution by destination", &["then"])?;
+            let then = match fields.get("then") {
+                None => DistributionStrategy::RoundRobin,
+                Some(then) => self.distribution(then, &format!("{at}/then"), name)?,
+            };
+            if matches!(then, DistributionStrategy::ByDestination(_)) {
+                self.problem(format!("{at}/then"), name, "by destination chooses among the ways that reach by \"round_robin\" or {\"weighted\": ...}, not by destination again");
+                return None;
+            }
+            return Some(DistributionStrategy::ByDestination(Box::new(then)));
+        }
         let Some(weighted) = fields.get("weighted") else {
             self.problem(pointer.to_owned(), name, SAY.to_string());
             return None;

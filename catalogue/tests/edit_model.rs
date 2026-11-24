@@ -414,7 +414,7 @@ fn get_attributes_gives_every_attribute_with_its_value_and_origin() {
     let names: Vec<&str> = attributes.iter().map(|(name, _)| name.as_str()).collect();
     assert_eq!(
         names,
-        ["process_time", "failures", "starting_mus", "capacity", "start", "dimensions", "description", "state_notes", "distribution"],
+        ["process_time", "failures", "starting_mus", "capacity", "start", "dimensions", "description", "state_notes", "distribution", "detour"],
         "every attribute a Station has"
     );
     let of = |name: &str| attributes.iter().find(|(n, _)| n == name).unwrap().1.clone();
@@ -606,7 +606,7 @@ fn an_mu_class_is_derived_set_and_chosen_for_a_source_and_its_mus_have_its_value
     let tote = setup.ok("get_attributes", json!({ "path": "line.json", "target": { "class": "Tote" } }));
     assert_eq!((tote["built_in_class"].clone(), tote["chain"].clone()), (json!("MU"), json!(["MU"])));
     let names: Vec<&str> = tote["attributes"].as_array().unwrap().iter().map(|a| a["attribute"].as_str().unwrap()).collect();
-    assert_eq!(names, ["description", "length", "width", "booking_point"], "an MU class has only an MU's attributes");
+    assert_eq!(names, ["description", "length", "width", "booking_point", "work_plan"], "an MU class has only an MU's attributes");
     let source = setup.ok("get_attributes", json!({ "path": "line.json", "target": { "instance": "In" } }));
     let mu_class = source["attributes"].as_array().unwrap().iter().find(|a| a["attribute"] == "mu_class").unwrap().clone();
     assert_eq!(mu_class, json!({ "attribute": "mu_class", "value": "Tote", "from": "instance" }));

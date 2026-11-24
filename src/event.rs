@@ -21,11 +21,15 @@ impl ExitTicket {
 }
 
 /// What a material-flow object gets while handling an event: the current simulation
-/// time, a place to record occurrences, and new MU identities.
+/// time, a place to record occurrences, new MU identities, and the model's work plans and
+/// destinations.
 #[derive(Clone)]
 pub struct EventContext {
     pub time: SimTime,
     pub seq: u64,
+    /// The model's work plans and destinations (spec issue 148), which never change during a run.
+    /// Shared, since a checkpoint clones the context and the table can be large.
+    pub routing: std::sync::Arc<crate::routing::Routing>,
     next_mu_id: u32,
     recording: Recording,
     occurrences: Vec<Occurrence>,
@@ -36,7 +40,21 @@ pub struct EventContext {
 
 impl EventContext {
     pub fn new(first_mu_id: u32, recording: Recording) -> EventContext {
-        EventContext { time: SimTime::ZERO, seq: 0, next_mu_id: first_mu_id, recording, occurrences: Vec::new(), scheduled: Vec::new() }
+        EventContext {
+            time: SimTime::ZERO,
+            seq: 0,
+            routing: Default::default(),
+            next_mu_id: first_mu_id,
+            recording,
+            occurrences: Vec::new(),
+            scheduled: Vec::new(),
+        }
+    }
+
+    /// The same, reading this model's work plans and destinations.
+    pub fn with_routing(mut self, routing: std::sync::Arc<crate::routing::Routing>) -> EventContext {
+        self.routing = routing;
+        self
     }
 
     pub fn set_recording(&mut self, recording: Recording) {

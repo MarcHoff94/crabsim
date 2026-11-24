@@ -12,7 +12,7 @@ pub mod buffer;
 
 pub use conveyor::Conveyor;
 pub use drain::Drain;
-pub use flows::{Distributing, DistributionStrategy, LowestIndexStrategy, MoveableUnit, Ranked, RoundRobinStrategy, ProcessState};
+pub use flows::{ByDestination, Distributing, DistributionStrategy, LowestIndexStrategy, MoveableUnit, Ranked, RoundRobinStrategy, ProcessState};
 pub use self::flows::BaseObject;
 pub use interruptions::{Change, Interruptible, Interruptions};
 pub use model_object::{ModelObject, OtherObjects};

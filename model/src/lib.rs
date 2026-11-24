@@ -231,15 +231,37 @@ pub struct Attributes {
     pub min_radius: Option<f64>,
     /// The steepest a conveyor's path may climb or fall, in degrees. 30 by default.
     pub max_incline: Option<f64>,
+    /// The steps an MU class's MUs follow, each a destination with an optional process time
+    /// (ADR 0026). None by default: no destination. Inherited as a whole.
+    pub work_plan: Option<Vec<WorkStep>>,
+    /// Where a Station sends every MU it works on before the MU carries on with its plan, such as
+    /// Rework: an instance's or a class's name (ADR 0026). None by default.
+    pub detour: Option<String>,
+}
+
+/// One step of a work plan: where the MU goes, an instance or a class standing for any of its
+/// instances (ADR 0025), and how long a Station there works on it. Without a time, the Station's
+/// own.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WorkStep {
+    pub at: String,
+    pub process_time: Option<SimTime>,
+}
+
+impl WorkStep {
+    pub fn new(at: impl Into<String>, process_time: Option<SimTime>) -> WorkStep {
+        WorkStep { at: at.into(), process_time }
+    }
 }
 
 /// A Source's own values for the MUs it makes: any of an MU class's values, each changing its
 /// MU class's when set.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct MuValues {
     pub length: Option<f64>,
     pub width: Option<f64>,
     pub booking_point: Option<f64>,
+    pub work_plan: Option<Vec<WorkStep>>,
 }
 
 /// What MUs with these resolved MU class values are made like, as the engine holds it.
@@ -259,6 +281,20 @@ pub enum DistributionStrategy {
     RoundRobin,
     /// The best-ranked successor that can take the MU, those ranking equal taking turns.
     Weighted(WeightedStrategy),
+    /// Only the successors from which the MU's next destination can be reached (ADR 0025), and
+    /// among them this strategy, round robin or weighted, never by destination again.
+    ByDestination(Box<DistributionStrategy>),
+}
+
+impl DistributionStrategy {
+    /// The weighted strategy that ranks the successors, alone or after by destination.
+    pub fn weighted(&self) -> Option<&WeightedStrategy> {
+        match self {
+            DistributionStrategy::RoundRobin => None,
+            DistributionStrategy::Weighted(weighted) => Some(weighted),
+            DistributionStrategy::ByDestination(then) => then.weighted(),
+        }
+    }
 }
 
 /// How a weighted object ranks its successors.
@@ -321,6 +357,8 @@ impl Attributes {
             Attribute::Direction => self.direction.is_some(),
             Attribute::MinRadius => self.min_radius.is_some(),
             Attribute::MaxIncline => self.max_incline.is_some(),
+            Attribute::WorkPlan => self.work_plan.is_some(),
+            Attribute::Detour => self.detour.is_some(),
         }
     }
 
@@ -342,7 +380,7 @@ impl Attributes {
             Attribute::StateNotes => self.state_notes = from.state_notes.clone(),
             Attribute::Distribution => self.distribution = from.distribution.clone(),
             Attribute::MuClass => self.mu_class = from.mu_class.clone(),
-            Attribute::MuValues => self.mu_values = from.mu_values,
+            Attribute::MuValues => self.mu_values = from.mu_values.clone(),
             Attribute::Length => self.length = from.length,
             Attribute::Width => self.width = from.width,
             Attribute::BookingPoint => self.booking_point = from.booking_point,
@@ -353,6 +391,8 @@ impl Attributes {
             Attribute::Direction => self.direction = from.direction,
             Attribute::MinRadius => self.min_radius = from.min_radius,
             Attribute::MaxIncline => self.max_incline = from.max_incline,
+            Attribute::WorkPlan => self.work_plan = from.work_plan.clone(),
+            Attribute::Detour => self.detour = from.detour.clone(),
         }
     }
 }
@@ -386,10 +426,12 @@ pub enum Attribute {
     Direction,
     MinRadius,
     MaxIncline,
+    WorkPlan,
+    Detour,
 }
 
 impl Attribute {
-    pub const ALL: [Attribute; 26] = [
+    pub const ALL: [Attribute; 28] = [
         Attribute::Interval,
         Attribute::ProcessTime,
         Attribute::Failures,
@@ -416,6 +458,8 @@ impl Attribute {
         Attribute::Direction,
         Attribute::MinRadius,
         Attribute::MaxIncline,
+        Attribute::WorkPlan,
+        Attribute::Detour,
     ];
 
     /// Its name in a file.
@@ -447,6 +491,8 @@ impl Attribute {
             Attribute::Direction => "direction",
             Attribute::MinRadius => "min_radius",
             Attribute::MaxIncline => "max_incline",
+            Attribute::WorkPlan => "work_plan",
+            Attribute::Detour => "detour",
         }
     }
 
@@ -454,7 +500,7 @@ impl Attribute {
     pub fn applies_to(self, built_in: &str) -> bool {
         matches!(
             (built_in, self),
-            (BUILT_IN_MU_CLASS, Attribute::Length | Attribute::Width | Attribute::BookingPoint | Attribute::Description)
+            (BUILT_IN_MU_CLASS, Attribute::Length | Attribute::Width | Attribute::BookingPoint | Attribute::Description | Attribute::WorkPlan)
                 | ("Source" | "Station" | "Buffer" | "Drain" | "Conveyor", Attribute::Dimensions | Attribute::Description | Attribute::StateNotes | Attribute::Failures)
                 | (
                     "Conveyor",
@@ -469,10 +515,11 @@ impl Attribute {
                         | Attribute::Distribution
                 )
                 | ("Source", Attribute::Interval | Attribute::Distribution | Attribute::MuClass | Attribute::MuValues)
-                | ("Station", Attribute::ProcessTime | Attribute::StartingMus | Attribute::Capacity | Attribute::Start | Attribute::Distribution)
+                | ("Station", Attribute::ProcessTime | Attribute::StartingMus | Attribute::Capacity | Attribute::Start | Attribute::Distribution | Attribute::Detour)
                 | (
                     "Buffer",
-                    Attribute::StartingMus
+                    Attribute::Distribution
+                        | Attribute::StartingMus
                         | Attribute::Capacity
                         | Attribute::DwellingTime
                         | Attribute::ExitStrategy
@@ -765,6 +812,69 @@ impl Model {
             values.booking_point = own.booking_point.or(values.booking_point);
         }
         Some(mu_kind(&values))
+    }
+
+    /// The work plan the MUs of the Source at `index` follow: its own, if it gives its MUs one,
+    /// otherwise its MU class's (ADR 0026). Empty for none. `None` if it isn't a Source, or its MU
+    /// class isn't one.
+    pub fn work_plan_of(&self, index: usize) -> Option<Vec<WorkStep>> {
+        let resolved = self.resolve(index).filter(|resolved| resolved.built_in == "Source")?;
+        let class = resolved.attributes.mu_class.as_deref().filter(|class| self.is_mu_class(class))?;
+        let own = resolved.attributes.mu_values.and_then(|values| values.work_plan);
+        Some(own.or_else(|| self.resolve_class(class).and_then(|class| class.attributes.work_plan)).unwrap_or_default())
+    }
+
+    /// The instances a destination stands for, by index (ADR 0025): the instance called `name`,
+    /// or every instance of the object class called `name` or of a class derived from it. `None`
+    /// if `name` is neither, such as an MU class.
+    pub fn destination_members(&self, name: &str) -> Option<Vec<usize>> {
+        if let Some(index) = self.instances.iter().position(|instance| instance.name == name) {
+            return Some(vec![index]);
+        }
+        let is_object_class = BUILT_IN_OBJECT_CLASSES.contains(&name) || self.chain(name).is_some_and(|(_, built_in)| built_in != BUILT_IN_MU_CLASS);
+        if !is_object_class {
+            return None;
+        }
+        Some(
+            self.instances
+                .iter()
+                .enumerate()
+                .filter(|(_, instance)| self.is_of_class(&instance.class, name))
+                .map(|(index, _)| index)
+                .collect(),
+        )
+    }
+
+    /// Whether a class, or anything made from it, can be a Station: the built-in class at the root
+    /// of the chain of the instance or class called `name`.
+    pub fn destination_built_in(&self, name: &str) -> Option<&'static str> {
+        match self.instances.iter().find(|instance| instance.name == name) {
+            Some(instance) => self.chain(&instance.class).map(|(_, built_in)| built_in),
+            None => self.chain(name).map(|(_, built_in)| built_in),
+        }
+    }
+
+    /// Whether `class`, followed up its chain, is `name` or derives from it. A built-in class
+    /// counts, and so does the model refinement of one.
+    fn is_of_class(&self, class: &str, name: &str) -> bool {
+        let Some((chain, built_in)) = self.chain(class) else { return false };
+        built_in == name || chain.iter().any(|link| link.name == name)
+    }
+
+    /// Every name a work plan step or a detour gives as a destination, each once, in the order
+    /// first given: classes, then instances, in file order.
+    pub fn destination_names(&self) -> Vec<&str> {
+        let mut names: Vec<&str> = Vec::new();
+        let owners = self.classes.iter().map(|class| &class.attributes).chain(self.instances.iter().map(|instance| &instance.attributes));
+        for attributes in owners {
+            let steps = attributes.work_plan.iter().flatten().chain(attributes.mu_values.iter().flat_map(|values| values.work_plan.iter().flatten()));
+            for name in steps.map(|step| step.at.as_str()).chain(attributes.detour.as_deref()) {
+                if !names.contains(&name) {
+                    names.push(name);
+                }
+            }
+        }
+        names
     }
 
     /// The connections out of the instance called `name`, by exit: the order it offers MUs on.

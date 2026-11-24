@@ -8,6 +8,7 @@ pub mod live_session;
 pub mod materialflow_objects;
 pub mod model;
 pub mod report;
+pub mod routing;
 pub mod picture;
 pub mod random_numbers;
 pub mod simulation_run;
@@ -15,7 +16,8 @@ pub mod statistics;
 pub mod time;
 
 pub use crate::materialflow_objects::flows; // keep single module re-export
-pub use crate::materialflow_objects::flows::{BaseObject, FailureProfile, MoveableUnit, MuKindId, ProcessState, TimeBasis};
+pub use crate::materialflow_objects::flows::{BaseObject, DestinationId, FailureProfile, MoveableUnit, MuKindId, ProcessState, TimeBasis, NO_DESTINATION};
+pub use crate::routing::{Arrival, PlanCounts, PlanStep, Routing};
 
 pub use crate::error::{AdvanceFailure, InitError, MaterialflowError, RunError, RunTimeError};
 pub use crate::event::{EventContext, EventTemplate, EventType, ExitTicket};

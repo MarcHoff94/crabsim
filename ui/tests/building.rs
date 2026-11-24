@@ -433,7 +433,7 @@ fn a_buffer_is_placed_from_the_classes_panel_with_no_limit_and_takes_its_values(
         (view.value.clone(), view.from.clone())
     };
     let names: Vec<String> = workspace.attributes("Buffer 1").unwrap().into_iter().map(|view| view.attribute).collect();
-    assert_eq!(names, ["failures", "starting_mus", "capacity", "dwelling_time", "exit_strategy", "histogram_bar_width", "stop_freezes_dwelling", "dimensions", "description", "state_notes"]);
+    assert_eq!(names, ["failures", "starting_mus", "capacity", "dwelling_time", "exit_strategy", "histogram_bar_width", "stop_freezes_dwelling", "dimensions", "description", "state_notes", "distribution"]);
     assert_eq!(value(&workspace, "Buffer 1", "capacity"), (Some(json!("unlimited")), crabsim_ui::workspace::ValueFrom::BuiltIn));
     assert_eq!(value(&workspace, "Buffer 1", "exit_strategy"), (Some(json!("first_in_first_out")), crabsim_ui::workspace::ValueFrom::BuiltIn));
 
@@ -470,7 +470,7 @@ fn mu_classes_are_a_tree_of_their_own_chosen_for_a_source_and_never_placed() {
     assert_eq!(workspace.mu_classes(), ["MU", "Tote"]);
     let tote = workspace.class_attributes("Tote").unwrap();
     let names: Vec<&str> = tote.iter().map(|view| view.attribute.as_str()).collect();
-    assert_eq!(names, ["description", "length", "width", "booking_point"]);
+    assert_eq!(names, ["description", "length", "width", "booking_point", "work_plan"]);
 
     let refused = workspace.add_instance("Tote", Position { x: 0.0, y: 8.0, z: 0.0 }, false).unwrap_err();
     assert!(refused.to_string().contains("`Tote` is an MU class"), "{refused}");

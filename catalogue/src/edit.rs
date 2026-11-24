@@ -257,6 +257,29 @@ impl Draft {
         self.model["instances"].as_array_mut().expect("a loaded model has instances")
     }
 
+    /// Every work plan step and detour that names `name`, an instance or a class, names `to`
+    /// instead (ADR 0025), so a rename keeps where MUs go.
+    fn rename_destination(&mut self, name: &str, to: &str) {
+        // Only what is there is touched: indexing a missing key mutably would add it.
+        let rename_steps = |plan: Option<&mut Value>| {
+            for step in plan.and_then(Value::as_array_mut).into_iter().flatten() {
+                if step.get("at").is_some_and(|at| at == name) {
+                    step["at"] = json!(to);
+                }
+            }
+        };
+        let rename = |owner: &mut Value| {
+            let Some(attributes) = owner.get_mut("attributes").and_then(Value::as_object_mut) else { return };
+            if attributes.get("detour").is_some_and(|detour| detour == name) {
+                attributes.insert("detour".into(), json!(to));
+            }
+            rename_steps(attributes.get_mut("work_plan"));
+            rename_steps(attributes.get_mut("mu_values").and_then(|values| values.get_mut("work_plan")));
+        };
+        self.instances().iter_mut().for_each(rename);
+        self.classes().iter_mut().for_each(rename);
+    }
+
     fn classes(&mut self) -> &mut Vec<Value> {
         let fields = self.model.as_object_mut().expect("a model is an object");
         fields.entry("classes").or_insert_with(|| json!([])).as_array_mut().expect("classes are a list")
@@ -508,6 +531,7 @@ impl Draft {
                         }
                     }
                 }
+                self.rename_destination(&name, &to);
             }
             Change::MoveInstance { name, position } => {
                 let index = self.instance(&name)?;
@@ -643,6 +667,7 @@ impl Draft {
                 };
                 self.instances().iter_mut().for_each(rename);
                 self.classes().iter_mut().for_each(rename);
+                self.rename_destination(&name, &to);
             }
             Change::SetParent { name, parent } => {
                 let index = self.class(&name)?;

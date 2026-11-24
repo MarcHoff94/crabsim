@@ -157,8 +157,8 @@ pub struct AttributesFile {
     /// crabsim's definition of the state. Only states its built-in class can be in, each note not
     /// empty. Inherited as a whole. Visual only.
     pub state_notes: Option<StateNotesFile>,
-    /// Source, Station, Conveyor: which successor receives the MU it passes on (ADR 0016). Round
-    /// robin by default. Inherited as a whole.
+    /// Source, Station, Buffer, Conveyor: which successor receives the MU it passes on (ADR 0016).
+    /// Round robin by default. Inherited as a whole.
     pub distribution: Option<DistributionFile>,
     /// Source: the MU class whose MUs it makes, `MU` or a class derived from it. `MU` by default.
     pub mu_class: Option<String>,
@@ -201,6 +201,25 @@ pub struct AttributesFile {
     /// Conveyor: the steepest its path may climb or fall, in degrees. 30 by default.
     #[schemars(extend("exclusiveMinimum" = 0, "exclusiveMaximum" = 90))]
     pub max_incline: Option<f64>,
+    /// MU class: the steps its MUs follow (ADR 0026), each a destination and an optional process
+    /// time. An MU entering a Station its next step names is worked on for the step's time, or
+    /// the Station's own without one, and moves on to its next step. None by default. Inherited
+    /// as a whole.
+    pub work_plan: Option<Vec<WorkStepFile>>,
+    /// Station: where every MU it works on goes before carrying on with its plan, such as Rework:
+    /// an instance, or a class standing for any of its instances (ADR 0025). None by default.
+    pub detour: Option<String>,
+}
+
+/// One step of a work plan.
+#[derive(JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WorkStepFile {
+    /// Where the MU goes: an instance, or a class standing for any of its instances (ADR 0025).
+    pub at: String,
+    /// How long a Station there works on it. Only for a step that can be a Station. Without it,
+    /// the Station's own process time.
+    pub process_time: Option<Time>,
 }
 
 /// One piece of a conveyor's path: exactly one of a straight, an arc, a transition curve and a
@@ -329,6 +348,8 @@ pub struct MuValuesFile {
     /// A share of its length from its front, from 0 to 1.
     #[schemars(range(min = 0, max = 1))]
     pub booking_point: Option<f64>,
+    /// Its own work plan for the MUs it makes, in place of its MU class's (ADR 0026).
+    pub work_plan: Option<Vec<WorkStepFile>>,
 }
 
 /// A whole number from 1, or `"unlimited"`: it then takes every MU and grows as far as it's
@@ -373,13 +394,36 @@ pub enum ExitStrategyFile {
     LastInFirstOut,
 }
 
-/// `"round_robin"`, each successor in turn, or weighted: the best-ranked successor that can take
-/// the MU, those ranking equal taking turns.
+/// `"round_robin"`, each successor in turn, weighted: the best-ranked successor that can take
+/// the MU, those ranking equal taking turns, or by destination: only the successors from which
+/// the MU's next destination can be reached, and among them `then`.
 #[derive(JsonSchema)]
 #[serde(untagged)]
 pub enum DistributionFile {
     RoundRobin(RoundRobinFile),
     Weighted(WeightedFile),
+    ByDestination(ByDestinationFile),
+}
+
+/// The strategy that chooses among the successors that reach the MU's destination.
+#[derive(JsonSchema)]
+#[serde(untagged)]
+pub enum ThenFile {
+    RoundRobin(RoundRobinFile),
+    Weighted(WeightedFile),
+}
+
+#[derive(JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ByDestinationFile {
+    pub by_destination: ByDestinationFields,
+}
+
+#[derive(JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ByDestinationFields {
+    /// Round robin or weighted. Round robin when left out.
+    pub then: Option<ThenFile>,
 }
 
 #[derive(JsonSchema)]

@@ -185,12 +185,26 @@ pub fn attribute(wanted: &str) -> Result<Attribute, String> {
 }
 
 /// A value as a model file writes it, from what was typed: a time as text, a path in its short
-/// form, such as `4, arc 1.5 90`, or as JSON, anything else that reads as JSON as that, and the
-/// rest as text. A path that reads as neither says what's wrong with its short form.
-fn value(attribute: Attribute, typed: &str) -> Result<Value, String> {
+/// form, such as `4, arc 1.5 90`, a work plan in its, `Saw 0:40, Mill, Shipping`, a detour as a
+/// name, matched as names are, `by_destination` for a distribution by destination taking turns,
+/// or any of these as JSON, anything else that reads as JSON as that, and the rest as text. A path
+/// or work plan that reads as neither says what's wrong with its short form.
+fn value(attribute: Attribute, typed: &str, names: &Names) -> Result<Value, String> {
     let typed = typed.trim();
     if matches!(attribute, Attribute::Interval | Attribute::ProcessTime | Attribute::DwellingTime) {
         return Ok(json!(typed));
+    }
+    if attribute == Attribute::WorkPlan {
+        return match serde_json::from_str::<Value>(typed) {
+            Ok(json) if json.is_array() => Ok(json),
+            _ => work_plan(typed, names),
+        };
+    }
+    if attribute == Attribute::Detour {
+        return place(typed.trim_matches('"'), names).map(|name| json!(name));
+    }
+    if attribute == Attribute::Distribution && matches!(typed.to_lowercase().replace(' ', "_").as_str(), "by_destination") {
+        return Ok(json!({ "by_destination": { "then": "round_robin" } }));
     }
     if attribute == Attribute::Path {
         return match serde_json::from_str::<Value>(typed) {
@@ -199,6 +213,37 @@ fn value(attribute: Attribute, typed: &str) -> Result<Value, String> {
         };
     }
     Ok(serde_json::from_str(typed).unwrap_or_else(|_| json!(typed)))
+}
+
+/// A work plan from its short form: steps by comma, each a place in the model with its process
+/// time last if it has one, such as `Saw 0:40, Mill 1:30, Shipping`. A whole step that names a
+/// place is a name without a time, so `Station 3` stays a name.
+fn work_plan(typed: &str, names: &Names) -> Result<Value, String> {
+    let mut steps = Vec::new();
+    for (index, piece) in typed.split(',').map(str::trim).enumerate() {
+        let place_of = |text: &str| place(text.trim_matches('"'), names).map_err(|why| format!("step {} (`{piece}`): {why}", index + 1));
+        if piece.is_empty() {
+            return Err(format!("step {} is empty: write a work plan as Saw 0:40, Mill, Shipping", index + 1));
+        }
+        if let Ok(at) = place(piece.trim_matches('"'), names) {
+            steps.push(json!({ "at": at }));
+            continue;
+        }
+        match piece.rsplit_once(char::is_whitespace) {
+            Some((name, time)) if crabsim::time::parse_time(time).is_some() => steps.push(json!({ "at": place_of(name.trim())?, "process_time": time })),
+            _ => return Err(place_of(piece).expect_err("not a place")),
+        }
+    }
+    Ok(Value::Array(steps))
+}
+
+/// The instance or class `wanted` names, for a destination: exactly, either, or by a part only one
+/// holds, an instance before a class.
+fn place(wanted: &str, names: &Names) -> Result<String, String> {
+    if names.instances.iter().any(|placed| placed.name == wanted) || names.classes.iter().any(|class| class == wanted) {
+        return Ok(wanted.to_string());
+    }
+    names.instance(wanted).or_else(|why| names.class(wanted).map_err(|_| why))
 }
 
 /// "1st", "2nd", "3rd", "4th" and so on.
@@ -503,7 +548,7 @@ fn read_command(command: &str, model: &Model, context: &Context, names: &mut Nam
                 if typed.trim().is_empty() {
                     return Err(format!("set it to what? Write it as set {}.{} 0:45", target_name(&target), attribute.name()));
                 }
-                json!({ "change": "set_attribute", "target": target, "attribute": attribute.name(), "value": value(attribute, &typed)? })
+                json!({ "change": "set_attribute", "target": target, "attribute": attribute.name(), "value": value(attribute, &typed, names)? })
             } else {
                 json!({ "change": "restore_inheritance", "target": target, "attribute": attribute.name() })
             };
@@ -879,6 +924,16 @@ pub fn complete(line: &str, model: &Model, macros: &[String]) -> Vec<String> {
     if let Some((attribute, typed)) = value_typed
         && *verb == "set"
     {
+        // A work plan step's or a detour's name, completed whole after the last comma.
+        if matches!(attribute, "work_plan" | "detour") {
+            let piece_at = if attribute == "work_plan" { typed.rfind(',').map_or(0, |at| at + 1) } else { 0 };
+            let piece = typed[piece_at..].trim_start();
+            let kept = &partial[..partial.len() - piece.len()];
+            let lower = piece.to_lowercase();
+            let mut pool: Vec<&str> = names.instances.iter().map(|placed| placed.name.as_str()).collect();
+            pool.extend(names.classes.iter().map(String::as_str).filter(|class| !model.is_mu_class(class)));
+            return pool.iter().filter(|name| !lower.is_empty() && name.to_lowercase().starts_with(&lower) && **name != piece).map(|name| format!("{lead}{before}{kept}{name}")).collect();
+        }
         let word_at = typed.rfind([' ', ',']).map_or(0, |at| at + 1);
         let word = &typed[word_at..];
         let choices: &[&str] = match attribute {

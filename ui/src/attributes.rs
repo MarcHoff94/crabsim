@@ -15,6 +15,10 @@ pub fn summary(value: &Value) -> String {
     if value == "round_robin" {
         return "round robin".to_string();
     }
+    if let Some(by_destination) = value.get("by_destination") {
+        let then = by_destination.get("then").map_or_else(|| "round robin".to_string(), summary);
+        return format!("by destination, then {then}");
+    }
     if let Some(weighted) = value.get("weighted") {
         let by = WEIGHABLE.iter().find(|(name, _)| weighted["by"] == *name).map_or("?", |(_, label)| label).to_lowercase();
         let order = if weighted["order"] == "largest" { "largest" } else { "smallest" };
@@ -536,6 +540,9 @@ pub const WEIGHABLE: [(&str, &str); 4] = [("process_time", "Process time"), ("in
 /// A distribution strategy's choices (ADR 0016).
 #[derive(Debug, Clone, PartialEq)]
 pub struct DistributionChoice {
+    /// Only the successors that reach the MU's destination (ADR 0025), chosen among by the rest.
+    /// The window offers no control for it yet (spec issue 148, PR 3), but keeps it when saving.
+    pub by_destination: bool,
     /// Weighted rather than round robin.
     pub weighted: bool,
     /// One of `WEIGHABLE`'s names.
@@ -556,6 +563,18 @@ fn part(label: &'static str, text: impl Into<String>) -> Part {
 fn number(x: f64) -> String {
     let rounded = (x * 1e6).round() / 1e6;
     format!("{rounded}")
+}
+
+/// A work plan typed as JSON, until the window has rows for one (spec issue 148, PR 3). Empty is
+/// no steps. Whether its names are places is the model file's check.
+fn work_plan(text: &str) -> Result<Value, String> {
+    if text.is_empty() {
+        return Ok(json!([]));
+    }
+    match serde_json::from_str::<Value>(text) {
+        Ok(plan) if plan.is_array() => Ok(plan),
+        _ => Err(format!("`{text}` isn't a work plan: type it as a list of steps, such as [{{\"at\": \"Saw\", \"process_time\": \"0:40\"}}, {{\"at\": \"Out\"}}], or on the : line as set Housing.work_plan Saw 0:40, Out")),
+    }
 }
 
 fn text_of(value: Option<&Value>) -> String {
@@ -601,9 +620,12 @@ impl Form {
             "stop_freezes_dwelling" => (vec![part("", if value.and_then(Value::as_bool) == Some(true) { "true" } else { "false" })], None),
             "accumulating" => (vec![part("", if value.and_then(Value::as_bool) == Some(false) { "false" } else { "true" })], None),
             // Each may be left empty, taking the MU class's.
+            // Its own work plan as JSON, so editing the others keeps it, until the window has rows
+            // for work plans (spec issue 148, PR 3).
             "mu_values" => {
                 let field = |key: &str| value.and_then(|values| values.get(key)).and_then(Value::as_f64).map_or(String::new(), number);
-                (vec![part("length m", field("length")), part("width m", field("width")), part("booking point", field("booking_point"))], None)
+                let plan = value.and_then(|values| values.get("work_plan")).map_or(String::new(), Value::to_string);
+                (vec![part("length m", field("length")), part("width m", field("width")), part("booking point", field("booking_point")), part("work plan", plan)], None)
             }
             "direction" => (vec![part("", value.and_then(Value::as_str).unwrap_or(DIRECTIONS[0].0))], None),
             "length" | "width" | "booking_point" | "speed" | "gap" | "min_radius" | "max_incline" => {
@@ -640,6 +662,9 @@ impl Form {
     /// robin without one. The Drains to tick are the model's `drains`, then any other name the
     /// value counts, so saving again never drops one silently.
     pub fn distribution(value: Option<&Value>, drains: &[String]) -> Form {
+        let by_destination = value.and_then(|value| value.get("by_destination"));
+        // By destination, what then chooses is read as a strategy of its own.
+        let value = by_destination.map_or(value, |by| by.get("then"));
         let weighted = value.and_then(|value| value.get("weighted"));
         let named: Vec<String> = weighted
             .and_then(|weighted| weighted.get("drains"))
@@ -650,6 +675,7 @@ impl Form {
         ticks.extend(named.iter().filter(|name| !drains.contains(name)).map(|name| (name.clone(), true)));
         let field = |key: &str| weighted.and_then(|weighted| weighted.get(key)).and_then(Value::as_str);
         let choice = DistributionChoice {
+            by_destination: by_destination.is_some(),
             weighted: weighted.is_some(),
             by: field("by").unwrap_or("process_time").to_string(),
             largest: field("order") == Some("largest"),
@@ -731,8 +757,10 @@ impl Form {
                 Ok(json!({ "availability": percent / 100.0, "repair_time": repair }))
             }
             "distribution" => {
+                let by_destination = self.distribution.as_ref().is_some_and(|choice| choice.by_destination);
+                let wrap = |then: Value| if by_destination { json!({ "by_destination": { "then": then } }) } else { then };
                 let Some(choice) = self.distribution.as_ref().filter(|choice| choice.weighted) else {
-                    return Ok(json!("round_robin"));
+                    return Ok(wrap(json!("round_robin")));
                 };
                 let mut weighted = Map::new();
                 weighted.insert("by".into(), json!(choice.by));
@@ -742,7 +770,7 @@ impl Form {
                 if !counted.is_empty() {
                     weighted.insert("drains".into(), json!(counted));
                 }
-                Ok(json!({ "weighted": weighted }))
+                Ok(wrap(json!({ "weighted": weighted })))
             }
             "state_notes" => {
                 let mut notes = Map::new();
@@ -809,8 +837,12 @@ impl Form {
                 if !text(2).is_empty() {
                     values.insert("booking_point".into(), json!(booking_point(text(2))?));
                 }
+                if !text(3).is_empty() {
+                    values.insert("work_plan".into(), work_plan(text(3))?);
+                }
                 Ok(if values.is_empty() { Value::Null } else { Value::Object(values) })
             }
+            "work_plan" => work_plan(text(0)),
             _ => Ok(json!(text(0))),
         }
     }
@@ -828,8 +860,10 @@ impl Form {
             // Round robin set nowhere is round robin all the same.
             // The Drains counted are a set, whatever order the file lists them in.
             let sorted = |mut value: Value| {
-                if let Some(Value::Array(names)) = value.pointer_mut("/weighted/drains") {
-                    names.sort_by(|a, b| a.as_str().cmp(&b.as_str()));
+                for at in ["/weighted/drains", "/by_destination/then/weighted/drains"] {
+                    if let Some(Value::Array(names)) = value.pointer_mut(at) {
+                        names.sort_by(|a, b| a.as_str().cmp(&b.as_str()));
+                    }
                 }
                 value
             };

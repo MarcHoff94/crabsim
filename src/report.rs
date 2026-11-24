@@ -224,6 +224,10 @@ pub struct ObjectState {
     /// The process time in the Station's default state, which Reset returns to.
     pub configured_process_time: Option<SimTime>,
     pub statistics: ObjectStatistics,
+    /// How many MUs a Station worked on for their work plan's step or their detour, and how many
+    /// on their way somewhere else (spec issue 148), since statistics began. `None` for other
+    /// objects. Beside the statistics, which every object keeps, so no other object grows.
+    pub plan: Option<crate::routing::PlanCounts>,
     /// Each failure profile's figures, in the order of the object's list. Empty for an object with
     /// none, which then allocates nothing for it.
     pub failure_profiles: Vec<FailureProfileState>,

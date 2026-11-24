@@ -10,6 +10,7 @@ use crate::flows::FailureProfile;
 use crate::error::{InitError, MaterialflowError, RunTimeError};
 use crate::event::{EventContext, EventTemplate, EventType};
 use crate::report::ObjectState;
+use crate::routing::Arrival;
 use crate::time::SimTime;
 
 /// One material-flow object in a model.
@@ -130,6 +131,15 @@ impl ModelObject {
         }
     }
 
+    /// Takes an MU moving in, after working out what reaching this object means for its work plan
+    /// and detour (ADR 0026). Every MU enters an object through here. An MU with nowhere to go
+    /// costs one comparison.
+    #[inline]
+    pub fn enter(&mut self, mut mu: MoveableUnit, context: &mut EventContext) -> Result<Option<EventTemplate>, MaterialflowError> {
+        let arrival = if mu.is_routed() { context.routing.arrive(&mut mu, *self.get_object_id()) } else { Arrival::Unrouted };
+        self.process_mu_entrance(mu, arrival, context)
+    }
+
     /// Whether it asks which MU it is offered before taking one: an object whose geometry counts.
     #[inline]
     pub fn reads_mu_kind(&self) -> bool {
@@ -223,8 +233,8 @@ impl MaterialFlow for ModelObject {
     fn wake_on_listing(&mut self) -> Option<EventTemplate> {
         on_the_object!(self, object => object.wake_on_listing())
     }
-    fn process_mu_entrance(&mut self, mu: MoveableUnit, context: &mut EventContext) -> Result<Option<EventTemplate>, MaterialflowError> {
-        on_the_object!(self, object => object.process_mu_entrance(mu, context))
+    fn process_mu_entrance(&mut self, mu: MoveableUnit, arrival: Arrival, context: &mut EventContext) -> Result<Option<EventTemplate>, MaterialflowError> {
+        on_the_object!(self, object => object.process_mu_entrance(mu, arrival, context))
     }
     fn add_blocked(&mut self, id_blocked: u32, since: SimTime, answering_retry: bool) {
         on_the_object!(self, object => object.add_blocked(id_blocked, since, answering_retry))

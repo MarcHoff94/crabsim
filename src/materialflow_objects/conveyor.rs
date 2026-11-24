@@ -20,6 +20,7 @@ use crate::materialflow_objects::OtherObjects;
 use crate::model::MuKind;
 use crate::report::{BeltPosition, Capacity, ObjectKind, ObjectState, OccurrenceKind};
 use crate::statistics::{BeltKeeper, MachineState, ObjectStatistics, StatisticsKeeper};
+use crate::routing::Arrival;
 use crate::time::SimTime;
 
 use super::flows::FailureProfile;
@@ -541,7 +542,7 @@ impl Conveyor {
 			// Its rear may still be on this one, which the MUs behind must not run into.
 			self.led_by = Some(to);
 		}
-		if let Some(entered) = others.get_mut(to).process_mu_entrance(on.mu, context).map_err(|_| RunTimeError {})? {
+		if let Some(entered) = others.get_mut(to).enter(on.mu, context).map_err(|_| RunTimeError {})? {
 			context.schedule(entered);
 		}
 		Ok(())
@@ -722,7 +723,7 @@ impl MaterialFlow for Conveyor {
 	/// The MU enters with its booking point at the start, the rest of it behind, still taking
 	/// that space (ADR 0023), and moves on.
 	#[inline(never)]
-	fn process_mu_entrance(&mut self, mu: MoveableUnit, context: &mut EventContext) -> Result<Option<EventTemplate>, MaterialflowError> {
+	fn process_mu_entrance(&mut self, mu: MoveableUnit, _arrival: Arrival, context: &mut EventContext) -> Result<Option<EventTemplate>, MaterialflowError> {
 		log::info!("MU {} entered conveyor {}", mu.id, self.base.object_id);
 		let front = self.booking_offset(mu.kind());
 		// Handed over by a conveyor, it may still have its rear on that one.
@@ -838,6 +839,7 @@ impl EventInterface for Conveyor {
 			process_time: None,
 			configured_process_time: None,
 			statistics: self.statistics_at(now),
+			plan: None,
 			fill: Some(Box::new(fill)),
 			belt: Some(Box::new(belt)),
 			positions: (0..self.belt.len())
@@ -942,6 +944,9 @@ impl SuccessorContainer for Conveyor {
 	#[inline(never)]
 	fn offered_kind(&self, _now: SimTime) -> Option<MuKindId> {
 		self.belt.front().filter(|_| self.front_at_end && self.handing_to.is_none()).map(|on| on.mu.kind())
+	}
+	fn offered_mu(&self, _now: SimTime) -> Option<&MoveableUnit> {
+		self.belt.front().filter(|_| self.front_at_end && self.handing_to.is_none()).map(|on| &on.mu)
 	}
 	#[inline(never)]
 	fn on_belt(&self) -> bool {

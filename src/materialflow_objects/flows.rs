@@ -6,6 +6,7 @@ use crate::report::{ObjectState, OccurrenceKind};
 use crate::materialflow_objects::OtherObjects;
 use crate::random_numbers::{Distribution, DistributionSampler};
 use crate::statistics::StatisticsKeeper;
+use crate::routing::Arrival;
 
 /// An MU. Every object holding MUs pays for each, so it packs its departure time and kind into one
 /// word (ADR 0027) and stays 16 bytes with its place in its work plan and its detour.
@@ -254,7 +255,9 @@ pub trait MaterialFlow: EventInterface {
 		None
 	}
 	fn is_exit_allowed(&self) -> bool;
-	fn process_mu_entrance(&mut self, mu: MoveableUnit, context: &mut EventContext) -> Result<Option<EventTemplate>, MaterialflowError>;
+	/// Takes the MU, which has just arrived as `arrival` says: reaching its next destination has
+	/// already moved it on (ADR 0026). Only a Station reads it, for its process time.
+	fn process_mu_entrance(&mut self, mu: MoveableUnit, arrival: Arrival, context: &mut EventContext) -> Result<Option<EventTemplate>, MaterialflowError>;
 	/// Lists a predecessor it refused, whose MU has been ready to leave since `since`.
 	/// `answering_retry` says the predecessor was answering this object's retry.
 	fn add_blocked(&mut self, id_blocked: u32, since: SimTime, answering_retry: bool);
@@ -354,6 +357,9 @@ pub trait SuccessorContainer {
 	/// The kind of the MU it would hand over at `now`, which a successor whose geometry counts
 	/// needs to say whether it fits. `None` if it has none to hand over.
 	fn offered_kind(&self, now: SimTime) -> Option<MuKindId>;
+	/// The MU it would hand over at `now`, whose destination an object routing by destination
+	/// reads (ADR 0025). `None` if it has none to hand over.
+	fn offered_mu(&self, now: SimTime) -> Option<&MoveableUnit>;
 	/// Whether it is a conveyor, whose MUs hand over to another conveyor with their front first.
 	fn on_belt(&self) -> bool {
 		false
@@ -389,6 +395,110 @@ pub enum Distributing {
 	RoundRobin,
 	/// By a ranking worked out when the run was built or a weight changed.
 	Weighted(Ranked),
+	/// Among the successors from which the MU's next destination can be reached (ADR 0025), by
+	/// round robin or a ranking. Boxed, since only objects routing by destination pay for it.
+	ByDestination(Box<ByDestination>),
+}
+
+/// An object routing by destination: which of its exits reach each destination, worked out when
+/// the run is built, and what chooses among them.
+#[derive(Debug, Clone)]
+pub struct ByDestination {
+	/// Round robin or weighted, never by destination again.
+	pub then: Distributing,
+	/// By destination, which of its exits reach it, or `None` where none does, and the MU is
+	/// offered to every one.
+	reaching: crate::distribution::Reaching,
+}
+
+impl ByDestination {
+	/// Choosing by round robin until the run ranks the successors, from which exits reach each
+	/// destination, by destination and then by exit.
+	pub fn new(reaching: crate::distribution::Reaching) -> ByDestination {
+		ByDestination { then: Distributing::RoundRobin, reaching }
+	}
+}
+
+/// Offers an MU only to the exits that reach its next destination, in the order of the rule
+/// that chooses among them, or to all when none does.
+struct Toward<'a, S> {
+	allowed: Option<&'a [bool]>,
+	inner: S,
+}
+
+impl<S: DistributionStrategy> DistributionStrategy for Toward<'_, S> {
+	fn order(&self, n: usize, start: usize) -> impl Iterator<Item = usize> {
+		let allowed = self.allowed;
+		self.inner.order(n, start).filter(move |&idx| allowed.is_none_or(|allowed| allowed[idx]))
+	}
+	fn moved(&mut self, idx: usize, n: usize, pointer: &mut usize) {
+		self.inner.moved(idx, n, pointer);
+	}
+	fn answers_retry(&self) -> bool {
+		self.inner.answers_retry()
+	}
+}
+
+/// The rule that chooses among the exits reaching an MU's destination.
+enum Then<'a> {
+	RoundRobin,
+	Ranked(&'a mut Ranked),
+}
+
+/// One of two iterators, so `Then` needs no allocation.
+enum Either<A, B> {
+	A(A),
+	B(B),
+}
+
+impl<A: Iterator<Item = usize>, B: Iterator<Item = usize>> Iterator for Either<A, B> {
+	type Item = usize;
+	fn next(&mut self) -> Option<usize> {
+		match self {
+			Either::A(a) => a.next(),
+			Either::B(b) => b.next(),
+		}
+	}
+}
+
+impl DistributionStrategy for Then<'_> {
+	fn order(&self, n: usize, start: usize) -> impl Iterator<Item = usize> {
+		match self {
+			Then::RoundRobin => Either::A(RoundRobinStrategy.order(n, start)),
+			Then::Ranked(ranked) => Either::B(ranked.order(n, start)),
+		}
+	}
+	fn moved(&mut self, idx: usize, n: usize, pointer: &mut usize) {
+		match self {
+			Then::RoundRobin => RoundRobinStrategy.moved(idx, n, pointer),
+			Then::Ranked(ranked) => ranked.moved(idx, n, pointer),
+		}
+	}
+}
+
+/// Where the MU `obj` would hand over at `now` goes next, or `NO_DESTINATION`.
+fn offered_destination<T: SuccessorContainer>(obj: &T, context: &EventContext) -> DestinationId {
+	obj.offered_mu(context.time).map_or(NO_DESTINATION, |mu| context.routing.next_destination(mu))
+}
+
+/// Runs `move_it` with the object's by-destination state taken out of it for the while, given the
+/// exits that reach `destination` and the rule that chooses among them. Taking it out moves no
+/// memory.
+fn with_toward<T: SuccessorContainer, R>(obj: &mut T, destination: DestinationId, move_it: impl FnOnce(&mut T, Option<&[bool]>, Then<'_>) -> R) -> R {
+	let mut distribution = std::mem::take(obj.distribution_mut());
+	let Distributing::ByDestination(by) = &mut distribution else {
+		unreachable!("only an object routing by destination is moved toward one")
+	};
+	let ByDestination { then, reaching } = &mut **by;
+	let allowed = reaching.get(usize::from(destination)).and_then(|exits| exits.as_deref());
+	let then = match then {
+		Distributing::RoundRobin => Then::RoundRobin,
+		Distributing::Weighted(ranked) => Then::Ranked(ranked),
+		Distributing::ByDestination(_) => unreachable!("by destination chooses by round robin or weighted"),
+	};
+	let result = move_it(obj, allowed, then);
+	*obj.distribution_mut() = distribution;
+	result
 }
 
 /// A weighted object's successors, best first, those that rank equal taking turns.
@@ -473,7 +583,7 @@ pub fn try_to_move_to_successor_with_strategy<
 				}
 				context.record(OccurrenceKind::MuMoved { mu_id, from: pred_id, to: succ_id });
 				log::info!("seq={} MU {} moved from {} to {}", seq, mu_id, pred_id, succ_id);
-				match others.get_mut(succ_id).process_mu_entrance(mu, context) {
+				match others.get_mut(succ_id).enter(mu, context) {
 					Ok(entered) => {
 						chosen = Some((idx, entered));
 						break;
@@ -553,10 +663,13 @@ pub fn retry_move_to_successor<T: SuccessorContainer + EventInterface>(
 	let Some(index) = obj.successors().iter().position(|&succ| succ == from) else {
 		return Ok(None);
 	};
-	if let Distributing::RoundRobin = obj.distribution_mut() {
-		return try_to_move_to_successor_with_strategy(obj, context, others, &mut OnlySuccessor(index, &mut RoundRobinStrategy));
+	match obj.distribution_mut() {
+		Distributing::RoundRobin => try_to_move_to_successor_with_strategy(obj, context, others, &mut OnlySuccessor(index, &mut RoundRobinStrategy)),
+		Distributing::Weighted(_) => with_ranked(obj, |obj, ranked| try_to_move_to_successor_with_strategy(obj, context, others, &mut OnlySuccessor(index, ranked))),
+		Distributing::ByDestination(_) => with_toward(obj, offered_destination(obj, context), |obj, allowed, mut then| {
+			try_to_move_to_successor_with_strategy(obj, context, others, &mut Toward { allowed, inner: OnlySuccessor(index, &mut then) })
+		}),
 	}
-	with_ranked(obj, |obj, ranked| try_to_move_to_successor_with_strategy(obj, context, others, &mut OnlySuccessor(index, ranked)))
 }
 
 /// Runs `move_it` with the object's ranking taken out of it for the while, so both can be
@@ -587,16 +700,20 @@ pub fn try_to_reserve_successor<T: SuccessorContainer + EventInterface>(
 		Some(from) => Some(obj.successors().iter().position(|&succ| succ == from)?),
 		None => None,
 	};
-	if let Distributing::RoundRobin = obj.distribution_mut() {
-		return match index {
+	match obj.distribution_mut() {
+		Distributing::RoundRobin => match index {
 			Some(index) => reserve_with_strategy(obj, context, others, mu_id, &mut OnlySuccessor(index, &mut RoundRobinStrategy)),
 			None => reserve_with_strategy(obj, context, others, mu_id, &mut RoundRobinStrategy),
-		};
+		},
+		Distributing::Weighted(_) => with_ranked(obj, |obj, ranked| match index {
+			Some(index) => reserve_with_strategy(obj, context, others, mu_id, &mut OnlySuccessor(index, ranked)),
+			None => reserve_with_strategy(obj, context, others, mu_id, ranked),
+		}),
+		Distributing::ByDestination(_) => with_toward(obj, offered_destination(obj, context), |obj, allowed, mut then| match index {
+			Some(index) => reserve_with_strategy(obj, context, others, mu_id, &mut Toward { allowed, inner: OnlySuccessor(index, &mut then) }),
+			None => reserve_with_strategy(obj, context, others, mu_id, &mut Toward { allowed, inner: then }),
+		}),
 	}
-	with_ranked(obj, |obj, ranked| match index {
-		Some(index) => reserve_with_strategy(obj, context, others, mu_id, &mut OnlySuccessor(index, ranked)),
-		None => reserve_with_strategy(obj, context, others, mu_id, ranked),
-	})
 }
 
 fn reserve_with_strategy<T: SuccessorContainer + EventInterface, S: DistributionStrategy>(
@@ -643,10 +760,13 @@ pub fn try_to_move_to_successor<T: SuccessorContainer + EventInterface>(
 	context: &mut EventContext,
 	others: &mut OtherObjects<'_>,
 ) -> Result<Option<EventTemplate>, MaterialflowError> {
-	if let Distributing::RoundRobin = obj.distribution_mut() {
-		return try_to_move_to_successor_with_strategy(obj, context, others, &mut RoundRobinStrategy);
+	match obj.distribution_mut() {
+		Distributing::RoundRobin => try_to_move_to_successor_with_strategy(obj, context, others, &mut RoundRobinStrategy),
+		Distributing::Weighted(_) => with_ranked(obj, |obj, ranked| try_to_move_to_successor_with_strategy(obj, context, others, ranked)),
+		Distributing::ByDestination(_) => with_toward(obj, offered_destination(obj, context), |obj, allowed, then| {
+			try_to_move_to_successor_with_strategy(obj, context, others, &mut Toward { allowed, inner: then })
+		}),
 	}
-	with_ranked(obj, |obj, ranked| try_to_move_to_successor_with_strategy(obj, context, others, ranked))
 }
 
 

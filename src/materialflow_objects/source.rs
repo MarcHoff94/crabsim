@@ -96,7 +96,10 @@ impl Source {
 			return Err(MaterialflowError::NoMU);
 		}
 		let mu_id = context.new_mu_id();
-		self.content = Some(MoveableUnit::new(mu_id, context.time, self.mu_kind));
+		let mut mu = MoveableUnit::new(mu_id, context.time, self.mu_kind);
+		// Its work plan comes with its kind (ADR 0026), and it starts at the plan's first step.
+		mu.step = context.routing.first_step(self.mu_kind);
+		self.content = Some(mu);
 		self.statistics.count_mu_in();
 		log::info!("Source {} created MU {}", self.base.object_id, mu_id);
 		context.record(OccurrenceKind::MuCreated { mu_id, at: self.base.object_id, duration: self.proc_time, kind: self.mu_kind });
@@ -213,6 +216,7 @@ impl EventInterface for Source {
 			process_time: None,
 			configured_process_time: None,
 			statistics: self.statistics.read(now),
+			plan: None,
 			fill: None,
 			belt: None,
 			positions: Vec::new(),
@@ -241,6 +245,7 @@ impl MaterialFlow for Source {
 	fn process_mu_entrance(
 		&mut self,
 		_mu: MoveableUnit,
+		_arrival: crate::routing::Arrival,
 		_context: &mut EventContext,
 	) -> Result<Option<EventTemplate>, MaterialflowError> {
 		panic!("Source should not be processing MU entrance")
@@ -284,6 +289,9 @@ impl SuccessorContainer for Source {
 	}
 	fn offered_kind(&self, _now: SimTime) -> Option<MuKindId> {
 		self.content.as_ref().map(|mu| mu.kind())
+	}
+	fn offered_mu(&self, _now: SimTime) -> Option<&MoveableUnit> {
+		self.content.as_ref()
 	}
 	fn statistics_mut(&mut self) -> &mut StatisticsKeeper {
 		&mut self.statistics

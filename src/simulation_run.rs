@@ -2,7 +2,9 @@ use crate::error::{AdvanceFailure, RunError};
 use crate::event::{EventContext, EventType, ScheduledEvent};
 use crate::flows::EventInterface;
 use crate::distribution::DistributionRule;
-use crate::materialflow_objects::{Distributing, ModelObject, OtherObjects, Ranked};
+use crate::materialflow_objects::{ByDestination, Distributing, ModelObject, OtherObjects, Ranked};
+use crate::routing::Routing;
+use std::sync::Arc;
 use crate::report::{Occurrence, OccurrenceKind, Recording, RunState};
 use crate::statistics::{ObjectStatistics, Periods};
 use crate::time::SimTime;
@@ -45,6 +47,9 @@ pub struct SimulationRun {
     /// Each object's distribution strategy, by id, from which the run ranks the successors of
     /// the weighted ones (ADR 0016).
     rules: Vec<DistributionRule>,
+    /// The model's work plans and destinations (spec issue 148), which every event's context
+    /// reads.
+    routing: Arc<Routing>,
     initialised: bool,
     recording: Recording,
     statistics_since: SimTime,
@@ -60,7 +65,7 @@ pub struct SimulationRun {
 impl SimulationRun {
     /// A run of these objects, whose ids must match their positions. `ModelDescription` builds
     /// them that way.
-    pub(crate) fn new(objects: Vec<ModelObject>, seed: u64, streams: Vec<u64>, rules: Vec<DistributionRule>) -> SimulationRun {
+    pub(crate) fn new(objects: Vec<ModelObject>, seed: u64, streams: Vec<u64>, rules: Vec<DistributionRule>, routing: Arc<Routing>) -> SimulationRun {
         debug_assert_eq!(objects.len(), streams.len(), "one stream per object");
         debug_assert_eq!(objects.len(), rules.len(), "one distribution strategy per object");
         let mut run = SimulationRun {
@@ -79,23 +84,40 @@ impl SimulationRun {
             period_end: SimTime::MAX,
             measuring_period: None,
             periods: None,
-            context: EventContext::new(1, Recording::NOTHING),
+            context: EventContext::new(1, Recording::NOTHING).with_routing(routing.clone()),
+            routing,
         };
+        run.route_by_destination();
         run.rank_successors();
         run
+    }
+
+    /// Gives every object routing by destination its table of which exits reach each
+    /// destination (ADR 0025). Done once, when the run is built: connections don't change.
+    fn route_by_destination(&mut self) {
+        let tables = crate::distribution::reaching(&self.objects, &self.rules, &self.routing);
+        for (object, table) in self.objects.iter_mut().zip(tables) {
+            if let (Some(table), Some(distribution)) = (table, object.distribution_mut()) {
+                *distribution = Distributing::ByDestination(Box::new(ByDestination::new(table)));
+            }
+        }
     }
 
     /// Ranks the successors of every weighted object again from the objects' values now, with
     /// their turns among equals starting afresh. Done when the run is built, at Reset and when a
     /// value changes, never per event. Costs nothing in a model of round robin only.
     fn rank_successors(&mut self) {
-        if self.rules.iter().all(|rule| *rule == DistributionRule::RoundRobin) {
+        if self.rules.iter().all(|rule| rule.weighted().is_none()) {
             return;
         }
         let rankings = crate::distribution::rankings(&self.objects, &self.rules);
         for (object, ranking) in self.objects.iter_mut().zip(rankings) {
             if let (Some(ranking), Some(distribution)) = (ranking, object.distribution_mut()) {
-                *distribution = Distributing::Weighted(Ranked::new(ranking.groups));
+                let ranked = Distributing::Weighted(Ranked::new(ranking.groups));
+                match distribution {
+                    Distributing::ByDestination(by) => by.then = ranked,
+                    _ => *distribution = ranked,
+                }
             }
         }
     }
@@ -188,7 +210,7 @@ impl SimulationRun {
             return Err(RunError::AlreadyInitialised);
         }
         let highest_starting_mu = self.state().objects.iter().flat_map(|o| o.contents.clone()).max().unwrap_or(0);
-        self.context = EventContext::new(highest_starting_mu + 1, self.recording);
+        self.context = EventContext::new(highest_starting_mu + 1, self.recording).with_routing(self.routing.clone());
         self.context.time = SimTime::ZERO;
         self.context.record(OccurrenceKind::RunInitialised);
 
@@ -281,7 +303,7 @@ impl SimulationRun {
         self.statistics_since = SimTime::ZERO;
         self.periods = None;
         self.period_end = SimTime::MAX;
-        self.context = EventContext::new(1, self.recording);
+        self.context = EventContext::new(1, self.recording).with_routing(self.routing.clone());
         self.rank_successors();
     }
 
@@ -436,7 +458,7 @@ mod tests {
     }
 
     fn fails_at_five_seconds() -> SimulationRun {
-        let mut run = SimulationRun::new(vec![ModelObject::RecordsThenFails(RecordsThenFails::new(secs(5)))], 0, vec![0], vec![DistributionRule::RoundRobin]);
+        let mut run = SimulationRun::new(vec![ModelObject::RecordsThenFails(RecordsThenFails::new(secs(5)))], 0, vec![0], vec![DistributionRule::RoundRobin], Arc::default());
         run.set_recording(Recording::ALL);
         run
     }

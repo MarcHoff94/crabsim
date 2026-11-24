@@ -52,6 +52,7 @@ impl EventInterface for RecordsThenFails {
             process_time: None,
             configured_process_time: None,
             statistics: Default::default(),
+            plan: None,
             fill: None,
             belt: None,
             positions: Vec::new(),
@@ -77,6 +78,7 @@ impl MaterialFlow for RecordsThenFails {
     fn process_mu_entrance(
         &mut self,
         _mu: MoveableUnit,
+        _arrival: crate::routing::Arrival,
         _context: &mut EventContext,
     ) -> Result<Option<EventTemplate>, MaterialflowError> {
         Err(MaterialflowError::EntranceDenied)

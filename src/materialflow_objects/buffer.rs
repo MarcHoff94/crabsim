@@ -5,6 +5,7 @@ use crate::event::{EventContext, EventTemplate, EventType, ExitTicket};
 use crate::materialflow_objects::OtherObjects;
 use crate::report::{Capacity, ObjectKind, ObjectState, OccurrenceKind};
 use crate::statistics::{FillKeeper, MachineState, StatisticsKeeper};
+use crate::routing::Arrival;
 use crate::time::SimTime;
 use super::interruptions::{Interruptible, Interruptions};
 use super::flows::{
@@ -238,7 +239,7 @@ impl MaterialFlow for Buffer {
         self.blocked && !self.interruptions.is_interrupted()
     }
     /// Takes the MU and schedules the end of its dwelling time, when it tries to leave.
-    fn process_mu_entrance(&mut self, mu: MoveableUnit, context: &mut EventContext) -> Result<Option<EventTemplate>, MaterialflowError> {
+    fn process_mu_entrance(&mut self, mu: MoveableUnit, _arrival: Arrival, context: &mut EventContext) -> Result<Option<EventTemplate>, MaterialflowError> {
         log::info!("MU {} entered Buffer {}", mu.id, self.base.object_id);
         // An MU it was receiving takes its reserved place, even while it is interrupted.
         self.incoming = self.incoming.saturating_sub(1);
@@ -295,6 +296,9 @@ impl SuccessorContainer for Buffer {
     fn offered_kind(&self, now: SimTime) -> Option<crate::flows::MuKindId> {
         self.offered(now).map(|at| self.content[at].mu.kind())
     }
+    fn offered_mu(&self, now: SimTime) -> Option<&MoveableUnit> {
+        self.offered(now).map(|at| &self.content[at].mu)
+    }
 }
 
 impl EventInterface for Buffer {
@@ -344,6 +348,7 @@ impl EventInterface for Buffer {
             process_time: None,
             configured_process_time: None,
             statistics: self.statistics.read(now),
+            plan: None,
             fill: Some(Box::new(self.fill.read(self.statistics.in_progress(now)))),
             belt: None,
             positions: Vec::new(),

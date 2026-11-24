@@ -5,7 +5,9 @@
 //! taking turns. The rankings are worked out from the objects' values when a run is built, and
 //! again whenever a value they weigh changes, so moving an MU only reads them.
 
+use crate::flows::DestinationId;
 use crate::materialflow_objects::ModelObject;
+use crate::routing::Routing;
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, VecDeque};
 
@@ -63,6 +65,26 @@ pub enum DistributionRule {
     #[default]
     RoundRobin,
     Weighted(WeightedRule),
+    /// Only the successors from which the MU's next destination can be reached (ADR 0025), and
+    /// among them the rule given, round robin or weighted. An MU with no destination left, or one
+    /// none of them reaches, is offered to every successor by that rule.
+    ByDestination(Box<DistributionRule>),
+}
+
+impl DistributionRule {
+    /// The rule that ranks the successors, if any: weighted, alone or after by destination.
+    pub fn weighted(&self) -> Option<&WeightedRule> {
+        match self {
+            DistributionRule::RoundRobin => None,
+            DistributionRule::Weighted(rule) => Some(rule),
+            DistributionRule::ByDestination(then) => then.weighted(),
+        }
+    }
+
+    /// Whether it routes by destination.
+    pub fn by_destination(&self) -> bool {
+        matches!(self, DistributionRule::ByDestination(_))
+    }
 }
 
 /// How a weighted object ranks its successors.
@@ -96,15 +118,66 @@ pub fn weight(object: &ModelObject, by: WeighBy) -> Option<u64> {
     }
 }
 
-/// The ranking of every object whose rule is weighted, by id, and `None` for the others.
+/// The ranking of every object whose rule is weighted, alone or after by destination, by id, and
+/// `None` for the others.
 pub fn rankings(objects: &[ModelObject], rules: &[DistributionRule]) -> Vec<Option<Ranking>> {
     let mut routes = Routes::new(objects);
-    rules
+    rules.iter().enumerate().map(|(id, rule)| rule.weighted().map(|rule| routes.rank(id, rule))).collect()
+}
+
+/// Which exits of an object routing by destination reach each destination (ADR 0025): by
+/// destination, its exits in order, or `None` where none reaches it.
+pub type Reaching = Vec<Option<Box<[bool]>>>;
+
+/// The `Reaching` table of each object routing by destination, by id, and `None` for the others.
+/// Searches back from each destination's objects once, so it takes time growing with destinations
+/// times connections, when a run is built.
+pub fn reaching(objects: &[ModelObject], rules: &[DistributionRule], routing: &Routing) -> Vec<Option<Reaching>> {
+    if !rules.iter().any(DistributionRule::by_destination) {
+        return vec![None; objects.len()];
+    }
+    let mut predecessors = vec![Vec::new(); objects.len()];
+    for (from, object) in objects.iter().enumerate() {
+        for &to in object.successor_ids() {
+            predecessors[to as usize].push(from);
+        }
+    }
+    // For each destination, every object from which one of its objects can be reached, those
+    // included.
+    let reaches: Vec<Vec<bool>> = (0..routing.destinations())
+        .map(|destination| {
+            let mut reaches = vec![false; objects.len()];
+            let mut queue: VecDeque<usize> = VecDeque::new();
+            for &member in routing.members(destination as DestinationId) {
+                if let Some(reached) = reaches.get_mut(member as usize).filter(|reached| !**reached) {
+                    *reached = true;
+                    queue.push_back(member as usize);
+                }
+            }
+            while let Some(at) = queue.pop_front() {
+                for &before in &predecessors[at] {
+                    if !reaches[before] {
+                        reaches[before] = true;
+                        queue.push_back(before);
+                    }
+                }
+            }
+            reaches
+        })
+        .collect();
+    objects
         .iter()
-        .enumerate()
-        .map(|(id, rule)| match rule {
-            DistributionRule::RoundRobin => None,
-            DistributionRule::Weighted(rule) => Some(routes.rank(id, rule)),
+        .zip(rules)
+        .map(|(object, rule)| {
+            rule.by_destination().then(|| {
+                reaches
+                    .iter()
+                    .map(|reaches| {
+                        let exits: Box<[bool]> = object.successor_ids().iter().map(|&to| reaches[to as usize]).collect();
+                        exits.iter().any(|&reaches| reaches).then_some(exits)
+                    })
+                    .collect()
+            })
         })
         .collect()
 }

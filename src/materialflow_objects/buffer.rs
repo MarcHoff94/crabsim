@@ -293,7 +293,7 @@ impl SuccessorContainer for Buffer {
         self.offered(now).map(|at| self.content[at].ready_at)
     }
     fn offered_kind(&self, now: SimTime) -> Option<crate::flows::MuKindId> {
-        self.offered(now).map(|at| self.content[at].mu.kind)
+        self.offered(now).map(|at| self.content[at].mu.kind())
     }
 }
 
@@ -331,7 +331,7 @@ impl EventInterface for Buffer {
             id: self.base.object_id,
             kind: ObjectKind::Buffer,
             contents: self.content.iter().map(|held| held.mu.id).collect(),
-            content_kinds: self.content.iter().map(|held| held.mu.kind).collect(),
+            content_kinds: self.content.iter().map(|held| held.mu.kind()).collect(),
             process: self.process_state(),
             interrupted: self.interruptions.most_serious(),
             interruptions: self.interruptions.list(),
@@ -378,7 +378,7 @@ impl Buffer {
         let dwelling_time = self.dwelling_time;
         self.content = mus
             .iter()
-            .map(|&id| Held { mu: MoveableUnit { id, left_source: SimTime::ZERO, kind: 0 }, ready_at: dwelling_time })
+            .map(|&id| Held { mu: MoveableUnit::starting(id), ready_at: dwelling_time })
             .collect();
         self.starting_mus = mus;
     }

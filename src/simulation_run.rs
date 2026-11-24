@@ -356,6 +356,9 @@ impl SimulationRun {
         if self.has_event_by(until) {
             return Ok(false);
         }
+        if until > crate::flows::TIME_LIMIT {
+            return Err(RunError::BeyondTimeLimit { time: until });
+        }
         if until > self.time {
             self.time = until;
         }
@@ -379,6 +382,9 @@ impl SimulationRun {
             self.close_periods(time, false);
         }
         if time != self.counted_time {
+            if time > crate::flows::TIME_LIMIT {
+                return Err(RunError::BeyondTimeLimit { time });
+            }
             self.counted_time = time;
             self.events_at_this_time = 0;
         }

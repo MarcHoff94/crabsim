@@ -221,7 +221,7 @@ impl Conveyor {
 	}
 
 	fn rear(&self, at: usize, now: SimTime) -> f64 {
-		self.front(at, now) - self.kind(self.belt[at].mu.kind).length
+		self.front(at, now) - self.kind(self.belt[at].mu.kind()).length
 	}
 
 	/// How far its front is ahead of its booking point.
@@ -236,7 +236,7 @@ impl Conveyor {
 		on.front = front;
 		on.since = context.time;
 		on.speed = speed;
-		let (mu_id, kind) = (on.mu.id, on.mu.kind);
+		let (mu_id, kind) = (on.mu.id, on.mu.kind());
 		context.record(OccurrenceKind::MotionPlanned { mu_id, at: self.base.object_id, front: front as f32, speed: speed as f32, kind });
 	}
 
@@ -377,7 +377,7 @@ impl Conveyor {
 					}
 				}
 				self.apply(at, was, front, speed, context);
-				ahead = Some((front - self.kind(self.belt[at].mu.kind).length, speed));
+				ahead = Some((front - self.kind(self.belt[at].mu.kind()).length, speed));
 			}
 			// The last MU's rear and speed, unless the belt is empty and this is what was ahead.
 			let tail = if self.belt.is_empty() { None } else { ahead };
@@ -401,7 +401,7 @@ impl Conveyor {
 				last_front = front;
 			}
 			let last = self.belt.len() - 1;
-			return (closes_up, Some((last_front - self.kind(self.belt[last].mu.kind).length, group)));
+			return (closes_up, Some((last_front - self.kind(self.belt[last].mu.kind()).length, group)));
 		}
 		(closes_up, None)
 	}
@@ -432,7 +432,7 @@ impl Conveyor {
 			if first.speed > 0.0 {
 				let front = self.front(0, now);
 				let event = match self.handing_to {
-					Some(_) => Some((ConveyorStep::Booked, self.length + self.booking_offset(first.mu.kind) - front)),
+					Some(_) => Some((ConveyorStep::Booked, self.length + self.booking_offset(first.mu.kind()) - front)),
 					None if !self.front_at_end => Some((ConveyorStep::FrontAtEnd, self.length - front)),
 					None => None,
 				};
@@ -514,7 +514,7 @@ impl Conveyor {
 		if let Some(next) = others.get_mut(taken_by).as_conveyor_mut() {
 			next.reserved_by = Some(self.base.object_id);
 		}
-		if self.booking_offset(self.belt[0].mu.kind) <= EPSILON {
+		if self.booking_offset(self.belt[0].mu.kind()) <= EPSILON {
 			self.hand_over(taken_by, context, others)?;
 		} else {
 			self.handing_to = Some(taken_by);
@@ -533,7 +533,7 @@ impl Conveyor {
 		self.front_at_end = false;
 		self.statistics.count_mu_out();
 		self.belt_statistics.crossed(context.time.saturating_sub(on.entered));
-		self.taken -= self.kind(on.mu.kind).length;
+		self.taken -= self.kind(on.mu.kind()).length;
 		let from = self.base.object_id;
 		context.record(OccurrenceKind::MuMoved { mu_id: on.mu.id, from, to });
 		log::info!("seq={} MU {} moved from conveyor {} to {}", context.seq, on.mu.id, from, to);
@@ -724,7 +724,7 @@ impl MaterialFlow for Conveyor {
 	#[inline(never)]
 	fn process_mu_entrance(&mut self, mu: MoveableUnit, context: &mut EventContext) -> Result<Option<EventTemplate>, MaterialflowError> {
 		log::info!("MU {} entered conveyor {}", mu.id, self.base.object_id);
-		let front = self.booking_offset(mu.kind);
+		let front = self.booking_offset(mu.kind());
 		// Handed over by a conveyor, it may still have its rear on that one.
 		if let Some(from) = self.reserved_by.take() {
 			self.straddle_from = Some(from).filter(|&from| from != NOBODY);
@@ -738,8 +738,8 @@ impl MaterialFlow for Conveyor {
 		} else {
 			self.belt.front().map_or(self.speed, |first| first.speed)
 		};
-		self.taken += self.kind(mu.kind).length;
-		self.short_until = self.short_until(front - self.kind(mu.kind).length, speed, context.time);
+		self.taken += self.kind(mu.kind()).length;
+		self.short_until = self.short_until(front - self.kind(mu.kind()).length, speed, context.time);
 		self.belt.push_back(OnBelt { mu, front, since: context.time, speed, entered: context.time });
 		let at = self.belt.len() - 1;
 		self.plan_mu(at, front, speed, context);
@@ -825,7 +825,7 @@ impl EventInterface for Conveyor {
 			id: self.base.object_id,
 			kind: ObjectKind::Conveyor,
 			contents: self.belt.iter().map(|on| on.mu.id).collect(),
-			content_kinds: self.belt.iter().map(|on| on.mu.kind).collect(),
+			content_kinds: self.belt.iter().map(|on| on.mu.kind()).collect(),
 			process: self.state.clone(),
 			interrupted: self.interruptions.most_serious(),
 			interruptions: self.interruptions.list(),
@@ -845,7 +845,7 @@ impl EventInterface for Conveyor {
 					mu_id: self.belt[at].mu.id,
 					front: self.front(at, now),
 					speed: if stopped { 0.0 } else { self.belt[at].speed },
-					kind: self.belt[at].mu.kind,
+					kind: self.belt[at].mu.kind(),
 				})
 				.collect(),
 		}
@@ -931,7 +931,7 @@ impl SuccessorContainer for Conveyor {
 		if self.belt.is_empty() {
 			self.short_until = None;
 		}
-		self.taken -= self.kind(on.mu.kind).length;
+		self.taken -= self.kind(on.mu.kind()).length;
 		Some(on.mu)
 	}
 	/// Only its front MU at the end is offered, from when it got there.
@@ -941,7 +941,7 @@ impl SuccessorContainer for Conveyor {
 	}
 	#[inline(never)]
 	fn offered_kind(&self, _now: SimTime) -> Option<MuKindId> {
-		self.belt.front().filter(|_| self.front_at_end && self.handing_to.is_none()).map(|on| on.mu.kind)
+		self.belt.front().filter(|_| self.front_at_end && self.handing_to.is_none()).map(|on| on.mu.kind())
 	}
 	#[inline(never)]
 	fn on_belt(&self) -> bool {

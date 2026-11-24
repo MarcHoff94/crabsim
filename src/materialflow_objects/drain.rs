@@ -121,7 +121,7 @@ impl MaterialFlow for Drain {
         mu: MoveableUnit,
         context: &mut EventContext,
     ) -> Result<Option<EventTemplate>, MaterialflowError> {
-        let lead_time = context.time.saturating_sub(mu.left_source);
+        let lead_time = context.time.saturating_sub(mu.left_source());
         self.statistics.count_exit(context.time, lead_time);
         context.record(OccurrenceKind::MuLeft { mu_id: mu.id, at: self.base.object_id, lead_time });
         log::info!(

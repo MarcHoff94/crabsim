@@ -7,20 +7,81 @@ use crate::materialflow_objects::OtherObjects;
 use crate::random_numbers::{Distribution, DistributionSampler};
 use crate::statistics::StatisticsKeeper;
 
-// Moveable unit
-#[derive(Debug, Clone)]
+/// An MU. Every object holding MUs pays for each, so it packs its departure time and kind into one
+/// word (ADR 0027) and stays 16 bytes with its place in its work plan and its detour.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MoveableUnit {
 	pub id: u32,
-	/// When it left its Source, which is where its lead time starts. A starting MU counts from
-	/// Init, and a Source sets this as the MU leaves.
-	pub left_source: SimTime,
-	/// Its MU kind, its place in the model's table of them (ADR 0021): what its MU class and its
-	/// Source make it, such as its footprint. 0, the built-in MU, for starting MUs.
-	pub kind: MuKindId,
+	/// Its place in the run's table of work plan steps (ADR 0026): the step it is on its way to,
+	/// or `NO_STEP` once its plan is done or it has none.
+	pub(crate) step: u16,
+	/// The destination it goes to before carrying on with its plan, set by a Station's detour and
+	/// cleared when reached, or `NO_DESTINATION`.
+	pub(crate) detour: DestinationId,
+	/// When it left its Source in the low 48 bits, as milliseconds, and its kind in the high 16.
+	packed: u64,
 }
 
 /// An MU kind's place in a model's table of them. A small number, so every MU pays little for it.
 pub type MuKindId = u16;
+
+/// A destination's place in a model's table of them (ADR 0025): an instance, or a class standing
+/// for any of its instances.
+pub type DestinationId = u16;
+
+/// No destination: an MU without a detour, or none left in its plan.
+pub const NO_DESTINATION: DestinationId = DestinationId::MAX;
+
+/// No step: an MU with no work plan, or whose plan is done.
+pub const NO_STEP: u16 = u16::MAX;
+
+/// The bits of an MU's packed word that hold its departure time.
+const DEPARTURE_BITS: u64 = (1 << 48) - 1;
+
+/// The latest simulated time an MU can record as its departure, about 8,900 years (ADR 0027). A
+/// run refuses to go beyond it.
+pub const TIME_LIMIT: SimTime = SimTime::from_millis(DEPARTURE_BITS);
+
+impl MoveableUnit {
+	/// An MU of `kind` that left its Source at `left_source`, with no plan and no detour.
+	#[inline]
+	pub fn new(id: u32, left_source: SimTime, kind: MuKindId) -> MoveableUnit {
+		debug_assert!(left_source <= TIME_LIMIT, "a run refuses to go beyond the time an MU can hold");
+		MoveableUnit { id, step: NO_STEP, detour: NO_DESTINATION, packed: (left_source.as_millis() & DEPARTURE_BITS) | (u64::from(kind) << 48) }
+	}
+
+	/// A starting MU: the built-in kind, counting from Init, with no plan.
+	pub fn starting(id: u32) -> MoveableUnit {
+		MoveableUnit::new(id, SimTime::ZERO, 0)
+	}
+
+	/// When it left its Source, which is where its lead time starts. A starting MU counts from
+	/// Init, and a Source sets this as the MU leaves.
+	#[inline]
+	pub fn left_source(&self) -> SimTime {
+		SimTime::from_millis(self.packed & DEPARTURE_BITS)
+	}
+
+	#[inline]
+	pub fn set_left_source(&mut self, at: SimTime) {
+		debug_assert!(at <= TIME_LIMIT, "a run refuses to go beyond the time an MU can hold");
+		self.packed = (self.packed & !DEPARTURE_BITS) | (at.as_millis() & DEPARTURE_BITS);
+	}
+
+	/// Its MU kind, its place in the model's table of them (ADR 0021): what its MU class and its
+	/// Source make it, such as its footprint and work plan. 0, the built-in MU, for starting MUs.
+	#[inline]
+	pub fn kind(&self) -> MuKindId {
+		(self.packed >> 48) as MuKindId
+	}
+
+	/// Whether it has somewhere left to go: a detour or a step of its plan. Checked on every
+	/// entry, so models without work plans pay one comparison.
+	#[inline]
+	pub fn is_routed(&self) -> bool {
+		self.step != NO_STEP || self.detour != NO_DESTINATION
+	}
+}
 
 #[derive(Debug, Clone)]
 pub struct BaseObject{
@@ -591,12 +652,30 @@ pub fn try_to_move_to_successor<T: SuccessorContainer + EventInterface>(
 
 #[cfg(test)]
 mod size_tests {
-	use super::MoveableUnit;
+	use super::{MoveableUnit, TIME_LIMIT};
+	use crate::time::SimTime;
 
-	/// Every object holding MUs pays for each, so an MU's kind (ADR 0021) costs no room: 16 bytes,
-	/// as before it had one.
+	/// Every object holding MUs pays for each, so an MU's kind (ADR 0021), its step and its detour
+	/// (ADR 0026) cost no room: 16 bytes, as before it had any (ADR 0027).
 	#[test]
 	fn an_mu_is_16_bytes() {
 		assert_eq!(size_of::<MoveableUnit>(), 16);
+	}
+
+	#[test]
+	fn an_mu_keeps_its_departure_time_and_kind_apart_up_to_the_limit() {
+		let mut mu = MoveableUnit::new(7, TIME_LIMIT, u16::MAX);
+		assert_eq!((mu.left_source(), mu.kind()), (TIME_LIMIT, u16::MAX));
+		mu.set_left_source(SimTime::from_millis(1));
+		assert_eq!((mu.left_source(), mu.kind()), (SimTime::from_millis(1), u16::MAX));
+		let mu = MoveableUnit::new(8, TIME_LIMIT, 0);
+		assert_eq!((mu.left_source(), mu.kind()), (TIME_LIMIT, 0));
+		assert!(!mu.is_routed(), "a new MU has no plan and no detour");
+	}
+
+	#[test]
+	fn the_limit_is_about_8900_years() {
+		let years = TIME_LIMIT.as_secs_f64() / (365.25 * 86_400.0);
+		assert!((8_900.0..8_930.0).contains(&years), "{years}");
 	}
 }

@@ -164,7 +164,7 @@ impl ModelDescription {
     /// A Station whose default state holds an MU, which it works on from Init.
     pub fn add_station_holding(&mut self, process_time: SimTime, failures: FailureProfile, mu_id: u32) -> u32 {
         let id = self.next_id();
-        let mu = MoveableUnit { id: mu_id, left_source: SimTime::ZERO, kind: 0 };
+        let mu = MoveableUnit::starting(mu_id);
         self.add(ModelObject::Station(SingleStation::new(id, process_time, failures, Some(mu), Vec::new())))
     }
 
@@ -181,7 +181,7 @@ impl ModelDescription {
             _ => panic!("object {id} is not a Station"),
         };
         *object = if capacity == 1 {
-            let mu = mus.first().map(|&mu_id| MoveableUnit { id: mu_id, left_source: SimTime::ZERO, kind: 0 });
+            let mu = mus.first().map(|&mu_id| MoveableUnit::starting(mu_id));
             ModelObject::Station(SingleStation::new(id, proc_time, FailureProfile::new(1.0, Distribution::CONSTANT { value: 0.0 }, 0), mu, succ))
         } else {
             let mut station = MultiStation::new(id, proc_time, FailureProfile::new(1.0, Distribution::CONSTANT { value: 0.0 }, 0), capacity, start);
@@ -223,7 +223,7 @@ impl ModelDescription {
             Some(ModelObject::MultiStation(station)) => station.set_starting_mus(mus.to_vec()),
             Some(ModelObject::Station(station)) => {
                 assert!(mus.len() <= 1, "a Station of capacity 1 holds one MU at most");
-                station.starting_content = mus.first().map(|&mu_id| MoveableUnit { id: mu_id, left_source: SimTime::ZERO, kind: 0 });
+                station.starting_content = mus.first().map(|&mu_id| MoveableUnit::starting(mu_id));
                 station.content = station.starting_content.clone();
             }
             Some(_) => panic!("object {id} can't hold starting MUs"),

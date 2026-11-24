@@ -96,11 +96,7 @@ impl Source {
 			return Err(MaterialflowError::NoMU);
 		}
 		let mu_id = context.new_mu_id();
-		self.content = Some(MoveableUnit {
-			id: mu_id,
-			left_source: context.time,
-			kind: self.mu_kind,
-		});
+		self.content = Some(MoveableUnit::new(mu_id, context.time, self.mu_kind));
 		self.statistics.count_mu_in();
 		log::info!("Source {} created MU {}", self.base.object_id, mu_id);
 		context.record(OccurrenceKind::MuCreated { mu_id, at: self.base.object_id, duration: self.proc_time, kind: self.mu_kind });
@@ -204,7 +200,7 @@ impl EventInterface for Source {
 			id: self.base.object_id,
 			kind: ObjectKind::Source,
 			contents: self.content.iter().map(|mu| mu.id).collect(),
-			content_kinds: self.content.iter().map(|mu| mu.kind).collect(),
+			content_kinds: self.content.iter().map(|mu| mu.kind()).collect(),
 			process: self.state.clone(),
 			interrupted: self.interruptions.most_serious(),
 			interruptions: self.interruptions.list(),
@@ -280,14 +276,14 @@ impl SuccessorContainer for Source {
 	/// starts here. Time spent blocked in the Source is the Source's blocked time.
 	fn take_content(&mut self, now: SimTime) -> Option<MoveableUnit> {
 		let mut mu = self.content.take()?;
-		mu.left_source = now;
+		mu.set_left_source(now);
 		Some(mu)
 	}
 	fn offered_since(&self, _now: SimTime) -> Option<SimTime> {
 		self.content.as_ref().map(|_| self.ready_since)
 	}
 	fn offered_kind(&self, _now: SimTime) -> Option<MuKindId> {
-		self.content.as_ref().map(|mu| mu.kind)
+		self.content.as_ref().map(|mu| mu.kind())
 	}
 	fn statistics_mut(&mut self) -> &mut StatisticsKeeper {
 		&mut self.statistics

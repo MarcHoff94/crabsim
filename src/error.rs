@@ -26,6 +26,9 @@ pub enum RunError {
     ObjectFailed { object_id: u32, time: SimTime },
     /// Too many events in a row happened without simulation time moving.
     ZeroTimeLoop { time: SimTime },
+    /// The run was asked to go beyond the latest time an MU can hold as its departure, about
+    /// 8,900 years (ADR 0027).
+    BeyondTimeLimit { time: SimTime },
 }
 
 impl fmt::Display for RunError {
@@ -42,6 +45,12 @@ impl fmt::Display for RunError {
             RunError::ZeroTimeLoop { time } => {
                 write!(f, "simulation time is stuck at {:.3}s: events keep happening without it advancing", time.as_secs_f64())
             }
+            RunError::BeyondTimeLimit { time } => write!(
+                f,
+                "a run can't go beyond {} (about 8,900 years), the latest time an MU can hold as when it left its Source, and was asked to reach {}",
+                crate::time::format_time(crate::flows::TIME_LIMIT),
+                crate::time::format_time(*time)
+            ),
         }
     }
 }

@@ -351,7 +351,7 @@ impl EventInterface for SingleStation {
 			id: self.base.object_id,
 			kind: ObjectKind::Station,
 			contents: self.content.iter().map(|mu| mu.id).collect(),
-			content_kinds: self.content.iter().map(|mu| mu.kind).collect(),
+			content_kinds: self.content.iter().map(|mu| mu.kind()).collect(),
 			process: self.state.clone(),
 			interrupted: self.interruptions.most_serious(),
 			interruptions: self.interruptions.list(),
@@ -420,7 +420,7 @@ impl SuccessorContainer for SingleStation {
 		})
 	}
 	fn offered_kind(&self, _now: SimTime) -> Option<MuKindId> {
-		self.content.as_ref().map(|mu| mu.kind)
+		self.content.as_ref().map(|mu| mu.kind())
 	}
 	fn statistics_mut(&mut self) -> &mut StatisticsKeeper {
 		&mut self.statistics

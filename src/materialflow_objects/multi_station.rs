@@ -102,7 +102,7 @@ impl MultiStation {
 	pub fn set_starting_mus(&mut self, mus: Vec<u32>) {
 		self.places = mus
 			.iter()
-			.map(|&id| Place { mu: MoveableUnit { id, left_source: SimTime::ZERO, kind: 0 }, work: Work::Waiting })
+			.map(|&id| Place { mu: MoveableUnit::starting(id), work: Work::Waiting })
 			.collect();
 		self.starting_mus = mus;
 	}
@@ -428,7 +428,7 @@ impl EventInterface for MultiStation {
 			id: self.base.object_id,
 			kind: ObjectKind::Station,
 			contents: self.places.iter().map(|place| place.mu.id).collect(),
-			content_kinds: self.places.iter().map(|place| place.mu.kind).collect(),
+			content_kinds: self.places.iter().map(|place| place.mu.kind()).collect(),
 			process: self.process_state(),
 			interrupted: self.interruptions.most_serious(),
 			interruptions: self.interruptions.list(),
@@ -502,7 +502,7 @@ impl SuccessorContainer for MultiStation {
 		})
 	}
 	fn offered_kind(&self, _now: SimTime) -> Option<crate::flows::MuKindId> {
-		self.offered().map(|at| self.places[at].mu.kind)
+		self.offered().map(|at| self.places[at].mu.kind())
 	}
 }
 

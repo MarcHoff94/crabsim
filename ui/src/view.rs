@@ -2358,7 +2358,16 @@ impl ObjectView {
     fn holds(&self, floor: Point) -> bool {
         if let Some(shape) = &self.shape {
             let local = Point { x: floor.x - self.centre.x, y: floor.y - self.centre.y };
-            return shape.points.windows(2).any(|pair| distance_to_segment(local, pair[0].at, pair[1].at) <= shape.width / 2.0);
+            // Its band ends square at its start and end, as drawn, rather than round, so a click
+            // on the object it meets there, such as a cross conveyor, finds that object.
+            let last = shape.points.len().saturating_sub(2);
+            return shape.points.windows(2).enumerate().any(|(index, pair)| {
+                let (start, end) = (pair[0].at, pair[1].at);
+                let (dx, dy) = (end.x - start.x, end.y - start.y);
+                let along = (local.x - start.x) * dx + (local.y - start.y) * dy;
+                let beyond = (index == 0 && along < 0.0) || (index == last && along > dx * dx + dy * dy);
+                !beyond && distance_to_segment(local, start, end) <= shape.width / 2.0
+            });
         }
         let local = rotate(Point { x: floor.x - self.centre.x, y: floor.y - self.centre.y }, -self.rotation_degrees);
         local.x.abs() <= self.length / 2.0 && local.y.abs() <= self.width / 2.0

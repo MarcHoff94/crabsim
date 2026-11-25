@@ -1162,7 +1162,12 @@ fn draw_connections(mut gizmos: Gizmos, ui: Res<Ui>) {
     for (start, end) in ui.view.belt_directions() {
         gizmos.arrow(Vec3::new(start.x as f32, start.y as f32, 0.05), Vec3::new(end.x as f32, end.y as f32, 0.05), BELT_DIRECTION).with_tip_length(0.3);
     }
-    // Each cross conveyor's entries and exits, and its ways straight across.
+    // Each cross conveyor's outline, so it stands out from the conveyors it meets in the same
+    // colour, its entries and exits, and its ways straight across.
+    for object in ui.view.objects().iter().filter(|object| object.sides.is_some()) {
+        let outline = object.outline(0.0);
+        gizmos.linestrip(outline.iter().chain(outline.first()).map(|&point| Vec3::new(point.x as f32, point.y as f32, 0.05)), BELT_DIRECTION);
+    }
     for (start, end) in ui.view.straight_ways() {
         gizmos.line(Vec3::new(start.x as f32, start.y as f32, 0.04), Vec3::new(end.x as f32, end.y as f32, 0.04), STRAIGHT_WAY);
     }
@@ -4384,15 +4389,15 @@ fn plan_fields(ui: &mut egui::Ui, rows: &mut crabsim_ui::attributes::PlanRows, p
     if count == 0 {
         ui.label(egui::RichText::new("No steps: its MUs go nowhere in particular.").weak());
     }
-    egui::Grid::new((salt, "steps")).num_columns(6).spacing([4.0, 2.0]).show(ui, |grid| {
+    egui::Grid::new((salt, "steps")).num_columns(4).min_col_width(0.0).spacing([4.0, 2.0]).show(ui, |grid| {
         for (index, row) in rows.rows.iter_mut().enumerate() {
             grid.push_id((salt, "step", index), |line| {
                 line.label(egui::RichText::new(format!("{}", index + 1)).weak());
             });
-            let shown = if row.at.is_empty() { "choose a place" } else { row.at.as_str() };
+            let shown = if row.at.is_empty() { "choose" } else { row.at.as_str() };
             egui::ComboBox::from_id_salt((salt, "place", index))
                 .selected_text(shown)
-                .width(120.0)
+                .width(58.0)
                 .show_ui(grid, |menu| {
                     egui::ScrollArea::vertical().max_height(240.0).show(menu, |menu| {
                         for place in places {
@@ -4406,18 +4411,22 @@ fn plan_fields(ui: &mut egui::Ui, rows: &mut crabsim_ui::attributes::PlanRows, p
                 .response
                 .on_hover_text("Where the MU goes for this step: an instance, or a class standing for any of its instances");
             commit |= grid
-                .add(egui::TextEdit::singleline(&mut row.time).hint_text("own time").desired_width(56.0))
+                .add_sized([44.0, 18.0], egui::TextEdit::singleline(&mut row.time).hint_text("time"))
                 .on_hover_text("How long a Station this step names works on the MU, such as 0:40. Empty is the Station's own process time")
                 .lost_focus();
-            if grid.add_enabled(index > 0, egui::Button::new("Up").small()).on_hover_text("Move this step one earlier").clicked() {
-                action = Some(RowAction::Down(index - 1));
-            }
-            if grid.add_enabled(index + 1 < count, egui::Button::new("Down").small()).on_hover_text("Move this step one later").clicked() {
-                action = Some(RowAction::Down(index));
-            }
-            if grid.add(egui::Button::new("Remove").small()).on_hover_text("Take this step out of the plan").clicked() {
-                action = Some(RowAction::Remove(index));
-            }
+            // In one cell, close together, so a row fits the docked inspector's width.
+            grid.horizontal(|buttons| {
+                buttons.spacing_mut().item_spacing.x = 2.0;
+                if buttons.add_enabled(index > 0, egui::Button::new("Up").small()).on_hover_text("Move this step one earlier").clicked() {
+                    action = Some(RowAction::Down(index - 1));
+                }
+                if buttons.add_enabled(index + 1 < count, egui::Button::new("Down").small()).on_hover_text("Move this step one later").clicked() {
+                    action = Some(RowAction::Down(index));
+                }
+                if buttons.add(egui::Button::new("Remove").small()).on_hover_text("Take this step out of the plan").clicked() {
+                    action = Some(RowAction::Remove(index));
+                }
+            });
             grid.end_row();
         }
     });

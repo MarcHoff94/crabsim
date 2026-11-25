@@ -549,7 +549,9 @@ fn a_sources_own_work_plan_is_kept_when_its_other_values_change() {
     assert!(form.matches(Some(&json!({ "width": 0.45, "work_plan": plan }))));
     assert_eq!(form.plan.as_ref().unwrap().rows.len(), 2);
     form.parts[1].text = "0.5".into();
-    assert_eq!(form.value(), Ok(json!({ "width": 0.5, "work_plan": plan })), "the plan stays");
+    // The same time, written short, which the file saves as 00:00:40 again.
+    let kept = json!([{ "at": "Saw", "process_time": "0:40" }, { "at": "Out" }]);
+    assert_eq!(form.value(), Ok(json!({ "width": 0.5, "work_plan": kept })), "the plan stays");
 }
 
 #[test]
@@ -582,6 +584,15 @@ fn a_step_needs_a_place_and_a_time_that_reads_as_one() {
     form.plan.as_mut().unwrap().rows[0] = PlanRow { at: "Saw".into(), time: "soon".into() };
     assert!(form.value().unwrap_err().contains("`soon` isn't a time"));
     assert_eq!(summary(&json!([{ "at": "Saw", "process_time": "0:40" }, { "at": "Out" }])), "Saw 0:40, Out");
+}
+
+#[test]
+fn a_steps_time_shows_short_to_fit_its_field_and_reads_back_the_same() {
+    let saved = json!([{ "at": "Saw", "process_time": "00:00:40" }, { "at": "Mill", "process_time": "01:30:00" }]);
+    let form = Form::new("work_plan", Some(&saved));
+    let times: Vec<&str> = form.plan.as_ref().unwrap().rows.iter().map(|row| row.time.as_str()).collect();
+    assert_eq!(times, ["0:40", "01:30:00"], "under an hour as minutes and seconds");
+    assert!(form.matches(Some(&saved)), "nothing waits to be applied");
 }
 
 #[test]

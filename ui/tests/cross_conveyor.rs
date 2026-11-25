@@ -240,3 +240,15 @@ fn an_object_window_gives_a_cross_conveyor_s_switching_and_sides_and_a_station_s
     let on = rows.iter().find(|(label, _)| *label == "On plan").map(|(_, value)| value.clone());
     assert!(on.is_some_and(|on| on != "0"), "{rows:?}");
 }
+
+#[test]
+fn a_click_on_a_cross_conveyor_between_conveyors_finds_it_and_not_the_conveyors_ending_there() {
+    // The Fork's centre is half a conveyor's width from where the Feed ends and the Lane and the
+    // Spur start.
+    let view = ViewState::new(&crabsim::demo::cross_line());
+    let id = |name: &str| view.objects().iter().find(|object| object.name == name).unwrap().id;
+    let fork = view.objects()[id("Fork") as usize].centre;
+    assert_eq!(view.object_at(fork), Some(id("Fork")));
+    assert_eq!(view.object_at(Point { x: fork.x + 0.25, y: fork.y + 0.25 }), Some(id("Fork")), "near its corner too");
+    assert_eq!(view.object_at(Point { x: fork.x + 0.4, y: fork.y }), Some(id("Lane")), "just past its front, the Lane");
+}

@@ -117,6 +117,16 @@ pub fn summary(value: &Value) -> String {
     format!("notes on {}", fields.keys().cloned().collect::<Vec<_>>().join(", "))
 }
 
+/// A time as short as it reads back the same, so a step's time fits its narrow field: under an
+/// hour as minutes and seconds, such as "0:20" for a file's "00:00:20". Anything else, or a
+/// fraction of a second, stays as written.
+fn short_time(text: &str) -> String {
+    match parse_time(text) {
+        Some(time) if time.as_millis() % 1_000 == 0 && time.as_secs() < 3_600 => format!("{}:{:02}", time.as_secs() / 60, time.as_secs() % 60),
+        _ => text.to_string(),
+    }
+}
+
 /// A work plan's steps on one line, each with its time where it has one.
 fn work_plan_summary(steps: &[Value]) -> String {
     steps
@@ -228,7 +238,7 @@ impl PlanRows {
             .and_then(Value::as_array)
             .into_iter()
             .flatten()
-            .map(|step| PlanRow { at: text_of(step.get("at")), time: text_of(step.get("process_time")) })
+            .map(|step| PlanRow { at: text_of(step.get("at")), time: short_time(&text_of(step.get("process_time"))) })
             .collect();
         PlanRows { rows }
     }

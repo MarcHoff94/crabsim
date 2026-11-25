@@ -159,8 +159,10 @@ fn a_work_plan_a_detour_and_exits_edited_in_their_forms_are_saved_as_given() {
     // The Fork's front lists Paint too.
     let exits = value_of(&workspace, None, "Fork", "exits");
     let mut form = crabsim_ui::attributes::Form::for_attribute("exits", exits.as_ref(), &[], &names);
-    let front = form.exits.as_mut().unwrap().sides.iter_mut().find(|(side, _)| *side == Side::Front).unwrap();
-    front.1.iter_mut().find(|(name, _)| name == "Paint").unwrap().1 = true;
+    let lists = form.exits.as_mut().unwrap();
+    let front = Side::ALL.iter().position(|&side| side == Side::Front).unwrap();
+    lists.typed[front] = "Paint".into();
+    assert!(lists.add_typed(front));
     workspace.set_attribute("Fork", "exits", form.value().unwrap(), false).unwrap();
     picked_up(&mut workspace);
     let saved = value_of(&workspace, None, "Fork", "exits");

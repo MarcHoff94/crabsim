@@ -203,8 +203,8 @@ pub struct Form {
     pub path: Option<PathRows>,
     /// For a work plan, or a Source's own MU values: its steps as rows of fields.
     pub plan: Option<PlanRows>,
-    /// For a cross conveyor's exits: each side's destinations, ticked from the model's names.
-    pub exits: Option<ExitTicks>,
+    /// For a cross conveyor's exits: each side's destinations.
+    pub exits: Option<ExitLists>,
 }
 
 /// The names of the open model that forms offer to choose from.
@@ -285,56 +285,79 @@ impl PlanRows {
     }
 }
 
-/// A cross conveyor's exits as ticks (spec issue 148): for each side, every name a destination
-/// can be, ticked where the side lists it.
+/// A cross conveyor's exits (spec issue 148): for each side, the destinations it lists, in order,
+/// and a name being typed to add to it.
 #[derive(Debug, Clone, PartialEq, Default)]
-pub struct ExitTicks {
+pub struct ExitLists {
     /// In `Side::ALL`'s order.
-    pub sides: Vec<(Side, Vec<(String, bool)>)>,
+    pub sides: Vec<(Side, Vec<String>)>,
+    /// For each side, in the same order, what has been typed to add.
+    pub typed: Vec<String>,
 }
 
-impl ExitTicks {
-    /// The ticks for `value`, each side's lists as a model file writes them, over `names`, then
-    /// any other name a side lists, so saving again never drops one silently.
-    pub fn from_value(value: Option<&Value>, names: &[String]) -> ExitTicks {
-        let sides = Side::ALL
+impl ExitLists {
+    /// The lists for `value`, each side's as a model file writes them.
+    pub fn from_value(value: Option<&Value>) -> ExitLists {
+        let sides: Vec<(Side, Vec<String>)> = Side::ALL
             .into_iter()
             .map(|side| {
-                let listed: Vec<String> = value
+                let listed = value
                     .and_then(|exits| exits.get(side.name()))
                     .and_then(Value::as_array)
                     .map(|names| names.iter().filter_map(|name| name.as_str().map(str::to_owned)).collect())
                     .unwrap_or_default();
-                let mut ticks: Vec<(String, bool)> = names.iter().map(|name| (name.clone(), listed.contains(name))).collect();
-                ticks.extend(listed.iter().filter(|name| !names.contains(name)).map(|name| (name.clone(), true)));
-                (side, ticks)
+                (side, listed)
             })
             .collect();
-        ExitTicks { sides }
+        ExitLists { typed: vec![String::new(); sides.len()], sides }
     }
 
-    /// Each side listing anything, with its names ticked, in the order offered.
+    /// Each side listing anything, with its names in order.
     pub fn value(&self) -> Value {
         let mut exits = Map::new();
-        for (side, ticks) in &self.sides {
-            let ticked: Vec<&String> = ticks.iter().filter(|(_, ticked)| *ticked).map(|(name, _)| name).collect();
-            if !ticked.is_empty() {
-                exits.insert(side.name().into(), json!(ticked));
+        for (side, names) in &self.sides {
+            if !names.is_empty() {
+                exits.insert(side.name().into(), json!(names));
             }
         }
         Value::Object(exits)
     }
 
+    /// Adds what was typed for the side at `place` to its list, unless it is empty or already
+    /// there. Returns whether the list changed.
+    pub fn add_typed(&mut self, place: usize) -> bool {
+        let name = std::mem::take(&mut self.typed[place]).trim().to_string();
+        let names = &mut self.sides[place].1;
+        if name.is_empty() || names.contains(&name) {
+            return false;
+        }
+        names.push(name);
+        true
+    }
+
+    /// Takes the name at `index` off the side at `place`.
+    pub fn remove(&mut self, place: usize, index: usize) {
+        if index < self.sides[place].1.len() {
+            self.sides[place].1.remove(index);
+        }
+    }
+
     /// What a side lists, such as "Mill, Rework", or "none".
     pub fn listed(&self, side: Side) -> String {
-        let names: Vec<&str> = self
-            .sides
-            .iter()
-            .filter(|(listed, _)| *listed == side)
-            .flat_map(|(_, ticks)| ticks.iter().filter(|(_, ticked)| *ticked).map(|(name, _)| name.as_str()))
-            .collect();
+        let names: Vec<&str> = self.sides.iter().filter(|(listed, _)| *listed == side).flat_map(|(_, names)| names.iter().map(String::as_str)).collect();
         if names.is_empty() { "none".to_string() } else { names.join(", ") }
     }
+}
+
+/// The names that complete what was typed, at most `limit`, for a field that takes one of the
+/// model's names: those beginning with it first, then those containing it, each in the order
+/// given, ignoring case. Nothing typed offers the first names.
+pub fn completions<'a>(names: &'a [String], typed: &str, limit: usize) -> Vec<&'a str> {
+    let typed = typed.trim().to_lowercase();
+    let lower: Vec<String> = names.iter().map(|name| name.to_lowercase()).collect();
+    let starting = names.iter().zip(&lower).filter(|(_, low)| low.starts_with(&typed));
+    let containing = names.iter().zip(&lower).filter(|(_, low)| !low.starts_with(&typed) && low.contains(&typed));
+    starting.chain(containing).map(|(name, _)| name.as_str()).take(limit).collect()
 }
 
 /// The kinds of segment, as the path editor's menu offers them.
@@ -816,13 +839,14 @@ impl Form {
             "mu_values" => Some(PlanRows::from_value(value.and_then(|values| values.get("work_plan")))),
             _ => None,
         };
-        let exits = (attribute == "exits").then(|| ExitTicks::from_value(value, &[]));
+        let exits = (attribute == "exits").then(|| ExitLists::from_value(value));
         Form { attribute: attribute.to_string(), parts, repair, distribution: None, options, profiles: None, choices: Vec::new(), path, plan, exits }
     }
 
     /// The fields for `attribute`, whatever it is: state notes need the `states` the object can be
     /// in, and the rest the model's `names`: a distribution its Drains, an MU class its MU classes,
-    /// a detour, a work plan's steps and exits the names a destination can be.
+    /// a detour, a work plan's steps and exits the names a destination can be, to complete what is
+    /// typed.
     pub fn for_attribute(attribute: &str, value: Option<&Value>, states: &[State], names: &Names) -> Form {
         match attribute {
             "state_notes" => Form::state_notes(states, value),
@@ -830,9 +854,8 @@ impl Form {
             "mu_class" => Form { choices: names.mu_classes.to_vec(), ..Form::new(attribute, value) },
             // Each step's place is chosen from them.
             "work_plan" | "mu_values" => Form { choices: names.destinations.to_vec(), ..Form::new(attribute, value) },
-            // None first, which a model file says by leaving it out.
-            "detour" => Form { choices: std::iter::once(String::new()).chain(names.destinations.iter().cloned()).collect(), ..Form::new(attribute, value) },
-            "exits" => Form { exits: Some(ExitTicks::from_value(value, &names.destinations)), ..Form::new(attribute, value) },
+            // Typed, completed from the names a destination can be.
+            "detour" | "exits" => Form { choices: names.destinations.to_vec(), ..Form::new(attribute, value) },
             attribute => Form::new(attribute, value),
         }
     }
@@ -1023,7 +1046,7 @@ impl Form {
                 Ok(if values.is_empty() { Value::Null } else { Value::Object(values) })
             }
             "work_plan" => self.plan.as_ref().map_or(Ok(json!([])), PlanRows::value),
-            "exits" => Ok(self.exits.as_ref().map_or(json!({}), ExitTicks::value)),
+            "exits" => Ok(self.exits.as_ref().map_or(json!({}), ExitLists::value)),
             // None is no detour, which a model file says by leaving it out.
             "detour" if text(0).is_empty() => Ok(Value::Null),
             _ => Ok(json!(text(0))),

@@ -7,7 +7,7 @@ use crabsim::{Position, SimTime};
 use crabsim_catalogue::{Catalogue, Settings, Source};
 use crabsim_model::State;
 use crabsim::Side;
-use crabsim_ui::attributes::{summary, Form, Names, PlanRow, RepairKind};
+use crabsim_ui::attributes::{completions, summary, Form, Names, PlanRow, RepairKind};
 use crabsim_ui::view::Change;
 use crabsim_ui::workspace::{ModelChange, Refusal, ValueFrom, Workspace};
 use serde_json::{json, Value};
@@ -606,12 +606,12 @@ fn a_sources_own_work_plan_is_its_rows_and_none_takes_the_mu_classes() {
 }
 
 #[test]
-fn a_detour_is_chosen_from_the_destinations_or_none() {
+fn a_detour_is_typed_completed_from_the_destinations_and_empty_is_none() {
     let names = Names { destinations: vec!["Mills".into(), "Rework".into()], ..Names::default() };
     let mut form = Form::for_attribute("detour", None, &[], &names);
-    assert_eq!(form.choices, ["", "Mills", "Rework"], "none first");
+    assert_eq!(form.choices, ["Mills", "Rework"], "what typing completes from");
     assert!(form.matches(None));
-    assert_eq!(form.value(), Ok(Value::Null), "none is no detour");
+    assert_eq!(form.value(), Ok(Value::Null), "nothing typed is no detour");
     form.parts[0].text = "Rework".into();
     assert_eq!(form.value(), Ok(json!("Rework")));
     assert!(!form.matches(None));
@@ -619,22 +619,39 @@ fn a_detour_is_chosen_from_the_destinations_or_none() {
 }
 
 #[test]
-fn a_cross_conveyors_exits_are_ticked_per_side_from_the_destinations() {
+fn typing_part_of_a_name_offers_those_beginning_with_it_then_those_containing_it() {
+    let names: Vec<String> = ["Mill 1", "Saw", "Mill 2", "Paint mill", "Out"].iter().map(|name| name.to_string()).collect();
+    assert_eq!(completions(&names, "mil", 8), ["Mill 1", "Mill 2", "Paint mill"], "ignoring case");
+    assert_eq!(completions(&names, "mil", 2), ["Mill 1", "Mill 2"], "at most the limit");
+    assert_eq!(completions(&names, "", 3), ["Mill 1", "Saw", "Mill 2"], "nothing typed offers the first");
+    assert!(completions(&names, "lathe", 8).is_empty());
+}
+
+#[test]
+fn a_cross_conveyors_exits_are_each_sides_names_added_and_removed() {
     let names = Names { destinations: vec!["Mill".into(), "Paint".into(), "Out".into()], ..Names::default() };
     let given = json!({ "left": ["Out", "Mill"], "right": ["Gone"] });
     let mut form = Form::for_attribute("exits", Some(&given), &[], &names);
+    assert_eq!(form.choices, names.destinations, "what typing completes from");
     let exits = form.exits.as_ref().unwrap();
     assert_eq!(exits.sides.iter().map(|(side, _)| *side).collect::<Vec<_>>(), Side::ALL);
-    assert_eq!(exits.listed(Side::Left), "Mill, Out");
-    // A name that isn't a destination stays ticked, so saving never drops it.
-    assert_eq!(exits.listed(Side::Right), "Gone");
+    assert_eq!(exits.listed(Side::Left), "Out, Mill", "in the file's order");
+    assert_eq!(exits.listed(Side::Right), "Gone", "a name that isn't a destination stays");
     assert_eq!(exits.listed(Side::Front), "none");
-    assert!(form.matches(Some(&given)), "whatever order a side lists its names in");
+    assert!(form.matches(Some(&given)));
 
-    let front = form.exits.as_mut().unwrap().sides.iter_mut().find(|(side, _)| *side == Side::Front).unwrap();
-    front.1.iter_mut().find(|(name, _)| name == "Paint").unwrap().1 = true;
+    let exits = form.exits.as_mut().unwrap();
+    let front = Side::ALL.iter().position(|&side| side == Side::Front).unwrap();
+    exits.typed[front] = " Paint ".into();
+    assert!(exits.add_typed(front));
+    assert!(exits.typed[front].is_empty(), "the field empties once added");
+    exits.typed[front] = "Paint".into();
+    assert!(!exits.add_typed(front), "already listed");
+    assert!(!exits.add_typed(front), "nothing typed");
+    let right = Side::ALL.iter().position(|&side| side == Side::Right).unwrap();
+    exits.remove(right, 0);
     assert!(!form.matches(Some(&given)));
-    assert_eq!(form.value(), Ok(json!({ "front": ["Paint"], "left": ["Mill", "Out"], "right": ["Gone"] })));
+    assert_eq!(form.value(), Ok(json!({ "front": ["Paint"], "left": ["Out", "Mill"] })));
 
     let none = Form::for_attribute("exits", None, &[], &names);
     assert_eq!(none.value(), Ok(json!({})));

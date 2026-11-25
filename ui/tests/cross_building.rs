@@ -170,3 +170,22 @@ fn a_work_plan_a_detour_and_exits_edited_in_their_forms_are_saved_as_given() {
     assert!(form.matches(saved.as_ref()), "nothing waits once saved");
     assert_eq!(workspace.exit_lists().into_iter().find(|(id, _)| *id == id_of(&workspace, "Fork")).unwrap().1, vec![(Side::Front, vec!["Paint".to_string()]), (Side::Left, vec!["Mill".to_string()])]);
 }
+
+#[test]
+fn a_conveyors_end_meets_a_cross_conveyor_at_the_middle_of_the_side_its_connection_names() {
+    let folder = Folder::new("fits");
+    let mut workspace = open(&folder);
+    let shown = |workspace: &Workspace, name: &str| {
+        let mut view = ViewState::new(workspace.description());
+        view.set_shapes(workspace.shapes());
+        view.end_fits(id_of(workspace, name)).iter().map(|fit| fit.describe()).collect::<Vec<_>>()
+    };
+    // The Spur leaves the Fork's left side heading up, as the example lays it.
+    assert_eq!(shown(&workspace, "Spur"), ["Start: meets Fork", "End: meets Mill"]);
+    // Moved half a metre further up (its drawn centre, 1.5 m past its start), it says how far it
+    // is from that side's middle.
+    workspace.move_instance("Spur", crabsim::Position { x: 12.3, y: 2.3, z: 0.0 }, false).unwrap();
+    picked_up(&mut workspace);
+    let fits = shown(&workspace, "Spur");
+    assert!(fits[0].starts_with("Start: 0.50 m from the middle of Fork's left side"), "{fits:?}");
+}

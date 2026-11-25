@@ -565,11 +565,14 @@ struct ClassWindow {
     forms: HashMap<String, Form>,
     /// The field to give the keyboard once it is drawn, as when opened at a value.
     focus: Option<String>,
+    /// The last change refused, shown at its field, with the change to make anyway while an agent
+    /// holds the file, as an object window keeps its own.
+    refused: Option<(String, Refusal, Option<AttributeChange>)>,
 }
 
 impl ClassWindow {
     fn new(class: String, focus: Option<String>) -> ClassWindow {
-        ClassWindow { class, values: None, forms: HashMap::new(), focus }
+        ClassWindow { class, values: None, forms: HashMap::new(), focus, refused: None }
     }
 }
 
@@ -1616,13 +1619,28 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
         None => {}
     }
     let class_asked_change = class_window(&ctx, ui, canvas_right_for_windows(&ctx));
+    // A change in the class window is refused at its field, as in an object window.
     if let Some((class, (change, take_over))) = class_asked_change {
-        let building = match change {
+        let building = match change.clone() {
             AttributeChange::Set(attribute, value) => Building::SetClassAttribute { class, attribute, value },
             AttributeChange::Restore(attribute) => Building::RestoreClassAttribute { class, attribute },
         };
         ui.view.commanded(wall);
-        build(ui, building, take_over);
+        match building.apply(&mut ui.workspace, take_over) {
+            Ok(_) => {
+                ui.history = None;
+                if let Some(window) = ui.class_window.as_mut() {
+                    window.refused = None;
+                }
+            }
+            Err(refusal) => match ui.class_window.as_mut() {
+                Some(window) => {
+                    let again = matches!(refusal, Refusal::NotEditor(_)).then(|| change.clone());
+                    window.refused = Some((change.attribute().to_string(), refusal, again));
+                }
+                None => ui.build_error = Some(format!("{} didn't happen: {refusal}", building.what())),
+            },
+        }
     }
     if let (Some(asked), Some((from, to))) = (connection_asked, shown_connection) {
         let (from, to) = (ui.view.objects()[from as usize].name.clone(), ui.view.objects()[to as usize].name.clone());
@@ -2061,6 +2079,7 @@ fn replace_session(ui: &mut Ui, session: &Session, new_model: bool, wall: Durati
         }
         if let Some(window) = ui.class_window.as_mut() {
             window.values = None;
+            window.refused = None;
         }
     }
     ui.rebuild_scene = true;
@@ -2530,7 +2549,7 @@ fn class_window(ctx: &egui::Context, ui: &mut Ui, canvas_right: f32) -> Option<(
                 match &window.values {
                     None => {}
                     Some(values) => {
-                        asked = attributes_section(inside, values, &mut window.forms, editable, None, "class ").map(|change| (window.class.clone(), change));
+                        asked = attributes_section(inside, values, &mut window.forms, editable, window.refused.as_ref(), "class ").map(|change| (window.class.clone(), change));
                     }
                 }
             });

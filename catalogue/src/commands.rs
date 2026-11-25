@@ -165,6 +165,7 @@ pub fn find(names: &[&str], wanted: &str, what: &str) -> Result<String, String> 
 /// `stop_freezes_dwelling`.
 pub fn attribute(wanted: &str) -> Result<Attribute, String> {
     let plain = |text: &str| text.to_lowercase().replace([' ', '_'], "");
+    let typed = wanted.trim().to_lowercase().replace(' ', "_");
     let wanted = plain(wanted);
     if let Some(exact) = Attribute::ALL.into_iter().find(|attribute| plain(attribute.name()) == wanted) {
         return Ok(exact);
@@ -172,6 +173,16 @@ pub fn attribute(wanted: &str) -> Result<Attribute, String> {
     let holding: Vec<Attribute> = Attribute::ALL.into_iter().filter(|attribute| !wanted.is_empty() && plain(attribute.name()).contains(&wanted)).collect();
     let beginning: Vec<Attribute> = holding.iter().copied().filter(|attribute| plain(attribute.name()).starts_with(&wanted)).collect();
     if let ([_, _, ..], [only]) = (holding.as_slice(), beginning.as_slice()) {
+        return Ok(*only);
+    }
+    // Several begin with it, but only one has it as a whole word: `exit` is `exit_strategy`, not
+    // `exits`.
+    let whole_word: Vec<Attribute> = beginning
+        .iter()
+        .copied()
+        .filter(|attribute| attribute.name().strip_prefix(typed.as_str()).is_some_and(|rest| rest.is_empty() || rest.starts_with('_')))
+        .collect();
+    if let ([_, _, ..], [only]) = (beginning.as_slice(), whole_word.as_slice()) {
         return Ok(*only);
     }
     match holding.as_slice() {
@@ -191,7 +202,7 @@ pub fn attribute(wanted: &str) -> Result<Attribute, String> {
 /// or work plan that reads as neither says what's wrong with its short form.
 fn value(attribute: Attribute, typed: &str, names: &Names) -> Result<Value, String> {
     let typed = typed.trim();
-    if matches!(attribute, Attribute::Interval | Attribute::ProcessTime | Attribute::DwellingTime) {
+    if matches!(attribute, Attribute::Interval | Attribute::ProcessTime | Attribute::DwellingTime | Attribute::SwitchTime | Attribute::ReleaseTime) {
         return Ok(json!(typed));
     }
     if attribute == Attribute::WorkPlan {
@@ -527,7 +538,17 @@ fn read_command(command: &str, model: &Model, context: &Context, names: &mut Nam
                 .split_once('>')
                 .map(|(from, to)| (from.trim().to_string(), to.trim().to_string()))
                 .ok_or_else(|| format!("write it as {verb} … > …"))?;
-            Ok(planned(vec![json!({ "change": verb, "from": names.instance(&from)?, "to": names.instance(&to)? })]))
+            // A cross conveyor's end names its side, as Cross.left.
+            let ((from, from_side), (to, to_side)) = (end(&from, names)?, end(&to, names)?);
+            let mut change = json!({ "change": verb, "from": from, "to": to });
+            if verb == "connect" {
+                for (key, side) in [("from_side", from_side), ("to_side", to_side)] {
+                    if let Some(side) = side {
+                        change[key] = json!(side.name());
+                    }
+                }
+            }
+            Ok(planned(vec![change]))
         }
         "rename" => {
             let (name, to) = split(rest, "to")?;
@@ -541,6 +562,28 @@ fn read_command(command: &str, model: &Model, context: &Context, names: &mut Nam
             let name = names.instance(rest)?;
             names.instances.retain(|placed| placed.name != name);
             Ok(Planned { removes: true, ..planned(vec![json!({ "change": "remove_instance", "name": name })]) })
+        }
+        "set" | "restore" if exits_address(rest, names).is_some() => {
+            let (target, side, typed) = exits_address(rest, names).expect("checked")?;
+            // Exits are inherited as a whole, so the list the target has now is copied, with this
+            // side's destinations replaced, or taken out when none are given.
+            let mut exits = current_exits(model, &target);
+            let listed: Vec<String> = if verb == "set" {
+                typed.split(',').map(str::trim).filter(|piece| !piece.is_empty()).map(|piece| place(piece.trim_matches('"'), names)).collect::<Result<_, _>>()?
+            } else {
+                Vec::new()
+            };
+            if listed.is_empty() {
+                exits.remove(side.name());
+            } else {
+                exits.insert(side.name().to_string(), json!(listed));
+            }
+            let change = if exits.is_empty() {
+                json!({ "change": "restore_inheritance", "target": target, "attribute": "exits" })
+            } else {
+                json!({ "change": "set_attribute", "target": target, "attribute": "exits", "value": Value::Object(exits) })
+            };
+            Ok(planned(vec![change]))
         }
         "set" | "restore" => {
             let (target, attribute, typed) = address(rest, names)?;
@@ -877,6 +920,50 @@ fn address(text: &str, names: &Names) -> Result<(Value, Attribute, String), Stri
     last
 }
 
+/// An end of a connection: an instance's name, and for a cross conveyor the side after a dot, as
+/// `Cross.left`. A name holding a dot is read whole first.
+fn end(text: &str, names: &Names) -> Result<(String, Option<crabsim_model::Side>), String> {
+    if let Some((name, side)) = text.rsplit_once('.')
+        && let Some(side) = crabsim_model::Side::from_name(&side.trim().to_lowercase())
+        && names.instances.iter().all(|placed| placed.name != text)
+    {
+        return Ok((names.instance(name.trim())?, Some(side)));
+    }
+    Ok((names.instance(text)?, None))
+}
+
+/// `Cross.exits.left Mill, Rework` as the instance (or else class) it names, the side, and what
+/// follows, if it is written so.
+fn exits_address(text: &str, names: &Names) -> Option<Result<(Value, crabsim_model::Side, String), String>> {
+    let (name, rest) = text.split_once(".exits.")?;
+    let (side, typed) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
+    let Some(side) = crabsim_model::Side::from_name(&side.to_lowercase()) else {
+        return Some(Err(format!("`{side}` is no side: write it as {name}.exits.left, with front, back, left or right")));
+    };
+    let target = match names.instance(name.trim()) {
+        Ok(instance) => json!({ "instance": instance }),
+        Err(why) => match names.class(name.trim()) {
+            Ok(class) => json!({ "class": class }),
+            Err(_) => return Some(Err(why)),
+        },
+    };
+    Some(Ok((target, side, typed.to_string())))
+}
+
+/// The exits the instance or class `target` has in `model` now, set on it or inherited, as a
+/// file writes them.
+fn current_exits(model: &Model, target: &Value) -> serde_json::Map<String, Value> {
+    let resolved = match (target["instance"].as_str(), target["class"].as_str()) {
+        (Some(name), _) => model.instances.iter().position(|instance| instance.name == name).and_then(|index| model.resolve(index)),
+        (None, Some(class)) => model.resolve_class(class),
+        (None, None) => None,
+    };
+    resolved
+        .and_then(|resolved| resolved.attributes.exits)
+        .map(|exits| exits.into_iter().map(|(side, names)| (side.name().to_string(), json!(names))).collect())
+        .unwrap_or_default()
+}
+
 fn target_name(target: &Value) -> &str {
     target["instance"].as_str().or_else(|| target["class"].as_str()).unwrap_or_default()
 }
@@ -916,6 +1003,30 @@ pub fn complete(line: &str, model: &Model, macros: &[String]) -> Vec<String> {
     // A name after `>` begins after any spaces, which the completed line keeps as typed.
     let spaces = partial.len() - partial.trim_start().len();
     let (before, partial) = command.split_at(start.min(command.len()) + spaces);
+    // A side after `Cross.` at an end of a connection, or after `Cross.exits.`.
+    if let Some((name, typed)) = partial.rsplit_once('.')
+        && (matches!(*verb, "connect" | "disconnect") || (name.ends_with(".exits") && matches!(*verb, "set" | "restore")))
+        && !typed.contains(' ')
+    {
+        let instance = name.strip_suffix(".exits").unwrap_or(name);
+        let is_cross = model.instances.iter().position(|i| i.name == instance).and_then(|index| model.resolve(index)).is_some_and(|resolved| resolved.built_in == "CrossConveyor");
+        if is_cross {
+            let space = if *verb == "set" { " " } else { "" };
+            return ["front", "back", "left", "right"].iter().filter(|side| side.starts_with(typed) && **side != typed).map(|side| format!("{lead}{before}{name}.{side}{space}")).collect();
+        }
+    }
+    // A destination after `set Cross.exits.left `, completed whole after the last comma.
+    if let Some(at) = partial.find(".exits.")
+        && *verb == "set"
+        && let Some((_, typed)) = partial[at + ".exits.".len()..].split_once(' ')
+    {
+        let piece = typed[typed.rfind(',').map_or(0, |at| at + 1)..].trim_start();
+        let kept = &partial[..partial.len() - piece.len()];
+        let lower = piece.to_lowercase();
+        let mut pool: Vec<&str> = names.instances.iter().map(|placed| placed.name.as_str()).collect();
+        pool.extend(names.classes.iter().map(String::as_str).filter(|class| !model.is_mu_class(class)));
+        return pool.iter().filter(|name| !lower.is_empty() && name.to_lowercase().starts_with(&lower) && **name != piece).map(|name| format!("{lead}{before}{kept}{name}")).collect();
+    }
     // A value after `set object.attribute `: a direction, or a word of a path's short form.
     let value_typed = partial.match_indices('.').find_map(|(dot, _)| {
         let (attribute, typed) = partial[dot + 1..].split_once(' ')?;

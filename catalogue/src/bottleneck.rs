@@ -1,7 +1,7 @@
 //! The likely bottleneck, by one rule for everyone: the window applies it to a live run's state,
 //! and `find_bottleneck` to a run in the results store, so a person and an agent never disagree.
 //!
-//! The rule: among Stations and Conveyors, the one busy and full or interrupted (failed, stopped or paused) the largest share
+//! The rule: among Stations, Conveyors and cross conveyors, the one busy and full or interrupted (failed, stopped or paused) the largest share
 //! of the time. A Station with capacity working with free places isn't what limits the flow, and nor is a Conveyor moving MUs with room at its start, or accumulating behind a slow successor. The glossary's bottleneck is what limits the flow, with what is upstream of it mostly
 //! blocked and what is downstream mostly starved, so its direct neighbours' shares come with it as
 //! evidence. It is likely, not certain: changing it and comparing runs settles it.
@@ -23,7 +23,7 @@ pub(crate) fn entries() -> Vec<Entry> {
 const RANKING_LENGTH: usize = 5;
 
 /// What the rule says, for anyone reading its answer.
-pub const RULE: &str = "The likely bottleneck is the Station or Conveyor busy and full or interrupted (failed, stopped or paused) the largest share of the time: a Station with a capacity above 1 counts only the time every place was in work, not time working with free places or while a finished MU couldn't leave, and a Conveyor only the time it moved MUs with its start taken, so that no MU could enter, not time moving with room at its start or while the MU at its end waited for a successor. It is likely, not certain: what is upstream of a bottleneck is mostly blocked and what is downstream mostly idle, waiting for MUs, so check its neighbours, and settle it by running the model with it faster and comparing the runs.";
+pub const RULE: &str = "The likely bottleneck is the Station or Conveyor busy and full or interrupted (failed, stopped or paused) the largest share of the time: a Station with a capacity above 1 counts only the time every place was in work, not time working with free places or while a finished MU couldn't leave, and a Conveyor only the time it moved MUs with its start taken, so that no MU could enter, not time moving with room at its start or while the MU at its end waited for a successor, and a CrossConveyor all the time it held an MU, moving, switching or waiting at a side. It is likely, not certain: what is upstream of a bottleneck is mostly blocked and what is downstream mostly idle, waiting for MUs, so check its neighbours, and settle it by running the model with it faster and comparing the runs.";
 
 /// One object's shares of the time measured, from 0 to 1, for judging the bottleneck.
 #[derive(Debug, Clone, PartialEq)]
@@ -42,8 +42,11 @@ pub struct Shares {
 
 impl Shares {
     /// Busy and full, or interrupted: the share of time it worked at its limit or was kept from it.
+    /// A cross conveyor holds one MU at a time, so its MU standing at a side that can't take it
+    /// counts as full too (spec issue 148).
     pub fn full_or_interrupted(&self) -> f64 {
-        self.working_full + self.failed + self.paused
+        let blocked = if self.built_in == "CrossConveyor" { self.blocked } else { 0.0 };
+        self.working_full + blocked + self.failed + self.paused
     }
 }
 
@@ -68,7 +71,7 @@ pub struct LikelyBottleneck {
 /// The likely bottleneck among `objects`, with `connections` from predecessor to successor by
 /// name, or `None` without Stations or Conveyors. A tie goes to the one listed first.
 pub fn likely_bottleneck(objects: &[Shares], connections: &[(String, String)]) -> Option<LikelyBottleneck> {
-    let mut stations: Vec<&Shares> = objects.iter().filter(|object| object.built_in == "Station" || object.built_in == "Conveyor").collect();
+    let mut stations: Vec<&Shares> = objects.iter().filter(|object| matches!(object.built_in.as_str(), "Station" | "Conveyor" | "CrossConveyor")).collect();
     // Stable, so a tie keeps the order the objects were listed in.
     stations.sort_by(|a, b| b.full_or_interrupted().total_cmp(&a.full_or_interrupted()));
     let found = *stations.first()?;

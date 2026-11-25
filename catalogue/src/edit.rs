@@ -101,12 +101,26 @@ pub enum Change {
         entrance: Option<u64>,
         /// What the connection is, such as "via the lift".
         description: Option<String>,
+        /// The side of `from` it leaves by, `front`, `back`, `left` or `right`: given when `from`
+        /// is a cross conveyor, and only then.
+        from_side: Option<String>,
+        /// The side of `to` it comes in by: given when `to` is a cross conveyor, and only then.
+        to_side: Option<String>,
     },
     /// Removes the connection from `from` to `to`. The other connections at both ends close up.
     Disconnect { from: String, to: String },
     /// Moves the connection from `from` to `to` to exit `exit` of `from` or entrance `entrance` of
-    /// `to`, the others moving to make room, or sets its description, which `""` removes.
-    SetConnection { from: String, to: String, exit: Option<u64>, entrance: Option<u64>, description: Option<String> },
+    /// `to`, the others moving to make room, or sets its description, which `""` removes, or the
+    /// side of a cross conveyor at either end it leaves or comes in by.
+    SetConnection {
+        from: String,
+        to: String,
+        exit: Option<u64>,
+        entrance: Option<u64>,
+        description: Option<String>,
+        from_side: Option<String>,
+        to_side: Option<String>,
+    },
     /// Adds a class derived from `parent`, a built-in or another class.
     AddClass {
         name: String,
@@ -201,7 +215,7 @@ impl Change {
             Change::MoveInstance { name, position } => format!("move {name} to {}", place(position)),
             Change::SetClass { name, class } => format!("set the class of {name} to {class}"),
             Change::DuplicateInstance { name, to, .. } => format!("duplicate {name} as {to}"),
-            Change::Connect { from, to, .. } => format!("connect {from} > {to}"),
+            Change::Connect { from, to, from_side, to_side, .. } => format!("connect {} > {}", at_side(from, from_side), at_side(to, to_side)),
             Change::Disconnect { from, to } => format!("disconnect {from} > {to}"),
             Change::SetConnection { from, to, .. } => format!("set the connection {from} > {to}"),
             Change::AddClass { name, parent, .. } => format!("derive {parent} as {name}"),
@@ -257,8 +271,8 @@ impl Draft {
         self.model["instances"].as_array_mut().expect("a loaded model has instances")
     }
 
-    /// Every work plan step and detour that names `name`, an instance or a class, names `to`
-    /// instead (ADR 0025), so a rename keeps where MUs go.
+    /// Every work plan step, detour and cross conveyor exit that names `name`, an instance or a
+    /// class, names `to` instead (ADR 0025), so a rename keeps where MUs go.
     fn rename_destination(&mut self, name: &str, to: &str) {
         // Only what is there is touched: indexing a missing key mutably would add it.
         let rename_steps = |plan: Option<&mut Value>| {
@@ -275,6 +289,13 @@ impl Draft {
             }
             rename_steps(attributes.get_mut("work_plan"));
             rename_steps(attributes.get_mut("mu_values").and_then(|values| values.get_mut("work_plan")));
+            for names in attributes.get_mut("exits").and_then(Value::as_object_mut).into_iter().flat_map(|exits| exits.values_mut()) {
+                for listed in names.as_array_mut().into_iter().flatten() {
+                    if listed == name {
+                        *listed = json!(to);
+                    }
+                }
+            }
         };
         self.instances().iter_mut().for_each(rename);
         self.classes().iter_mut().for_each(rename);
@@ -385,7 +406,8 @@ impl Draft {
 
     /// Connects `from` to `to`, checking both names and both places first, so a refusal changes
     /// nothing.
-    fn connect(&mut self, from: &str, to: &str, exit: Option<u64>, entrance: Option<u64>, description: Option<String>) -> Result<(), Refusal> {
+    #[allow(clippy::too_many_arguments)]
+    fn connect(&mut self, from: &str, to: &str, exit: Option<u64>, entrance: Option<u64>, description: Option<String>, from_side: Option<String>, to_side: Option<String>) -> Result<(), Refusal> {
         self.instance(from)?;
         self.instance(to)?;
         if self.connection(from, to).is_ok() {
@@ -396,6 +418,11 @@ impl Draft {
         let mut connection = json!({ "from": from, "to": to, "exit": 0, "entrance": 0 });
         if let Some(description) = description.filter(|description| !description.is_empty()) {
             connection["description"] = json!(description);
+        }
+        for (key, side) in [("from_side", from_side), ("to_side", to_side)] {
+            if let Some(side) = side.filter(|side| !side.is_empty()) {
+                connection[key] = json!(side);
+            }
         }
         self.connections().push(connection);
         let index = self.connections().len() - 1;
@@ -555,8 +582,8 @@ impl Draft {
                 }
                 self.instances().push(copy);
             }
-            Change::Connect { from, to, exit, entrance, description } => {
-                self.connect(&from, &to, exit, entrance, description)?;
+            Change::Connect { from, to, exit, entrance, description, from_side, to_side } => {
+                self.connect(&from, &to, exit, entrance, description, from_side, to_side)?;
             }
             Change::Disconnect { from, to } => {
                 self.instance(&from)?;
@@ -564,7 +591,7 @@ impl Draft {
                 let index = self.connection(&from, &to)?;
                 self.disconnect(index);
             }
-            Change::SetConnection { from, to, exit, entrance, description } => {
+            Change::SetConnection { from, to, exit, entrance, description, from_side, to_side } => {
                 let index = self.connection(&from, &to)?;
                 self.check_place("from", &from, "exit", exit, Some(index))?;
                 self.check_place("to", &to, "entrance", entrance, Some(index))?;
@@ -583,6 +610,18 @@ impl Draft {
                         fields.insert("description".into(), json!(text));
                     }
                     None => {}
+                }
+                // A side is changed when given, and `""` takes it away.
+                for (key, side) in [("from_side", from_side), ("to_side", to_side)] {
+                    match side {
+                        Some(side) if side.is_empty() => {
+                            fields.remove(key);
+                        }
+                        Some(side) => {
+                            fields.insert(key.into(), json!(side));
+                        }
+                        None => {}
+                    }
                 }
             }
             Change::AddClass { name, parent, attributes } => {
@@ -891,6 +930,26 @@ pub struct GetAttributesOutput {
     /// long it is, its bounds, its tightest bend and its steepest incline.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub geometry: Option<PathGeometry>,
+    /// A cross conveyor instance's four sides, front, back, left and right, each with the
+    /// connection at it, if any, and the destinations it lists as an exit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sides: Option<Vec<SideConnection>>,
+}
+
+/// A cross conveyor's side (spec issue 148): what is connected there and which way, and the
+/// destinations its exits list for it.
+#[derive(Serialize, JsonSchema)]
+pub struct SideConnection {
+    /// `front`, `back`, `left` or `right`.
+    pub side: String,
+    /// `in` for an entry side, `out` for an exit side, `none` with nothing connected.
+    pub way: String,
+    /// The instance connected there.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub neighbour: Option<String>,
+    /// The destinations the exits list for this side.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exits: Vec<String>,
 }
 
 /// A conveyor's path worked out (spec issue 141), with its direction applied: `start` is where its
@@ -967,7 +1026,7 @@ fn path_geometry(resolved: &crabsim_model::Resolved, position: Option<crabsim::P
 
 impl Operation for GetAttributes {
     const NAME: &'static str = "get_attributes";
-    const DESCRIPTION: &'static str = "Shows every attribute of an instance or class in a model file, with its value as a model file writes it and where it comes from: `from` is instance (set on it), class (inherited, with the class named), built_in (the built-in default) or not_set. It also gives the chain of classes, nearest first, an instance's stream, position, successors (by exit) and predecessors (by entrance), for a Conveyor its path's geometry (where its MUs enter and leave, its length in 3D, bounds, tightest bend and steepest incline), the file's file_hash, and the model_hash runs of it record. Use it to see why an object behaves as it does before changing it with edit_model.";
+    const DESCRIPTION: &'static str = "Shows every attribute of an instance or class in a model file, with its value as a model file writes it and where it comes from: `from` is instance (set on it), class (inherited, with the class named), built_in (the built-in default) or not_set. It also gives the chain of classes, nearest first, an instance's stream, position, successors (by exit) and predecessors (by entrance), for a Conveyor its path's geometry (where its MUs enter and leave, its length in 3D, bounds, tightest bend and steepest incline), for a CrossConveyor its sides with what each connects and lists, the file's file_hash, and the model_hash runs of it record. Use it to see why an object behaves as it does before changing it with edit_model.";
     const EFFECT: Effect = Effect::ReadOnly;
     type Input = GetAttributesInput;
     type Output = GetAttributesOutput;
@@ -1027,6 +1086,27 @@ impl Operation for GetAttributes {
             predecessors: instance.map(|instance| model.predecessors(&instance.name).into_iter().map(str::to_owned).collect()),
             stream: instance.and_then(|instance| instance.stream),
             geometry: (built_in == "Conveyor").then(|| path_geometry(&resolved, instance.and_then(|instance| instance.position))).flatten(),
+            sides: instance.filter(|_| built_in == "CrossConveyor").map(|instance| {
+                let listed = resolved.attributes.exits.clone().unwrap_or_default();
+                crabsim_model::Side::ALL
+                    .into_iter()
+                    .map(|side| {
+                        let out = model.connections.iter().find(|c| c.from == instance.name && c.from_side == Some(side)).map(|c| ("out", c.to.clone()));
+                        let into = model.connections.iter().find(|c| c.to == instance.name && c.to_side == Some(side)).map(|c| ("in", c.from.clone()));
+                        let (way, neighbour) = out.or(into).map_or(("none", None), |(way, neighbour)| (way, Some(neighbour)));
+                        SideConnection { side: side.name().to_string(), way: way.to_string(), neighbour, exits: listed.get(&side).cloned().unwrap_or_default() }
+                    })
+                    .collect()
+            }),
         })
+    }
+}
+
+/// An end of a connection as the command language writes it: an instance's name, and for a cross
+/// conveyor the side, such as `Cross.left`.
+pub(crate) fn at_side(name: &str, side: &Option<String>) -> String {
+    match side.as_deref().filter(|side| !side.is_empty()) {
+        Some(side) => format!("{name}.{side}"),
+        None => name.to_string(),
     }
 }

@@ -273,7 +273,8 @@ pub struct MuMarker {
 /// Which text the canvas shows, switched in turn by `i`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Labels {
-    /// Every object's name but a conveyor's, which lies along its belt over its neighbours.
+    /// Every object's name but a conveyor's or a cross conveyor's, which lie over their
+    /// neighbours.
     #[default]
     Names,
     /// Every name, conveyors' too, and the annotations: a cross conveyor's exits and a conveyor's
@@ -296,7 +297,7 @@ impl Labels {
     /// Whether an object of this kind has its name shown.
     pub fn shows_name(self, kind: ObjectKind) -> bool {
         match self {
-            Labels::Names => kind != ObjectKind::Conveyor,
+            Labels::Names => !matches!(kind, ObjectKind::Conveyor | ObjectKind::CrossConveyor),
             Labels::All => true,
             Labels::None => false,
         }
@@ -309,7 +310,7 @@ impl Labels {
     /// What the canvas shows now, in words.
     pub fn describe(self) -> &'static str {
         match self {
-            Labels::Names => "Names shown, but conveyors' and annotations hidden",
+            Labels::Names => "Names shown, but conveyors' and cross conveyors' and annotations hidden",
             Labels::All => "Every name shown, with annotations: a cross conveyor's exits, a conveyor's rises and heights",
             Labels::None => "No names or annotations shown",
         }

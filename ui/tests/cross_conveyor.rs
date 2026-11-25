@@ -259,11 +259,11 @@ fn i_shows_names_but_conveyors_then_every_name_with_annotations_then_none() {
     use crabsim_ui::view::Labels;
     let shown = Labels::default();
     assert_eq!(shown, Labels::Names);
-    assert!(shown.shows_name(ObjectKind::Station) && shown.shows_name(ObjectKind::CrossConveyor));
-    assert!(!shown.shows_name(ObjectKind::Conveyor), "a conveyor's name lies over its neighbours");
+    assert!(shown.shows_name(ObjectKind::Station));
+    assert!(!shown.shows_name(ObjectKind::Conveyor) && !shown.shows_name(ObjectKind::CrossConveyor), "their names lie over their neighbours");
     assert!(!shown.shows_annotations());
     let all = shown.next();
-    assert!(all.shows_name(ObjectKind::Conveyor) && all.shows_annotations());
+    assert!(all.shows_name(ObjectKind::Conveyor) && all.shows_name(ObjectKind::CrossConveyor) && all.shows_annotations());
     let none = all.next();
     assert!(!none.shows_name(ObjectKind::Station) && !none.shows_annotations());
     assert_eq!(none.next(), Labels::Names, "and round again");

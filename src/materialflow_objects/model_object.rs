@@ -5,7 +5,7 @@ use super::flows::{BaseObject, EventInterface, MaterialFlow, MoveableUnit};
 #[cfg(test)]
 use super::records_then_fails::RecordsThenFails;
 use super::{Buffer, Conveyor, Drain, MultiStation, SingleStation, Source};
-use super::flows::{MuKindId, SuccessorContainer};
+use super::flows::{MuKindId, Offer, SuccessorContainer};
 use crate::flows::FailureProfile;
 use crate::error::{InitError, MaterialflowError, RunTimeError};
 use crate::event::{EventContext, EventTemplate, EventType};
@@ -172,6 +172,12 @@ impl ModelObject {
         }
     }
 
+    /// The MU it would pass on at `now` as an object whose geometry counts sees it, if it has one.
+    pub fn offer(&self, now: SimTime) -> Option<Offer> {
+        let crosswise = self.as_conveyor().is_some_and(|conveyor| conveyor.offered_crosswise());
+        self.offered_kind(now).map(|kind| Offer { kind, from: *self.get_object_id(), from_belt: self.reads_mu_kind(), crosswise })
+    }
+
     /// How it picks a successor, if it has successors to pick from.
     pub fn distribution_mut(&mut self) -> Option<&mut crate::materialflow_objects::Distributing> {
         match self {
@@ -224,8 +230,11 @@ impl MaterialFlow for ModelObject {
     fn is_exit_allowed(&self) -> bool {
         on_the_object!(self, object => object.is_exit_allowed())
     }
-    fn accepts(&self, kind: MuKindId, now: SimTime, from_belt: bool) -> bool {
-        on_the_object!(self, object => object.accepts(kind, now, from_belt))
+    fn accepts(&self, offer: &Offer, now: SimTime) -> bool {
+        on_the_object!(self, object => object.accepts(offer, now))
+    }
+    fn arriving(&mut self, from: u32, crosswise: bool) {
+        on_the_object!(self, object => object.arriving(from, crosswise))
     }
     fn reserve(&mut self, mu_id: u32, context: &mut EventContext) {
         on_the_object!(self, object => object.reserve(mu_id, context))

@@ -1,4 +1,5 @@
 pub mod conveyor;
+pub mod cross;
 pub mod drain;
 pub mod flows;
 pub mod interruptions;
@@ -11,8 +12,9 @@ pub mod station;
 pub mod buffer;
 
 pub use conveyor::Conveyor;
+pub use cross::{CrossStatistics, Side};
 pub use drain::Drain;
-pub use flows::{ByDestination, Distributing, DistributionStrategy, LowestIndexStrategy, MoveableUnit, Ranked, RoundRobinStrategy, ProcessState};
+pub use flows::{ByDestination, Distributing, DistributionStrategy, LowestIndexStrategy, MoveableUnit, Offer, Ranked, RoundRobinStrategy, ProcessState};
 pub use self::flows::BaseObject;
 pub use interruptions::{Change, Interruptible, Interruptions};
 pub use model_object::{ModelObject, OtherObjects};

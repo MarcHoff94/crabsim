@@ -25,7 +25,7 @@ pub use crate::live_session::{
     Clock, LiveSession, SessionOutput, SessionError, SessionSettings, SessionStatus, TimeMode, WallClock,
     OUTPUT_BACKLOG_LIMIT,
 };
-pub use crate::materialflow_objects::{Buffer, Drain, ExitStrategy, ModelObject, MultiStation, OtherObjects, SingleStation, Source, StartMode};
+pub use crate::materialflow_objects::{Buffer, CrossStatistics, Drain, ExitStrategy, ModelObject, MultiStation, OtherObjects, Side, SingleStation, Source, StartMode};
 pub use crate::model::{Dimensions, ModelDescription, MuKind, Position};
 pub use crate::picture::{ObjectPicture, Picture};
 pub use crate::report::{Capacity, ActiveInterruption, ObjectKind, ObjectState, Occurrence, OccurrenceKind, OccurrenceType, Recording, RunState, Interruption};

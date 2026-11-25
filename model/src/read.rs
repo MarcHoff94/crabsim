@@ -4,7 +4,7 @@
 
 use crate::{Attributes, Bend, Direction, DistributionStrategy, MuValues, Segment, WeightedStrategy, WEIGHABLE, BUILT_IN_CLASSES, Class, Connection, Failures, Instance, Model, Problem, RepairTime, State, StateNotes, WorkStep, FORMAT_VERSION, escape};
 use crabsim::time::parse_time;
-use crate::{exit_strategy_from_name, start_from_name, Capacity, ExitStrategy, StartMode};
+use crate::{exit_strategy_from_name, start_from_name, Capacity, Exits, ExitStrategy, Side, StartMode};
 use crabsim::{Dimensions, Position, SimTime};
 use serde_json::{Map, Value};
 use std::collections::HashSet;
@@ -36,9 +36,9 @@ pub(crate) struct Broken {
 
 const TOP_LEVEL: [&str; 6] = ["$schema", "format_version", "description", "classes", "instances", "connections"];
 const INSTANCE: [&str; 5] = ["name", "class", "stream", "position", "attributes"];
-const CONNECTION: [&str; 5] = ["from", "to", "exit", "entrance", "description"];
+const CONNECTION: [&str; 7] = ["from", "to", "exit", "entrance", "description", "from_side", "to_side"];
 const CLASS: [&str; 3] = ["name", "parent", "attributes"];
-const ATTRIBUTES: [&str; 28] = [
+const ATTRIBUTES: [&str; 31] = [
     "interval",
     "process_time",
     "failures",
@@ -67,6 +67,9 @@ const ATTRIBUTES: [&str; 28] = [
     "max_incline",
     "work_plan",
     "detour",
+    "switch_time",
+    "release_time",
+    "exits",
 ];
 /// The kinds of segment a path has (ADR 0024).
 const SEGMENTS: [&str; 4] = ["straight", "arc", "transition", "helix"];
@@ -221,7 +224,53 @@ impl Reader {
         if let Some(description) = fields.get("description") {
             connection.description = self.text(description, &format!("{pointer}/description"), None);
         }
+        for key in ["from_side", "to_side"] {
+            if let Some(value) = fields.get(key) {
+                let side = self.side(value, &format!("{pointer}/{key}"), None);
+                if key == "from_side" { connection.from_side = side } else { connection.to_side = side }
+            }
+        }
         connection
+    }
+
+    /// A cross conveyor's side: `front`, `back`, `left` or `right`.
+    fn side(&mut self, value: &Value, pointer: &str, name: Option<&str>) -> Option<Side> {
+        let side = value.as_str().and_then(Side::from_name);
+        if side.is_none() {
+            self.problem(pointer.to_owned(), name, "a side is \"front\", \"back\", \"left\" or \"right\"");
+        }
+        side
+    }
+
+    /// A cross conveyor's exits: each side's list of destinations, such as
+    /// `{"left": ["Mill"], "right": ["Rework", "Shipping"]}`.
+    fn exits(&mut self, value: &Value, pointer: &str, name: Option<&str>) -> Option<Exits> {
+        const SAY: &str = r#"exits list each exit side's destinations, such as {"left": ["Mill"], "right": ["Rework", "Shipping"]}"#;
+        let Some(fields) = value.as_object() else {
+            self.problem(pointer.to_owned(), name, SAY);
+            return None;
+        };
+        let mut exits = Exits::new();
+        let mut ok = true;
+        for (key, list) in fields {
+            let at = format!("{pointer}/{}", crate::escape(key));
+            let Some(side) = Side::from_name(key) else {
+                self.problem(at, name, format!("`{key}` is no side: a side is \"front\", \"back\", \"left\" or \"right\""));
+                ok = false;
+                continue;
+            };
+            let names = list.as_array().and_then(|items| items.iter().map(|item| item.as_str().map(str::to_owned)).collect::<Option<Vec<String>>>());
+            match names {
+                Some(names) => {
+                    exits.insert(side, names);
+                }
+                None => {
+                    self.problem(at, name, SAY);
+                    ok = false;
+                }
+            }
+        }
+        ok.then_some(exits)
     }
 
     fn instance(&mut self, index: usize, value: &Value) -> Instance {
@@ -354,6 +403,9 @@ impl Reader {
                 "max_incline" => self.number_value(value, &at, name).map(|degrees| attributes.max_incline = Some(degrees)),
                 "work_plan" => self.work_plan(value, &at, name).map(|plan| attributes.work_plan = Some(plan)),
                 "detour" => self.text(value, &at, name).map(|detour| attributes.detour = Some(detour)),
+                "switch_time" => self.time(value, &at, name).map(|time| attributes.switch_time = Some(time)),
+                "release_time" => self.time(value, &at, name).map(|time| attributes.release_time = Some(time)),
+                "exits" => self.exits(value, &at, name).map(|exits| attributes.exits = Some(exits)),
                 _ => unreachable!("every attribute is read"),
             };
             if read.is_none() {

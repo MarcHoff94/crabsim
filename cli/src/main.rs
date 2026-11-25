@@ -728,7 +728,7 @@ fn read_model(path: &PathBuf) -> Result<ModelDescription, Vec<String>> {
 fn report(model: &ModelDescription, state: &RunState) -> String {
     let mut text = format!("\nStatistics from {} to {}\n", crabsim::time::format_time(state.statistics_since), format_time_exact(state.time));
     text += &format!(
-        "{:>4}  {:<12} {:<8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>9} {:>8} {:>8} {:>9} {:>13}\n",
+        "{:>4}  {:<12} {:<13} {:>8} {:>8} {:>8} {:>8} {:>8} {:>9} {:>8} {:>8} {:>9} {:>13}\n",
         "ID", "Name", "Type", "MUs in", "MUs out", "Working", "Blocked", "Idle", "Receiving", "Failed", "Paused", "Failures", "Availability"
     );
     for object in &state.objects {
@@ -740,7 +740,7 @@ fn report(model: &ModelDescription, state: &RunState) -> String {
         };
         let availability = statistics.achieved_availability().map_or("-".to_string(), |a| format!("{:.1} %", a * 100.0));
         text += &format!(
-            "{:>4}  {:<12} {:<8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>9} {:>8} {:>8} {:>9} {:>13}\n",
+            "{:>4}  {:<12} {:<13} {:>8} {:>8} {:>8} {:>8} {:>8} {:>9} {:>8} {:>8} {:>9} {:>13}\n",
             object.id,
             model.name(object.id).unwrap_or("-"),
             kind(object.kind),
@@ -760,10 +760,29 @@ fn report(model: &ModelDescription, state: &RunState) -> String {
     for object in state.objects.iter().filter(|object| object.statistics.drain.is_some()) {
         text += &drain_line(model.name(object.id).unwrap_or("Drain"), &object.statistics, state.time);
     }
-    for object in state.objects.iter().filter(|object| object.belt.is_some()) {
+    for object in state.objects.iter().filter(|object| object.belt.is_some() && object.cross.is_none()) {
         text += &conveyor_line(model.name(object.id).unwrap_or("Conveyor"), object);
     }
+    for object in state.objects.iter().filter(|object| object.cross.is_some()) {
+        text += &cross_line(model.name(object.id).unwrap_or("CrossConveyor"), object);
+    }
     text
+}
+
+/// A cross conveyor's switching time, part of its working, the MUs out of each side and how
+/// long MUs took to cross it.
+fn cross_line(name: &str, object: &crabsim::ObjectState) -> String {
+    let (statistics, cross) = (&object.statistics, object.cross.as_deref().expect("a cross conveyor's"));
+    let measured = statistics.measured_time();
+    let share = |time: SimTime| match measured.as_millis() {
+        0 => "-".to_string(),
+        total => format!("{:.1} %", time.as_millis() as f64 * 100.0 / total as f64),
+    };
+    let out: Vec<String> = crabsim::Side::ALL.iter().filter(|side| cross.mus_out[side.index()] > 0).map(|side| format!("{} {}", side.name(), cross.mus_out[side.index()])).collect();
+    let out = if out.is_empty() { "none".to_string() } else { out.join(", ") };
+    let crossing = object.belt.as_deref().and_then(|belt| belt.crossing_mean()).map_or("-".to_string(), format_time_exact);
+    format!("{name}: working {}, of which switching {}; MUs out by side: {out}; crossing {crossing} on average
+", share(statistics.time_busy), share(cross.time_switching))
 }
 
 /// A conveyor's busy time in its three parts, how full it was and how long MUs took to cross it.
@@ -802,6 +821,7 @@ fn kind(kind: ObjectKind) -> &'static str {
         ObjectKind::Buffer => "Buffer",
         ObjectKind::Drain => "Drain",
         ObjectKind::Conveyor => "Conveyor",
+        ObjectKind::CrossConveyor => "CrossConveyor",
     }
 }
 

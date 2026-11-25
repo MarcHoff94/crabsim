@@ -369,6 +369,8 @@ pub struct RoutingSummary {
     pub detours: Listed,
     /// The instances routing by destination.
     pub by_destination: Listed,
+    /// The cross conveyors, which turn MUs by where they go: their exits say where.
+    pub cross_conveyors: Listed,
 }
 
 fn is_zero(n: &usize) -> bool {
@@ -517,11 +519,13 @@ fn describe(model: &Model, problems: &[crabsim_model::Problem]) -> DescribeModel
     let mut planned: Vec<String> = model.classes.iter().filter(|class| class.attributes.work_plan.is_some()).map(|class| class.name.clone()).collect();
     planned.extend(model.instances.iter().filter(|instance| instance.attributes.mu_values.as_ref().is_some_and(|values| values.work_plan.is_some())).map(|instance| instance.name.clone()));
     let destinations = model.destination_names().len();
-    let routing = (destinations > 0 || !by_destination.is_empty()).then(|| RoutingSummary {
+    let cross_conveyors: Vec<usize> = (0..count).filter(|&i| graph.is(i, "CrossConveyor")).collect();
+    let routing = (destinations > 0 || !by_destination.is_empty() || !cross_conveyors.is_empty()).then(|| RoutingSummary {
         destinations,
         work_plans: Listed { count: planned.len(), names: planned.into_iter().take(LISTED).collect() },
         detours: some(detours),
         by_destination: some(by_destination),
+        cross_conveyors: some(cross_conveyors),
     });
     DescribeModelOutput {
         valid: problems.is_empty(),
@@ -914,6 +918,13 @@ pub struct RankedSuccessor {
     /// otherwise.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reaches: Option<Vec<String>>,
+    /// For a cross conveyor: the side this successor is at.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub side: Option<String>,
+    /// For a cross conveyor: the destinations its exits list for that side, whose MUs turn there.
+    /// MUs going anywhere no side lists go straight through.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exits: Option<Vec<String>>,
 }
 
 #[derive(Serialize, JsonSchema)]
@@ -1581,6 +1592,12 @@ fn distribution(model: &Model, at: usize, name: String) -> Result<QueryModelOutp
                 .collect()
         })
     };
+    // A cross conveyor's successors are at its sides, each with what its exits list there.
+    let cross = resolved.built_in == "CrossConveyor";
+    let out = model.connections_out(&name);
+    let side = |exit: usize| -> Option<String> { cross.then(|| out[exit].from_side.map(|side| side.name().to_string())).flatten() };
+    let listed_exits = resolved.attributes.exits.clone().unwrap_or_default();
+    let exits = |exit: usize| -> Option<Vec<String>> { cross.then(|| out[exit].from_side.and_then(|side| listed_exits.get(&side).cloned()).unwrap_or_default()) };
     let (kind, weighted, listed) = match (strategy.weighted(), description.ranking(at as u32)) {
         (Some(weighted), Some(ranking)) => {
             let in_seconds = matches!(weighted.by, Attribute::ProcessTime | Attribute::Interval);
@@ -1590,7 +1607,7 @@ fn distribution(model: &Model, at: usize, name: String) -> Result<QueryModelOutp
                 .iter()
                 .enumerate()
                 .flat_map(|(place, group)| group.iter().map(move |&exit| (place, exit)))
-                .map(|(place, exit)| RankedSuccessor { name: successors[exit].to_string(), exit: exit + 1, place: place + 1, total: total(exit), reaches: reaches(exit) })
+                .map(|(place, exit)| RankedSuccessor { name: successors[exit].to_string(), exit: exit + 1, place: place + 1, total: total(exit), reaches: reaches(exit), side: side(exit), exits: exits(exit) })
                 .collect();
             (if by_destination { "by_destination" } else { "weighted" }, Some(crabsim_model::write_distribution(&strategy)), listed)
         }
@@ -1598,7 +1615,7 @@ fn distribution(model: &Model, at: usize, name: String) -> Result<QueryModelOutp
             let listed = successors
                 .iter()
                 .enumerate()
-                .map(|(exit, to)| RankedSuccessor { name: to.to_string(), exit: exit + 1, place: 1, total: None, reaches: reaches(exit) })
+                .map(|(exit, to)| RankedSuccessor { name: to.to_string(), exit: exit + 1, place: 1, total: None, reaches: reaches(exit), side: side(exit), exits: exits(exit) })
                 .collect();
             if by_destination { ("by_destination", Some(crabsim_model::write_distribution(&strategy)), listed) } else { ("round_robin", None, listed) }
         }

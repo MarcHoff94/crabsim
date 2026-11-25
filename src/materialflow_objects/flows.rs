@@ -239,12 +239,14 @@ pub trait EventInterface {
 
 pub trait MaterialFlow: EventInterface {
 	fn is_entrance_allowed(&self) -> bool;
-	/// Whether it can take an MU of this kind at `now`. Only an object whose geometry counts asks
-	/// about the MU (ADR 0021): the rest take any MU they have room for. `from_belt` says it comes
-	/// from another conveyor, with its front at the start rather than its booking point.
-	fn accepts(&self, _kind: MuKindId, _now: SimTime, _from_belt: bool) -> bool {
+	/// Whether it can take the MU offered at `now`. Only an object whose geometry counts asks
+	/// about the MU (ADR 0021): the rest take any MU they have room for.
+	fn accepts(&self, _offer: &Offer, _now: SimTime) -> bool {
 		self.is_entrance_allowed()
 	}
+	/// Tells an object whose geometry counts who hands it the MU about to enter, and whether that MU
+	/// lies crosswise, just before it enters. The rest ignore it.
+	fn arriving(&mut self, _from: u32, _crosswise: bool) {}
 	/// Reserves a place for the MU `mu_id` a conveyor is handing over, which it takes through
 	/// `process_mu_entrance` once its booking point arrives (ADR 0023). Asked only after `accepts`
 	/// said yes. A transfer once begun always finishes, even if the object is interrupted.
@@ -266,6 +268,26 @@ pub trait MaterialFlow: EventInterface {
 	fn relist_blocked(&mut self, id_blocked: u32, next: Option<SimTime>);
 	/// Schedules a retry for each predecessor waiting for it, longest-waiting first.
 	fn notify_blocked_predecessors(&mut self, context: &mut EventContext) -> Result<(), MaterialflowError>;
+}
+
+/// An MU a predecessor offers to an object whose geometry counts (ADR 0021), which needs to know
+/// whether it fits and how it would come in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Offer {
+	pub kind: MuKindId,
+	/// The predecessor offering it.
+	pub from: u32,
+	/// It comes from another geometry-aware object, with its front first rather than placed with
+	/// its booking point at the start.
+	pub from_belt: bool,
+	/// It lies across the way it moves: it turned at a cross conveyor, keeping its orientation, so
+	/// its width lies along its way.
+	pub crosswise: bool,
+}
+
+/// What `obj` offers at `now`, if it has an MU to hand over.
+pub fn offer_of<T: SuccessorContainer + EventInterface>(obj: &T, now: SimTime) -> Option<Offer> {
+	obj.offered_kind(now).map(|kind| Offer { kind, from: *obj.get_object_id(), from_belt: obj.on_belt(), crosswise: obj.offered_crosswise() })
 }
 
 /// A predecessor's place in the line for a successor to have room.
@@ -362,6 +384,11 @@ pub trait SuccessorContainer {
 	fn offered_mu(&self, now: SimTime) -> Option<&MoveableUnit>;
 	/// Whether it is a conveyor, whose MUs hand over to another conveyor with their front first.
 	fn on_belt(&self) -> bool {
+		false
+	}
+	/// Whether the MU it would hand over lies crosswise. Only a conveyor's can: an object without
+	/// geometry passes its MUs on lengthwise.
+	fn offered_crosswise(&self) -> bool {
 		false
 	}
 	fn statistics_mut(&mut self) -> &mut StatisticsKeeper;
@@ -567,7 +594,8 @@ pub fn try_to_move_to_successor_with_strategy<
 		// Only a successor whose geometry counts needs to know which MU (ADR 0021), so the rest
 		// keep the cheaper question on this, the busiest path of every run.
 		let successor = others.get(succ_id);
-		let allowed = if successor.reads_mu_kind() { accepts_offered(obj, successor, context.time) } else { successor.is_entrance_allowed() };
+		let geometry = successor.reads_mu_kind();
+		let allowed = if geometry { accepts_offered(obj, successor, context.time) } else { successor.is_entrance_allowed() };
 		if allowed {
 			// We selected a successor that appears able to accept an MU.
 			// Now take the MU from the predecessor and attempt the transfer.
@@ -583,6 +611,9 @@ pub fn try_to_move_to_successor_with_strategy<
 				}
 				context.record(OccurrenceKind::MuMoved { mu_id, from: pred_id, to: succ_id });
 				log::info!("seq={} MU {} moved from {} to {}", seq, mu_id, pred_id, succ_id);
+				if geometry {
+					arriving_from(others, succ_id, pred_id);
+				}
 				match others.get_mut(succ_id).enter(mu, context) {
 					Ok(entered) => {
 						chosen = Some((idx, entered));
@@ -633,8 +664,16 @@ pub fn try_to_move_to_successor_with_strategy<
 /// which every run goes through for every move, so models without conveyors pay nothing for it.
 #[cold]
 #[inline(never)]
-fn accepts_offered<T: SuccessorContainer>(obj: &T, successor: &crate::materialflow_objects::ModelObject, now: SimTime) -> bool {
-	obj.offered_kind(now).is_some_and(|kind| successor.accepts(kind, now, obj.on_belt()))
+fn accepts_offered<T: SuccessorContainer + EventInterface>(obj: &T, successor: &crate::materialflow_objects::ModelObject, now: SimTime) -> bool {
+	offer_of(obj, now).is_some_and(|offer| successor.accepts(&offer, now))
+}
+
+/// Tells a successor whose geometry counts who hands it the MU entering now. Only the move loop's
+/// objects without geometry come here, and they pass MUs on lengthwise.
+#[cold]
+#[inline(never)]
+fn arriving_from(others: &mut OtherObjects<'_>, successor: u32, from: u32) {
+	others.get_mut(successor).arriving(from, false);
 }
 
 /// Tries only one successor, whichever the other rules would have picked, and tells the object's
@@ -724,13 +763,13 @@ fn reserve_with_strategy<T: SuccessorContainer + EventInterface, S: Distribution
 	strategy: &mut S,
 ) -> Option<u32> {
 	let n = obj.successors().len();
-	let kind = obj.offered_kind(context.time)?;
+	let offer = offer_of(obj, context.time)?;
 	let pred_id = *obj.get_object_id();
 	let answering = strategy.answers_retry();
 	let mut chosen = None;
 	for idx in strategy.order(n, obj.succ_pointer()) {
 		let succ_id = obj.successors()[idx];
-		if others.get(succ_id).accepts(kind, context.time, obj.on_belt()) {
+		if others.get(succ_id).accepts(&offer, context.time) {
 			chosen = Some((idx, succ_id));
 			break;
 		}
@@ -752,6 +791,58 @@ fn reserve_with_strategy<T: SuccessorContainer + EventInterface, S: Distribution
 	}
 	strategy.moved(idx, n, obj.succ_pointer_mut());
 	Some(succ_id)
+}
+
+/// Offers only the exit at `exit`, not moving the object's turn on: a cross conveyor's MU, whose
+/// exit was chosen already.
+struct OneExit {
+	exit: usize,
+	answering: bool,
+}
+
+impl DistributionStrategy for OneExit {
+	fn order(&self, _n: usize, _start: usize) -> impl Iterator<Item = usize> {
+		std::iter::once(self.exit)
+	}
+	fn moved(&mut self, _idx: usize, _n: usize, _pointer: &mut usize) {}
+	fn answers_retry(&self) -> bool {
+		self.answering
+	}
+}
+
+/// Offers the MU `obj` would hand over to the successor at `exit` alone, as `try_to_reserve_successor`
+/// does, answering its retry if `answering`. Returns it if it reserved a place.
+pub fn try_to_reserve_exit<T: SuccessorContainer + EventInterface>(obj: &mut T, context: &mut EventContext, others: &mut OtherObjects<'_>, mu_id: u32, exit: usize, answering: bool) -> Option<u32> {
+	reserve_with_strategy(obj, context, others, mu_id, &mut OneExit { exit, answering })
+}
+
+/// Which of the exits in `allowed`, a bit per exit, `obj`'s own strategy picks for the MU, offered
+/// at each exit as `offer` gives it: the first in its order whose successor would take it now,
+/// otherwise the first in its order, which it then waits for. Its turn moves on past the one
+/// picked. Only a cross conveyor chooses this way, as an MU is allowed in.
+pub fn choose_exit<T: SuccessorContainer>(obj: &mut T, others: &OtherObjects<'_>, allowed: u8, offer: &dyn Fn(usize) -> Offer, now: SimTime) -> Option<usize> {
+	let mut distribution = std::mem::take(obj.distribution_mut());
+	let mut pointer = obj.succ_pointer();
+	let successors = obj.successors();
+	let chosen = match &mut distribution {
+		Distributing::RoundRobin => pick_exit(&mut RoundRobinStrategy, successors, &mut pointer, others, allowed, offer, now),
+		Distributing::Weighted(ranked) => pick_exit(ranked, successors, &mut pointer, others, allowed, offer, now),
+		Distributing::ByDestination(by) => match &mut by.then {
+			Distributing::Weighted(ranked) => pick_exit(ranked, successors, &mut pointer, others, allowed, offer, now),
+			_ => pick_exit(&mut RoundRobinStrategy, successors, &mut pointer, others, allowed, offer, now),
+		},
+	};
+	*obj.succ_pointer_mut() = pointer;
+	*obj.distribution_mut() = distribution;
+	chosen
+}
+
+fn pick_exit<S: DistributionStrategy>(strategy: &mut S, successors: &[u32], pointer: &mut usize, others: &OtherObjects<'_>, allowed: u8, offer: &dyn Fn(usize) -> Offer, now: SimTime) -> Option<usize> {
+	let n = successors.len();
+	let usable = |idx: &usize| *idx < 8 && allowed & (1 << *idx) != 0;
+	let exit = strategy.order(n, *pointer).filter(usable).find(|&idx| others.get(successors[idx]).accepts(&offer(idx), now)).or_else(|| strategy.order(n, *pointer).find(usable))?;
+	strategy.moved(exit, n, pointer);
+	Some(exit)
 }
 
 /// Backwards-compatible default that uses round-robin ordering.

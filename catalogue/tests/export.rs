@@ -31,8 +31,8 @@ const LINE: &str = r#"{"format_version":2,"description":"Split, press and join",
   {"from":"Join","to":"Out","exit":1,"entrance":1}]}"#;
 
 const INSTANCES: usize = 8;
-/// The model's own two, the five built-in classes of objects and the built-in MU class.
-const CLASSES: usize = 8;
+/// The model's own two, the six built-in classes of objects and the built-in MU class.
+const CLASSES: usize = 9;
 const CONNECTIONS: usize = 8;
 /// Each derived class derives from one other.
 const DERIVATIONS: usize = 2;

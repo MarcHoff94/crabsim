@@ -67,6 +67,33 @@ pub struct ConnectionFile {
     pub entrance: u64,
     /// What the connection is, such as "via the lift".
     pub description: Option<String>,
+    /// The side of `from` it leaves by: given when `from` is a cross conveyor, and only then. A
+    /// side is an entry side or an exit side, never both, and has one connection.
+    pub from_side: Option<SideFile>,
+    /// The side of `to` it comes in by: given when `to` is a cross conveyor, and only then.
+    pub to_side: Option<SideFile>,
+}
+
+/// One of a cross conveyor's four sides: front, where its own x axis points, back, left, 90°
+/// counter-clockwise from the front, and right.
+#[derive(JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SideFile {
+    Front,
+    Back,
+    Left,
+    Right,
+}
+
+/// A cross conveyor's exit sides, each with the destinations it takes: instances, or classes
+/// standing for any of their instances.
+#[derive(JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ExitsFile {
+    pub front: Option<Vec<String>>,
+    pub back: Option<Vec<String>>,
+    pub left: Option<Vec<String>>,
+    pub right: Option<Vec<String>>,
 }
 
 /// A class of the model's own, or, named like a built-in class and with no parent, this model's
@@ -165,10 +192,12 @@ pub struct AttributesFile {
     /// Source: its own values for the MUs it makes, changing its MU class's. Inherited as a whole.
     pub mu_values: Option<MuValuesFile>,
     /// MU class: its footprint's length along the way it travels, in metres. 0.6 by default.
+    /// CrossConveyor: its length along its own x axis, from its back to its front, 0.6 by default.
     #[schemars(extend("exclusiveMinimum" = 0))]
     pub length: Option<f64>,
     /// MU class: its footprint's width across the way it travels, in metres, 0.4 by default.
     /// Conveyor: how wide it is, in metres, 0.6 by default: an MU wider than this doesn't fit.
+    /// CrossConveyor: its width from its right side to its left, 0.6 by default.
     #[schemars(extend("exclusiveMinimum" = 0))]
     pub width: Option<f64>,
     /// MU class: where its booking point is, as a share of its length from its front, 0 at the
@@ -181,7 +210,8 @@ pub struct AttributesFile {
     /// conveyor's length counts each in 3D, rise included. One straight of 5 m by default.
     #[schemars(length(min = 1))]
     pub path: Option<Vec<SegmentFile>>,
-    /// Conveyor: how fast it moves its MUs, in metres per second, above 0. 0.5 by default.
+    /// Conveyor, CrossConveyor: how fast it moves its MUs, in metres per second, above 0. 0.5 by
+    /// default.
     #[schemars(extend("exclusiveMinimum" = 0))]
     pub speed: Option<f64>,
     /// Conveyor: the least space between two MUs on it, in metres, 0 or more. 0 by default.
@@ -209,6 +239,16 @@ pub struct AttributesFile {
     /// Station: where every MU it works on goes before carrying on with its plan, such as Rework:
     /// an instance, or a class standing for any of its instances (ADR 0025). None by default.
     pub detour: Option<String>,
+    /// CrossConveyor: how long an MU turning there stands at its centre, such as a lift raising
+    /// it onto cross rollers. 2 s by default.
+    pub switch_time: Option<Time>,
+    /// CrossConveyor: how long it takes no MU after one that turned has left, such as its lift
+    /// going back down. 0 by default.
+    pub release_time: Option<Time>,
+    /// CrossConveyor: each exit side's destinations. An MU whose next destination one of them
+    /// stands for leaves by that side, turning at the centre, unless the side straight across
+    /// takes it too; every other MU goes straight through. None by default. Inherited as a whole.
+    pub exits: Option<ExitsFile>,
 }
 
 /// One step of a work plan.

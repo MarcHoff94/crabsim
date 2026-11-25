@@ -80,6 +80,12 @@ fn connection(connection: &Connection) -> Value {
     if let Some(description) = &connection.description {
         fields.insert("description".into(), json!(description));
     }
+    if let Some(side) = connection.from_side {
+        fields.insert("from_side".into(), json!(side.name()));
+    }
+    if let Some(side) = connection.to_side {
+        fields.insert("to_side".into(), json!(side.name()));
+    }
     Value::Object(fields)
 }
 
@@ -171,7 +177,20 @@ pub(crate) fn attributes(attributes: &Attributes) -> Value {
     if let Some(detour) = &attributes.detour {
         fields.insert("detour".into(), json!(detour));
     }
+    for (key, value) in [("switch_time", attributes.switch_time), ("release_time", attributes.release_time)] {
+        if let Some(value) = value {
+            fields.insert(key.into(), time(value));
+        }
+    }
+    if let Some(exits) = &attributes.exits {
+        fields.insert("exits".into(), crate::write::exits(exits));
+    }
     Value::Object(fields)
+}
+
+/// A cross conveyor's exits as a file writes them: by side, front, back, left, right.
+pub(crate) fn exits(exits: &crate::Exits) -> Value {
+    Value::Object(exits.iter().map(|(side, names)| (side.name().to_string(), json!(names))).collect())
 }
 
 /// A Source's own values for its MUs, as a file writes them: only those set.

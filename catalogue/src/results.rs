@@ -17,7 +17,7 @@ pub(crate) fn entries() -> Vec<Entry> {
 }
 
 /// Every statistic the store keeps, in the order results show them.
-pub const STATISTICS: [&str; 26] = [
+pub const STATISTICS: [&str; 31] = [
     "mus_in",
     "mus_out",
     "working_share",
@@ -44,6 +44,11 @@ pub const STATISTICS: [&str; 26] = [
     "max_crossing_time_s",
     "mus_on_plan",
     "mus_off_plan",
+    "switching_share",
+    "mus_out_front",
+    "mus_out_back",
+    "mus_out_left",
+    "mus_out_right",
 ];
 
 /// How many of the busiest, the most blocked and the most failed objects a summary shows.
@@ -127,6 +132,18 @@ pub(crate) fn figures(object: &ObjectState, now: SimTime) -> Vec<(&'static str, 
             figures.push(("mean_crossing_time_s", mean.as_secs_f64()));
         }
         figures.push(("max_crossing_time_s", belt.crossing_max.as_secs_f64()));
+    }
+    // A cross conveyor's switching, part of its working, and the MUs out of each side that had any.
+    if let Some(cross) = &object.cross {
+        if measured > 0.0 {
+            figures.push(("switching_share", cross.time_switching.as_millis() as f64 / measured));
+        }
+        for (side, name) in [(crabsim::Side::Front, "mus_out_front"), (crabsim::Side::Back, "mus_out_back"), (crabsim::Side::Left, "mus_out_left"), (crabsim::Side::Right, "mus_out_right")] {
+            let out = cross.mus_out[side.index()];
+            if out > 0 {
+                figures.push((name, out as f64));
+            }
+        }
     }
     figures
 }
@@ -217,7 +234,7 @@ pub struct ObjectResults {
     pub why: Vec<Why>,
     /// By statistic: mus_in, mus_out, working_share, blocked_share, idle_share, failed_share,
     /// paused_share, receiving_share, failures, availability, for Drains throughput_per_hour and
-    /// mean_lead_time_s, for Buffers and Conveyors mean_mus, min_mus, max_mus and median_mus, for Buffers full_share, and for Conveyors working_full_share, working_not_full_share, working_partly_blocked_share, mean_length_taken_share, max_length_taken_share, mean_crossing_time_s and max_crossing_time_s,
+    /// mean_lead_time_s, for Buffers and Conveyors mean_mus, min_mus, max_mus and median_mus, for Buffers full_share, and for Conveyors working_full_share, working_not_full_share, working_partly_blocked_share, mean_length_taken_share, max_length_taken_share, mean_crossing_time_s and max_crossing_time_s, for CrossConveyors switching_share (part of working_share) and mus_out_front, mus_out_back, mus_out_left and mus_out_right,
     /// named as in the store. Shares and availability are from 0 to 1, times in seconds. A figure
     /// that is 0 in every observation is left out.
     pub figures: BTreeMap<String, Figure>,

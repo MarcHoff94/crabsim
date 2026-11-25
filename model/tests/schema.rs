@@ -75,7 +75,8 @@ fn valid_files() -> Vec<Value> {
             { "from": "Belt", "to": "Out", "exit": 1, "entrance": 1 },
         ],
     });
-    vec![demo, everything]
+    let cross: Value = serde_json::from_str(&std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../models/cross-line.json")).unwrap()).unwrap();
+    vec![demo, everything, cross]
 }
 
 // ---------- The committed file ----------
@@ -173,6 +174,19 @@ fn shape_mistakes_fail_the_schema_as_well_as_the_reader() {
         ("a min_radius of 0", Box::new(|file| file["instances"][9]["attributes"]["min_radius"] = json!(0))),
         ("a max_incline of 90", Box::new(|file| file["instances"][9]["attributes"]["max_incline"] = json!(90))),
     ];
+    let cross = || valid_files().remove(2);
+    let cross_mistakes: Vec<(&str, Box<dyn Fn(&mut Value)>)> = vec![
+        ("a side there is none of", Box::new(|file| file["connections"][3]["to_side"] = json!("up"))),
+        ("exits as a list", Box::new(|file| file["instances"][4]["attributes"]["exits"] = json!(["Mill"]))),
+        ("exits at a side there is none of", Box::new(|file| file["instances"][4]["attributes"]["exits"] = json!({ "up": ["Mill"] }))),
+        ("a switch time as a number", Box::new(|file| file["instances"][4]["attributes"]["switch_time"] = json!(2))),
+    ];
+    for (what, change) in cross_mistakes {
+        let mut file = cross();
+        change(&mut file);
+        assert!(load(&file.to_string()).is_err(), "the reader refuses {what}");
+        assert!(!passes_schema(&file), "the schema refuses {what}");
+    }
     for (what, change) in mistakes {
         let mut file = base();
         change(&mut file);

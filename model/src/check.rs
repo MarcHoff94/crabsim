@@ -24,6 +24,7 @@ pub(crate) fn check(model: &Model, broken: &Broken) -> Vec<Problem> {
         checker.instance(index);
     }
     checker.connections();
+    checker.sides();
     checker.places(Place::Exit);
     checker.places(Place::Entrance);
     checker.endless_sources();
@@ -313,6 +314,11 @@ impl<'m> Checker<'m> {
         if let Some(detour) = &attributes.detour {
             self.destination(owner, "/attributes/detour", detour);
         }
+        for (side, names) in attributes.exits.iter().flatten() {
+            for (place, name) in names.iter().enumerate() {
+                self.destination(owner, &format!("/attributes/exits/{}/{place}", side.name()), name);
+            }
+        }
         if built_in == "Source"
             && let Some(class) = &attributes.mu_class
         {
@@ -579,6 +585,43 @@ impl<'m> Checker<'m> {
                 Some(&first) => self.problem(owner, "", format!("connection {first} already connects `{}` to `{}`", connection.from, connection.to)),
                 None => {
                     seen.insert((&connection.from, &connection.to), index);
+                }
+            }
+        }
+    }
+
+    /// A connection names a side of each end that is a cross conveyor, and only of those, and a
+    /// cross conveyor's side has one connection, in or out (spec issue 148).
+    fn sides(&mut self) {
+        let model = self.model;
+        // By cross conveyor and side, the first connection there.
+        let mut taken: HashMap<(usize, crate::Side), usize> = HashMap::new();
+        for (index, connection) in model.connections.iter().enumerate() {
+            if self.broken.connections.contains(&index) {
+                continue;
+            }
+            let owner = Owner::Connection(index);
+            for (field, name, side, way) in [("from_side", &connection.from, connection.from_side, "leaves"), ("to_side", &connection.to, connection.to_side, "comes in")] {
+                let Some(&end) = self.by_name.get(name.as_str()) else { continue };
+                let cross = self.built_in(end) == Some("CrossConveyor");
+                match (cross, side) {
+                    (true, None) => self.problem(
+                        owner,
+                        "",
+                        format!("`{name}` is a cross conveyor: say which side the connection {way} by with `{field}`, \"front\", \"back\", \"left\" or \"right\""),
+                    ),
+                    (false, Some(_)) => self.problem(owner, &format!("/{field}"), format!("`{name}` isn't a cross conveyor, so the connection names no side of it")),
+                    (true, Some(side)) => match taken.get(&(end, side)) {
+                        Some(&first) => self.problem(
+                            owner,
+                            &format!("/{field}"),
+                            format!("the {} side of `{name}` has connection {first} already: a side has one connection, in or out", side.name()),
+                        ),
+                        None => {
+                            taken.insert((end, side), index);
+                        }
+                    },
+                    (false, None) => {}
                 }
             }
         }

@@ -14,7 +14,7 @@ use crate::error::{InitError, MaterialflowError, RunTimeError};
 use crate::event::{EventContext, EventTemplate, EventType};
 use crate::flows::{
 	list_blocked, relist_blocked, retries_for_blocked, try_to_reserve_successor, waiting_ids, BaseObject, Distributing, EventInterface, MaterialFlow, MoveableUnit,
-	MuKindId, ProcessState, SuccessorContainer, Waiting,
+	MuKindId, Offer, ProcessState, SuccessorContainer, Waiting,
 };
 use crate::materialflow_objects::OtherObjects;
 use crate::model::MuKind;
@@ -23,7 +23,8 @@ use crate::statistics::{BeltKeeper, MachineState, ObjectStatistics, StatisticsKe
 use crate::routing::Arrival;
 use crate::time::SimTime;
 
-use super::flows::FailureProfile;
+use super::cross::{Cross, Stage, Timer};
+use super::flows::{choose_exit, try_to_reserve_exit, FailureProfile};
 use super::interruptions::{Interruptible, Interruptions};
 
 /// How many times conveyors worked out their events again and how many MUs those passes walked, for
@@ -55,6 +56,15 @@ pub enum ConveyorStep {
 	/// An MU straddling this conveyor and the one before it has passed a point that changes how it
 	/// moves or what is behind it: work out the events again.
 	Straddle,
+	/// On a cross conveyor, the MU turning there reaches its centre.
+	Centre,
+	/// On a cross conveyor, the switch time is over and the turning MU leaves sideways.
+	Switched,
+	/// On a cross conveyor, the release time after a turned MU is over.
+	Released,
+	/// On a cross conveyor, it has reserved room for a conveyor's MU: choose that MU's exit, and
+	/// nothing else.
+	Decide,
 }
 
 /// Names a conveyor's event and the plan it belongs to. Anything that changes the conveyor makes
@@ -75,6 +85,10 @@ impl ConveyorTicket {
 			2 => ConveyorStep::CloseUp,
 			3 => ConveyorStep::Room,
 			5 => ConveyorStep::Straddle,
+			6 => ConveyorStep::Centre,
+			7 => ConveyorStep::Switched,
+			8 => ConveyorStep::Released,
+			9 => ConveyorStep::Decide,
 			_ => ConveyorStep::Wake,
 		}
 	}
@@ -91,6 +105,11 @@ struct OnBelt {
 	speed: f64,
 	/// When its booking point crossed the start, for its crossing time.
 	entered: SimTime,
+	/// It lies across its way, having turned at a cross conveyor: its width lies along the belt.
+	crosswise: bool,
+	/// How long it is along the belt, its length or lying crosswise its width, kept so the walk
+	/// over the MUs on every replan reads no MU kind.
+	along: f64,
 }
 
 /// The MU a conveyor handed to the next one, which still has its rear on this one: where its rear
@@ -167,6 +186,12 @@ pub struct Conveyor {
 	/// already at hand, when it enters and when the conveyor replans, so telling busy and full from
 	/// busy with room reads no position on any other event.
 	short_until: Option<SimTime>,
+	/// Who hands over the MU about to enter, and whether it lies crosswise, told just before it
+	/// enters.
+	arriving: Option<(u32, bool)>,
+	/// What makes it a cross conveyor (spec issue 148), if it is one: then `length` and `width`
+	/// are those of the way the MU on it goes now. Boxed, so other conveyors pay a pointer.
+	pub(crate) cross: Option<Box<Cross>>,
 	/// The model's kinds of MU, by `MuKindId`, given when a run is built.
 	pub(crate) kinds: Vec<MuKind>,
 }
@@ -202,8 +227,27 @@ impl Conveyor {
 			taken: 0.0,
 			clears_at: None,
 			short_until: None,
+			arriving: None,
+			cross: None,
 			kinds: vec![MuKind::default()],
 		}
+	}
+
+	/// A cross conveyor of `length` along its x axis, front to back, and `width` across, moving
+	/// its MUs at `speed` metres per second, one at a time.
+	pub fn new_cross(object_id: u32, length: f64, width: f64, speed: f64) -> Conveyor {
+		let mut conveyor = Conveyor::new(object_id, length, width, speed);
+		conveyor.cross = Some(Box::new(Cross::new(length, width)));
+		conveyor
+	}
+
+	/// Its cross conveyor part, if it is one.
+	pub fn cross(&self) -> Option<&Cross> {
+		self.cross.as_deref()
+	}
+
+	pub(crate) fn cross_mut(&mut self) -> Option<&mut Cross> {
+		self.cross.as_deref_mut()
 	}
 
 	/// Gives it failures, or none with `None`.
@@ -222,13 +266,31 @@ impl Conveyor {
 	}
 
 	fn rear(&self, at: usize, now: SimTime) -> f64 {
-		self.front(at, now) - self.kind(self.belt[at].mu.kind()).length
+		self.front(at, now) - self.along(&self.belt[at])
 	}
 
-	/// How far its front is ahead of its booking point.
-	fn booking_offset(&self, kind: MuKindId) -> f64 {
+	/// How long an MU of this kind is along its way, and how wide across it: its length and width,
+	/// or the other way round while it lies crosswise.
+	fn extent(&self, kind: MuKindId, crosswise: bool) -> (f64, f64) {
 		let kind = self.kind(kind);
-		kind.booking_point * kind.length
+		if crosswise { (kind.width, kind.length) } else { (kind.length, kind.width) }
+	}
+
+	/// How long the MU is along the belt.
+	#[inline]
+	fn along(&self, on: &OnBelt) -> f64 {
+		on.along
+	}
+
+	/// How far its front is ahead of its booking point. Lying crosswise, its booking point is at
+	/// its middle along its way.
+	fn booking_offset(&self, kind: MuKindId, crosswise: bool) -> f64 {
+		let kind = self.kind(kind);
+		if crosswise { kind.width / 2.0 } else { kind.booking_point * kind.length }
+	}
+
+	fn booking_offset_of(&self, on: &OnBelt) -> f64 {
+		self.booking_offset(on.mu.kind(), on.crosswise)
 	}
 
 	/// Sets the MU at `at` at `front` from `now` on, moving at `speed` or standing, and says so.
@@ -237,21 +299,26 @@ impl Conveyor {
 		on.front = front;
 		on.since = context.time;
 		on.speed = speed;
-		let (mu_id, kind) = (on.mu.id, on.mu.kind());
-		context.record(OccurrenceKind::MotionPlanned { mu_id, at: self.base.object_id, front: front as f32, speed: speed as f32, kind });
+		let (mu_id, kind, crosswise) = (on.mu.id, on.mu.kind(), on.crosswise);
+		let from_side = self.cross.as_ref().map(|cross| cross.leg_from);
+		context.record(OccurrenceKind::MotionPlanned { mu_id, at: self.base.object_id, front: front as f32, speed: speed as f32, kind, crosswise, from_side });
 	}
 
-	/// Whether an MU of this kind could ever be on it.
-	fn fits(&self, kind: MuKindId) -> bool {
-		let kind = self.kind(kind);
-		kind.width <= self.width + EPSILON && kind.length <= self.length + EPSILON
+	/// Whether the MU offered could ever be on it, lying as it does.
+	fn fits(&self, offer: &Offer) -> bool {
+		let (along, across) = self.extent(offer.kind, offer.crosswise);
+		if let Some(cross) = &self.cross {
+			// Its way across depends on the side it comes in by.
+			return cross.entry_side(offer.from).is_some_and(|side| cross.fits_from(side, along, across, EPSILON));
+		}
+		across <= self.width + EPSILON && along <= self.length + EPSILON
 	}
 
-	/// How far the last MU's rear must be past the start for one of this kind to enter. From
+	/// How far the last MU's rear must be past the start for the MU offered to enter. From
 	/// another conveyor it enters with its front at the start, so only the gap is needed. From
 	/// anything else it enters with its booking point there.
-	fn room_needed(&self, kind: MuKindId, from_belt: bool) -> f64 {
-		if from_belt { self.gap } else { self.booking_offset(kind) + self.gap }
+	fn room_needed(&self, offer: &Offer) -> f64 {
+		if offer.from_belt { self.gap } else { self.booking_offset(offer.kind, offer.crosswise) + self.gap }
 	}
 
 	/// How long it takes to move `distance` metres at `speed`, rounded up to the next millisecond
@@ -322,6 +389,9 @@ impl Conveyor {
 		if self.interruptions.is_interrupted() || (at == 0 && self.front_at_end && self.handing_to.is_none()) {
 			return 0.0;
 		}
+		if self.cross.as_ref().is_some_and(|cross| cross.stage == Stage::Switching) {
+			return 0.0;
+		}
 		let mut speed = self.speed;
 		// An MU on this conveyor and the next moves at the slower of the two, but while one is
 		// stopped it moves at the speed of the one it belongs to (ADR 0023).
@@ -378,7 +448,7 @@ impl Conveyor {
 					}
 				}
 				self.apply(at, was, front, speed, context);
-				ahead = Some((front - self.kind(self.belt[at].mu.kind()).length, speed));
+				ahead = Some((front - self.along(&self.belt[at]), speed));
 			}
 			// The last MU's rear and speed, unless the belt is empty and this is what was ahead.
 			let tail = if self.belt.is_empty() { None } else { ahead };
@@ -402,7 +472,7 @@ impl Conveyor {
 				last_front = front;
 			}
 			let last = self.belt.len() - 1;
-			return (closes_up, Some((last_front - self.kind(self.belt[last].mu.kind()).length, group)));
+			return (closes_up, Some((last_front - self.along(&self.belt[last]), group)));
 		}
 		(closes_up, None)
 	}
@@ -426,15 +496,26 @@ impl Conveyor {
 			return;
 		}
 		let now = context.time;
-		let lead = self.lead(others, now);
+		if self.cross.as_ref().is_some_and(|cross| !cross.decided) {
+			self.decide_exit(context, others);
+		}
+		let had_lead = self.led_by.is_some();
+		let mut lead = self.lead(others, now);
+		if self.cross.is_some() {
+			lead = self.cross_lead(had_lead, lead, now);
+		}
 		let (closes_up, tail) = self.settle(lead, others, context);
 		self.short_until = tail.and_then(|(rear, speed)| self.short_until(rear, speed, now));
 		if let Some(first) = self.belt.front() {
 			if first.speed > 0.0 {
 				let front = self.front(0, now);
 				let event = match self.handing_to {
-					Some(_) => Some((ConveyorStep::Booked, self.length + self.booking_offset(first.mu.kind()) - front)),
-					None if !self.front_at_end => Some((ConveyorStep::FrontAtEnd, self.length - front)),
+					Some(_) => Some((ConveyorStep::Booked, self.length + self.booking_offset_of(first) - front)),
+					// A turning MU on a cross conveyor stops at its centre first.
+					None if !self.front_at_end => match self.centre_ahead(first) {
+						Some(centre) => Some((ConveyorStep::Centre, centre - front)),
+						None => Some((ConveyorStep::FrontAtEnd, self.length - front)),
+					},
 					None => None,
 				};
 				if let Some((step, distance)) = event {
@@ -454,13 +535,18 @@ impl Conveyor {
 			// Its last MU may be what the MU that is coming in must not run into.
 			Self::wake(from, context, others);
 		}
-		if !self.retried {
-			let first = waiting_ids(&self.blockedlist).into_iter().find_map(|id| {
-				let waiting = others.get(id);
-				waiting.offered_kind(now).filter(|&kind| self.fits(kind)).map(|kind| (kind, waiting.reads_mu_kind()))
-			});
-			if let Some((kind, from_belt)) = first {
-				let need = self.room_needed(kind, from_belt);
+		if let Some(cross) = &self.cross {
+			if let Some(Timer::Until(at)) = cross.switch.filter(|_| cross.stage == Stage::Switching) {
+				context.schedule(self.event(ConveyorStep::Switched, at.saturating_sub(now)));
+			}
+			if let Some(Timer::Until(at)) = cross.release {
+				context.schedule(self.event(ConveyorStep::Released, at.saturating_sub(now)));
+			}
+		}
+		if !self.retried && self.free_for_another() {
+			let first = waiting_ids(&self.blockedlist).into_iter().find_map(|id| others.get(id).offer(now).filter(|offer| self.fits(offer)));
+			if let Some(offer) = first {
+				let need = self.room_needed(&offer);
 				let after = match self.belt.back() {
 					None => Some(SimTime::ZERO),
 					Some(last) => {
@@ -507,7 +593,15 @@ impl Conveyor {
 	/// crosses the end, at once with its booking point at the front.
 	fn offer(&mut self, context: &mut EventContext, others: &mut OtherObjects<'_>, only: Option<u32>) -> Result<bool, RunTimeError> {
 		let mu_id = self.belt[0].mu.id;
-		let Some(taken_by) = try_to_reserve_successor(self, context, others, mu_id, only) else {
+		let taken_by = match self.cross.as_ref() {
+			// A cross conveyor offers its MU only to the exit it leaves by, if it has one.
+			Some(cross) => match cross.exit {
+				Some(exit) if only.is_none_or(|from| from == self.succ[exit]) => try_to_reserve_exit(self, context, others, mu_id, exit, only.is_some()),
+				_ => None,
+			},
+			None => try_to_reserve_successor(self, context, others, mu_id, only),
+		};
+		let Some(taken_by) = taken_by else {
 			return Ok(false);
 		};
 		self.front_at_end = false;
@@ -515,7 +609,7 @@ impl Conveyor {
 		if let Some(next) = others.get_mut(taken_by).as_conveyor_mut() {
 			next.reserved_by = Some(self.base.object_id);
 		}
-		if self.booking_offset(self.belt[0].mu.kind()) <= EPSILON {
+		if self.booking_offset_of(&self.belt[0]) <= EPSILON {
 			self.hand_over(taken_by, context, others)?;
 		} else {
 			self.handing_to = Some(taken_by);
@@ -534,14 +628,31 @@ impl Conveyor {
 		self.front_at_end = false;
 		self.statistics.count_mu_out();
 		self.belt_statistics.crossed(context.time.saturating_sub(on.entered));
-		self.taken -= self.kind(on.mu.kind()).length;
+		self.taken -= self.along(&on);
 		let from = self.base.object_id;
 		context.record(OccurrenceKind::MuMoved { mu_id: on.mu.id, from, to });
 		log::info!("seq={} MU {} moved from conveyor {} to {}", context.seq, on.mu.id, from, to);
-		if others.get(to).as_conveyor().is_some() {
+		let to_belt = others.get(to).as_conveyor().is_some();
+		if to_belt {
 			// Its rear may still be on this one, which the MUs behind must not run into.
 			self.led_by = Some(to);
 		}
+		if let Some(cross) = self.cross.as_deref_mut() {
+			if let Some(exit) = cross.exit {
+				cross.statistics.out(cross.exit_sides[exit]);
+			}
+			cross.turned_last = cross.turning;
+			cross.stage = Stage::Approaching;
+			cross.turning = false;
+			cross.exit = None;
+			cross.decided = false;
+			// Into an object without geometry it is gone whole at once. Onto a conveyor, once its
+			// rear has left (`cross_lead`).
+			if !to_belt {
+				Self::start_release(cross, context.time);
+			}
+		}
+		others.get_mut(to).arriving(from, on.crosswise);
 		if let Some(entered) = others.get_mut(to).enter(on.mu, context).map_err(|_| RunTimeError {})? {
 			context.schedule(entered);
 		}
@@ -575,6 +686,31 @@ impl Conveyor {
 						self.hand_over(to, context, others)?;
 					}
 					ConveyorStep::CloseUp | ConveyorStep::Straddle => {}
+				ConveyorStep::Centre => {
+					let Some(centre) = self.belt.front().and_then(|first| self.centre_ahead(first)) else {
+						self.replan(context, others);
+						return Ok(());
+					};
+					// Held up on the way, it isn't there: the plan was already void.
+					if self.front(0, now) < centre - 1e-3 {
+						self.replan(context, others);
+						return Ok(());
+					}
+					self.turn_at_centre(centre, context);
+				}
+				ConveyorStep::Switched => self.leave_sideways(context),
+				ConveyorStep::Released => {
+					if let Some(cross) = self.cross.as_deref_mut() {
+						cross.release = None;
+					}
+				}
+					// Nothing on it moves differently, so nothing is worked out again.
+					ConveyorStep::Decide => {
+						if self.cross.as_ref().is_some_and(|cross| !cross.decided) {
+							self.decide_exit(context, others);
+						}
+						return Ok(());
+					}
 					ConveyorStep::Room => {
 						self.retried = true;
 						retries_for_blocked(&mut self.blockedlist, self.base.object_id, context);
@@ -611,6 +747,110 @@ impl Conveyor {
 		}
 	}
 
+	/// Whether another MU could come in now, as far as what is already on it goes: on a cross
+	/// conveyor, only when the last MU's rear has left, nothing is reserved and the release time
+	/// is over. A conveyor takes one whenever its start has room, which `accepts` works out.
+	fn free_for_another(&self) -> bool {
+		match &self.cross {
+			None => true,
+			Some(cross) => self.belt.is_empty() && self.led_by.is_none() && self.reserved_by.is_none() && cross.release.is_none(),
+		}
+	}
+
+	/// On a cross conveyor, where the front of `first` stops if it turns at the centre: with the MU's
+	/// centre over the cross conveyor's.
+	fn centre_ahead(&self, first: &OnBelt) -> Option<f64> {
+		let cross = self.cross.as_ref()?;
+		(cross.turning && cross.stage == Stage::Approaching).then(|| (self.length + self.along(first)) / 2.0)
+	}
+
+	/// On a cross conveyor, what its MUs must not run into on the next conveyor. The MU it handed
+	/// over has left once its rear is off it, which the next conveyor tells it by waking it: then
+	/// nothing on it is held back any more, and a release time begins after a turned MU.
+	fn cross_lead(&mut self, had_lead: bool, lead: Option<Lead>, now: SimTime) -> Option<Lead> {
+		let mut lead = lead;
+		if self.led_by.is_some() && lead.is_some_and(|lead| lead.rear >= self.length - EPSILON) {
+			self.led_by = None;
+			lead = None;
+		}
+		if had_lead && self.led_by.is_none() {
+			if let Some(cross) = self.cross.as_deref_mut() {
+				Self::start_release(cross, now);
+			}
+		}
+		lead
+	}
+
+	/// The MU handed over has left whole: after one that turned, the release time begins.
+	fn start_release(cross: &mut Cross, now: SimTime) {
+		if std::mem::take(&mut cross.turned_last) && cross.release_time > SimTime::ZERO {
+			cross.release = Some(Timer::Until(now + cross.release_time));
+		}
+	}
+
+	/// The MU turning on a cross conveyor has its centre over the cross conveyor's: it stands there
+	/// for the switch time, and its exit is chosen now, among those that take where it goes, by the
+	/// cross conveyor's own strategy.
+	fn turn_at_centre(&mut self, centre: f64, context: &mut EventContext) {
+		let now = context.time;
+		self.plan_mu(0, centre, 0.0, context);
+		let cross = self.cross.as_deref_mut().expect("only a cross conveyor turns MUs");
+		cross.stage = Stage::Switching;
+		cross.switch = Some(Timer::Until(now + cross.switch_time));
+	}
+
+	/// Chooses the exit of the MU on it, or of the one a conveyor before it is handing over, for
+	/// which it has reserved room: as the MU is allowed in. Among the exits whose lists take its
+	/// next destination, straight across included, its own strategy picks the first whose
+	/// successor would take the MU now, otherwise the first in its order, which the MU then waits
+	/// for. An MU no exit lists goes straight across.
+	fn decide_exit(&mut self, context: &EventContext, others: &OtherObjects<'_>) {
+		let Some(cross) = self.cross.as_deref() else { return };
+		let (destination, kind, crosswise, side) = match self.belt.front() {
+			Some(on) => (context.routing.next_destination(&on.mu), on.mu.kind(), on.crosswise, cross.leg_from),
+			None => {
+				let Some(giver) = self.reserved_by.filter(|&from| from != NOBODY) else { return };
+				let Some((mu, crosswise)) = others.get(giver).as_conveyor().and_then(Conveyor::handed_mu) else { return };
+				let Some(side) = cross.entry_side(giver) else { return };
+				(context.routing.next_destination(mu), mu.kind(), crosswise, side)
+			}
+		};
+		let takes = cross.exits_taking(destination);
+		let exit = if takes == 0 {
+			cross.exit_at(side.opposite())
+		} else {
+			// Leaving sideways it lies the other way round from how it came in.
+			let mut turns = [false; 8];
+			for (exit, &at) in cross.exit_sides.iter().enumerate().take(8) {
+				turns[exit] = at != side.opposite();
+			}
+			let from = self.base.object_id;
+			choose_exit(self, others, takes, &|exit| Offer { kind, from, from_belt: true, crosswise: crosswise != turns[exit] }, context.time)
+		};
+		self.cross.as_deref_mut().expect("a cross conveyor").decide(side, exit);
+	}
+
+	/// The MU it is handing over to the next object, and whether it lies crosswise.
+	fn handed_mu(&self) -> Option<(&MoveableUnit, bool)> {
+		self.handing_to.and(self.belt.front()).map(|on| (&on.mu, on.crosswise))
+	}
+
+	/// The switch time is over: the turning MU leaves sideways from the centre, keeping its
+	/// orientation, so it lies crosswise to its new way, or lengthwise again if it came in
+	/// crosswise.
+	fn leave_sideways(&mut self, context: &mut EventContext) {
+		let cross = self.cross.as_deref_mut().expect("only a cross conveyor turns MUs");
+		cross.switch = None;
+		cross.stage = Stage::Leaving;
+		let side = cross.exit.map_or(cross.leg_from.opposite(), |exit| cross.exit_sides[exit]);
+		cross.leg_from = side.opposite();
+		(self.length, self.width) = cross.dimensions_from(side);
+		self.belt[0].crosswise = !self.belt[0].crosswise;
+		self.belt[0].along = self.extent(self.belt[0].mu.kind(), self.belt[0].crosswise).0;
+		let front = (self.length + self.along(&self.belt[0])) / 2.0;
+		self.plan_mu(0, front, self.speed, context);
+	}
+
 	/// Sets where the MU at `at` is, exactly, without saying so: its movement doesn't change.
 	fn plan_mu_quietly(&mut self, at: usize, front: f64, now: SimTime) {
 		let on = &mut self.belt[at];
@@ -620,6 +860,12 @@ impl Conveyor {
 
 	/// Empty, moving MUs, or every MU standing.
 	fn process_state(&self) -> ProcessState {
+		// Switching, or releasing after a turned MU, a cross conveyor is busy with nothing moving,
+		// and so it is while an MU moves over it that belongs to a conveyor beside it: one coming in
+		// that it has reserved the space for, or one it handed over whose rear is still on it.
+		if self.cross.as_ref().is_some_and(|cross| cross.switching()) || (self.cross.is_some() && self.belt.is_empty() && (self.reserved_by.is_some() || self.led_by.is_some())) {
+			return ProcessState::Processing;
+		}
 		if self.belt.is_empty() {
 			ProcessState::Idle
 		} else if self.belt.iter().any(|on| on.speed > 0.0) {
@@ -650,8 +896,13 @@ impl Conveyor {
 		if let Some((held, time)) = self.statistics.observe_stretch(now, machine, self.belt.len() as u64) {
 			self.belt_statistics.stretch(held, time);
 		}
-		// Busy and full only because of the last MU's rear, it comes free when that moves clear.
-		self.clears_at = if machine == MachineState::Busy && self.reserved_by.is_none() { self.short_until.filter(|&at| at != SimTime::MAX) } else { None };
+		let interrupted = self.interruptions.is_interrupted();
+		if let Some(cross) = self.cross.as_deref_mut() {
+			cross.statistics.observe(cross.switching() && !interrupted, now);
+		}
+		// Busy and full only because of the last MU's rear, it comes free when that moves clear. A
+		// cross conveyor busy is always full: it holds one MU at a time.
+		self.clears_at = if machine == MachineState::Busy && self.reserved_by.is_none() && self.cross.is_none() { self.short_until.filter(|&at| at != SimTime::MAX) } else { None };
 		if self.belt.is_empty() {
 			// So rounding never leaves a little behind.
 			self.taken = 0.0;
@@ -676,6 +927,8 @@ impl Conveyor {
 	/// and partly blocked while the MU at its end waits for a successor and others still move.
 	fn machine_state(&self, now: SimTime) -> MachineState {
 		let machine = match self.state {
+			// Holding one MU at a time, a cross conveyor that is busy has no room for another.
+			ProcessState::Processing if self.cross.is_some() => MachineState::Busy,
 			ProcessState::Processing if self.front_at_end && self.handing_to.is_none() => MachineState::BusyPartlyBlocked,
 			ProcessState::Processing => {
 				let taken = self.reserved_by.is_some() || self.short_until.is_some_and(|until| now < until);
@@ -699,14 +952,21 @@ impl MaterialFlow for Conveyor {
 		false
 	}
 	#[inline(never)]
-	fn accepts(&self, kind: MuKindId, now: SimTime, from_belt: bool) -> bool {
-		if self.interruptions.is_interrupted() || self.reserved_by.is_some() || !self.fits(kind) {
+	fn accepts(&self, offer: &Offer, now: SimTime) -> bool {
+		if self.interruptions.is_interrupted() || self.reserved_by.is_some() || !self.fits(offer) {
 			return false;
+		}
+		if self.cross.is_some() {
+			return self.free_for_another();
 		}
 		match self.belt.back() {
 			None => true,
-			Some(_) => self.rear(self.belt.len() - 1, now) >= self.room_needed(kind, from_belt) - EPSILON,
+			Some(_) => self.rear(self.belt.len() - 1, now) >= self.room_needed(offer) - EPSILON,
 		}
+	}
+	#[inline(never)]
+	fn arriving(&mut self, from: u32, crosswise: bool) {
+		self.arriving = Some((from, crosswise));
 	}
 	/// Another conveyor's MU has its front at the start: nothing else may enter until it has been
 	/// handed over (ADR 0023).
@@ -715,6 +975,10 @@ impl MaterialFlow for Conveyor {
 		self.reserved_by = Some(NOBODY);
 		// Its start is taken from now on.
 		self.update_state(context);
+		// A cross conveyor chooses the exit of the MU it has let in now, once it knows whose it is.
+		if self.cross.is_some() {
+			context.schedule(self.event(ConveyorStep::Decide, SimTime::ZERO));
+		}
 	}
 	#[inline(never)]
 	fn is_exit_allowed(&self) -> bool {
@@ -725,7 +989,15 @@ impl MaterialFlow for Conveyor {
 	#[inline(never)]
 	fn process_mu_entrance(&mut self, mu: MoveableUnit, _arrival: Arrival, context: &mut EventContext) -> Result<Option<EventTemplate>, MaterialflowError> {
 		log::info!("MU {} entered conveyor {}", mu.id, self.base.object_id);
-		let front = self.booking_offset(mu.kind());
+		let arriving = self.arriving.take();
+		let crosswise = arriving.is_some_and(|(_, crosswise)| crosswise);
+		if let Some(cross) = self.cross.as_deref_mut() {
+			let from = arriving.map(|(from, _)| from).or(self.reserved_by.filter(|&from| from != NOBODY));
+			let side = from.and_then(|from| cross.entry_side(from)).ok_or(MaterialflowError::EntranceDenied)?;
+			cross.enter(side);
+			(self.length, self.width) = cross.dimensions_from(side);
+		}
+		let front = self.booking_offset(mu.kind(), crosswise);
 		// Handed over by a conveyor, it may still have its rear on that one.
 		if let Some(from) = self.reserved_by.take() {
 			self.straddle_from = Some(from).filter(|&from| from != NOBODY);
@@ -739,9 +1011,10 @@ impl MaterialFlow for Conveyor {
 		} else {
 			self.belt.front().map_or(self.speed, |first| first.speed)
 		};
-		self.taken += self.kind(mu.kind()).length;
-		self.short_until = self.short_until(front - self.kind(mu.kind()).length, speed, context.time);
-		self.belt.push_back(OnBelt { mu, front, since: context.time, speed, entered: context.time });
+		let along = self.extent(mu.kind(), crosswise).0;
+		self.taken += along;
+		self.short_until = self.short_until(front - along, speed, context.time);
+		self.belt.push_back(OnBelt { mu, front, since: context.time, speed, entered: context.time, crosswise, along });
 		let at = self.belt.len() - 1;
 		self.plan_mu(at, front, speed, context);
 		self.statistics.count_mu_in();
@@ -808,6 +1081,11 @@ impl EventInterface for Conveyor {
 		self.taken = 0.0;
 		self.clears_at = None;
 		self.short_until = None;
+		self.arriving = None;
+		if let Some(cross) = self.cross.as_deref_mut() {
+			cross.reset();
+			(self.length, self.width) = (cross.length, cross.width);
+		}
 	}
 	#[inline(never)]
 	fn clear_statistics(&mut self, now: SimTime) {
@@ -817,6 +1095,9 @@ impl EventInterface for Conveyor {
 		self.interruptions.clear_statistics(now, &self.statistics);
 		self.statistics.clear(now);
 		self.belt_statistics.clear();
+		if let Some(cross) = self.cross.as_deref_mut() {
+			cross.statistics.clear(now);
+		}
 	}
 	#[inline(never)]
 	fn report(&self, now: SimTime) -> ObjectState {
@@ -824,7 +1105,7 @@ impl EventInterface for Conveyor {
 		let (fill, belt) = self.belt_statistics.read(self.statistics.in_progress(now), self.belt.front().map(|first| now.saturating_sub(first.entered)));
 		ObjectState {
 			id: self.base.object_id,
-			kind: ObjectKind::Conveyor,
+			kind: if self.cross.is_some() { ObjectKind::CrossConveyor } else { ObjectKind::Conveyor },
 			contents: self.belt.iter().map(|on| on.mu.id).collect(),
 			content_kinds: self.belt.iter().map(|on| on.mu.kind()).collect(),
 			process: self.state.clone(),
@@ -842,12 +1123,15 @@ impl EventInterface for Conveyor {
 			plan: None,
 			fill: Some(Box::new(fill)),
 			belt: Some(Box::new(belt)),
+			cross: self.cross.as_ref().map(|cross| Box::new(cross.statistics.read(now))),
 			positions: (0..self.belt.len())
 				.map(|at| BeltPosition {
 					mu_id: self.belt[at].mu.id,
 					front: self.front(at, now),
 					speed: if stopped { 0.0 } else { self.belt[at].speed },
 					kind: self.belt[at].mu.kind(),
+					crosswise: self.belt[at].crosswise,
+					from_side: self.cross.as_ref().map(|cross| cross.leg_from),
 				})
 				.collect(),
 		}
@@ -883,12 +1167,21 @@ impl Interruptible for Conveyor {
 			}
 		}
 		self.plan = self.plan.wrapping_add(1);
+		// A cross conveyor's switch time and release time freeze.
+		if let Some(cross) = self.cross.as_deref_mut() {
+			cross.switch = cross.switch.map(|timer| timer.freeze(now));
+			cross.release = cross.release.map(|timer| timer.freeze(now));
+		}
 	}
 	/// Its MUs move again where their way is clear, as `replan` works out, and the front MU at the
 	/// end is offered again.
 	#[inline(never)]
 	fn stop_ended(&mut self, context: &mut EventContext, others: &mut OtherObjects<'_>) -> Result<(), RunTimeError> {
 		self.retried = false;
+		if let Some(cross) = self.cross.as_deref_mut() {
+			cross.switch = cross.switch.map(|timer| timer.thaw(context.time));
+			cross.release = cross.release.map(|timer| timer.thaw(context.time));
+		}
 		if self.front_at_end && self.handing_to.is_none() && !self.belt.is_empty() {
 			self.offer(context, others, None)?;
 		}
@@ -917,6 +1210,9 @@ impl SuccessorContainer for Conveyor {
 	#[inline(never)]
 	fn clear_content_and_idle(&mut self) {
 		self.belt.clear();
+		if let Some(cross) = self.cross.as_deref_mut() {
+			cross.reset();
+		}
 		self.short_until = None;
 		self.taken = 0.0;
 		self.front_at_end = false;
@@ -933,13 +1229,17 @@ impl SuccessorContainer for Conveyor {
 		if self.belt.is_empty() {
 			self.short_until = None;
 		}
-		self.taken -= self.kind(on.mu.kind()).length;
+		self.taken -= self.along(&on);
 		Some(on.mu)
 	}
 	/// Only its front MU at the end is offered, from when it got there.
 	#[inline(never)]
 	fn offered_since(&self, _now: SimTime) -> Option<SimTime> {
 		(self.front_at_end && self.handing_to.is_none() && !self.belt.is_empty()).then_some(self.ready_since)
+	}
+	#[inline(never)]
+	fn offered_crosswise(&self) -> bool {
+		self.belt.front().is_some_and(|on| on.crosswise)
 	}
 	#[inline(never)]
 	fn offered_kind(&self, _now: SimTime) -> Option<MuKindId> {

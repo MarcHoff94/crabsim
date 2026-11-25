@@ -31,9 +31,12 @@ pub enum OccurrenceKind {
     /// receiving it until the MU's booking point arrives, which is its `MuMoved` (ADR 0023).
     Reserved { object_id: u32, mu_id: u32 },
     /// An MU on a conveyor began to move or stand: where its front is now, in metres from the
-    /// conveyor's start, its speed in metres per second, 0 standing, and its MU kind. A view works
-    /// out where it is later from this, until the next for it (ADR 0022).
-    MotionPlanned { mu_id: u32, at: u32, front: f32, speed: f32, kind: crate::flows::MuKindId },
+    /// conveyor's start, its speed in metres per second, 0 standing, its MU kind, and whether it
+    /// lies crosswise, its width along its way. A view works out where it is later from this, until
+    /// the next for it (ADR 0022).
+    /// On a cross conveyor, `from_side` is the side its way starts from, and `front` counts from
+    /// there: its entry side, or for a turned MU, the side opposite the one it leaves by.
+    MotionPlanned { mu_id: u32, at: u32, front: f32, speed: f32, kind: crate::flows::MuKindId, crosswise: bool, from_side: Option<crate::materialflow_objects::Side> },
     /// A failure, stop or pause began. The object is interrupted while any interruption is active, so
     /// overlapping ones are one stop.
     /// `profile` is the failure profile's index in the object's list, for a random failure.
@@ -133,6 +136,8 @@ pub enum ObjectKind {
     Buffer,
     Drain,
     Conveyor,
+    /// A conveyor with four sides that turns MUs by where they go (spec issue 148).
+    CrossConveyor,
 }
 
 /// How many MUs an object can hold.
@@ -240,6 +245,9 @@ pub struct ObjectState {
     /// Each MU on a conveyor, front first, and how it moves now. Empty for other objects, which
     /// then allocate nothing for it.
     pub positions: Vec<BeltPosition>,
+    /// A cross conveyor's own figures: its switching time and the MUs out of each side (spec issue
+    /// 148). `None` for every other object, which then allocates nothing for it.
+    pub cross: Option<Box<crate::materialflow_objects::CrossStatistics>>,
 }
 
 /// Where an MU on a conveyor is at a state's time and how it moves (ADR 0022).
@@ -251,6 +259,10 @@ pub struct BeltPosition {
     /// Metres per second, 0 standing.
     pub speed: f64,
     pub kind: crate::flows::MuKindId,
+    /// It lies across its way, having turned at a cross conveyor: its width lies along the belt.
+    pub crosswise: bool,
+    /// On a cross conveyor, the side its way starts from, which `front` counts from.
+    pub from_side: Option<crate::materialflow_objects::Side>,
 }
 
 /// The full current state of a simulation run.

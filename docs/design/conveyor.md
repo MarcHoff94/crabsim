@@ -1,6 +1,6 @@
 # The conveyor
 
-Spec issue 133, increment 1. The decisions are in ADR 0021 to ADR 0024. This note records how the engine carries them out, for PR 2 onwards. PR 2 builds a straight conveyor at constant speed between objects without geometry. PR 3 adds conveyor to conveyor and non-accumulating conveyors with interruptions while an MU is on two at once, and PR 4 adds the conveyor's statistics (both built).
+Spec issue 133, increment 1, and the cross conveyor of spec issue 148. The decisions are in ADR 0021 to ADR 0027. This note records how the engine carries them out, for PR 2 onwards. PR 2 builds a straight conveyor at constant speed between objects without geometry. PR 3 adds conveyor to conveyor and non-accumulating conveyors with interruptions while an MU is on two at once, and PR 4 adds the conveyor's statistics (both built).
 
 ## Inside
 
@@ -47,6 +47,21 @@ An interrupted conveyor stops every MU it holds, takes no MU and passes none on.
 - **Crossing time** is from an MU's booking point crossing the start, when it enters, to crossing the end, when it is handed over: its count, total and longest, the longest including the MU on it longest, as a Drain's exit interval includes the one in progress.
 - All of it is boxed in the conveyor (`BeltKeeper`), fixed in size, and reported as `ObjectState::belt`.
 - **Measured** on the benchmark's `conveyor-line` scenario (`demo::conveyor_line`), with the `counters` feature: a conveyor works out its events again about once every two events, walking about 9 MUs each time.
+
+## Lying crosswise (spec issue 148)
+
+- **An MU keeps its orientation** from one geometry-aware object to the next, decided with the owner on 2026-11-25. A cross conveyor turning an MU sends it sideways without turning it, so it lies crosswise on what comes next: its width along its way and its length across. Turned again at another cross conveyor, it lies lengthwise again. An object without geometry passes MUs on lengthwise.
+- **Kept by the conveyor, not the MU,** which stays 16 bytes (ADR 0027): each MU on a belt knows whether it lies crosswise. The object handing it over says so just before it enters (`MaterialFlow::arriving`), and what a successor is offered says so too (`Offer`, built by `offer_of`), with the kind, the predecessor and whether it comes front first.
+- **Crosswise,** an MU takes its width of the belt, needs its length across, and has its booking point at its middle along its way. Models without cross conveyors never have one, and their results are unchanged.
+
+## The cross conveyor (spec issue 148)
+
+- **A conveyor with a cross part.** `Conveyor::new_cross` gives a conveyor a boxed `Cross` (`src/materialflow_objects/cross.rs`): its four sides, which predecessor comes in by which side and which exit leaves by which, each exit side's destinations, the switch and release times, and what its MU is doing. Everything the conveyor does to take an MU in, move it, hand it over and not run into its neighbours' MUs is the same code, so between conveyors it behaves as a conveyor does, straddling MUs and reservations included, and other conveyors pay one pointer for it.
+- **One leg at a time.** An MU's way across is a leg along one axis, from the side it starts at, and the conveyor's `length` and `width` are that leg's: going straight through, from its entry side to the side opposite; turning, from its entry side to the centre, where it stands for the switch time (`Centre`, `Switched`), then a second leg from the centre to the side it leaves by, starting from the side opposite that one, which is what `MotionPlanned::from_side` and `BeltPosition::from_side` name.
+- **Its exit is chosen as the MU is let in** (decided with the owner on 2026-11-25), as a real line decides: when it enters from an object without geometry, or, for a conveyor's MU, when the cross conveyor reserves room for it, through an event at once that does nothing else (`Decide`, `decide_exit`). Among the exits whose lists take its next destination, the one straight across included, its own strategy (round robin, weighted, or by destination's `then`) picks the first in its order whose successor would take the MU now, otherwise the first, which the MU then waits for at that side (`choose_exit`). A destination is taken by an exit if any object it stands for is one the exit's listed destinations stand for, worked out once per run as a bit per exit for every destination (`Cross::build_takes`). An MU no exit lists goes straight across. It turns only if its exit isn't straight across, and then stops at the centre (`Centre`), which decides nothing. It is offered only to its exit (`try_to_reserve_exit`).
+- **One at a time.** It takes an MU only when empty, nothing is reserved, the last MU's rear has left and no release time runs. Into an object without geometry an MU is gone whole at once. Onto a conveyor its rear is still on the cross conveyor until that conveyor wakes it as the rear passes its start: then it has left (`cross_lead`), and after a turned MU the release time begins (`Released`).
+- **Interrupted,** its MU stands and the switch and release times freeze (`Timer`).
+- **Busy** from an MU touching it until its rear has left, and while switching or releasing; holding one MU, it is always full while busy. Switching and releasing are kept apart as its switching time, and the MUs out of each side are counted (`CrossStatistics`, `ObjectState::cross`). Its MU standing at a side it can't leave by is blocked.
 
 ## What a view sees
 

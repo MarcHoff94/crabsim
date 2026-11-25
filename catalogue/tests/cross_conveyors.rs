@@ -185,3 +185,62 @@ fn describe_and_query_model_know_a_cross_conveyors_sides_and_exits() {
     let source = setup.ok("query_model", json!({ "path": "fork.json", "query": { "kind": "distribution", "name": "In" } }));
     assert!(source["successors"][0].get("side").is_none());
 }
+
+/// A Feed conveyor into a cross conveyor, which turns MUs onto a Spur conveyor at one side, the
+/// rest going on to Ahead: `entry` and `exit` name the sides.
+fn belts(entry: &str, exit: &str) -> String {
+    format!(
+        r#"{{"format_version":2,"classes":[
+  {{"name":"Part","parent":"MU","attributes":{{"work_plan":[{{"at":"Out"}}]}}}}],"instances":[
+  {{"name":"In","class":"Source","position":{{"x":-2,"y":0}},"attributes":{{"interval":"0:10","mu_class":"Part"}}}},
+  {{"name":"Feed","class":"Conveyor","position":{{"x":0,"y":0}},"attributes":{{"path":[{{"straight":4}}]}}}},
+  {{"name":"Cross","class":"CrossConveyor","position":{{"x":10,"y":10}},"attributes":{{"exits":{{"{exit}":["Out"]}}}}}},
+  {{"name":"Spur","class":"Conveyor","position":{{"x":20,"y":20}},"attributes":{{"path":[{{"straight":3}}]}}}},
+  {{"name":"Out","class":"Drain","position":{{"x":30,"y":30}}}}],"connections":[
+  {{"from":"In","to":"Feed","exit":1,"entrance":1}},
+  {{"from":"Feed","to":"Cross","exit":1,"entrance":1,"to_side":"{entry}"}},
+  {{"from":"Cross","to":"Spur","exit":1,"entrance":1,"from_side":"{exit}"}},
+  {{"from":"Spur","to":"Out","exit":1,"entrance":1}}]}}"#
+    )
+}
+
+/// Where the instance called `name` is, and how far it is turned.
+fn placed(setup: &Setup, name: &str) -> (f64, f64, f64) {
+    let model = saved(setup);
+    let instance = model.instances.iter().find(|instance| instance.name == name).unwrap();
+    let position = instance.position.unwrap();
+    (position.x, position.y, instance.attributes.dimensions.map_or(0.0, |size| size.rotation_degrees))
+}
+
+fn assert_near(got: (f64, f64, f64), wanted: (f64, f64, f64)) {
+    let close = (got.0 - wanted.0).abs() < 1e-6 && (got.1 - wanted.1).abs() < 1e-6 && (got.2 - wanted.2).abs() < 1e-6;
+    assert!(close, "got {got:?}, wanted {wanted:?}");
+}
+
+#[test]
+fn attach_meets_a_cross_conveyor_at_the_middle_of_the_side_its_connection_names() {
+    let setup = Setup::new("attach-cross");
+    setup.ok("write_model", json!({ "path": "fork.json", "text": belts("back", "left") }));
+    // Feed ends at (4, 0) heading along x: the cross conveyor's back meets it, so its centre is
+    // half its length on, unturned.
+    run_line(&setup, "attach Cross to Feed");
+    assert_near(placed(&setup, "Cross"), (4.3, 0.0, 0.0));
+    // The Spur starts at the middle of its left side, heading out of it.
+    run_line(&setup, "attach Spur to Cross");
+    assert_near(placed(&setup, "Spur"), (4.3, 0.3, 90.0));
+}
+
+#[test]
+fn attach_turns_a_cross_conveyor_so_the_side_named_faces_its_neighbour() {
+    // In by its left side: turned a quarter, its left faces back along the Feed.
+    let setup = Setup::new("attach-cross-left");
+    setup.ok("write_model", json!({ "path": "fork.json", "text": belts("left", "front") }));
+    run_line(&setup, "attach Cross to Feed");
+    assert_near(placed(&setup, "Cross"), (4.3, 0.0, 90.0));
+    // Its front then points up the y axis, so the Spur starts above it.
+    run_line(&setup, "attach Spur to Cross");
+    assert_near(placed(&setup, "Spur"), (4.3, 0.3, 90.0));
+    // And the Feed attached to the cross conveyor, the other way round, ends at its left side.
+    run_line(&setup, "attach Feed to Cross");
+    assert_near(placed(&setup, "Feed"), (0.0, 0.0, 0.0));
+}

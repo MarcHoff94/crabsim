@@ -1137,6 +1137,23 @@ pub struct Placement {
 }
 
 /// Which way to go `length` metres from `x`, `y` along `heading_degrees`.
+/// The way out through a cross conveyor's side, counterclockwise from its own x axis.
+fn side_heading(side: Side) -> f64 {
+    match side {
+        Side::Front => 0.0,
+        Side::Left => 90.0,
+        Side::Back => 180.0,
+        Side::Right => 270.0,
+    }
+}
+
+/// How far a cross conveyor's side's middle is from its centre: half its length for its front
+/// and back, half its width for its left and right.
+fn side_reach(resolved: &Resolved, side: Side) -> f64 {
+    let (length, width) = (resolved.attributes.length.unwrap_or(0.6), resolved.attributes.width.unwrap_or(0.6));
+    if side.along_length() { length / 2.0 } else { width / 2.0 }
+}
+
 fn ahead(x: f64, y: f64, heading_degrees: f64, length: f64) -> (f64, f64) {
     let (sin, cos) = heading_degrees.to_radians().sin_cos();
     (x + cos * length, y + sin * length)
@@ -1148,8 +1165,11 @@ impl Model {
     /// conveyor's start onto the end of the one before it, or its end onto the start of the one
     /// after, heading the same way at the same height; an object without geometry with its centre
     /// half its length past a conveyor's end, or before its start, turned the way MUs go there;
-    /// and a conveyor's start or end the same way against an object without geometry. Refused,
-    /// with the reason, unless they are connected, one is a conveyor and `b` is placed.
+    /// and a conveyor's start or end the same way against an object without geometry. At a cross
+    /// conveyor (spec issue 148), they meet at the middle of the side the connection names,
+    /// heading out of it by an exit side and into it by an entry side, a cross conveyor attached
+    /// turning so that side faces its neighbour. Refused, with the reason, unless they are
+    /// connected, one is a conveyor or cross conveyor and `b` is placed.
     pub fn attach_placement(&self, a: usize, b: usize) -> Result<Placement, String> {
         let (first, second) = (self.instances.get(a).ok_or("no such instance")?, self.instances.get(b).ok_or("no such instance")?);
         if a == b {
@@ -1164,10 +1184,20 @@ impl Model {
             return Err(format!("`{}` and `{}` aren't connected: attaching lines up the ends of a connection", first.name, second.name));
         };
         let (resolved_a, resolved_b) = (self.resolve(a).ok_or("its class is unsound")?, self.resolve(b).ok_or("its class is unsound")?);
-        let (a_conveyor, b_conveyor) = (resolved_a.built_in == "Conveyor", resolved_b.built_in == "Conveyor");
-        if !a_conveyor && !b_conveyor {
-            return Err(format!("neither `{}` nor `{}` is a conveyor: attaching lines up a conveyor's ends with its neighbours", first.name, second.name));
+        if !geometry_aware(resolved_a.built_in) && !geometry_aware(resolved_b.built_in) {
+            return Err(format!("neither `{}` nor `{}` is a conveyor or cross conveyor: attaching lines up their ends and sides with their neighbours", first.name, second.name));
         }
+        // The connection's sides at a cross conveyor: `a`'s and `b`'s.
+        let connection = if after {
+            self.connections.iter().find(|c| c.from == second.name && c.to == first.name)
+        } else {
+            self.connections.iter().find(|c| c.from == first.name && c.to == second.name)
+        };
+        let (a_side, b_side) = match connection {
+            Some(c) if after => (c.to_side, c.from_side),
+            Some(c) => (c.from_side, c.to_side),
+            None => (None, None),
+        };
         let at_b = second.position.ok_or_else(|| format!("`{}` has no place yet: move it first, or attach it the other way round", second.name))?;
         let rotation = |resolved: &Resolved| resolved.attributes.dimensions.map_or(0.0, |size| size.rotation_degrees);
         let length = |resolved: &Resolved| resolved.attributes.dimensions.map_or(1.0, |size| size.length);
@@ -1179,6 +1209,14 @@ impl Model {
                 }
                 let (start, end) = path::travel_ends(&path, laid);
                 if after { end } else { start }
+            }
+            // At a cross conveyor's side, its middle, MUs leaving by it heading out and coming
+            // in by it heading in.
+            None if b_side.is_some() && resolved_b.built_in == "CrossConveyor" => {
+                let side = b_side.expect("given");
+                let out = rotation(&resolved_b) + side_heading(side);
+                let (x, y) = ahead(at_b.x, at_b.y, out, side_reach(&resolved_b, side));
+                path::Pose { x, y, z: at_b.z, heading_degrees: if after { out } else { out + 180.0 } }
             }
             None => {
                 let heading = rotation(&resolved_b);
@@ -1201,6 +1239,15 @@ impl Model {
                 let (sin, cos) = turn.to_radians().sin_cos();
                 let (dx, dy) = (own.x * cos - own.y * sin, own.x * sin + own.y * cos);
                 Placement { position: Position { x: meet.x - dx, y: meet.y - dy, z: meet.z - own.z }, rotation_degrees: turn }
+            }
+            // A cross conveyor turned so its side faces the way MUs pass through it there, out by
+            // an exit side and in by an entry side, and moved so that side's middle is the
+            // meeting place.
+            None if a_side.is_some() && resolved_a.built_in == "CrossConveyor" => {
+                let side = a_side.expect("given");
+                let out = if after { meet.heading_degrees + 180.0 } else { meet.heading_degrees };
+                let (x, y) = ahead(meet.x, meet.y, out, -side_reach(&resolved_a, side));
+                Placement { position: Position { x, y, z: meet.z }, rotation_degrees: out - side_heading(side) }
             }
             None => {
                 let reach = if after { length(&resolved_a) / 2.0 } else { -length(&resolved_a) / 2.0 };

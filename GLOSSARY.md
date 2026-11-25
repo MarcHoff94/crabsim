@@ -221,6 +221,9 @@ An MU straddles two geometry-aware objects while its footprint is on both. It be
 A geometry-aware routing object with four sides, holding one MU at a time. Each exit side lists the destinations it takes. An MU whose next destination one or more exit sides list leaves by one of them, chosen by the cross conveyor's own distribution strategy: it stops at the centre for the switch time and leaves sideways, keeping its orientation. Any other MU passes straight through to the side opposite the one it came in by, without stopping.
 _Avoid_: Diverter, transfer unit
 
+**Crosswise**:
+How an MU lies after a cross conveyor turned it: across its way, its width along it and its length across. It stays so on the conveyors after it until another cross conveyor turns it again, or an object without geometry takes it and passes it on lengthwise.
+
 **Side**:
 One of a cross conveyor's four physical sides: front, back, left or right. Connections attach to sides. A side with incoming connections is an entry side, one with outgoing connections an exit side, never both.
 _Avoid_: Entrance, exit (a connection's place in an order)

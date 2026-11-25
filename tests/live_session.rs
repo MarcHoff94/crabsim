@@ -2651,3 +2651,45 @@ fn work_left_follows_a_stop_by_hand_begun_and_ended_while_halted_in_any_order_of
         assert_eq!(pictured, own, "going on, asked between {ask_between}, after {ask_after}, at {shown:?}");
     }
 }
+
+#[test]
+fn the_picture_of_a_cross_conveyor_is_busy_while_it_holds_an_mu_switching_or_moving_and_blocked_only_when_the_run_says() {
+    let mut watched = Watched::new(|| crabsim::demo::cross_line().build(0));
+    watched.session.start().unwrap();
+    watched.look();
+    watched.picture_takes_states = false;
+    let crosses: Vec<u32> = watched.picture.objects().iter().filter(|object| object.kind() == crabsim::ObjectKind::CrossConveyor).map(|object| object.id()).collect();
+    assert_eq!(crosses.len(), 3);
+    // Every object after a cross conveyor stops by hand for a while, so they are seen blocked.
+    let after: Vec<u32> = crosses.iter().flat_map(|&id| watched.picture.object(id).unwrap().successors().to_vec()).collect();
+    let (mut switching, mut blocked) = (0, 0);
+    for step in 1..=400 {
+        watched.at(step);
+        watched.look();
+        let state = watched.state_now();
+        for &id in &crosses {
+            let pictured = watched.picture.object(id).unwrap().process();
+            let own = &state.objects[id as usize];
+            if own.contents.is_empty() {
+                // Busy with no MU of its own, releasing or with a conveyor's MU over it, shows idle.
+                assert_eq!(pictured, crabsim::ProcessState::Idle, "cross conveyor {id} at t={step}");
+                continue;
+            }
+            assert_eq!(pictured, own.process, "cross conveyor {id} at t={step}");
+            match own.process {
+                crabsim::ProcessState::Processing if own.positions.iter().all(|position| position.speed == 0.0) => switching += 1,
+                crabsim::ProcessState::Blocked => blocked += 1,
+                _ => {}
+            }
+        }
+        for &id in &after {
+            match step {
+                100 => watched.session.stop_object(id).unwrap(),
+                200 => watched.session.end_stop(id).unwrap(),
+                _ => {}
+            }
+        }
+    }
+    assert!(switching > 0, "an MU was seen switching");
+    assert!(blocked > 0, "a cross conveyor was seen blocked");
+}

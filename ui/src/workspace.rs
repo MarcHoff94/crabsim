@@ -14,7 +14,7 @@
 use crate::editing::{ActRefusal, EditAction, Editors};
 use crate::history::{Entry, History};
 use crate::view::{Change, Point, Shape, ShapePoint, DEFAULT_MEASURING_PERIOD};
-use crabsim::{Clock, Dimensions, LiveSession, ModelDescription, ObjectKind, Position, SimTime};
+use crabsim::{Clock, Dimensions, LiveSession, ModelDescription, ObjectKind, Position, Side, SimTime};
 use crabsim_catalogue::{Catalogue, ErrorKind, Settings, Source};
 use crabsim_model::{Attribute, Model, BUILT_IN_CLASSES};
 use serde_json::{json, Value};
@@ -76,6 +76,18 @@ pub struct ConnectionView {
     /// How many connections lead into `to`.
     pub entrances: u64,
     pub description: Option<String>,
+    /// Where `from` is a cross conveyor: the side it leaves by, and the sides it could leave by
+    /// instead, those with no connection.
+    pub from_side: Option<SideChoice>,
+    /// Where `to` is a cross conveyor: the side it comes in by, and the free ones.
+    pub to_side: Option<SideChoice>,
+}
+
+/// A cross conveyor's side at one end of a connection, and the sides free to move it to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SideChoice {
+    pub side: Side,
+    pub free: Vec<Side>,
 }
 
 impl ConnectionView {
@@ -528,6 +540,18 @@ impl Workspace {
         shapes_of(&self.model)
     }
 
+    /// Each cross conveyor's exits as the view labels them (spec issue 148): by id, each side's
+    /// destinations as the open model names them, inherited ones included.
+    pub fn exit_lists(&self) -> Vec<(u32, Vec<(Side, Vec<String>)>)> {
+        (0..self.model.instances.len())
+            .filter_map(|index| {
+                let resolved = self.model.resolve(index).filter(|resolved| resolved.built_in == "CrossConveyor")?;
+                let exits = resolved.attributes.exits.unwrap_or_default();
+                Some((index as u32, exits.into_iter().collect()))
+            })
+            .collect()
+    }
+
     /// Moves the instance to `to`, saving the model file, with every position rounded to the
     /// centimetre so the file stays readable. Instances the file leaves unplaced are saved where
     /// the window draws them too, in the same change, so moving one doesn't send the rest
@@ -797,7 +821,44 @@ impl Workspace {
             entrance: connection.entrance,
             entrances: self.model.connections_in(to).len() as u64,
             description: connection.description.clone(),
+            from_side: connection.from_side.map(|side| SideChoice { side, free: self.free_sides(from) }),
+            to_side: connection.to_side.map(|side| SideChoice { side, free: self.free_sides(to) }),
         })
+    }
+
+    /// The sides of the cross conveyor called `name` with no connection, in `Side::ALL`'s order.
+    /// None for anything else.
+    pub fn free_sides(&self, name: &str) -> Vec<Side> {
+        let taken = |side: Side| {
+            self.model.connections.iter().any(|connection| (connection.from == name && connection.from_side == Some(side)) || (connection.to == name && connection.to_side == Some(side)))
+        };
+        let is_cross = self.model.instances.iter().position(|instance| instance.name == name).and_then(|index| self.model.resolve(index)).is_some_and(|resolved| resolved.built_in == "CrossConveyor");
+        if !is_cross {
+            return Vec::new();
+        }
+        Side::ALL.into_iter().filter(|&side| !taken(side)).collect()
+    }
+
+    /// Connects `from` to `to` as `connect` does, at `from_side` of `from` and `to_side` of `to`,
+    /// given where that end is a cross conveyor.
+    pub fn connect_at(&mut self, from: &str, from_side: Option<Side>, to: &str, to_side: Option<Side>, take_over: bool) -> Result<(), Refusal> {
+        let mut change = json!({ "change": "connect", "from": from, "to": to });
+        if let Some(side) = from_side {
+            change["from_side"] = json!(side.name());
+        }
+        if let Some(side) = to_side {
+            change["to_side"] = json!(side.name());
+        }
+        self.change(change, take_over)
+    }
+
+    /// Moves the connection from `from` to `to` to another side of the cross conveyor at one end:
+    /// `from`'s when `at_from`, otherwise `to`'s.
+    pub fn set_connection_side(&mut self, from: &str, to: &str, at_from: bool, side: Side, take_over: bool) -> Result<(), Refusal> {
+        let key = if at_from { "from_side" } else { "to_side" };
+        let mut change = json!({ "change": "set_connection", "from": from, "to": to });
+        change[key] = json!(side.name());
+        self.change(change, take_over)
     }
 
     /// Every connection to and from the instance called `name`, as (from, to), which removing it

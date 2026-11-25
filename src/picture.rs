@@ -287,8 +287,14 @@ impl ObjectPicture {
 
     /// A conveyor is empty, moving MUs, or has every MU standing, which a run reports as blocked.
     fn follow_belt(&mut self) {
-        // A cross conveyor's MU also stands while switching, which says nothing of its own: it
-        // follows its Blocked and Unblocked occurrences instead.
+        // A cross conveyor's MU also stands while switching, when it is busy: it is blocked only
+        // between its Blocked and Unblocked occurrences, and otherwise busy while it holds an MU.
+        // Busy with none of its own, releasing after a turned MU or with one coming in or going
+        // out that a conveyor beside it holds, says nothing either, so it shows idle until a full
+        // state.
+        if self.kind == ObjectKind::CrossConveyor && self.process != ProcessState::Blocked {
+            self.process = if self.contents.is_empty() { ProcessState::Idle } else { ProcessState::Processing };
+        }
         if self.kind == ObjectKind::Conveyor {
             self.process = if self.contents.is_empty() {
                 ProcessState::Idle

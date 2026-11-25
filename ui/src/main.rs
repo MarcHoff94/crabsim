@@ -22,7 +22,7 @@ use bevy::{
 };
 use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui, input::egui_wants_any_pointer_input};
 use clap::Parser;
-use crabsim::{LiveSession, SessionStatus, SimTime, TimeMode, WallClock};
+use crabsim::{LiveSession, SessionStatus, Side, SimTime, TimeMode, WallClock};
 use crabsim_ui::camera::Camera as ViewCamera;
 use crabsim_ui::view::{
     Change, Control, DEFAULT_SPEED, Deletion, Details, EndTimeProblem, GoingOn, Inspection, Intervention, Interval, JumpProblem, MAX_SPEED,
@@ -96,6 +96,7 @@ fn main() {
     };
     let mut view = ViewState::new(workspace.description());
     view.set_shapes(workspace.shapes());
+    view.set_exit_lists(workspace.exit_lists());
     let session = workspace.session(WallClock::new());
     session.set_speed(DEFAULT_SPEED).expect("a positive speed");
     let seed_text = workspace.seed().to_string();
@@ -477,7 +478,10 @@ enum Building {
     RemoveInstances { names: Vec<String> },
     SetAttributeOnAll { names: Vec<String>, attribute: String, value: serde_json::Value },
     MakeClassFromAll { names: Vec<String>, name: String },
-    Connect { from: String, to: String },
+    /// `from_side` and `to_side` where that end is a cross conveyor.
+    Connect { from: String, to: String, from_side: Option<Side>, to_side: Option<Side> },
+    /// The connection moved to another side of the cross conveyor at one end: `from`'s when `at_from`.
+    ConnectionSide { from: String, to: String, at_from: bool, side: Side },
     Disconnect { from: String, to: String },
     /// A connection moved to another place among its object's exits or its successor's entrances.
     MoveConnection { from: String, to: String, end: End, place: u64 },
@@ -505,7 +509,8 @@ impl Building {
             Building::RemoveInstances { names } => format!("Removing {} objects", names.len()),
             Building::SetAttributeOnAll { names, attribute, .. } => format!("Setting the {} of {} objects", attribute_label(attribute).to_lowercase(), names.len()),
             Building::MakeClassFromAll { name, .. } => format!("Making the class {name}"),
-            Building::Connect { from, to } => format!("Connecting {from} to {to}"),
+            Building::Connect { from, to, .. } => format!("Connecting {from} to {to}"),
+            Building::ConnectionSide { from, to, .. } => format!("Moving the connection from {from} to {to} to another side"),
             Building::Disconnect { from, to } => format!("Removing the connection from {from} to {to}"),
             Building::MoveConnection { from, to, .. } => format!("Moving the connection from {from} to {to}"),
             Building::DescribeConnection { from, to, .. } => format!("Describing the connection from {from} to {to}"),
@@ -529,7 +534,8 @@ impl Building {
             Building::RemoveInstances { names } => workspace.remove_instances(names, take_over).map(|()| None),
             Building::SetAttributeOnAll { names, attribute, value } => workspace.set_attribute_on_all(names, attribute, value.clone(), take_over).map(|()| None),
             Building::MakeClassFromAll { names, name } => workspace.make_class_from_all(names, name, take_over).map(|()| None),
-            Building::Connect { from, to } => workspace.connect(from, to, take_over).map(|()| None),
+            Building::Connect { from, to, from_side, to_side } => workspace.connect_at(from, *from_side, to, *to_side, take_over).map(|()| None),
+            Building::ConnectionSide { from, to, at_from, side } => workspace.set_connection_side(from, to, *at_from, *side, take_over).map(|()| None),
             Building::Disconnect { from, to } => workspace.disconnect(from, to, take_over).map(|()| None),
             Building::MoveConnection { from, to, end, place } => workspace.move_connection(from, to, *end, *place, take_over).map(|()| None),
             Building::DescribeConnection { from, to, description } => {
@@ -624,6 +630,8 @@ const SELECTION: Color = Color::srgb(1.0, 1.0, 1.0);
 const MU_COLOUR: Color = Color::srgb(0.96, 0.96, 0.93);
 /// The arrow along a conveyor saying which way it goes: faint, under its MUs.
 const BELT_DIRECTION: Color = Color::srgba(1.0, 1.0, 1.0, 0.35);
+/// The way straight across a cross conveyor: fainter still, so its side arrows stand out.
+const STRAIGHT_WAY: Color = Color::srgba(1.0, 1.0, 1.0, 0.18);
 
 /// The model file open and the edit state, which a thread of its own watches while the window is
 /// idle.
@@ -934,11 +942,19 @@ fn canvas_input(
         ui.press = None;
         ui.boxing = None;
         let to = ui.pointer_floor.and_then(|at| ui.view.object_at(at)).filter(|&to| to != from);
-        if let Some(to) = to {
-            let names = |id: u32| ui.view.objects()[id as usize].name.clone();
-            let building = Building::Connect { from: names(from), to: names(to) };
+        if let (Some(to), Some(pointer)) = (to, ui.pointer_floor) {
             ui.view.commanded(time.elapsed());
-            build(ui, building, false);
+            let names = |id: u32| ui.view.objects()[id as usize].name.clone();
+            // At a cross conveyor, the free side nearest where it was let go: on the one let go
+            // over, and on the one dragged from, the side facing it.
+            let side = |id: u32| ui.view.objects()[id as usize].sides.is_some().then(|| ui.view.free_side_near(id, pointer));
+            let (from_side, to_side) = (side(from), side(to));
+            if let Some(full) = [(from, from_side), (to, to_side)].into_iter().find(|(_, side)| *side == Some(None)).map(|(id, _)| names(id)) {
+                ui.build_error = Some(format!("Connecting {} to {} didn't happen: every side of {full} has a connection already", names(from), names(to)));
+            } else {
+                let building = Building::Connect { from: names(from), to: names(to), from_side: from_side.flatten(), to_side: to_side.flatten() };
+                build(ui, building, false);
+            }
         }
     }
     // A release over a panel never reaches the canvas, so a drag ends whenever the button is up.
@@ -1145,6 +1161,14 @@ fn draw_connections(mut gizmos: Gizmos, ui: Res<Ui>) {
     // Each conveyor's direction, along its middle.
     for (start, end) in ui.view.belt_directions() {
         gizmos.arrow(Vec3::new(start.x as f32, start.y as f32, 0.05), Vec3::new(end.x as f32, end.y as f32, 0.05), BELT_DIRECTION).with_tip_length(0.3);
+    }
+    // Each cross conveyor's entries and exits, and its ways straight across.
+    for (start, end) in ui.view.straight_ways() {
+        gizmos.line(Vec3::new(start.x as f32, start.y as f32, 0.04), Vec3::new(end.x as f32, end.y as f32, 0.04), STRAIGHT_WAY);
+    }
+    for (start, end) in ui.view.side_arrows() {
+        let tip = (((end.x - start.x).powi(2) + (end.y - start.y).powi(2)).sqrt() * 0.6) as f32;
+        gizmos.arrow(Vec3::new(start.x as f32, start.y as f32, 0.05), Vec3::new(end.x as f32, end.y as f32, 0.05), BELT_DIRECTION).with_tip_length(tip);
     }
     for connection in ui.view.connections() {
         let start = Vec3::new(connection.start.x as f32, connection.start.y as f32, 0.0);
@@ -1563,6 +1587,7 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
             ConnectionAsk::Move(end, place) => Building::MoveConnection { from, to, end, place },
             ConnectionAsk::Describe(description) => Building::DescribeConnection { from, to, description },
             ConnectionAsk::Remove => Building::Disconnect { from, to },
+            ConnectionAsk::Side(at_from, side) => Building::ConnectionSide { from, to, at_from, side },
         };
         ui.view.commanded(wall);
         build(ui, building, false);
@@ -1934,6 +1959,7 @@ fn replace_session(ui: &mut Ui, session: &Session, new_model: bool, wall: Durati
     ui.history = None;
     let mut view = ViewState::with_settings_of(ui.workspace.description(), &ui.view);
     view.set_shapes(ui.workspace.shapes());
+    view.set_exit_lists(ui.workspace.exit_lists());
     // The same model, reloaded or with another seed, keeps the object selected, found by its name.
     if !new_model {
         // Everything selected stays selected, found by name, unless an undo or redo says what it
@@ -2166,6 +2192,18 @@ enum ConnectionAsk {
     /// Its description, which an empty one removes.
     Describe(String),
     Remove,
+    /// Move it to this side of the cross conveyor at one end: its object's when true.
+    Side(bool, Side),
+}
+
+/// A cross conveyor's side as people read it.
+fn side_label(side: Side) -> &'static str {
+    match side {
+        Side::Front => "Front",
+        Side::Back => "Back",
+        Side::Left => "Left",
+        Side::Right => "Right",
+    }
 }
 
 /// What the inspector asks for with several objects selected.
@@ -2435,6 +2473,28 @@ fn connection_view(ui: &mut egui::Ui, view: &ConnectionView, description: &mut S
         view.entrance,
         view.entrances,
     );
+    // At a cross conveyor, the side it leaves or comes in by, movable to a free one.
+    for (at_from, choice, name) in [(true, &view.from_side, &view.from), (false, &view.to_side, &view.to)] {
+        let Some(choice) = choice else { continue };
+        ui.horizontal(|row| {
+            row.label(format!("{} {name}'s", if at_from { "Leaves by" } else { "Comes in by" }))
+                .on_hover_text("The side of the cross conveyor it meets, at the side's middle. A side has one connection");
+            row.add_enabled_ui(editable, |row| {
+                egui::ComboBox::from_id_salt(("side", at_from)).selected_text(side_label(choice.side)).show_ui(row, |menu| {
+                    for side in Side::ALL {
+                        let free = side == choice.side || choice.free.contains(&side);
+                        let item = menu.add_enabled(free, egui::Button::selectable(side == choice.side, side_label(side))).on_disabled_hover_text("Another connection meets this side");
+                        if item.clicked() && side != choice.side {
+                            asked = Some(ConnectionAsk::Side(at_from, side));
+                        }
+                    }
+                });
+            })
+            .response
+            .on_disabled_hover_text(RESET_FIRST);
+            row.label("side");
+        });
+    }
     ui.add_space(6.0);
     ui.label(egui::RichText::new("Description").strong());
     let field = ui.add_enabled(editable, egui::TextEdit::singleline(description).hint_text("such as via the lift").desired_width(240.0)).on_disabled_hover_text(RESET_FIRST);
@@ -5741,6 +5801,12 @@ fn labels(ctx: &egui::Context, view: &ViewState, camera: &ViewCamera, canvas: eg
         let at = camera.to_screen(floor, size);
         let at = egui::pos2(canvas.min.x + at.x as f32, canvas.min.y + at.y as f32);
         painter.text(at, egui::Align2::CENTER_CENTER, text, egui::FontId::proportional(text_size * 0.85), egui::Color32::from_rgb(200, 200, 140));
+    }
+    // Beside each cross conveyor's exit side, the destinations MUs turn there for.
+    for (floor, text) in view.exit_labels() {
+        let at = camera.to_screen(floor, size);
+        let at = egui::pos2(canvas.min.x + at.x as f32, canvas.min.y + at.y as f32);
+        painter.text(at, egui::Align2::CENTER_CENTER, text, egui::FontId::proportional(text_size * 0.85), egui::Color32::from_rgb(150, 200, 230));
     }
     // Where MUs can't be followed, each holder shows how many it holds, in its middle.
     for (id, count) in view.counts(camera) {

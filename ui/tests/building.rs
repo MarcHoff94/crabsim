@@ -167,7 +167,7 @@ fn connecting_dragging_from_one_object_to_another_adds_the_last_exit_and_entranc
     workspace.connect("Station 1", "Station 4", false).unwrap();
     picked_up(&mut workspace);
     let view = workspace.connection("Station 1", "Station 4").unwrap();
-    assert_eq!(view, ConnectionView { from: "Station 1".into(), to: "Station 4".into(), exit: 2, exits: 2, entrance: 2, entrances: 2, description: None });
+    assert_eq!(view, ConnectionView { from: "Station 1".into(), to: "Station 4".into(), exit: 2, exits: 2, entrance: 2, entrances: 2, description: None, from_side: None, to_side: None });
     assert_eq!(view.exit_text(), "2nd of Station 1's 2 exits");
     assert_eq!(view.entrance_text(), "2nd of Station 4's 2 entrances");
 }

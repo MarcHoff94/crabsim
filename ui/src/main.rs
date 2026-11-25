@@ -25,7 +25,7 @@ use clap::Parser;
 use crabsim::{LiveSession, SessionStatus, Side, SimTime, TimeMode, WallClock};
 use crabsim_ui::camera::Camera as ViewCamera;
 use crabsim_ui::view::{
-    Change, Control, DEFAULT_SPEED, Deletion, Details, EndTimeProblem, GoingOn, Inspection, Intervention, Interval, JumpProblem, MAX_SPEED,
+    Change, Control, DEFAULT_SPEED, Deletion, Details, EndTimeProblem, GoingOn, Inspection, Intervention, Interval, JumpProblem, Labels, MAX_SPEED,
     MIN_PERIODS, MIN_SPEED, Mark, PERIOD_FAILURE_FACTOR, Point, Shade, StepBack, ViewState, format_time, format_time_exact, label_size, parse_time, rgb,
     wall_time_roughly,
 };
@@ -180,7 +180,7 @@ fn main() {
             over_egui: false,
             keys: Keys::default(),
             key_note: None,
-            annotations: false,
+            labels: Labels::default(),
             search: (Vec::new(), 0),
             steps_pending: (0, 0),
             keys_help: false,
@@ -346,9 +346,9 @@ struct Ui {
     keys: Keys,
     /// A word on what the last key did, such as why it did nothing, shown on the key line.
     key_note: Option<String>,
-    /// Whether the canvas shows its annotations: a cross conveyor's exits and a conveyor's rises,
-    /// helices and heights. Off to start with, so names stay readable; `i` switches them.
-    annotations: bool,
+    /// Which text the canvas shows: names but conveyors' to start with, so they stay readable;
+    /// `i` goes on to every name with annotations, then to none.
+    labels: Labels,
     /// The last search's matches, by id, and which of them is selected.
     search: (Vec<u32>, usize),
     /// Steps forward and back still to go, asked for with a count.
@@ -1955,7 +1955,7 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
         );
     }
     if let Some((camera, size)) = ui.camera.and_then(|camera| Some((camera, label_size(&camera)?))) {
-        labels(&ctx, &ui.view, &camera, canvas, size as f32, ui.annotations);
+        labels(&ctx, &ui.view, &camera, canvas, size as f32, ui.labels);
         paths_labels(&ctx, ui, &camera, canvas, size as f32);
     }
     // A building change refused this frame, or from the canvas before it, says why last of all.
@@ -5374,10 +5374,9 @@ fn run_key(ctx: &egui::Context, ui: &mut Ui, session: &Session, command: Command
         Command::Faster => return ui.view.has_model().then(|| Request::Speed(ui.view.speed() * 2.0)),
         Command::Slower => return ui.view.has_model().then(|| Request::Speed(ui.view.speed() / 2.0)),
         Command::Animate => return ui.view.has_model().then(|| Request::Animate(!ui.view.animate())),
-        Command::Annotations => {
-            ui.annotations = !ui.annotations;
-            let shown = if ui.annotations { "shown" } else { "hidden" };
-            ui.key_note = Some(format!("Annotations {shown}: a cross conveyor's exits, a conveyor's rises and heights. i switches them"));
+        Command::Labels => {
+            ui.labels = ui.labels.next();
+            ui.key_note = Some(format!("{}. i for the next", ui.labels.describe()));
         }
         Command::GoTo => want_focus(ctx, "goto"),
         Command::OpenWindow => match ui.view.selected() {
@@ -5806,7 +5805,7 @@ fn keys_help(ctx: &egui::Context, ui: &mut Ui) {
                 ("Space", "start or halt"),
                 ("x y", "step forward, back: 10x steps ten"),
                 ("R", "reset"),
-                ("i", "show or hide annotations: a cross conveyor's exits, a conveyor's rises and heights"),
+                ("i", "names, then every name with annotations (a cross conveyor's exits, a conveyor's rises), then none"),
                 ("+ -", "faster, slower"),
                 ("a", "animate on or off"),
                 ("gt", "go to a time"),
@@ -6154,11 +6153,12 @@ fn distribution_fields(ui: &mut egui::Ui, choice: &mut crabsim_ui::attributes::D
 
 /// Each object's name under it, and counts of MUs where they aren't drawn, `text_size` pixels
 /// tall, clipped to the canvas.
-fn labels(ctx: &egui::Context, view: &ViewState, camera: &ViewCamera, canvas: egui::Rect, text_size: f32, annotations: bool) {
+fn labels(ctx: &egui::Context, view: &ViewState, camera: &ViewCamera, canvas: egui::Rect, text_size: f32, shown: Labels) {
+    let annotations = shown.shows_annotations();
     // Under every window, such as the help on states, as the canvas itself is.
     let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Background, egui::Id::new("labels"))).with_clip_rect(canvas);
     let size = Point { x: canvas.width() as f64, y: canvas.height() as f64 };
-    for object in view.objects() {
+    for object in view.objects().iter().filter(|object| shown.shows_name(object.kind)) {
         let floor = Point { x: object.centre.x, y: object.lowest() };
         let at = camera.to_screen(floor, size);
         let at = egui::pos2(canvas.min.x + at.x as f32, canvas.min.y + at.y as f32 + text_size / 4.0);

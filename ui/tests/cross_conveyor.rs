@@ -252,3 +252,19 @@ fn a_click_on_a_cross_conveyor_between_conveyors_finds_it_and_not_the_conveyors_
     assert_eq!(view.object_at(Point { x: fork.x + 0.25, y: fork.y + 0.25 }), Some(id("Fork")), "near its corner too");
     assert_eq!(view.object_at(Point { x: fork.x + 0.4, y: fork.y }), Some(id("Lane")), "just past its front, the Lane");
 }
+
+#[test]
+fn i_shows_names_but_conveyors_then_every_name_with_annotations_then_none() {
+    use crabsim::ObjectKind;
+    use crabsim_ui::view::Labels;
+    let shown = Labels::default();
+    assert_eq!(shown, Labels::Names);
+    assert!(shown.shows_name(ObjectKind::Station) && shown.shows_name(ObjectKind::CrossConveyor));
+    assert!(!shown.shows_name(ObjectKind::Conveyor), "a conveyor's name lies over its neighbours");
+    assert!(!shown.shows_annotations());
+    let all = shown.next();
+    assert!(all.shows_name(ObjectKind::Conveyor) && all.shows_annotations());
+    let none = all.next();
+    assert!(!none.shows_name(ObjectKind::Station) && !none.shows_annotations());
+    assert_eq!(none.next(), Labels::Names, "and round again");
+}

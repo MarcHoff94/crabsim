@@ -270,6 +270,52 @@ pub struct MuMarker {
     pub rotation_degrees: f64,
 }
 
+/// Which text the canvas shows, switched in turn by `i`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Labels {
+    /// Every object's name but a conveyor's, which lies along its belt over its neighbours.
+    #[default]
+    Names,
+    /// Every name, conveyors' too, and the annotations: a cross conveyor's exits and a conveyor's
+    /// rises, helices and heights.
+    All,
+    /// No names or annotations at all, for the model's layout alone.
+    None,
+}
+
+impl Labels {
+    /// The next in turn: names, all, none, then names again.
+    pub fn next(self) -> Labels {
+        match self {
+            Labels::Names => Labels::All,
+            Labels::All => Labels::None,
+            Labels::None => Labels::Names,
+        }
+    }
+
+    /// Whether an object of this kind has its name shown.
+    pub fn shows_name(self, kind: ObjectKind) -> bool {
+        match self {
+            Labels::Names => kind != ObjectKind::Conveyor,
+            Labels::All => true,
+            Labels::None => false,
+        }
+    }
+
+    pub fn shows_annotations(self) -> bool {
+        self == Labels::All
+    }
+
+    /// What the canvas shows now, in words.
+    pub fn describe(self) -> &'static str {
+        match self {
+            Labels::Names => "Names shown, but conveyors' and annotations hidden",
+            Labels::All => "Every name shown, with annotations: a cross conveyor's exits, a conveyor's rises and heights",
+            Labels::None => "No names or annotations shown",
+        }
+    }
+}
+
 /// How long the window keeps drawing frames after something happens while halted, so that the
 /// answer to a command reaches the screen. After that a halted window draws nothing.
 const SETTLE: Duration = Duration::from_secs(1);

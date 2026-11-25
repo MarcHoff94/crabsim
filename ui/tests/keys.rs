@@ -29,7 +29,7 @@ fn each_key_asks_for_its_command() {
         ('+', Command::Faster),
         ('-', Command::Slower),
         ('a', Command::Animate),
-        ('i', Command::Annotations),
+        ('i', Command::Labels),
         ('n', Command::NextMatch { backwards: false }),
         ('N', Command::NextMatch { backwards: true }),
         ('?', Command::Help),

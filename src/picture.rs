@@ -55,6 +55,10 @@ pub struct Motion {
     /// Metres per second, 0 standing.
     pub speed: f64,
     pub since: SimTime,
+    /// It lies across its way, its width along the belt, having turned at a cross conveyor.
+    pub crosswise: bool,
+    /// On a cross conveyor, the side its way starts from, which `front` counts from.
+    pub from_side: Option<crate::materialflow_objects::Side>,
 }
 
 impl Motion {
@@ -180,9 +184,9 @@ impl Picture {
                     object.process = ProcessState::Receiving;
                 }
             }
-            OccurrenceKind::MotionPlanned { mu_id, at, front, speed, kind } => {
+            OccurrenceKind::MotionPlanned { mu_id, at, front, speed, kind, crosswise, from_side } => {
                 let object = &mut objects[at as usize];
-                let motion = Motion { mu_id, kind, front: f64::from(front), speed: f64::from(speed), since: now };
+                let motion = Motion { mu_id, kind, front: f64::from(front), speed: f64::from(speed), since: now, crosswise, from_side };
                 match object.motion.iter_mut().find(|motion| motion.mu_id == mu_id) {
                     Some(known) => *known = motion,
                     None => object.motion.push(motion),
@@ -275,7 +279,7 @@ impl ObjectPicture {
             motion: state
                 .positions
                 .iter()
-                .map(|position| Motion { mu_id: position.mu_id, kind: position.kind, front: position.front, speed: position.speed, since: now })
+                .map(|position| Motion { mu_id: position.mu_id, kind: position.kind, front: position.front, speed: position.speed, since: now, crosswise: position.crosswise, from_side: position.from_side })
                 .collect(),
             reserved: Vec::new(),
         }
@@ -283,6 +287,8 @@ impl ObjectPicture {
 
     /// A conveyor is empty, moving MUs, or has every MU standing, which a run reports as blocked.
     fn follow_belt(&mut self) {
+        // A cross conveyor's MU also stands while switching, which says nothing of its own: it
+        // follows its Blocked and Unblocked occurrences instead.
         if self.kind == ObjectKind::Conveyor {
             self.process = if self.contents.is_empty() {
                 ProcessState::Idle

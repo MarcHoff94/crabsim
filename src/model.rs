@@ -8,7 +8,8 @@
 use crate::distribution::{DistributionRule, Ranking};
 use crate::flows::{DestinationId, FailureProfile, MoveableUnit, MuKindId, NO_DESTINATION};
 use crate::routing::{PlanStep, Routing};
-use crate::materialflow_objects::{Buffer, Conveyor, Drain, ModelObject, MultiStation, SingleStation, Source, StartMode};
+use crate::materialflow_objects::cross::Cross;
+use crate::materialflow_objects::{Buffer, Conveyor, Drain, ModelObject, MultiStation, Side, SingleStation, Source, StartMode};
 use crate::materialflow_objects::ExitStrategy;
 use crate::random_numbers::Distribution;
 use crate::report::{Capacity, ObjectKind};
@@ -44,6 +45,8 @@ impl Dimensions {
             ObjectKind::Buffer => (2.0, 1.0, 1.0),
             // A conveyor's length and width are its own, which `add_conveyor` gives it.
             ObjectKind::Conveyor => (5.0, 0.6, 0.5),
+            // A conveyor's default width each way, so default conveyors meet every side.
+            ObjectKind::CrossConveyor => (0.6, 0.6, 0.5),
         };
         Dimensions { length, width, height, rotation_degrees: 0.0 }
     }
@@ -390,13 +393,74 @@ impl ModelDescription {
         }
     }
 
+    /// A cross conveyor (spec issue 148): `length` along its own x axis, from its back to its
+    /// front, and `width` across, from its right to its left, in metres, moving its MUs at `speed`
+    /// metres per second, one at a time, with a switch time of 2 s and no release time. Its
+    /// connections name its sides, through `connect_at`.
+    pub fn add_cross_conveyor(&mut self, length: f64, width: f64, speed: f64) -> u32 {
+        let id = self.add(ModelObject::Conveyor(Box::new(Conveyor::new_cross(self.next_id(), length, width, speed))));
+        self.layout_mut(id).dimensions = Some(Dimensions { length, width, height: 0.5, rotation_degrees: 0.0 });
+        id
+    }
+
+    fn cross_mut(&mut self, id: u32) -> &mut Cross {
+        match self.objects.get_mut(id as usize) {
+            Some(ModelObject::Conveyor(conveyor)) => conveyor.cross_mut().unwrap_or_else(|| panic!("object {id} is not a cross conveyor")),
+            Some(_) => panic!("object {id} is not a cross conveyor"),
+            None => panic!("object {id} is not in the model"),
+        }
+    }
+
+    /// How long an MU turning at a cross conveyor stands at its centre.
+    pub fn set_switch_time(&mut self, id: u32, switch_time: SimTime) {
+        self.cross_mut(id).switch_time = switch_time;
+    }
+
+    /// How long a cross conveyor takes no MU after one that turned has left.
+    pub fn set_release_time(&mut self, id: u32, release_time: SimTime) {
+        self.cross_mut(id).release_time = release_time;
+    }
+
+    /// The destinations a cross conveyor's exit side `side` takes, replacing any it had: an MU
+    /// whose next destination one of them stands for turns towards it, unless an exit straight
+    /// across takes it too.
+    pub fn set_exit_destinations(&mut self, id: u32, side: Side, destinations: &[DestinationId]) {
+        let cross = self.cross_mut(id);
+        cross.lists.retain(|(listed, _)| *listed != side);
+        cross.lists.push((side, destinations.to_vec()));
+    }
+
     pub fn add_drain(&mut self) -> u32 {
         self.add(ModelObject::Drain(Drain::new(self.next_id())))
     }
 
     /// Adds `to` as the next successor of `from`. Successors are tried in the order added.
+    ///
+    /// # Panics
+    /// If either is a cross conveyor, whose connections name its sides: see `connect_at`.
     pub fn connect(&mut self, from: u32, to: u32) {
+        self.connect_at(from, None, to, None);
+    }
+
+    /// Connects `from` to `to` as `connect` does, at `from_side` of `from` and `to_side` of `to`,
+    /// which are given for an end that is a cross conveyor and only then. A side is an entry side
+    /// or an exit side, never both, and has one connection.
+    pub fn connect_at(&mut self, from: u32, from_side: Option<Side>, to: u32, to_side: Option<Side>) {
         assert!((to as usize) < self.objects.len(), "object {to} is not in the model");
+        let is_cross = |objects: &[ModelObject], id: u32| matches!(objects.get(id as usize), Some(ModelObject::Conveyor(conveyor)) if conveyor.cross().is_some());
+        assert_eq!(is_cross(&self.objects, from), from_side.is_some(), "a side is given for the end of a connection that is a cross conveyor, and only for it");
+        assert_eq!(is_cross(&self.objects, to), to_side.is_some(), "a side is given for the end of a connection that is a cross conveyor, and only for it");
+        let taken = |cross: &Cross, side: Side| cross.exit_sides.contains(&side) || cross.entries.iter().any(|&(_, entry)| entry == side);
+        if let Some(side) = from_side {
+            let cross = self.cross_mut(from);
+            assert!(!taken(cross, side), "the {} side of cross conveyor {from} has a connection already", side.name());
+            cross.exit_sides.push(side);
+        }
+        if let Some(side) = to_side {
+            let cross = self.cross_mut(to);
+            assert!(!taken(cross, side), "the {} side of cross conveyor {to} has a connection already", side.name());
+            cross.entries.push((from, side));
+        }
         let successors = match self.objects.get_mut(from as usize) {
             Some(ModelObject::Source(source)) => &mut source.succ,
             Some(ModelObject::Station(station)) => &mut station.succ,
@@ -413,13 +477,17 @@ impl ModelDescription {
     /// behind: the run has no use for them.
     pub fn build(&self, seed: u64) -> SimulationRun {
         let mut objects = self.objects.clone();
-        // Each conveyor reads MUs' sizes from its own copy of the kinds, so a run shares nothing.
+        let routing = if self.destinations.is_empty() && self.plans.iter().all(Vec::is_empty) { Routing::default() } else { Routing::new(&self.plans, &self.destinations) };
+        // Each conveyor reads MUs' sizes from its own copy of the kinds, so a run shares nothing,
+        // and each cross conveyor works out which of its exits take which destination.
         for object in &mut objects {
             if let ModelObject::Conveyor(conveyor) = object {
                 conveyor.kinds = self.mu_kinds.clone();
+                if let Some(cross) = conveyor.cross_mut() {
+                    cross.build_takes(&routing);
+                }
             }
         }
-        let routing = if self.destinations.is_empty() && self.plans.iter().all(Vec::is_empty) { Routing::default() } else { Routing::new(&self.plans, &self.destinations) };
         SimulationRun::new(objects, seed, self.streams.clone(), self.distributions.clone(), std::sync::Arc::new(routing))
     }
 
@@ -463,6 +531,7 @@ impl ModelDescription {
             ModelObject::Station(_) | ModelObject::MultiStation(_) => ObjectKind::Station,
             ModelObject::Buffer(_) => ObjectKind::Buffer,
             ModelObject::Drain(_) => ObjectKind::Drain,
+            ModelObject::Conveyor(conveyor) if conveyor.cross().is_some() => ObjectKind::CrossConveyor,
             ModelObject::Conveyor(_) => ObjectKind::Conveyor,
             #[cfg(test)]
             ModelObject::RecordsThenFails(_) => ObjectKind::Station,

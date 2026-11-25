@@ -352,6 +352,7 @@ impl EventInterface for Buffer {
             fill: Some(Box::new(self.fill.read(self.statistics.in_progress(now)))),
             belt: None,
             positions: Vec::new(),
+            cross: None,
         }
     }
     fn get_object_id(&self) -> &u32 {

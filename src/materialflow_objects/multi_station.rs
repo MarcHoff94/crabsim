@@ -483,6 +483,7 @@ impl EventInterface for MultiStation {
 			fill: None,
 			belt: None,
 			positions: Vec::new(),
+			cross: None,
 		}
 	}
 	fn get_object_id(&self) -> &u32 {

@@ -56,6 +56,7 @@ impl EventInterface for RecordsThenFails {
             fill: None,
             belt: None,
             positions: Vec::new(),
+            cross: None,
         }
     }
     fn clear_statistics(&mut self, _now: SimTime) {}

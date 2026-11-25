@@ -593,6 +593,22 @@ impl Inspection {
                 rows.extend(unless_never(interruption_rows));
                 rows
             }
+            // One MU at a time: busy is all full. Its switching time comes with the window's own
+            // view of cross conveyors.
+            ObjectKind::CrossConveyor => {
+                let mut rows = vec![
+                    ("MUs in", statistics.mus_in.to_string()),
+                    ("MUs out", statistics.mus_out.to_string()),
+                    ("Busy", share(statistics.time_busy)),
+                    ("Blocked", share(statistics.time_blocked)),
+                    ("Idle", share(statistics.time_idle)),
+                ];
+                if let Some(belt) = &details.belt {
+                    rows.push(("Mean crossing", belt.crossing_mean().map_or_else(|| "–".to_string(), format_time_exact)));
+                }
+                rows.extend(unless_never(interruption_rows));
+                rows
+            }
             // A Buffer does no work, so it shows how full it was instead.
             ObjectKind::Buffer => {
                 let mut rows = vec![
@@ -664,6 +680,7 @@ impl Inspection {
             ObjectKind::Source => pick(&[("MUs out", "MUs out"), ("Blocked", "Blocked")]),
             ObjectKind::Drain => pick(&[("Throughput", "Throughput"), ("Lead time", "Mean lead time")]),
             ObjectKind::Conveyor => pick(&[("Busy, full", "  start taken"), ("Blocked", "Blocked"), ("Crossing", "Mean crossing")]),
+            ObjectKind::CrossConveyor => pick(&[("Busy", "Busy"), ("Blocked", "Blocked"), ("Crossing", "Mean crossing")]),
         }
     }
 }
@@ -1364,9 +1381,11 @@ impl ViewState {
             if let Some(shape) = holder.shape.as_ref().filter(|_| pictured.kind() == ObjectKind::Conveyor) {
                 for motion in pictured.motion() {
                     let kind = self.mu_kinds.get(usize::from(motion.kind)).copied().unwrap_or_default();
+                    // Turned at a cross conveyor, it lies crosswise, its width along the path.
+                    let (length, width) = if motion.crosswise { (kind.width, kind.length) } else { (kind.length, kind.width) };
                     // Its centre's place along the path, turned the way the path heads there. One
                     // entering is still partly behind the start: it carries on straight back.
-                    let centre = motion.front_at(now) - kind.length / 2.0;
+                    let centre = motion.front_at(now) - length / 2.0;
                     let (at, heading) = shape.at(centre.max(0.0));
                     let (sin, cos) = heading.to_radians().sin_cos();
                     let before = centre.min(0.0);
@@ -1374,8 +1393,8 @@ impl ViewState {
                         mu: motion.mu_id,
                         holder: holder.id,
                         at: Point { x: holder.centre.x + at.x + cos * before, y: holder.centre.y + at.y + sin * before },
-                        length: kind.length,
-                        width: kind.width,
+                        length,
+                        width,
                         rotation_degrees: heading,
                     });
                 }

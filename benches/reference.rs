@@ -162,6 +162,8 @@ enum Model {
     Buffered,
     /// `crabsim::demo::conveyor_line`, with accumulating conveyors and a chain of two.
     Conveyors,
+    /// `crabsim::demo::cross_line`, with work plans and three cross conveyors.
+    Crosses,
 }
 
 impl Model {
@@ -171,6 +173,7 @@ impl Model {
             Model::Demo => 14,
             Model::Buffered => 8,
             Model::Conveyors => 8,
+            Model::Crosses => 16,
         }
     }
 }
@@ -184,7 +187,7 @@ struct Scenario {
     occurrences: Occurrences,
 }
 
-const SCENARIOS: [Scenario; 8] = [
+const SCENARIOS: [Scenario; 9] = [
     Scenario { name: "demo-headless", model: Model::Demo, lines: 1, length: YEAR, length_label: "1 year", occurrences: Occurrences::Headless },
     // The same run over ten times the length: peak memory should stay where it is.
     Scenario { name: "demo-headless-10y", model: Model::Demo, lines: 1, length: YEAR.times(10), length_label: "10 years", occurrences: Occurrences::Headless },
@@ -212,6 +215,9 @@ const SCENARIOS: [Scenario; 8] = [
     // Accumulating conveyors between Stations and a chain of two (spec issue 133). Its own
     // figures from before are what it compares with.
     Scenario { name: "conveyor-line", model: Model::Conveyors, lines: 1, length: YEAR, length_label: "1 year", occurrences: Occurrences::Headless },
+    // Two products following work plans, turned or passed straight through by three cross
+    // conveyors (spec issue 148). Its own figures from before are what it compares with.
+    Scenario { name: "cross-line", model: Model::Crosses, lines: 1, length: YEAR, length_label: "1 year", occurrences: Occurrences::Headless },
 ];
 
 /// One repetition of a scenario.
@@ -262,6 +268,7 @@ fn measure(scenario: &Scenario, seed: u64) -> Measurement {
         Model::Demo => reference_model(scenario.lines, seed),
         Model::Buffered => crabsim::demo::buffered_line().build(seed),
         Model::Conveyors => crabsim::demo::conveyor_line().build(seed),
+        Model::Crosses => crabsim::demo::cross_line().build(seed),
     };
     if !matches!(scenario.occurrences, Occurrences::Headless) {
         run.set_recording(Recording::ALL);
@@ -313,7 +320,7 @@ fn run_scenario(scenario: &Scenario, seed: u64, reps: usize) {
         median.events,
     );
     #[cfg(feature = "counters")]
-    if scenario.model == Model::Conveyors {
+    if matches!(scenario.model, Model::Conveyors | Model::Crosses) {
         use crabsim::materialflow_objects::conveyor::counters::{MUS_WALKED, REPLANS};
         // Every repetition counted, and each ran the same events.
         let (replans, walked) = (REPLANS.swap(0, Relaxed), MUS_WALKED.swap(0, Relaxed));

@@ -25,6 +25,7 @@ pub fn built_in(kind: ObjectKind) -> &'static str {
         ObjectKind::Buffer => "Buffer",
         ObjectKind::Drain => "Drain",
         ObjectKind::Conveyor => "Conveyor",
+        ObjectKind::CrossConveyor => "CrossConveyor",
     }
 }
 
@@ -65,6 +66,12 @@ pub fn meaning(kind: ObjectKind, state: State) -> &'static str {
         (ObjectKind::Conveyor, State::Failed) => "Interrupted by a random failure until its repair is done. Every MU on it stands, and it takes and passes on none.",
         (ObjectKind::Conveyor, State::Stopped) => "Stopped by hand, until someone ends it. Every MU on it stands, and it takes and passes on none. It counts as a failure in the statistics.",
         (ObjectKind::Conveyor, State::Paused) => "Paused until someone resumes it. Every MU on it stands, and it takes and passes on none.",
+        (ObjectKind::CrossConveyor, State::Busy) => "An MU is crossing it, standing at its centre for the switch time to turn, or it is releasing after a turned MU: it holds one MU at a time, so none other can enter.",
+        (ObjectKind::CrossConveyor, State::Blocked) => "Its MU stands at the side it leaves by, waiting for what is there to take it.",
+        (ObjectKind::CrossConveyor, State::Idle) => "Empty: no MU is on it or partly over it, and it is ready for the next.",
+        (ObjectKind::CrossConveyor, State::Failed) => "Interrupted by a random failure until its repair is done. Its MU stands, its switch time and release time wait, and it takes and passes on none.",
+        (ObjectKind::CrossConveyor, State::Stopped) => "Stopped by hand, until someone ends it. Its MU stands, its switch time and release time wait, and it takes and passes on none. It counts as a failure in the statistics.",
+        (ObjectKind::CrossConveyor, State::Paused) => "Paused until someone resumes it. Its MU stands, its switch time and release time wait, and it takes and passes on none.",
         (_, State::Receiving) => "A place is taken for an MU a conveyor is handing over, until the MU's booking point arrives, and nothing else is going on. Once begun, the MU always arrives, even if it is interrupted meanwhile.",
         (_, State::Busy) => "Working on an MU.",
         (_, State::Blocked) => "Holding an MU whose work is done, but no successor can take it.",

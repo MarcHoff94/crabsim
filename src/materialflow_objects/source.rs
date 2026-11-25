@@ -220,6 +220,7 @@ impl EventInterface for Source {
 			fill: None,
 			belt: None,
 			positions: Vec::new(),
+			cross: None,
 		}
 	}
 	fn get_object_id(&self) -> &u32 {

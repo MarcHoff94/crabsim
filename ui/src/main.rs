@@ -1402,8 +1402,8 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
     if several.len() > 1 && ui.several.0 != several {
         let names: Vec<String> = several.iter().map(|&id| ui.view.objects()[id as usize].name.clone()).collect();
         let shared = shared_values(&ui.workspace, &names);
-        let (drains, mu_classes) = (ui.workspace.drains(), ui.workspace.mu_classes());
-        ui.several_forms = shared.iter().map(|view| (view.attribute.clone(), Form::for_attribute(&view.attribute, view.value.as_ref(), &[], &drains, &mu_classes))).collect();
+        let names = ui.workspace.names();
+        ui.several_forms = shared.iter().map(|view| (view.attribute.clone(), Form::for_attribute(&view.attribute, view.value.as_ref(), &[], &names))).collect();
         ui.several = (several.clone(), shared);
     }
     let mut class_asked_change = None;
@@ -1412,10 +1412,10 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
         && ui.class_forms.0.as_deref() != Some(class.as_str())
     {
         let states = crabsim_model::State::of(ui.workspace.built_in_of(class).unwrap_or("Station"));
-        let (drains, mu_classes) = (ui.workspace.drains(), ui.workspace.mu_classes());
+        let names = ui.workspace.names();
         ui.class_forms.1 = values
             .iter()
-            .map(|view| (view.attribute.clone(), Form::for_attribute(&view.attribute, view.value.as_ref(), states, &drains, &mu_classes)))
+            .map(|view| (view.attribute.clone(), Form::for_attribute(&view.attribute, view.value.as_ref(), states, &names)))
             .collect();
         ui.class_forms.0 = Some(class.clone());
     }
@@ -4305,13 +4305,96 @@ fn option_field(ui: &mut egui::Ui, form: &mut Form, attribute: &str) {
 /// A value that is one of the model's names, such as a Source's MU class, as a menu of them.
 /// Where the fields differ between several objects, it shows none chosen.
 fn choice_field(ui: &mut egui::Ui, form: &mut Form, attribute: &str) {
-    egui::ComboBox::from_id_salt(("choice", attribute)).selected_text(form.parts[0].text.clone()).show_ui(ui, |menu| {
-        for name in &form.choices {
-            if menu.selectable_label(form.parts[0].text == *name, name).clicked() {
-                form.parts[0].text = name.clone();
+    // An empty choice is none, such as no detour.
+    let shown = |name: &str| if name.is_empty() { "None".to_string() } else { name.to_string() };
+    egui::ComboBox::from_id_salt(("choice", attribute)).selected_text(shown(&form.parts[0].text)).show_ui(ui, |menu| {
+        egui::ScrollArea::vertical().max_height(240.0).show(menu, |menu| {
+            for name in &form.choices {
+                if menu.selectable_label(form.parts[0].text == *name, shown(name)).clicked() {
+                    form.parts[0].text = name.clone();
+                }
             }
+        });
+    });
+}
+
+/// A work plan as a row per step: its place, chosen from the model's `places`, its process time,
+/// empty for the Station's own, Up, Down and Remove, then Add step. Returns whether to apply it
+/// now, as when a place is chosen, a time left or a row moved.
+fn plan_fields(ui: &mut egui::Ui, rows: &mut crabsim_ui::attributes::PlanRows, places: &[String], salt: &str) -> bool {
+    let mut commit = false;
+    let mut action = None;
+    let count = rows.rows.len();
+    if count == 0 {
+        ui.label(egui::RichText::new("No steps: its MUs go nowhere in particular.").weak());
+    }
+    egui::Grid::new((salt, "steps")).num_columns(6).spacing([4.0, 2.0]).show(ui, |grid| {
+        for (index, row) in rows.rows.iter_mut().enumerate() {
+            grid.push_id((salt, "step", index), |line| {
+                line.label(egui::RichText::new(format!("{}", index + 1)).weak());
+            });
+            let shown = if row.at.is_empty() { "choose a place" } else { row.at.as_str() };
+            egui::ComboBox::from_id_salt((salt, "place", index))
+                .selected_text(shown)
+                .width(120.0)
+                .show_ui(grid, |menu| {
+                    egui::ScrollArea::vertical().max_height(240.0).show(menu, |menu| {
+                        for place in places {
+                            if menu.selectable_label(row.at == *place, place).clicked() && row.at != *place {
+                                row.at = place.clone();
+                                commit = true;
+                            }
+                        }
+                    });
+                })
+                .response
+                .on_hover_text("Where the MU goes for this step: an instance, or a class standing for any of its instances");
+            commit |= grid
+                .add(egui::TextEdit::singleline(&mut row.time).hint_text("own time").desired_width(56.0))
+                .on_hover_text("How long a Station this step names works on the MU, such as 0:40. Empty is the Station's own process time")
+                .lost_focus();
+            if grid.add_enabled(index > 0, egui::Button::new("Up").small()).on_hover_text("Move this step one earlier").clicked() {
+                action = Some(RowAction::Down(index - 1));
+            }
+            if grid.add_enabled(index + 1 < count, egui::Button::new("Down").small()).on_hover_text("Move this step one later").clicked() {
+                action = Some(RowAction::Down(index));
+            }
+            if grid.add(egui::Button::new("Remove").small()).on_hover_text("Take this step out of the plan").clicked() {
+                action = Some(RowAction::Remove(index));
+            }
+            grid.end_row();
         }
     });
+    match action {
+        Some(RowAction::Down(index)) => rows.swap_with_next(index),
+        Some(RowAction::Remove(index)) => rows.remove(index),
+        _ => {}
+    }
+    commit |= action.is_some();
+    if ui.small_button("Add step").on_hover_text("Another step after the last: choose its place").clicked() {
+        rows.add("");
+    }
+    commit
+}
+
+/// A cross conveyor's exits: for each side, what it lists, opening to a tick for each name a
+/// destination can be. An MU whose next destination a side lists turns there. Returns whether to
+/// apply them now, as when a tick changes.
+fn exit_fields(ui: &mut egui::Ui, exits: &mut crabsim_ui::attributes::ExitTicks, salt: &str) -> bool {
+    let mut commit = false;
+    ui.label(egui::RichText::new("MUs going to a destination a side lists leave by it, turning at the centre; others go straight across.").weak().small());
+    for place in 0..exits.sides.len() {
+        let side = exits.sides[place].0;
+        let header = format!("{}: {}", side_label(side), exits.listed(side));
+        egui::CollapsingHeader::new(header).id_salt((salt, "exit", place)).show(ui, |inside| {
+            egui::ScrollArea::vertical().id_salt((salt, "exit names", place)).max_height(160.0).show(inside, |inside| {
+                for (name, ticked) in &mut exits.sides[place].1 {
+                    commit |= inside.checkbox(ticked, name.as_str()).changed();
+                }
+            });
+        });
+    }
+    commit
 }
 
 /// An attribute's name as people read it.
@@ -4345,6 +4428,9 @@ fn attribute_label(attribute: &str) -> &str {
         "max_incline" => "Max. incline °",
         "work_plan" => "Work plan",
         "detour" => "Detour",
+        "switch_time" => "Switch time",
+        "release_time" => "Release time",
+        "exits" => "Exits",
         other => other,
     }
 }
@@ -4477,11 +4563,21 @@ fn attributes_section(
                 distribution_fields(fields, choice, &format!("{salt}{}", view.attribute));
                 return;
             }
+            if let Some(exits) = form.exits.as_mut() {
+                commit |= exit_fields(fields, exits, &format!("{salt}{}", view.attribute));
+                return;
+            }
+            if view.attribute == "work_plan"
+                && let Some(rows) = form.plan.as_mut()
+            {
+                commit |= plan_fields(fields, rows, &form.choices, &format!("{salt}{}", view.attribute));
+                return;
+            }
             if !form.options.is_empty() {
                 option_field(fields, form, &view.attribute);
                 return;
             }
-            if !form.choices.is_empty() {
+            if !form.choices.is_empty() && form.plan.is_none() {
                 choice_field(fields, form, &view.attribute);
                 return;
             }
@@ -4505,6 +4601,11 @@ fn attributes_section(
                     grid.end_row();
                 }
             });
+            // A Source's own MU values end with its own work plan, empty for its MU class's.
+            if let Some(rows) = form.plan.as_mut() {
+                fields.label(egui::RichText::new("Own work plan, none for its MU class's").weak().small());
+                commit |= plan_fields(fields, rows, &form.choices, &format!("{salt}{}", view.attribute));
+            }
         });
         let waiting = !form.matches(view.value.as_ref());
         if waiting {
@@ -5742,6 +5843,12 @@ fn validation_window(ctx: &egui::Context, ui: &mut Ui) -> Option<crabsim_ui::wor
 /// A distribution strategy's choices: Round robin or Weighted, and for Weighted what it weighs,
 /// which totals come first, what it ranks, and the Drains it counts.
 fn distribution_fields(ui: &mut egui::Ui, choice: &mut crabsim_ui::attributes::DistributionChoice, salt: &str) {
+    ui.checkbox(&mut choice.by_destination, "By destination").on_hover_text(
+        "Only the successors from which the MU's next destination can be reached, chosen among as below. An MU with no destination, or one none of them reaches, is offered to all",
+    );
+    if choice.by_destination {
+        ui.label(egui::RichText::new("then").weak().small());
+    }
     ui.horizontal(|row| {
         let first = row.selectable_value(&mut choice.weighted, false, "Round robin").on_hover_text("Each successor in turn");
         focus_if_wanted(row, &first, salt);

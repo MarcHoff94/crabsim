@@ -111,3 +111,60 @@ fn a_connection_to_a_cross_conveyor_needs_a_free_side() {
     assert!(why.contains("back"), "{why}");
     assert!(workspace.connect_at("Saw", None, "Fork", None, false).is_err(), "a cross conveyor's end names its side");
 }
+
+#[test]
+fn the_names_a_destination_can_be_are_the_object_classes_then_the_instances() {
+    let folder = Folder::new("names");
+    let workspace = open(&folder);
+    let destinations = workspace.names().destinations;
+    // Housing and Cover are MU classes, which no MU goes to.
+    assert_eq!(destinations.first().map(String::as_str), Some("In A"));
+    assert!(destinations.contains(&"Mill".to_string()) && destinations.contains(&"Fork".to_string()));
+    assert!(!destinations.contains(&"Housing".to_string()));
+}
+
+#[test]
+fn a_work_plan_a_detour_and_exits_edited_in_their_forms_are_saved_as_given() {
+    let folder = Folder::new("forms");
+    let mut workspace = open(&folder);
+    let names = workspace.names();
+    let value_of = |workspace: &Workspace, class: Option<&str>, name: &str, attribute: &str| {
+        let views = match class {
+            Some(class) => workspace.class_attributes(class).unwrap(),
+            None => workspace.attributes(name).unwrap(),
+        };
+        views.into_iter().find(|view| view.attribute == attribute).and_then(|view| view.value)
+    };
+
+    // The Housing's plan gets the Paint step, with a time, before Out.
+    let plan = value_of(&workspace, Some("Housing"), "", "work_plan");
+    let mut form = crabsim_ui::attributes::Form::for_attribute("work_plan", plan.as_ref(), &[], &names);
+    assert_eq!(form.choices, names.destinations);
+    let rows = form.plan.as_mut().unwrap();
+    rows.add("Paint");
+    rows.rows[3].time = "0:20".into();
+    rows.swap_with_next(2);
+    workspace.set_class_attribute("Housing", "work_plan", form.value().unwrap(), false).unwrap();
+    picked_up(&mut workspace);
+    let saved = value_of(&workspace, Some("Housing"), "", "work_plan");
+    assert_eq!(saved, Some(json!([{ "at": "Saw" }, { "at": "Mill" }, { "at": "Paint", "process_time": "00:00:20" }, { "at": "Out" }])));
+
+    // The Mill sends its MUs to Paint first.
+    let mut detour = crabsim_ui::attributes::Form::for_attribute("detour", None, &[], &names);
+    detour.parts[0].text = "Paint".into();
+    workspace.set_attribute("Mill", "detour", detour.value().unwrap(), false).unwrap();
+    picked_up(&mut workspace);
+    assert_eq!(value_of(&workspace, None, "Mill", "detour"), Some(json!("Paint")));
+
+    // The Fork's front lists Paint too.
+    let exits = value_of(&workspace, None, "Fork", "exits");
+    let mut form = crabsim_ui::attributes::Form::for_attribute("exits", exits.as_ref(), &[], &names);
+    let front = form.exits.as_mut().unwrap().sides.iter_mut().find(|(side, _)| *side == Side::Front).unwrap();
+    front.1.iter_mut().find(|(name, _)| name == "Paint").unwrap().1 = true;
+    workspace.set_attribute("Fork", "exits", form.value().unwrap(), false).unwrap();
+    picked_up(&mut workspace);
+    let saved = value_of(&workspace, None, "Fork", "exits");
+    assert_eq!(saved, Some(json!({ "front": ["Paint"], "left": ["Mill"] })));
+    assert!(form.matches(saved.as_ref()), "nothing waits once saved");
+    assert_eq!(workspace.exit_lists().into_iter().find(|(id, _)| *id == id_of(&workspace, "Fork")).unwrap().1, vec![(Side::Front, vec!["Paint".to_string()]), (Side::Left, vec!["Mill".to_string()])]);
+}

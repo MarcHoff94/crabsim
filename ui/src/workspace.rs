@@ -712,6 +712,18 @@ impl Workspace {
         self.model.mu_classes().into_iter().map(str::to_owned).collect()
     }
 
+    /// Every name a destination can be in the open model (ADR 0025): its own object classes, each
+    /// standing for its instances, then its instances, in file order.
+    pub fn destinations(&self) -> Vec<String> {
+        let classes = self.model.classes.iter().filter(|class| self.model.destination_members(&class.name).is_some()).map(|class| class.name.clone());
+        classes.chain(self.model.instances.iter().map(|instance| instance.name.clone())).collect()
+    }
+
+    /// The names the inspector's forms offer: Drains, MU classes and destinations.
+    pub fn names(&self) -> crate::attributes::Names {
+        crate::attributes::Names { drains: self.drains(), mu_classes: self.mu_classes(), destinations: self.destinations() }
+    }
+
     /// The built-in class at the root of `class`'s chain, if it has a sound one.
     pub fn built_in_of(&self, class: &str) -> Option<&'static str> {
         self.model.chain(class).map(|(_, built_in)| built_in)

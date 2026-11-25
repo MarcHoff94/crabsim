@@ -6,7 +6,8 @@
 use crabsim::{Position, SimTime};
 use crabsim_catalogue::{Catalogue, Settings, Source};
 use crabsim_model::State;
-use crabsim_ui::attributes::{summary, Form, RepairKind};
+use crabsim::Side;
+use crabsim_ui::attributes::{summary, Form, Names, PlanRow, RepairKind};
 use crabsim_ui::view::Change;
 use crabsim_ui::workspace::{ModelChange, Refusal, ValueFrom, Workspace};
 use serde_json::{json, Value};
@@ -379,13 +380,13 @@ fn a_value_reads_as_one_short_line_for_a_class_shown_in_the_inspector() {
 
 // ---------- Distribution ----------
 
-fn drains(names: &[&str]) -> Vec<String> {
-    names.iter().map(|name| name.to_string()).collect()
+fn with_drains(names: &[&str]) -> Names {
+    Names { drains: names.iter().map(|name| name.to_string()).collect(), ..Names::default() }
 }
 
 #[test]
 fn a_distribution_starts_as_round_robin_and_set_nowhere_matches_it() {
-    let form = Form::for_attribute("distribution", None, &[], &drains(&["Out"]), &[]);
+    let form = Form::for_attribute("distribution", None, &[], &with_drains(&["Out"]));
     let choice = form.distribution.clone().unwrap();
     assert!(!choice.weighted);
     assert_eq!(form.value(), Ok(json!("round_robin")));
@@ -396,7 +397,7 @@ fn a_distribution_starts_as_round_robin_and_set_nowhere_matches_it() {
 #[test]
 fn a_weighted_distribution_reads_back_what_it_was_given_whatever_the_order_of_its_drains() {
     let given = json!({ "weighted": { "by": "interval", "order": "largest", "rank": "route", "drains": ["B", "A"] } });
-    let form = Form::for_attribute("distribution", Some(&given), &[], &drains(&["A", "B", "C"]), &[]);
+    let form = Form::for_attribute("distribution", Some(&given), &[], &with_drains(&["A", "B", "C"]));
     let choice = form.distribution.clone().unwrap();
     assert!(choice.weighted && choice.largest && !choice.successor);
     assert_eq!(choice.by, "interval");
@@ -407,7 +408,7 @@ fn a_weighted_distribution_reads_back_what_it_was_given_whatever_the_order_of_it
 
 #[test]
 fn choosing_weighted_waits_to_be_applied_with_every_drain_counted_by_default() {
-    let mut form = Form::for_attribute("distribution", None, &[], &drains(&["Out"]), &[]);
+    let mut form = Form::for_attribute("distribution", None, &[], &with_drains(&["Out"]));
     form.distribution.as_mut().unwrap().weighted = true;
     assert!(!form.matches(None));
     assert_eq!(form.value(), Ok(json!({ "weighted": { "by": "process_time", "order": "smallest", "rank": "route" } })), "none ticked counts every Drain");
@@ -416,7 +417,7 @@ fn choosing_weighted_waits_to_be_applied_with_every_drain_counted_by_default() {
 #[test]
 fn a_counted_name_that_isnt_a_drain_stays_ticked_so_saving_never_drops_it() {
     let given = json!({ "weighted": { "by": "process_time", "drains": ["Gone"] } });
-    let form = Form::for_attribute("distribution", Some(&given), &[], &drains(&["Out"]), &[]);
+    let form = Form::for_attribute("distribution", Some(&given), &[], &with_drains(&["Out"]));
     assert_eq!(form.distribution.unwrap().drains, vec![("Out".into(), false), ("Gone".into(), true)]);
 }
 
@@ -529,7 +530,8 @@ fn an_mus_footprint_is_metres_above_0_and_its_booking_point_a_share_of_its_lengt
 #[test]
 fn a_sources_own_mu_values_are_those_typed_and_none_typed_is_none() {
     let mut form = Form::new("mu_values", Some(&json!({ "width": 0.45 })));
-    assert_eq!(form.parts.iter().map(|part| part.text.as_str()).collect::<Vec<_>>(), ["", "0.45", "", ""]);
+    assert_eq!(form.parts.iter().map(|part| part.text.as_str()).collect::<Vec<_>>(), ["", "0.45", ""]);
+    assert_eq!(form.plan.as_ref().map(|plan| plan.rows.len()), Some(0), "no work plan of its own");
     assert!(form.matches(Some(&json!({ "width": 0.45 }))));
     form.parts[2].text = "0".into();
     assert_eq!(form.value(), Ok(json!({ "width": 0.45, "booking_point": 0.0 })));
@@ -545,25 +547,105 @@ fn a_sources_own_work_plan_is_kept_when_its_other_values_change() {
     let plan = json!([{ "at": "Saw", "process_time": "00:00:40" }, { "at": "Out" }]);
     let mut form = Form::new("mu_values", Some(&json!({ "width": 0.45, "work_plan": plan })));
     assert!(form.matches(Some(&json!({ "width": 0.45, "work_plan": plan }))));
+    assert_eq!(form.plan.as_ref().unwrap().rows.len(), 2);
     form.parts[1].text = "0.5".into();
     assert_eq!(form.value(), Ok(json!({ "width": 0.5, "work_plan": plan })), "the plan stays");
 }
 
 #[test]
-fn a_work_plan_is_typed_as_json_until_it_has_rows() {
-    let plan = json!([{ "at": "Saw" }]);
+fn a_work_plan_is_a_row_per_step_each_with_its_place_and_its_time_or_none() {
+    let plan = json!([{ "at": "Saw", "process_time": "0:40" }, { "at": "Mill" }]);
     let mut form = Form::new("work_plan", Some(&plan));
-    assert_eq!(form.value(), Ok(plan));
-    form.parts[0].text = "Saw 0:40".into();
-    assert!(form.value().unwrap_err().contains("isn't a work plan"));
-    form.parts[0].text.clear();
+    let rows = &form.plan.as_ref().unwrap().rows;
+    assert_eq!(rows, &vec![PlanRow { at: "Saw".into(), time: "0:40".into() }, PlanRow { at: "Mill".into(), time: String::new() }]);
+    assert!(form.matches(Some(&plan)));
+    assert_eq!(form.value(), Ok(plan.clone()));
+
+    let rows = form.plan.as_mut().unwrap();
+    rows.add("Out");
+    rows.swap_with_next(0);
+    rows.rows[0].time = "1:30".into();
+    assert_eq!(form.value(), Ok(json!([{ "at": "Mill", "process_time": "1:30" }, { "at": "Saw", "process_time": "0:40" }, { "at": "Out" }])));
+    assert!(!form.matches(Some(&plan)), "it waits to be applied");
+    form.plan.as_mut().unwrap().remove(2);
+    form.plan.as_mut().unwrap().remove(0);
+    assert_eq!(form.value(), Ok(json!([{ "at": "Saw", "process_time": "0:40" }])));
+}
+
+#[test]
+fn a_step_needs_a_place_and_a_time_that_reads_as_one() {
+    let mut form = Form::new("work_plan", None);
     assert_eq!(form.value(), Ok(json!([])), "no steps");
+    assert!(form.matches(None));
+    form.plan.as_mut().unwrap().add("");
+    assert!(form.value().unwrap_err().contains("step 1 needs a place"));
+    form.plan.as_mut().unwrap().rows[0] = PlanRow { at: "Saw".into(), time: "soon".into() };
+    assert!(form.value().unwrap_err().contains("`soon` isn't a time"));
+    assert_eq!(summary(&json!([{ "at": "Saw", "process_time": "0:40" }, { "at": "Out" }])), "Saw 0:40, Out");
+}
+
+#[test]
+fn a_sources_own_work_plan_is_its_rows_and_none_takes_the_mu_classes() {
+    let mut form = Form::new("mu_values", Some(&json!({ "width": 0.45 })));
+    form.plan.as_mut().unwrap().add("Mill");
+    assert_eq!(form.value(), Ok(json!({ "width": 0.45, "work_plan": [{ "at": "Mill" }] })));
+    form.plan.as_mut().unwrap().remove(0);
+    assert_eq!(form.value(), Ok(json!({ "width": 0.45 })));
+    assert_eq!(summary(&json!({ "width": 0.45, "work_plan": [{ "at": "Mill" }] })), "width 0.45 m, work plan Mill");
+}
+
+#[test]
+fn a_detour_is_chosen_from_the_destinations_or_none() {
+    let names = Names { destinations: vec!["Mills".into(), "Rework".into()], ..Names::default() };
+    let mut form = Form::for_attribute("detour", None, &[], &names);
+    assert_eq!(form.choices, ["", "Mills", "Rework"], "none first");
+    assert!(form.matches(None));
+    assert_eq!(form.value(), Ok(Value::Null), "none is no detour");
+    form.parts[0].text = "Rework".into();
+    assert_eq!(form.value(), Ok(json!("Rework")));
+    assert!(!form.matches(None));
+    assert!(Form::for_attribute("detour", Some(&json!("Rework")), &[], &names).matches(Some(&json!("Rework"))));
+}
+
+#[test]
+fn a_cross_conveyors_exits_are_ticked_per_side_from_the_destinations() {
+    let names = Names { destinations: vec!["Mill".into(), "Paint".into(), "Out".into()], ..Names::default() };
+    let given = json!({ "left": ["Out", "Mill"], "right": ["Gone"] });
+    let mut form = Form::for_attribute("exits", Some(&given), &[], &names);
+    let exits = form.exits.as_ref().unwrap();
+    assert_eq!(exits.sides.iter().map(|(side, _)| *side).collect::<Vec<_>>(), Side::ALL);
+    assert_eq!(exits.listed(Side::Left), "Mill, Out");
+    // A name that isn't a destination stays ticked, so saving never drops it.
+    assert_eq!(exits.listed(Side::Right), "Gone");
+    assert_eq!(exits.listed(Side::Front), "none");
+    assert!(form.matches(Some(&given)), "whatever order a side lists its names in");
+
+    let front = form.exits.as_mut().unwrap().sides.iter_mut().find(|(side, _)| *side == Side::Front).unwrap();
+    front.1.iter_mut().find(|(name, _)| name == "Paint").unwrap().1 = true;
+    assert!(!form.matches(Some(&given)));
+    assert_eq!(form.value(), Ok(json!({ "front": ["Paint"], "left": ["Mill", "Out"], "right": ["Gone"] })));
+
+    let none = Form::for_attribute("exits", None, &[], &names);
+    assert_eq!(none.value(), Ok(json!({})));
+    assert!(none.matches(None) && none.matches(Some(&json!({ "left": [] }))), "no exits listed is none");
+    assert_eq!(summary(&given), "left: Out, Mill; right: Gone");
+}
+
+#[test]
+fn a_cross_conveyors_switch_and_release_times_are_times() {
+    let mut form = Form::new("switch_time", Some(&json!("00:00:02")));
+    assert_eq!(form.value(), Ok(json!("00:00:02")));
+    form.parts[0].text = "later".into();
+    assert!(form.value().unwrap_err().contains("isn't a time"));
+    let mut release = Form::new("release_time", None);
+    release.parts[0].text = "1.5".into();
+    assert_eq!(release.value(), Ok(json!("1.5")));
 }
 
 #[test]
 fn a_sources_mu_class_is_chosen_from_the_models_mu_classes() {
     let classes = ["MU".to_string(), "Tote".to_string()];
-    let mut form = Form::for_attribute("mu_class", Some(&json!("MU")), &[], &[], &classes);
+    let mut form = Form::for_attribute("mu_class", Some(&json!("MU")), &[], &Names { mu_classes: classes.to_vec(), ..Names::default() });
     assert_eq!(form.choices, classes);
     assert!(form.matches(Some(&json!("MU"))), "the names offered aren't part of the value");
     form.parts[0].text = "Tote".into();

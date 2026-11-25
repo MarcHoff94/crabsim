@@ -254,16 +254,17 @@ fn a_click_on_a_cross_conveyor_between_conveyors_finds_it_and_not_the_conveyors_
 }
 
 #[test]
-fn i_shows_names_but_conveyors_then_every_name_with_annotations_then_none() {
+fn i_shows_names_then_names_with_annotations_then_none_and_never_a_conveyors_name() {
     use crabsim::ObjectKind;
     use crabsim_ui::view::Labels;
     let shown = Labels::default();
     assert_eq!(shown, Labels::Names);
     assert!(shown.shows_name(ObjectKind::Station));
-    assert!(!shown.shows_name(ObjectKind::Conveyor) && !shown.shows_name(ObjectKind::CrossConveyor), "their names lie over their neighbours");
+    assert!(!shown.shows_name(ObjectKind::Conveyor) && !shown.shows_name(ObjectKind::CrossConveyor), "their names would lie over their neighbours");
     assert!(!shown.shows_annotations());
     let all = shown.next();
-    assert!(all.shows_name(ObjectKind::Conveyor) && all.shows_name(ObjectKind::CrossConveyor) && all.shows_annotations());
+    assert!(all.shows_name(ObjectKind::Station) && all.shows_annotations());
+    assert!(!all.shows_name(ObjectKind::Conveyor) && !all.shows_name(ObjectKind::CrossConveyor), "never");
     let none = all.next();
     assert!(!none.shows_name(ObjectKind::Station) && !none.shows_annotations());
     assert_eq!(none.next(), Labels::Names, "and round again");

@@ -270,15 +270,15 @@ pub struct MuMarker {
     pub rotation_degrees: f64,
 }
 
-/// Which text the canvas shows, switched in turn by `i`.
+/// Which text the canvas shows, switched in turn by `i`. A conveyor's or a cross conveyor's name
+/// is never shown: it would lie over its neighbours, such as the Spur's over the Fork.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Labels {
-    /// Every object's name but a conveyor's or a cross conveyor's, which lie over their
-    /// neighbours.
+    /// The names.
     #[default]
     Names,
-    /// Every name, conveyors' too, and the annotations: a cross conveyor's exits and a conveyor's
-    /// rises, helices and heights.
+    /// The names and the annotations: a cross conveyor's exits and a conveyor's rises, helices
+    /// and heights.
     All,
     /// No names or annotations at all, for the model's layout alone.
     None,
@@ -296,11 +296,7 @@ impl Labels {
 
     /// Whether an object of this kind has its name shown.
     pub fn shows_name(self, kind: ObjectKind) -> bool {
-        match self {
-            Labels::Names => !matches!(kind, ObjectKind::Conveyor | ObjectKind::CrossConveyor),
-            Labels::All => true,
-            Labels::None => false,
-        }
+        self != Labels::None && !matches!(kind, ObjectKind::Conveyor | ObjectKind::CrossConveyor)
     }
 
     pub fn shows_annotations(self) -> bool {
@@ -310,8 +306,8 @@ impl Labels {
     /// What the canvas shows now, in words.
     pub fn describe(self) -> &'static str {
         match self {
-            Labels::Names => "Names shown, but conveyors' and cross conveyors' and annotations hidden",
-            Labels::All => "Every name shown, with annotations: a cross conveyor's exits, a conveyor's rises and heights",
+            Labels::Names => "Names shown, annotations hidden",
+            Labels::All => "Names and annotations shown: a cross conveyor's exits, a conveyor's rises and heights",
             Labels::None => "No names or annotations shown",
         }
     }

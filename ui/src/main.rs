@@ -346,8 +346,8 @@ struct Ui {
     keys: Keys,
     /// A word on what the last key did, such as why it did nothing, shown on the key line.
     key_note: Option<String>,
-    /// Which text the canvas shows: names but conveyors' to start with, so they stay readable;
-    /// `i` goes on to every name with annotations, then to none.
+    /// Which text the canvas shows: names to start with, never a conveyor's; `i` goes on to names
+    /// with annotations, then to none.
     labels: Labels,
     /// The last search's matches, by id, and which of them is selected.
     search: (Vec<u32>, usize),
@@ -5805,7 +5805,7 @@ fn keys_help(ctx: &egui::Context, ui: &mut Ui) {
                 ("Space", "start or halt"),
                 ("x y", "step forward, back: 10x steps ten"),
                 ("R", "reset"),
-                ("i", "names, then every name with annotations (a cross conveyor's exits, a conveyor's rises), then none"),
+                ("i", "names, then names with annotations (a cross conveyor's exits, a conveyor's rises), then none"),
                 ("+ -", "faster, slower"),
                 ("a", "animate on or off"),
                 ("gt", "go to a time"),

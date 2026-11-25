@@ -314,62 +314,80 @@ impl Model {
     /// Warns about each conveyor the Source at `source` reaches, through objects without geometry
     /// and conveyors its MUs fit, whose width or length its MUs don't fit: the conveyor refuses
     /// them, and they wait for good. Also about one in whose tightest bend they stick out past its
-    /// edge.
+    /// edge. An MU lies as it does there: crosswise, its width along the belt, after a cross
+    /// conveyor turns it, until another turns it back or an object without geometry passes it on
+    /// lengthwise, so the search follows each MU's way with how it lies, and a cross conveyor's
+    /// side it comes in by.
     fn mus_that_dont_fit(&self, source: usize, successors: &[Vec<usize>], built_in: &[&str], warn: &mut impl FnMut(String, &str, String)) {
         let Some(kind) = self.mu_kind_of(source) else { return };
-        let mut seen = vec![false; successors.len()];
-        let mut queue: VecDeque<usize> = successors[source].iter().copied().collect();
-        while let Some(at) = queue.pop_front() {
-            if std::mem::replace(&mut seen[at], true) {
+        let class = || self.resolve(source).expect("checked").attributes.mu_class.unwrap_or_default();
+        let side_between = |from: usize, to: usize| {
+            let (from, to) = (&self.instances[from].name, &self.instances[to].name);
+            self.connections.iter().find(|c| &c.from == from && &c.to == to).map(|c| (c.from_side, c.to_side))
+        };
+        // Each place an MU can be, coming from where, and whether it lies crosswise.
+        let mut seen: std::collections::HashSet<(usize, usize, bool)> = std::collections::HashSet::new();
+        let mut queue: VecDeque<(usize, usize, bool)> = successors[source].iter().map(|&next| (next, source, false)).collect();
+        let mut warned: std::collections::HashSet<(usize, bool)> = std::collections::HashSet::new();
+        while let Some((at, from, crosswise)) = queue.pop_front() {
+            if !seen.insert((at, from, crosswise)) {
                 continue;
             }
+            // Its extent along the way it goes, and across it.
+            let (along, across) = if crosswise { (kind.width, kind.length) } else { (kind.length, kind.width) };
+            let lying = if crosswise { ", lying crosswise after a cross conveyor turned them," } else { "" };
             if built_in[at] == "CrossConveyor" {
                 let cross = self.resolve(at).expect("checked").attributes;
                 let (length, width) = (cross.length.unwrap_or(0.6), cross.width.unwrap_or(0.6));
                 let name = &self.instances[at].name;
+                let Some(entry) = side_between(from, at).and_then(|(_, side)| side) else { continue };
                 // Coming in by its front or back its way is its length, by its left or right its width.
-                let fits_from = |side: crate::Side| {
-                    let (way, across) = if side.along_length() { (length, width) } else { (width, length) };
-                    kind.length <= way + 1e-9 && kind.width <= across + 1e-9
-                };
-                let entries: Vec<crate::Side> = self.connections.iter().filter(|c| &c.to == name).filter_map(|c| c.to_side).collect();
-                if !entries.is_empty() && !entries.iter().any(|&side| fits_from(side)) {
-                    let class = self.resolve(source).expect("checked").attributes.mu_class.unwrap_or_default();
-                    warn(
-                        format!("/instances/{source}"),
-                        &self.instances[source].name,
-                        format!(
-                            "its MUs, of MU class `{class}`, are {} by {} m, and cross conveyor `{name}`, {length} by {width} m, has no way across them from any side they come in by, so it refuses them and they wait there for good",
-                            kind.length, kind.width
-                        ),
-                    );
-                    continue;
-                }
-                queue.extend(successors[at].iter().copied());
-                continue;
-            }
-            if built_in[at] != "Conveyor" {
-                queue.extend(successors[at].iter().copied());
-                continue;
-            }
-            let conveyor = self.resolve(at).expect("checked").attributes;
-            let (width, length) = (conveyor.width.unwrap_or(0.6), crate::path_length(conveyor.path.as_deref().unwrap_or_default()));
-            let too = if kind.width > width {
-                format!("{} m wide, and conveyor `{}` only {width} m", kind.width, self.instances[at].name)
-            } else if kind.length > length {
-                format!("{} m long, and conveyor `{}` only {length} m", kind.length, self.instances[at].name)
-            } else {
-                // A footprint centred on the path in a bend reaches out furthest at its outer
-                // corners. Only a view sees it: the conveyor still carries the MU.
-                if let Some(radius) = crate::path::tightest_radius(conveyor.path.as_deref().unwrap_or_default()) {
-                    let reach = ((radius + kind.width / 2.0).powi(2) + (kind.length / 2.0).powi(2)).sqrt() - radius;
-                    if reach > width / 2.0 + 1e-9 {
-                        let class = self.resolve(source).expect("checked").attributes.mu_class.unwrap_or_default();
+                let (way, breadth) = if entry.along_length() { (length, width) } else { (width, length) };
+                if along > way + 1e-9 || across > breadth + 1e-9 {
+                    if warned.insert((at, crosswise)) {
                         warn(
                             format!("/instances/{source}"),
                             &self.instances[source].name,
                             format!(
-                                "its MUs, of MU class `{class}`, are {} by {} m, and in conveyor `{}`'s tightest bend, of radius {radius} m, their corners stick out {:.2} m past its edge, as it is {width} m wide",
+                                "its MUs, of MU class `{}`{lying} are {along} m long and {across} m wide on their way, and cross conveyor `{name}`, {length} by {width} m, has no way across them from its {} side, where they come in, so it refuses them and they wait there for good",
+                                class(),
+                                entry.name()
+                            ),
+                        );
+                    }
+                    continue;
+                }
+                // Straight across it lies as it came in, and turned it lies the other way.
+                for &next in &successors[at] {
+                    let exit = side_between(at, next).and_then(|(side, _)| side);
+                    let turned = exit.is_some_and(|exit| exit != entry.opposite());
+                    queue.push_back((next, at, crosswise != turned));
+                }
+                continue;
+            }
+            if built_in[at] != "Conveyor" {
+                // An object without geometry passes MUs on lengthwise.
+                queue.extend(successors[at].iter().map(|&next| (next, at, false)));
+                continue;
+            }
+            let conveyor = self.resolve(at).expect("checked").attributes;
+            let (width, length) = (conveyor.width.unwrap_or(0.6), crate::path_length(conveyor.path.as_deref().unwrap_or_default()));
+            let too = if across > width {
+                format!("{across} m wide, and conveyor `{}` only {width} m", self.instances[at].name)
+            } else if along > length {
+                format!("{along} m long, and conveyor `{}` only {length} m", self.instances[at].name)
+            } else {
+                // A footprint centred on the path in a bend reaches out furthest at its outer
+                // corners. Only a view sees it: the conveyor still carries the MU.
+                if let Some(radius) = crate::path::tightest_radius(conveyor.path.as_deref().unwrap_or_default()) {
+                    let reach = ((radius + across / 2.0).powi(2) + (along / 2.0).powi(2)).sqrt() - radius;
+                    if reach > width / 2.0 + 1e-9 && warned.insert((at, crosswise)) {
+                        warn(
+                            format!("/instances/{source}"),
+                            &self.instances[source].name,
+                            format!(
+                                "its MUs, of MU class `{}`{lying} are {} by {} m, and in conveyor `{}`'s tightest bend, of radius {radius} m, their corners stick out {:.2} m past its edge, as it is {width} m wide",
+                                class(),
                                 kind.length,
                                 kind.width,
                                 self.instances[at].name,
@@ -378,16 +396,17 @@ impl Model {
                         );
                     }
                 }
-                // It fits, so it travels on to what comes after.
-                queue.extend(successors[at].iter().copied());
+                // It fits, so it travels on to what comes after, lying as it does.
+                queue.extend(successors[at].iter().map(|&next| (next, at, crosswise)));
                 continue;
             };
-            let class = self.resolve(source).expect("checked").attributes.mu_class.unwrap_or_default();
-            warn(
-                format!("/instances/{source}"),
-                &self.instances[source].name,
-                format!("its MUs, of MU class `{class}`, are {too}, which refuses them, so they wait there for good"),
-            );
+            if warned.insert((at, crosswise)) {
+                warn(
+                    format!("/instances/{source}"),
+                    &self.instances[source].name,
+                    format!("its MUs, of MU class `{}`{lying} are {too}, which refuses them, so they wait there for good", class()),
+                );
+            }
         }
     }
 }

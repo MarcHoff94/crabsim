@@ -1,5 +1,7 @@
 # Conveyor motion as closed-form motion plans, never time steps
 
+Amended on 2026-11-25 (ADR 0028): a conveyor-driven conveyor has no acceleration, deceleration or jerk, so its MUs' plans stay phases of constant speed, and an MU-driven trip is trapezoidal, constant acceleration up to a top speed and constant deceleration, without jerk, so no phase of constant jerk and no root-finder are needed.
+
 An MU on a conveyor moves by a motion plan: its object, the time it starts, where it starts along the path, and its phases of constant jerk, acceleration or speed up to a time. The engine schedules events only where MUs interact: an MU's front reaching the end, an MU closing up to the one ahead, a phase changing, an interruption beginning or ending. When something changes, such as an MU entering or the end being blocked, only the plans that change are computed again, which is the MUs behind the one that changed, since a change never reaches those ahead. There is no time step anywhere. Where a jerk-limited catch-up time has no closed form, it is found by a numeric root-finder at the event, to the millisecond, never by stepping. We decided it on 2026-11-21 in the design round for conveyors, since performance is the first pillar: a ticking conveyor would make a long run around a thousand times slower, and results that depended on a step size would weaken "the same seed gives the same result".
 
 ## Considered Options

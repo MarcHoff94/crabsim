@@ -197,7 +197,7 @@ _Avoid_: Belt, track (a conveyor of either drive)
 What a conveyor does with the MUs behind one that stops. **Accumulating**, the default: they close up to it, keeping the gap, and stop one by one while the rest move on. **Non-accumulating** (`accumulating` false): every MU on the conveyor stops as a whole when its first can't leave, wherever it is, and they all start again together, as far apart as they were.
 
 **Drive**:
-What moves the MUs on a conveyor. **Conveyor-driven**: the conveyor's own speed, acceleration, deceleration and jerk move every MU on it, as a belt or roller conveyor does. **MU-driven**: each MU moves by its own motion limits, as a shuttle or carrier does, and the conveyor is only the way it follows.
+What moves the MUs on a conveyor. **Conveyor-driven**: the conveyor's own drive moves every MU on it at its constant speed, as a belt or roller conveyor does, an MU standing while it is held back and moving at that speed again at once (ADR 0028). **MU-driven**: each MU moves by its own top speed, acceleration and deceleration, a trapezoidal profile without jerk, plus an optional start and stop time per trip, as a shuttle or carrier does, and the conveyor is only the way it follows.
 
 **Path**:
 The line a conveyor's MUs follow, made of segments joined without kinks, any of them rising or falling. Only its length, and the limits it sets, such as its tightest bend and steepest incline, affect results: a path that breaks its conveyor's `min_radius` or `max_incline` can't run.

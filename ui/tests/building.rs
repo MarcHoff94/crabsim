@@ -123,6 +123,7 @@ fn the_classes_panel_is_a_tree_by_inheritance() {
             ("Store".to_string(), 1, false),
             ("Drain".to_string(), 0, true),
             ("Conveyor".to_string(), 0, true),
+            ("CrossConveyor".to_string(), 0, true),
             ("MU".to_string(), 0, true),
         ]
     );
@@ -326,7 +327,7 @@ fn a_built_in_classs_values_are_this_models_own_and_reach_everything_built_on_it
     assert_eq!(description.from, crabsim_ui::workspace::ValueFrom::Class("Station".into()), "a Mill inherits it");
     // The panel shows it as the built-in class, once.
     let names: Vec<String> = workspace.classes().into_iter().map(|entry| entry.name).collect();
-    assert_eq!(names, ["Source", "Station", "Mill", "Fast mill", "Buffer", "Store", "Drain", "Conveyor", "MU"]);
+    assert_eq!(names, ["Source", "Station", "Mill", "Fast mill", "Buffer", "Store", "Drain", "Conveyor", "CrossConveyor", "MU"]);
     // Nothing depends on it in a way removing it would take: the built-in is still there.
     assert_eq!(workspace.class_dependents("Station"), Dependents::default());
     // Restoring its last value removes it.

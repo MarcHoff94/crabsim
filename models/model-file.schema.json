@@ -147,13 +147,13 @@
           "$ref": "#/$defs/MuValuesFile"
         },
         "length": {
-          "description": "MU class: its footprint's length along the way it travels, in metres. 0.6 by default.",
+          "description": "MU class: its footprint's length along the way it travels, in metres. 0.6 by default. CrossConveyor: its length along its own x axis, from its back to its front, 0.6 by default.",
           "type": "number",
           "format": "double",
           "exclusiveMinimum": 0
         },
         "width": {
-          "description": "MU class: its footprint's width across the way it travels, in metres, 0.4 by default. Conveyor: how wide it is, in metres, 0.6 by default: an MU wider than this doesn't fit.",
+          "description": "MU class: its footprint's width across the way it travels, in metres, 0.4 by default. Conveyor: how wide it is, in metres, 0.6 by default: an MU wider than this doesn't fit. CrossConveyor: its width from its right side to its left, 0.6 by default.",
           "type": "number",
           "format": "double",
           "exclusiveMinimum": 0
@@ -174,7 +174,7 @@
           "minItems": 1
         },
         "speed": {
-          "description": "Conveyor: how fast it moves its MUs, in metres per second, above 0. 0.5 by default.",
+          "description": "Conveyor, CrossConveyor: how fast it moves its MUs, in metres per second, above 0. 0.5 by default.",
           "type": "number",
           "format": "double",
           "exclusiveMinimum": 0
@@ -216,6 +216,18 @@
         "detour": {
           "description": "Station: where every MU it works on goes before carrying on with its plan, such as Rework: an instance, or a class standing for any of its instances (ADR 0025). None by default.",
           "type": "string"
+        },
+        "switch_time": {
+          "description": "CrossConveyor: how long an MU turning there stands at its centre, such as a lift raising it onto cross rollers. 2 s by default.",
+          "$ref": "#/$defs/Time"
+        },
+        "release_time": {
+          "description": "CrossConveyor: how long it takes no MU after one that turned has left, such as its lift going back down. 0 by default.",
+          "$ref": "#/$defs/Time"
+        },
+        "exits": {
+          "description": "CrossConveyor: each exit side's destinations. An MU whose next destination one of them stands for leaves by that side, turning at the centre, unless the side straight across takes it too; every other MU goes straight through. None by default. Inherited as a whole.",
+          "$ref": "#/$defs/ExitsFile"
         }
       },
       "additionalProperties": false
@@ -926,6 +938,37 @@
         }
       ]
     },
+    "ExitsFile": {
+      "description": "A cross conveyor's exit sides, each with the destinations it takes: instances, or classes standing for any of their instances.",
+      "type": "object",
+      "properties": {
+        "front": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "back": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "left": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "right": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
     "InstanceFile": {
       "description": "One material-flow object.",
       "type": "object",
@@ -1010,6 +1053,14 @@
         "description": {
           "description": "What the connection is, such as \"via the lift\".",
           "type": "string"
+        },
+        "from_side": {
+          "description": "The side of `from` it leaves by: given when `from` is a cross conveyor, and only then. A side is an entry side or an exit side, never both, and has one connection.",
+          "$ref": "#/$defs/SideFile"
+        },
+        "to_side": {
+          "description": "The side of `to` it comes in by: given when `to` is a cross conveyor, and only then.",
+          "$ref": "#/$defs/SideFile"
         }
       },
       "additionalProperties": false,
@@ -1018,6 +1069,16 @@
         "to",
         "exit",
         "entrance"
+      ]
+    },
+    "SideFile": {
+      "description": "One of a cross conveyor's four sides: front, where its own x axis points, back, left, 90° counter-clockwise from the front, and right.",
+      "type": "string",
+      "enum": [
+        "front",
+        "back",
+        "left",
+        "right"
       ]
     }
   }

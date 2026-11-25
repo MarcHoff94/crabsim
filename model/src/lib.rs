@@ -18,7 +18,7 @@ mod suggest;
 mod warn;
 mod write;
 
-pub use crabsim::{Capacity, ExitStrategy, StartMode};
+pub use crabsim::{Capacity, ExitStrategy, Side, StartMode};
 pub use path::{Bend, DEFAULT_PATH, Direction, Segment, path_length};
 use crabsim::{Dimensions, ObjectKind, Position, SimTime};
 use serde::Serialize;
@@ -53,12 +53,20 @@ pub fn start_from_name(name: &str) -> Option<StartMode> {
     [StartMode::Individual, StartMode::Batch].into_iter().find(|&start| start_name(start) == name)
 }
 
-/// The built-in classes every chain of classes ends in: the four material-flow objects, and the
+/// The built-in classes every chain of classes ends in: the material-flow objects, and the
 /// built-in MU class (ADR 0021).
-pub const BUILT_IN_CLASSES: [&str; 6] = ["Source", "Station", "Buffer", "Drain", "Conveyor", BUILT_IN_MU_CLASS];
+pub const BUILT_IN_CLASSES: [&str; 7] = ["Source", "Station", "Buffer", "Drain", "Conveyor", "CrossConveyor", BUILT_IN_MU_CLASS];
 
 /// The built-in classes of material-flow objects, which instances are made from.
-pub const BUILT_IN_OBJECT_CLASSES: [&str; 5] = ["Source", "Station", "Buffer", "Drain", "Conveyor"];
+pub const BUILT_IN_OBJECT_CLASSES: [&str; 6] = ["Source", "Station", "Buffer", "Drain", "Conveyor", "CrossConveyor"];
+
+/// The built-in classes whose geometry counts (ADR 0021): MUs must fit them.
+pub fn geometry_aware(built_in: &str) -> bool {
+    matches!(built_in, "Conveyor" | "CrossConveyor")
+}
+
+/// A cross conveyor's exit sides and the destinations each takes (spec issue 148), by side.
+pub type Exits = std::collections::BTreeMap<Side, Vec<String>>;
 
 /// The built-in MU class, which every MU class derives from (ADR 0021). A Source makes MUs of it
 /// unless given another.
@@ -99,11 +107,15 @@ pub struct Connection {
     pub entrance: u64,
     /// What the connection is, such as "via the lift".
     pub description: Option<String>,
+    /// The side of `from` it leaves by, given when `from` is a cross conveyor, and only then.
+    pub from_side: Option<Side>,
+    /// The side of `to` it comes in by, given when `to` is a cross conveyor, and only then.
+    pub to_side: Option<Side>,
 }
 
 impl Connection {
     pub fn new(from: impl Into<String>, to: impl Into<String>, exit: u64, entrance: u64) -> Connection {
-        Connection { from: from.into(), to: to.into(), exit, entrance, description: None }
+        Connection { from: from.into(), to: to.into(), exit, entrance, description: None, from_side: None, to_side: None }
     }
 }
 
@@ -237,6 +249,14 @@ pub struct Attributes {
     /// Where a Station sends every MU it works on before the MU carries on with its plan, such as
     /// Rework: an instance's or a class's name (ADR 0026). None by default.
     pub detour: Option<String>,
+    /// How long an MU turning at a cross conveyor stands at its centre. 2 s by default.
+    pub switch_time: Option<SimTime>,
+    /// How long a cross conveyor takes no MU after one that turned has left. 0 by default.
+    pub release_time: Option<SimTime>,
+    /// A cross conveyor's exit sides and the destinations each takes. An MU whose next destination
+    /// one of them stands for turns there, unless the side straight across takes it too; any other
+    /// goes straight through. None by default. Inherited as a whole.
+    pub exits: Option<Exits>,
 }
 
 /// One step of a work plan: where the MU goes, an instance or a class standing for any of its
@@ -359,6 +379,9 @@ impl Attributes {
             Attribute::MaxIncline => self.max_incline.is_some(),
             Attribute::WorkPlan => self.work_plan.is_some(),
             Attribute::Detour => self.detour.is_some(),
+            Attribute::SwitchTime => self.switch_time.is_some(),
+            Attribute::ReleaseTime => self.release_time.is_some(),
+            Attribute::Exits => self.exits.is_some(),
         }
     }
 
@@ -393,6 +416,9 @@ impl Attributes {
             Attribute::MaxIncline => self.max_incline = from.max_incline,
             Attribute::WorkPlan => self.work_plan = from.work_plan.clone(),
             Attribute::Detour => self.detour = from.detour.clone(),
+            Attribute::SwitchTime => self.switch_time = from.switch_time,
+            Attribute::ReleaseTime => self.release_time = from.release_time,
+            Attribute::Exits => self.exits = from.exits.clone(),
         }
     }
 }
@@ -428,10 +454,13 @@ pub enum Attribute {
     MaxIncline,
     WorkPlan,
     Detour,
+    SwitchTime,
+    ReleaseTime,
+    Exits,
 }
 
 impl Attribute {
-    pub const ALL: [Attribute; 28] = [
+    pub const ALL: [Attribute; 31] = [
         Attribute::Interval,
         Attribute::ProcessTime,
         Attribute::Failures,
@@ -460,6 +489,9 @@ impl Attribute {
         Attribute::MaxIncline,
         Attribute::WorkPlan,
         Attribute::Detour,
+        Attribute::SwitchTime,
+        Attribute::ReleaseTime,
+        Attribute::Exits,
     ];
 
     /// Its name in a file.
@@ -493,6 +525,9 @@ impl Attribute {
             Attribute::MaxIncline => "max_incline",
             Attribute::WorkPlan => "work_plan",
             Attribute::Detour => "detour",
+            Attribute::SwitchTime => "switch_time",
+            Attribute::ReleaseTime => "release_time",
+            Attribute::Exits => "exits",
         }
     }
 
@@ -501,7 +536,11 @@ impl Attribute {
         matches!(
             (built_in, self),
             (BUILT_IN_MU_CLASS, Attribute::Length | Attribute::Width | Attribute::BookingPoint | Attribute::Description | Attribute::WorkPlan)
-                | ("Source" | "Station" | "Buffer" | "Drain" | "Conveyor", Attribute::Dimensions | Attribute::Description | Attribute::StateNotes | Attribute::Failures)
+                | ("Source" | "Station" | "Buffer" | "Drain" | "Conveyor" | "CrossConveyor", Attribute::Dimensions | Attribute::Description | Attribute::StateNotes | Attribute::Failures)
+                | (
+                    "CrossConveyor",
+                    Attribute::Length | Attribute::Width | Attribute::Speed | Attribute::SwitchTime | Attribute::ReleaseTime | Attribute::Exits | Attribute::Distribution
+                )
                 | (
                     "Conveyor",
                     Attribute::Path
@@ -602,6 +641,8 @@ impl State {
             "Drain" => &[State::Idle, State::Receiving, State::Failed, State::Stopped, State::Paused],
             // Moving MUs, every MU standing, or empty.
             "Conveyor" => &[State::Busy, State::Blocked, State::Idle, State::Failed, State::Stopped, State::Paused],
+            // Moving, switching or releasing its MU, its MU standing at a side, or empty.
+            "CrossConveyor" => &[State::Busy, State::Blocked, State::Idle, State::Failed, State::Stopped, State::Paused],
             _ => &[],
         }
     }
@@ -861,14 +902,15 @@ impl Model {
         built_in == name || chain.iter().any(|link| link.name == name)
     }
 
-    /// Every name a work plan step or a detour gives as a destination, each once, in the order
-    /// first given: classes, then instances, in file order.
+    /// Every name a work plan step, a detour or a cross conveyor's exits give as a destination,
+    /// each once, in the order first given: classes, then instances, in file order.
     pub fn destination_names(&self) -> Vec<&str> {
         let mut names: Vec<&str> = Vec::new();
         let owners = self.classes.iter().map(|class| &class.attributes).chain(self.instances.iter().map(|instance| &instance.attributes));
         for attributes in owners {
             let steps = attributes.work_plan.iter().flatten().chain(attributes.mu_values.iter().flat_map(|values| values.work_plan.iter().flatten()));
-            for name in steps.map(|step| step.at.as_str()).chain(attributes.detour.as_deref()) {
+            let exits = attributes.exits.iter().flat_map(|exits| exits.values().flatten().map(String::as_str));
+            for name in steps.map(|step| step.at.as_str()).chain(attributes.detour.as_deref()).chain(exits) {
                 if !names.contains(&name) {
                     names.push(name);
                 }
@@ -904,9 +946,15 @@ impl Model {
     /// Connects `from` to `to` as the last exit of `from` and the last entrance of `to`, for
     /// models built in code.
     pub fn connect(&mut self, from: &str, to: &str) {
+        self.connect_at(from, None, to, None);
+    }
+
+    /// The same, leaving `from` by `from_side` and coming into `to` by `to_side`, for the ends
+    /// that are cross conveyors.
+    pub fn connect_at(&mut self, from: &str, from_side: Option<Side>, to: &str, to_side: Option<Side>) {
         let exit = self.connections.iter().filter(|connection| connection.from == from).count() as u64 + 1;
         let entrance = self.connections.iter().filter(|connection| connection.to == to).count() as u64 + 1;
-        self.connections.push(Connection::new(from, to, exit, entrance));
+        self.connections.push(Connection { from_side, to_side, ..Connection::new(from, to, exit, entrance) });
     }
 
     /// The derived classes from `class` up to its built-in class, nearest first, and that built-in
@@ -1000,6 +1048,18 @@ impl Model {
             let length = path_length(attributes.path.as_deref().unwrap_or_default());
             let width = attributes.width.unwrap_or(0.6);
             let size = attributes.dimensions.get_or_insert(Dimensions::default_for(ObjectKind::Conveyor));
+            (size.length, size.width) = (length, width);
+            return Some(Resolved { built_in, attributes, origins });
+        }
+        if built_in == "CrossConveyor" {
+            attributes.length.get_or_insert(0.6);
+            attributes.width.get_or_insert(0.6);
+            attributes.speed.get_or_insert(0.5);
+            attributes.switch_time.get_or_insert(SimTime::from_secs(2));
+            attributes.release_time.get_or_insert(SimTime::ZERO);
+            // Its size is its own length and width, whatever its dimensions say.
+            let (length, width) = (attributes.length.unwrap_or(0.6), attributes.width.unwrap_or(0.6));
+            let size = attributes.dimensions.get_or_insert(Dimensions::default_for(ObjectKind::CrossConveyor));
             (size.length, size.width) = (length, width);
             return Some(Resolved { built_in, attributes, origins });
         }

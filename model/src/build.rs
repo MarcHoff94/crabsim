@@ -50,6 +50,12 @@ pub(crate) fn build(model: &Model) -> ModelDescription {
                 buffer
             }
             "Drain" => description.add_drain(),
+            "CrossConveyor" => {
+                let cross = description.add_cross_conveyor(attributes.length.unwrap_or(0.6), attributes.width.unwrap_or(0.6), attributes.speed.unwrap_or(0.5));
+                description.set_switch_time(cross, attributes.switch_time.unwrap_or(SimTime::from_secs(2)));
+                description.set_release_time(cross, attributes.release_time.unwrap_or(SimTime::ZERO));
+                cross
+            }
             "Conveyor" => {
                 let path = attributes.path.as_deref().unwrap_or(&crate::DEFAULT_PATH);
                 let conveyor = description.add_conveyor(crate::path_length(path), attributes.width.unwrap_or(0.6), attributes.speed.unwrap_or(0.5));
@@ -105,6 +111,12 @@ pub(crate) fn build(model: &Model) -> ModelDescription {
                     description.set_detour(id, destinations[detour.as_str()]);
                 }
             }
+            "CrossConveyor" => {
+                for (side, names) in resolved.attributes.exits.iter().flatten() {
+                    let listed: Vec<DestinationId> = names.iter().map(|name| destinations[name.as_str()]).collect();
+                    description.set_exit_destinations(id, *side, &listed);
+                }
+            }
             _ => {}
         }
         // Its distribution strategy, its Drains by id. A name that isn't an instance is left out,
@@ -116,10 +128,11 @@ pub(crate) fn build(model: &Model) -> ModelDescription {
             }
         }
     }
-    // Each object offers MUs to its successors in the order of its exits.
+    // Each object offers MUs to its successors in the order of its exits, a cross conveyor's at
+    // their sides.
     for (from, instance) in model.instances.iter().enumerate() {
-        for successor in model.successors(&instance.name) {
-            description.connect(from as u32, ids[successor]);
+        for connection in model.connections_out(&instance.name) {
+            description.connect_at(from as u32, connection.from_side, ids[connection.to.as_str()], connection.to_side);
         }
     }
     description

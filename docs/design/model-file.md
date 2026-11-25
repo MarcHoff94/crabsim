@@ -57,6 +57,7 @@ A file holds the model only: classes, instances, their attributes, names, positi
 - `entrance` is its place among the connections into `to`, from 1. Nothing reads it yet, so it doesn't change results until an entrance rule, such as pull or priorities, does. The inspector will say so on hover once it shows connections, in spec 87 PR 4.
 - Both run 1 to n per object, n being how many connections leave it or lead into it, with no gaps or repeats. Both are written on every connection because no single order of the list could give both orders at once, and so that sorting or editing the list by hand can't change a result.
 - `description` is optional.
+- `from_side` and `to_side` (spec issue 148) name the side of a cross conveyor a connection leaves or comes in by: `"front"`, where its own x axis points, `"back"`, `"left"`, 90° counter-clockwise from the front, or `"right"`. Each is given for an end that is a cross conveyor and only then. A side has one connection, in or out, so it is an entry side or an exit side, never both, and MUs pass at its middle. The format stays version 2.
 - Saving writes the list in one order: by the place of the instance each connection leaves, then by exit, so it reads as each object's exits in turn.
 - `edit_model`'s `connect`, `disconnect` and `set_connection`, and removing or renaming an instance, number the exits and entrances at both ends again, so people never number connections themselves.
 
@@ -66,7 +67,7 @@ A file holds the model only: classes, instances, their attributes, names, positi
 { "name": "CNC mill", "parent": "Station", "attributes": { "process_time": "0:45", "description": "5-axis" } }
 ```
 
-- The built-in classes are Source, Station, Buffer, Drain and Conveyor (spec issue 133), and MU for MU classes. A derived class names its `parent`, a built-in or another derived class, so chains are allowed.
+- The built-in classes are Source, Station, Buffer, Drain, Conveyor (spec issue 133) and CrossConveyor (spec issue 148), and MU for MU classes. A derived class names its `parent`, a built-in or another derived class, so chains are allowed.
 - A class named like a built-in class, with no `parent`, is this model's own values for that built-in class (ADR 0015), such as `{ "name": "Station", "attributes": { "process_time": "0:10" } }`. Every class and instance built on the built-in class inherits them, between its own chain and the built-in's defaults, so a model can change what a Station is without a class of its own. A model has at most one for each built-in class, and one that names a `parent` is a validation error. `edit_model` makes it when a value is set on the built-in class's name and removes it when the last is restored, and the window's class library shows it as the built-in class. A new model made in the window starts with one for Station at 10 s, and so does a model when the first Station is placed or a class is first derived from Station.
 - **MU classes** (ADR 0021, spec issue 133) derive from the built-in class `MU`, or from each other, and say what a Source's MUs are: `{ "name": "Tote", "parent": "MU", "attributes": { "length": 0.6, "width": 0.4 } }`. They are never placed as instances, which is a validation error, and have only an MU's attributes. A class named `MU` with no parent is the model's own values for the built-in MU, which a Source makes unless set to another. `edit_model`'s `rename_class` renames an MU class wherever a `mu_class` names it, and `remove_class` refuses while a Source or a class of them makes its MUs, unless asked to remove dependents, when they make the MUs they inherit again (`also_removed.mu_classes_from`).
 - Classes can appear in any order. A cycle in the class tree is a validation error.
@@ -99,7 +100,7 @@ Which attributes an instance has depends on its built-in class at the root of it
 | `dimensions` | all | by type: Station 2 × 1.5 × 1.5 m, Buffer 2 × 1 × 1 m, Source and Drain 1 m each way | `length`, `width`, `height` above 0, `rotation_degrees` optional, 0 by default |
 | `description` | all | none | Free text |
 | `state_notes` | all | none | A note per state, see below |
-| `distribution` | Source, Station, Buffer, Conveyor | `"round_robin"` | `"round_robin"`, weighted or by destination, see below (ADR 0016, ADR 0025) |
+| `distribution` | Source, Station, Buffer, Conveyor, CrossConveyor | `"round_robin"` | `"round_robin"`, weighted or by destination, see below (ADR 0016, ADR 0025) |
 | `mu_class` | Source | `"MU"` | An MU class: the MUs it makes are of it (ADR 0021) |
 | `mu_values` | Source | none | Any of `length`, `width`, `booking_point` and `work_plan`, changing its MU class's values for its MUs alone. Inherited as a whole |
 | `work_plan` | MU class | none | Steps its MUs follow, each `{"at": name}` with an optional `"process_time"`, see below (ADR 0026). Inherited as a whole |
@@ -113,10 +114,16 @@ Which attributes an instance has depends on its built-in class at the root of it
 | `width` | Conveyor | 0.6 | Metres above 0: an MU wider than this doesn't fit |
 | `speed` | Conveyor | 0.5 | Metres per second, above 0 |
 | `gap` | Conveyor | 0 | The least space between two MUs on it, in metres, 0 or more |
+| `length`, `width` | CrossConveyor | 0.6, 0.6 | Metres above 0: its length along its own x axis, back to front, and its width, right to left. A conveyor's default width each way, so default conveyors meet every side |
+| `speed` | CrossConveyor | 0.5 | Metres per second, above 0 |
+| `switch_time` | CrossConveyor | `"2"` | How long an MU turning there stands at its centre, such as a lift raising it onto cross rollers |
+| `release_time` | CrossConveyor | `"0"` | How long it takes no MU after one that turned has left, such as its lift going back down |
+| `exits` | CrossConveyor | none | Each exit side's destinations, such as `{"left": ["Mill"], "right": ["Rework", "Shipping"]}`: see below. Inherited as a whole |
 | `booking_point` | MU class | 0.5 | A share of the MU's length from its front, 0 at the front to 1 at the rear: where it passes from one object to the next (ADR 0023) |
 
 - **Times** are strings in the UI's syntax, read by the same `parse_time` as the UI and the CLI: `"10"`, `"1:30"`, `"2:00:00"`, `"2d 06:00:00"`, `"0:00:12.5"`. Exact to the millisecond.
 - **A dummy Station** has a process time of 0. It takes no time, and exists so that something can happen as an MU passes, such as user code at a hook later. It can still fail, like any Station.
+- **A cross conveyor's exits** (spec issue 148) list, by side, the destinations each exit side takes: instances, or classes standing for any of their instances, as a work plan's steps do. An MU whose next destination an exit side's list stands for (any object both stand for) leaves by that side: it runs to the centre, stands for the switch time and leaves sideways, keeping its orientation, so it lies crosswise on what comes next until another cross conveyor turns it again or an object without geometry takes it. Several sides listing it, the one straight across included, are chosen among by the cross conveyor's `distribution` as the MU is let in, the first in its order whose successor would take it then, otherwise the first, which it then waits for; leaving straight across, it doesn't stop. Every MU no exit side lists goes straight on, through to the side opposite the one it came in by, without stopping. A `by_destination` distribution there chooses by what follows it, since the exits already route by destination. Renaming an instance or class renames it in exits.
 - **A Source with an interval of 0** creates an MU and offers it at once. It holds one MU at a time and creates the next only once that MU has left, so it waits whenever its successor is busy.
 - **Failures** are a list of named failure profiles, independent of each other (spec issue 122, PR 3):
   ```json
@@ -186,8 +193,9 @@ What it catches:
 - Attributes the class doesn't have, values out of range, and required values set nowhere in the chain.
 - **A Source that would create MUs forever:** a Source with an interval of 0 that can reach a Drain, or a Buffer with no limit, through nothing but zero-time objects: Stations with a process time of 0 and Buffers with a capacity and a dwelling time of 0. Nothing ever fills, so it would create MUs without time passing. A Buffer with a capacity and a dwelling time fills, and then the Source waits. The run's zero-time-loop error stays as the backstop.
 - **A Buffer that starts with more MUs than it holds,** wherever the two values come from.
+- **Sides** (spec issue 148): a connection to or from a cross conveyor without its side, a side on an end that isn't a cross conveyor, a side that isn't front, back, left or right, and a side with a second connection, in or out. Exits listing a place that is neither an instance nor an object class, or at a side that is none of the four.
 
-A model without problems can still get warnings from `validate_model`, which never stop a run. One of them is a Buffer with no limit that can get MUs faster than it can pass them on, judged from the intervals of the Sources and the process times of the Stations directly before and after it.
+A model without problems can still get warnings from `validate_model`, which never stop a run. One of them is a Buffer with no limit that can get MUs faster than it can pass them on, judged from the intervals of the Sources and the process times of the Stations directly before and after it. A cross conveyor gets three (spec issue 148): an entry side with no exit straight across, where an MU going somewhere no exit side lists would wait for good, given only where MUs can arrive going so, found by following each Source's MUs through their plans, their detours and the cross conveyors' exits; exits listed for a side no connection leaves by; and MUs too long or wide for its way across from every side they come in by.
 
 ## Saving
 

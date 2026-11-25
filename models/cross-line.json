@@ -1,0 +1,424 @@
+{
+  "$schema": "./model-file.schema.json",
+  "format_version": 2,
+  "description": "Housings and Covers through cross conveyors (spec issue 148): both are sawn, then the Fork turns Housings left to the Mill, lying crosswise on the spur, while Covers go straight on to Paint. After the Mill, Housings turn right at the Corner and left again into the Join, which Covers pass straight through to the Drain.",
+  "classes": [
+    {
+      "name": "Housing",
+      "parent": "MU",
+      "attributes": {
+        "description": "Sawn, milled and shipped",
+        "work_plan": [
+          {
+            "at": "Saw"
+          },
+          {
+            "at": "Mill"
+          },
+          {
+            "at": "Out"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Cover",
+      "parent": "MU",
+      "attributes": {
+        "description": "Sawn, painted and shipped",
+        "work_plan": [
+          {
+            "at": "Saw"
+          },
+          {
+            "at": "Paint"
+          },
+          {
+            "at": "Out"
+          }
+        ]
+      }
+    }
+  ],
+  "instances": [
+    {
+      "name": "In A",
+      "class": "Source",
+      "stream": 0,
+      "position": {
+        "x": 0.0,
+        "y": 1.0
+      },
+      "attributes": {
+        "interval": "00:00:08",
+        "mu_class": "Housing"
+      }
+    },
+    {
+      "name": "In B",
+      "class": "Source",
+      "stream": 1,
+      "position": {
+        "x": 0.0,
+        "y": -1.0
+      },
+      "attributes": {
+        "interval": "00:00:12",
+        "mu_class": "Cover"
+      }
+    },
+    {
+      "name": "Saw",
+      "class": "Station",
+      "stream": 2,
+      "position": {
+        "x": 2.5,
+        "y": 0.0
+      },
+      "attributes": {
+        "process_time": "00:00:04"
+      }
+    },
+    {
+      "name": "Feed",
+      "class": "Conveyor",
+      "stream": 3,
+      "position": {
+        "x": 4.0,
+        "y": 0.0
+      },
+      "attributes": {
+        "path": [
+          {
+            "straight": 8.0
+          }
+        ]
+      }
+    },
+    {
+      "name": "Fork",
+      "class": "CrossConveyor",
+      "stream": 4,
+      "position": {
+        "x": 12.3,
+        "y": 0.0
+      },
+      "attributes": {
+        "exits": {
+          "left": [
+            "Mill"
+          ]
+        }
+      }
+    },
+    {
+      "name": "Spur",
+      "class": "Conveyor",
+      "stream": 5,
+      "position": {
+        "x": 12.3,
+        "y": 0.3
+      },
+      "attributes": {
+        "dimensions": {
+          "length": 3.0,
+          "width": 0.6,
+          "height": 0.5,
+          "rotation_degrees": 90.0
+        },
+        "path": [
+          {
+            "straight": 3.0
+          }
+        ]
+      }
+    },
+    {
+      "name": "Mill",
+      "class": "Station",
+      "stream": 6,
+      "position": {
+        "x": 12.3,
+        "y": 4.3
+      },
+      "attributes": {
+        "process_time": "00:00:07",
+        "failures": [
+          {
+            "name": "Failures",
+            "availability": 0.95,
+            "repair_time": {
+              "erlang": {
+                "mean": "00:01:00",
+                "k": 2
+              }
+            }
+          }
+        ],
+        "dimensions": {
+          "length": 2.0,
+          "width": 1.5,
+          "height": 1.5,
+          "rotation_degrees": 90.0
+        }
+      }
+    },
+    {
+      "name": "Over",
+      "class": "Conveyor",
+      "stream": 7,
+      "position": {
+        "x": 13.3,
+        "y": 4.3
+      },
+      "attributes": {
+        "path": [
+          {
+            "straight": 6.4
+          }
+        ]
+      }
+    },
+    {
+      "name": "Corner",
+      "class": "CrossConveyor",
+      "stream": 8,
+      "position": {
+        "x": 20.0,
+        "y": 4.3
+      },
+      "attributes": {
+        "exits": {
+          "right": [
+            "Out"
+          ]
+        }
+      }
+    },
+    {
+      "name": "Down",
+      "class": "Conveyor",
+      "stream": 9,
+      "position": {
+        "x": 20.0,
+        "y": 4.0
+      },
+      "attributes": {
+        "dimensions": {
+          "length": 3.7,
+          "width": 0.6,
+          "height": 0.5,
+          "rotation_degrees": -90.0
+        },
+        "path": [
+          {
+            "straight": 3.7
+          }
+        ]
+      }
+    },
+    {
+      "name": "Lane",
+      "class": "Conveyor",
+      "stream": 10,
+      "position": {
+        "x": 12.6,
+        "y": 0.0
+      },
+      "attributes": {
+        "path": [
+          {
+            "straight": 2.0
+          }
+        ]
+      }
+    },
+    {
+      "name": "Paint",
+      "class": "Station",
+      "stream": 11,
+      "position": {
+        "x": 15.6,
+        "y": 0.0
+      },
+      "attributes": {
+        "process_time": "00:00:10",
+        "failures": [
+          {
+            "name": "Failures",
+            "availability": 0.9,
+            "repair_time": {
+              "erlang": {
+                "mean": "00:00:45",
+                "k": 2
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "Dry",
+      "class": "Conveyor",
+      "stream": 12,
+      "position": {
+        "x": 16.6,
+        "y": 0.0
+      },
+      "attributes": {
+        "path": [
+          {
+            "straight": 3.1
+          }
+        ]
+      }
+    },
+    {
+      "name": "Join",
+      "class": "CrossConveyor",
+      "stream": 13,
+      "position": {
+        "x": 20.0,
+        "y": 0.0
+      },
+      "attributes": {
+        "exits": {
+          "front": [
+            "Out"
+          ]
+        }
+      }
+    },
+    {
+      "name": "Outfeed",
+      "class": "Conveyor",
+      "stream": 14,
+      "position": {
+        "x": 20.3,
+        "y": 0.0
+      },
+      "attributes": {
+        "path": [
+          {
+            "straight": 4.0
+          }
+        ]
+      }
+    },
+    {
+      "name": "Out",
+      "class": "Drain",
+      "stream": 15,
+      "position": {
+        "x": 24.8,
+        "y": 0.0
+      }
+    }
+  ],
+  "connections": [
+    {
+      "from": "In A",
+      "to": "Saw",
+      "exit": 1,
+      "entrance": 1
+    },
+    {
+      "from": "In B",
+      "to": "Saw",
+      "exit": 1,
+      "entrance": 2
+    },
+    {
+      "from": "Saw",
+      "to": "Feed",
+      "exit": 1,
+      "entrance": 1
+    },
+    {
+      "from": "Feed",
+      "to": "Fork",
+      "exit": 1,
+      "entrance": 1,
+      "to_side": "back"
+    },
+    {
+      "from": "Fork",
+      "to": "Spur",
+      "exit": 1,
+      "entrance": 1,
+      "from_side": "left"
+    },
+    {
+      "from": "Fork",
+      "to": "Lane",
+      "exit": 2,
+      "entrance": 1,
+      "from_side": "front"
+    },
+    {
+      "from": "Spur",
+      "to": "Mill",
+      "exit": 1,
+      "entrance": 1
+    },
+    {
+      "from": "Mill",
+      "to": "Over",
+      "exit": 1,
+      "entrance": 1
+    },
+    {
+      "from": "Over",
+      "to": "Corner",
+      "exit": 1,
+      "entrance": 1,
+      "to_side": "back"
+    },
+    {
+      "from": "Corner",
+      "to": "Down",
+      "exit": 1,
+      "entrance": 1,
+      "from_side": "right"
+    },
+    {
+      "from": "Down",
+      "to": "Join",
+      "exit": 1,
+      "entrance": 1,
+      "to_side": "left"
+    },
+    {
+      "from": "Lane",
+      "to": "Paint",
+      "exit": 1,
+      "entrance": 1
+    },
+    {
+      "from": "Paint",
+      "to": "Dry",
+      "exit": 1,
+      "entrance": 1
+    },
+    {
+      "from": "Dry",
+      "to": "Join",
+      "exit": 1,
+      "entrance": 2,
+      "to_side": "back"
+    },
+    {
+      "from": "Join",
+      "to": "Outfeed",
+      "exit": 1,
+      "entrance": 1,
+      "from_side": "front"
+    },
+    {
+      "from": "Outfeed",
+      "to": "Out",
+      "exit": 1,
+      "entrance": 1
+    }
+  ]
+}

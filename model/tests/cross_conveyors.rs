@@ -223,3 +223,35 @@ fn validate_warns_of_mus_too_big_for_a_cross_conveyor_they_reach() {
     let found = warnings(&load(&fits).unwrap());
     assert!(!found.iter().any(|w| w.contains("no way across")), "{found:#?}");
 }
+
+#[test]
+fn validate_warns_of_mus_that_turned_and_lie_crosswise_on_a_conveyor_too_narrow_for_them() {
+    // Parts, 0.6 by 0.4 m, turn left onto a 0.5 m belt, where they lie 0.6 m across it; going
+    // straight on onto the same belt they would lie 0.4 m across and fit.
+    let turned = |exit: &str| {
+        fork(|file| {
+            file["instances"][3] = json!({ "name": "Spur", "class": "Conveyor", "attributes": { "width": 0.5 } });
+            file["instances"].as_array_mut().unwrap().push(json!({ "name": "End", "class": "Drain" }));
+            file["connections"].as_array_mut().unwrap().push(json!({ "from": "Spur", "to": "End", "exit": 1, "entrance": 1 }));
+            file["connections"][2]["from_side"] = json!(exit);
+            file["instances"][1]["attributes"]["exits"] = json!({ exit: ["Spur"] });
+        })
+    };
+    let found = warnings(&load(&turned("left")).unwrap());
+    assert!(
+        found.iter().any(|w| w.starts_with("/instances/0: ") && w.contains("lying crosswise") && w.contains("0.6 m wide, and conveyor `Spur` only 0.5 m")),
+        "{found:#?}"
+    );
+    // The Spur straight across from the back, at the front, takes them lengthwise.
+    let straight = fork(|file| {
+        file["instances"][3] = json!({ "name": "Spur", "class": "Conveyor", "attributes": { "width": 0.5 } });
+        file["instances"].as_array_mut().unwrap().push(json!({ "name": "End", "class": "Drain" }));
+        file["connections"].as_array_mut().unwrap().push(json!({ "from": "Spur", "to": "End", "exit": 1, "entrance": 1 }));
+        file["connections"].as_array_mut().unwrap().remove(1);
+        file["connections"][1]["from_side"] = json!("front");
+        file["connections"][1]["exit"] = json!(1);
+        file["instances"][1]["attributes"]["exits"] = json!({ "front": ["Spur"] });
+    });
+    let found = warnings(&load(&straight).unwrap());
+    assert!(!found.iter().any(|w| w.contains("conveyor `Spur`")), "{found:#?}");
+}

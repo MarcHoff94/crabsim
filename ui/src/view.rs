@@ -424,6 +424,8 @@ pub struct EndFit {
     pub turned: f64,
     /// How much higher the neighbour is, in metres, negative lower.
     pub higher: f64,
+    /// Where the neighbour is a cross conveyor, the side of it met.
+    pub side: Option<Side>,
 }
 
 impl EndFit {
@@ -440,6 +442,7 @@ impl EndFit {
             return format!("{end}: meets {}", self.neighbour);
         }
         let first = match (self.neighbour_is_conveyor, self.start) {
+            _ if self.side.is_some() => format!("{:.2} m from the middle of {}'s {} side", self.apart, self.neighbour, self.side.expect("given").name()),
             (true, true) => format!("{:.2} m from {}'s end", self.apart, self.neighbour),
             (true, false) => format!("{:.2} m from {}'s start", self.apart, self.neighbour),
             (false, _) => format!("{} is {:.2} m from where it would meet this end", self.neighbour, self.apart),
@@ -1100,6 +1103,22 @@ impl ViewState {
                         apart: ((there.x - here.x).powi(2) + (there.y - here.y).powi(2)).sqrt(),
                         turned: turn_between(heading, there_heading),
                         higher: there_z - z,
+                        side: None,
+                    }
+                }
+                // A cross conveyor meets at the middle of the side the connection names, MUs
+                // heading out of it by an exit side and into it by an entry side.
+                None if other.sides.is_some() && (if at_start { connection.from_side } else { connection.to_side }).is_some() => {
+                    let side = (if at_start { connection.from_side } else { connection.to_side }).expect("given");
+                    let out = other.rotation_degrees + side_heading(side);
+                    EndFit {
+                        start: at_start,
+                        neighbour: other.name.clone(),
+                        neighbour_is_conveyor: false,
+                        apart: distance(other.side_middle(side), here),
+                        turned: turn_between(heading, if at_start { out } else { out + 180.0 }),
+                        higher: other.z - z,
+                        side: Some(side),
                     }
                 }
                 // Anything else meets with its centre half its length past the end, or before the
@@ -1115,6 +1134,7 @@ impl ViewState {
                         apart: ((other.centre.x - wanted.x).powi(2) + (other.centre.y - wanted.y).powi(2)).sqrt(),
                         turned: turn_between(heading, other.rotation_degrees),
                         higher: other.z - z,
+                        side: None,
                     }
                 }
             };

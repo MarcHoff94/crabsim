@@ -4,6 +4,7 @@
 //! with no egui types, so it is tested without a window. See spec issue 63.
 
 use crabsim::time::parse_time;
+use crabsim::Side;
 use crabsim_model::{Bend, Segment, State};
 use serde_json::{json, Map, Value};
 
@@ -37,6 +38,13 @@ pub fn summary(value: &Value) -> String {
     // A conveyor's path, in its short form, such as "4, arc 1.5 90".
     if let Some(path) = crabsim_model::path::from_json(value).filter(|path| !path.is_empty()) {
         return crabsim_model::path::short_form(&path);
+    }
+    // A work plan, each step with its time, such as "Saw 0:40, Mill, Out".
+    if let Value::Array(steps) = value
+        && !steps.is_empty()
+        && steps.iter().all(|step| step.get("at").is_some())
+    {
+        return work_plan_summary(steps);
     }
     // Failure profiles, each by name.
     if let Value::Array(profiles) = value
@@ -82,17 +90,56 @@ pub fn summary(value: &Value) -> String {
         return format!("{} % available, {repair}", (availability * 1000.0).round() / 10.0);
     }
     // A Source's own MU values.
-    if !fields.is_empty() && fields.keys().all(|key| ["length", "width", "booking_point"].contains(&key.as_str())) {
+    if !fields.is_empty() && fields.keys().all(|key| ["length", "width", "booking_point", "work_plan"].contains(&key.as_str())) {
         let mut parts = Vec::new();
         for (key, label, unit) in [("length", "length", " m"), ("width", "width", " m"), ("booking_point", "booking point", "")] {
             if let Some(value) = fields.get(key) {
                 parts.push(format!("{label} {}{unit}", number(value)));
             }
         }
+        if let Some(steps) = fields.get("work_plan").and_then(Value::as_array) {
+            parts.push(if steps.is_empty() { "no work plan".to_string() } else { format!("work plan {}", work_plan_summary(steps)) });
+        }
         return parts.join(", ");
+    }
+    // A cross conveyor's exits, by side, such as "left: Mill; right: Rework, Out".
+    if fields.keys().all(|key| Side::from_name(key).is_some()) {
+        if fields.is_empty() {
+            return "none".to_string();
+        }
+        return Side::ALL
+            .into_iter()
+            .filter_map(|side| Some(format!("{}: {}", side.name(), fields.get(side.name())?.as_array()?.iter().map(&text).collect::<Vec<_>>().join(", "))))
+            .collect::<Vec<_>>()
+            .join("; ");
     }
     // State notes, by state.
     format!("notes on {}", fields.keys().cloned().collect::<Vec<_>>().join(", "))
+}
+
+/// A time as short as it reads back the same, so a step's time fits its narrow field: under an
+/// hour as minutes and seconds, such as "0:20" for a file's "00:00:20". Anything else, or a
+/// fraction of a second, stays as written.
+fn short_time(text: &str) -> String {
+    match parse_time(text) {
+        Some(time) if time.as_millis() % 1_000 == 0 && time.as_secs() < 3_600 => format!("{}:{:02}", time.as_secs() / 60, time.as_secs() % 60),
+        _ => text.to_string(),
+    }
+}
+
+/// A work plan's steps on one line, each with its time where it has one.
+fn work_plan_summary(steps: &[Value]) -> String {
+    steps
+        .iter()
+        .map(|step| {
+            let at = step["at"].as_str().unwrap_or("?");
+            match step.get("process_time").and_then(Value::as_str) {
+                Some(time) => format!("{at} {time}"),
+                None => at.to_string(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// How a repair time is spread, as a model file names it.
@@ -154,6 +201,163 @@ pub struct Form {
     pub choices: Vec<String>,
     /// For a conveyor's path: its segments as rows of fields.
     pub path: Option<PathRows>,
+    /// For a work plan, or a Source's own MU values: its steps as rows of fields.
+    pub plan: Option<PlanRows>,
+    /// For a cross conveyor's exits: each side's destinations.
+    pub exits: Option<ExitLists>,
+}
+
+/// The names of the open model that forms offer to choose from.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Names {
+    /// Its Drains, which a weighted distribution counts.
+    pub drains: Vec<String>,
+    /// Its MU classes, which a Source makes.
+    pub mu_classes: Vec<String>,
+    /// Every name a destination can be (ADR 0025): its object classes, then its instances.
+    pub destinations: Vec<String>,
+}
+
+/// One step of a work plan: where, and its process time as typed, empty for the Station's own.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct PlanRow {
+    pub at: String,
+    pub time: String,
+}
+
+/// A work plan as rows of fields, one per step (spec issue 148).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct PlanRows {
+    pub rows: Vec<PlanRow>,
+}
+
+impl PlanRows {
+    /// The rows of a work plan as a model file writes it: none without one.
+    pub fn from_value(value: Option<&Value>) -> PlanRows {
+        let rows = value
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .map(|step| PlanRow { at: text_of(step.get("at")), time: short_time(&text_of(step.get("process_time"))) })
+            .collect();
+        PlanRows { rows }
+    }
+
+    /// The steps as a model file writes them, or what is wrong with the first that can't be read.
+    /// Whether each place can be a destination is the model file's check.
+    pub fn value(&self) -> Result<Value, String> {
+        let mut steps = Vec::new();
+        for (index, row) in self.rows.iter().enumerate() {
+            let at = row.at.trim();
+            if at.is_empty() {
+                return Err(format!("step {} needs a place: choose one", index + 1));
+            }
+            let mut step = Map::new();
+            step.insert("at".into(), json!(at));
+            let time = row.time.trim();
+            if !time.is_empty() {
+                if parse_time(time).is_none() {
+                    return Err(format!("step {}: `{time}` isn't a time: type one such as 45 or 1:30, or leave it empty for the Station's own", index + 1));
+                }
+                step.insert("process_time".into(), json!(time));
+            }
+            steps.push(Value::Object(step));
+        }
+        Ok(Value::Array(steps))
+    }
+
+    /// Adds a step at `at`, with the Station's own time, after the last.
+    pub fn add(&mut self, at: &str) {
+        self.rows.push(PlanRow { at: at.to_string(), time: String::new() });
+    }
+
+    pub fn remove(&mut self, index: usize) {
+        if index < self.rows.len() {
+            self.rows.remove(index);
+        }
+    }
+
+    /// Swaps the step at `index` with the one after it.
+    pub fn swap_with_next(&mut self, index: usize) {
+        if index + 1 < self.rows.len() {
+            self.rows.swap(index, index + 1);
+        }
+    }
+}
+
+/// A cross conveyor's exits (spec issue 148): for each side, the destinations it lists, in order,
+/// and a name being typed to add to it.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ExitLists {
+    /// In `Side::ALL`'s order.
+    pub sides: Vec<(Side, Vec<String>)>,
+    /// For each side, in the same order, what has been typed to add.
+    pub typed: Vec<String>,
+}
+
+impl ExitLists {
+    /// The lists for `value`, each side's as a model file writes them.
+    pub fn from_value(value: Option<&Value>) -> ExitLists {
+        let sides: Vec<(Side, Vec<String>)> = Side::ALL
+            .into_iter()
+            .map(|side| {
+                let listed = value
+                    .and_then(|exits| exits.get(side.name()))
+                    .and_then(Value::as_array)
+                    .map(|names| names.iter().filter_map(|name| name.as_str().map(str::to_owned)).collect())
+                    .unwrap_or_default();
+                (side, listed)
+            })
+            .collect();
+        ExitLists { typed: vec![String::new(); sides.len()], sides }
+    }
+
+    /// Each side listing anything, with its names in order.
+    pub fn value(&self) -> Value {
+        let mut exits = Map::new();
+        for (side, names) in &self.sides {
+            if !names.is_empty() {
+                exits.insert(side.name().into(), json!(names));
+            }
+        }
+        Value::Object(exits)
+    }
+
+    /// Adds what was typed for the side at `place` to its list, unless it is empty or already
+    /// there. Returns whether the list changed.
+    pub fn add_typed(&mut self, place: usize) -> bool {
+        let name = std::mem::take(&mut self.typed[place]).trim().to_string();
+        let names = &mut self.sides[place].1;
+        if name.is_empty() || names.contains(&name) {
+            return false;
+        }
+        names.push(name);
+        true
+    }
+
+    /// Takes the name at `index` off the side at `place`.
+    pub fn remove(&mut self, place: usize, index: usize) {
+        if index < self.sides[place].1.len() {
+            self.sides[place].1.remove(index);
+        }
+    }
+
+    /// What a side lists, such as "Mill, Rework", or "none".
+    pub fn listed(&self, side: Side) -> String {
+        let names: Vec<&str> = self.sides.iter().filter(|(listed, _)| *listed == side).flat_map(|(_, names)| names.iter().map(String::as_str)).collect();
+        if names.is_empty() { "none".to_string() } else { names.join(", ") }
+    }
+}
+
+/// The names that complete what was typed, at most `limit`, for a field that takes one of the
+/// model's names: those beginning with it first, then those containing it, each in the order
+/// given, ignoring case. Nothing typed offers the first names.
+pub fn completions<'a>(names: &'a [String], typed: &str, limit: usize) -> Vec<&'a str> {
+    let typed = typed.trim().to_lowercase();
+    let lower: Vec<String> = names.iter().map(|name| name.to_lowercase()).collect();
+    let starting = names.iter().zip(&lower).filter(|(_, low)| low.starts_with(&typed));
+    let containing = names.iter().zip(&lower).filter(|(_, low)| !low.starts_with(&typed) && low.contains(&typed));
+    starting.chain(containing).map(|(name, _)| name.as_str()).take(limit).collect()
 }
 
 /// The kinds of segment, as the path editor's menu offers them.
@@ -461,7 +665,7 @@ impl Form {
                 form: Form::new("failure", Some(profile)),
             })
             .collect();
-        Form { attribute: "failures".into(), parts: Vec::new(), repair: None, distribution: None, options: &[], profiles: Some(profiles), choices: Vec::new(), path: None }
+        Form { attribute: "failures".into(), parts: Vec::new(), repair: None, distribution: None, options: &[], profiles: Some(profiles), choices: Vec::new(), path: None, plan: None, exits: None }
     }
 
     /// The profiles as a model file writes them, each with its stream. An empty list is none at
@@ -541,7 +745,6 @@ pub const WEIGHABLE: [(&str, &str); 4] = [("process_time", "Process time"), ("in
 #[derive(Debug, Clone, PartialEq)]
 pub struct DistributionChoice {
     /// Only the successors that reach the MU's destination (ADR 0025), chosen among by the rest.
-    /// The window offers no control for it yet (spec issue 148, PR 3), but keeps it when saving.
     pub by_destination: bool,
     /// Weighted rather than round robin.
     pub weighted: bool,
@@ -563,18 +766,6 @@ fn part(label: &'static str, text: impl Into<String>) -> Part {
 fn number(x: f64) -> String {
     let rounded = (x * 1e6).round() / 1e6;
     format!("{rounded}")
-}
-
-/// A work plan typed as JSON, until the window has rows for one (spec issue 148, PR 3). Empty is
-/// no steps. Whether its names are places is the model file's check.
-fn work_plan(text: &str) -> Result<Value, String> {
-    if text.is_empty() {
-        return Ok(json!([]));
-    }
-    match serde_json::from_str::<Value>(text) {
-        Ok(plan) if plan.is_array() => Ok(plan),
-        _ => Err(format!("`{text}` isn't a work plan: type it as a list of steps, such as [{{\"at\": \"Saw\", \"process_time\": \"0:40\"}}, {{\"at\": \"Out\"}}], or on the : line as set Housing.work_plan Saw 0:40, Out")),
-    }
 }
 
 fn text_of(value: Option<&Value>) -> String {
@@ -619,14 +810,13 @@ impl Form {
             "start" => (vec![part("", value.and_then(Value::as_str).unwrap_or(STARTS[0].0))], None),
             "stop_freezes_dwelling" => (vec![part("", if value.and_then(Value::as_bool) == Some(true) { "true" } else { "false" })], None),
             "accumulating" => (vec![part("", if value.and_then(Value::as_bool) == Some(false) { "false" } else { "true" })], None),
-            // Each may be left empty, taking the MU class's.
-            // Its own work plan as JSON, so editing the others keeps it, until the window has rows
-            // for work plans (spec issue 148, PR 3).
+            // Each may be left empty, taking the MU class's, and its own work plan has rows.
             "mu_values" => {
                 let field = |key: &str| value.and_then(|values| values.get(key)).and_then(Value::as_f64).map_or(String::new(), number);
-                let plan = value.and_then(|values| values.get("work_plan")).map_or(String::new(), Value::to_string);
-                (vec![part("length m", field("length")), part("width m", field("width")), part("booking point", field("booking_point")), part("work plan", plan)], None)
+                (vec![part("length m", field("length")), part("width m", field("width")), part("booking point", field("booking_point"))], None)
             }
+            // Rows of steps, or ticks per side, instead of parts.
+            "work_plan" | "exits" => (Vec::new(), None),
             "direction" => (vec![part("", value.and_then(Value::as_str).unwrap_or(DIRECTIONS[0].0))], None),
             "length" | "width" | "booking_point" | "speed" | "gap" | "min_radius" | "max_incline" => {
                 (vec![part("", value.and_then(Value::as_f64).map_or(String::new(), number))], None)
@@ -644,16 +834,28 @@ impl Form {
             _ => &[],
         };
         let path = (attribute == "path").then(|| PathRows::from_value(value));
-        Form { attribute: attribute.to_string(), parts, repair, distribution: None, options, profiles: None, choices: Vec::new(), path }
+        let plan = match attribute {
+            "work_plan" => Some(PlanRows::from_value(value)),
+            "mu_values" => Some(PlanRows::from_value(value.and_then(|values| values.get("work_plan")))),
+            _ => None,
+        };
+        let exits = (attribute == "exits").then(|| ExitLists::from_value(value));
+        Form { attribute: attribute.to_string(), parts, repair, distribution: None, options, profiles: None, choices: Vec::new(), path, plan, exits }
     }
 
     /// The fields for `attribute`, whatever it is: state notes need the `states` the object can be
-    /// in, a distribution the model's `drains`, and an MU class the model's `mu_classes`.
-    pub fn for_attribute(attribute: &str, value: Option<&Value>, states: &[State], drains: &[String], mu_classes: &[String]) -> Form {
+    /// in, and the rest the model's `names`: a distribution its Drains, an MU class its MU classes,
+    /// a detour, a work plan's steps and exits the names a destination can be, to complete what is
+    /// typed.
+    pub fn for_attribute(attribute: &str, value: Option<&Value>, states: &[State], names: &Names) -> Form {
         match attribute {
             "state_notes" => Form::state_notes(states, value),
-            "distribution" => Form::distribution(value, drains),
-            "mu_class" => Form { choices: mu_classes.to_vec(), ..Form::new(attribute, value) },
+            "distribution" => Form::distribution(value, &names.drains),
+            "mu_class" => Form { choices: names.mu_classes.to_vec(), ..Form::new(attribute, value) },
+            // Each step's place is chosen from them.
+            "work_plan" | "mu_values" => Form { choices: names.destinations.to_vec(), ..Form::new(attribute, value) },
+            // Typed, completed from the names a destination can be.
+            "detour" | "exits" => Form { choices: names.destinations.to_vec(), ..Form::new(attribute, value) },
             attribute => Form::new(attribute, value),
         }
     }
@@ -682,7 +884,7 @@ impl Form {
             successor: field("rank") == Some("successor"),
             drains: ticks,
         };
-        Form { attribute: "distribution".into(), parts: Vec::new(), repair: None, distribution: Some(choice), options: &[], profiles: None, choices: Vec::new(), path: None }
+        Form { attribute: "distribution".into(), parts: Vec::new(), repair: None, distribution: Some(choice), options: &[], profiles: None, choices: Vec::new(), path: None, plan: None, exits: None }
     }
 
     /// The fields for state notes: one per state the object can be in, labelled with the state and
@@ -692,7 +894,7 @@ impl Form {
             .iter()
             .map(|state| part(state.label(), value.and_then(|notes| notes.get(state.name())).and_then(Value::as_str).unwrap_or_default()))
             .collect();
-        Form { attribute: "state_notes".into(), parts, repair: None, distribution: None, options: &[], profiles: None, choices: Vec::new(), path: None }
+        Form { attribute: "state_notes".into(), parts, repair: None, distribution: None, options: &[], profiles: None, choices: Vec::new(), path: None, plan: None, exits: None }
     }
 
     /// The states a state notes form has a field for.
@@ -722,7 +924,7 @@ impl Form {
         };
         let whole = |index: usize| -> Result<u64, String> { text(index).parse::<u64>().map_err(|_| format!("`{}` isn't a whole number of 0 or more", text(index))) };
         match self.attribute.as_str() {
-            "interval" | "process_time" | "dwelling_time" => time(0),
+            "interval" | "process_time" | "dwelling_time" | "switch_time" | "release_time" => time(0),
             "starting_mus" => whole(0).map(|n| json!(n)),
             // Automatic is no value at all, which a model file says by leaving it out.
             "histogram_bar_width" if text(0).is_empty() || text(0).eq_ignore_ascii_case("automatic") => Ok(Value::Null),
@@ -837,12 +1039,16 @@ impl Form {
                 if !text(2).is_empty() {
                     values.insert("booking_point".into(), json!(booking_point(text(2))?));
                 }
-                if !text(3).is_empty() {
-                    values.insert("work_plan".into(), work_plan(text(3))?);
+                // No steps of its own takes the MU class's plan.
+                if let Some(plan) = self.plan.as_ref().filter(|plan| !plan.rows.is_empty()) {
+                    values.insert("work_plan".into(), plan.value()?);
                 }
                 Ok(if values.is_empty() { Value::Null } else { Value::Object(values) })
             }
-            "work_plan" => work_plan(text(0)),
+            "work_plan" => self.plan.as_ref().map_or(Ok(json!([])), PlanRows::value),
+            "exits" => Ok(self.exits.as_ref().map_or(json!({}), ExitLists::value)),
+            // None is no detour, which a model file says by leaving it out.
+            "detour" if text(0).is_empty() => Ok(Value::Null),
             _ => Ok(json!(text(0))),
         }
     }
@@ -870,6 +1076,21 @@ impl Form {
             let given = value.cloned().unwrap_or_else(|| json!("round_robin"));
             let given = Form::distribution(Some(&given), &[]).value().unwrap_or_default();
             return self.value().ok().map(sorted) == Some(sorted(given));
+        }
+        if self.attribute == "exits" {
+            // Each side's names are a set, and a side listing none lists nothing.
+            let sorted = |value: Value| -> Value {
+                let mut exits = Map::new();
+                for (side, names) in value.as_object().into_iter().flatten() {
+                    let mut names: Vec<&str> = names.as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+                    names.sort_unstable();
+                    if !names.is_empty() {
+                        exits.insert(side.clone(), json!(names));
+                    }
+                }
+                Value::Object(exits)
+            };
+            return self.value().ok().map(sorted) == Some(sorted(value.cloned().unwrap_or_else(|| json!({}))));
         }
         if self.attribute == "failures" {
             // Compared as the file would have them, each with its stream.

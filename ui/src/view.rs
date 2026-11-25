@@ -9,7 +9,7 @@ use crabsim_catalogue::bottleneck::{likely_bottleneck, LikelyBottleneck, Shares}
 use crabsim_model::State;
 use crabsim::{
     ModelDescription, ObjectKind, ObjectStatistics, SessionOutput, Picture, ProcessState, RunState, SessionStatus,
-    SimTime, Spread, Interruption, TimeMode, FillStatistics};
+    SimTime, Spread, Interruption, TimeMode, FillStatistics, Side};
 use std::collections::VecDeque;
 use std::time::Duration;
 
@@ -46,6 +46,19 @@ pub struct ObjectView {
     /// A conveyor's path, which it is drawn along, and which places its MUs, its ends and where a
     /// click finds it. Nothing for any other object.
     pub shape: Option<Shape>,
+    /// A cross conveyor's four sides, by `Side::index`: what each is for. Nothing for any other
+    /// object.
+    pub sides: Option<[SideUse; 4]>,
+}
+
+/// What a cross conveyor's side is for (spec issue 148): nothing, MUs coming in from `from`, or
+/// MUs leaving to `to`, with the destinations the side lists, which MUs going there turn to.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub enum SideUse {
+    #[default]
+    Free,
+    Entry { from: u32 },
+    Exit { to: u32, destinations: Vec<String> },
 }
 
 /// A conveyor's path as the view draws it (spec issue 141): points along its centreline, in the
@@ -116,13 +129,18 @@ impl Shape {
     }
 }
 
-/// A connection drawn from the edge of one object to the edge of its successor.
+/// A connection drawn from the edge of one object to the edge of its successor, or from and to
+/// the middle of a cross conveyor's side.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Connection {
     pub from: u32,
     pub to: u32,
     pub start: Point,
     pub end: Point,
+    /// The side of `from` it leaves by, where `from` is a cross conveyor.
+    pub from_side: Option<Side>,
+    /// The side of `to` it comes in by, where `to` is a cross conveyor.
+    pub to_side: Option<Side>,
 }
 
 /// What an object's colour says.
@@ -250,6 +268,49 @@ pub struct MuMarker {
     pub length: f64,
     pub width: f64,
     pub rotation_degrees: f64,
+}
+
+/// Which text the canvas shows, switched in turn by `i`. A conveyor's or a cross conveyor's name
+/// is never shown: it would lie over its neighbours, such as the Spur's over the Fork.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Labels {
+    /// The names.
+    #[default]
+    Names,
+    /// The names and the annotations: a cross conveyor's exits and a conveyor's rises, helices
+    /// and heights.
+    All,
+    /// No names or annotations at all, for the model's layout alone.
+    None,
+}
+
+impl Labels {
+    /// The next in turn: names, all, none, then names again.
+    pub fn next(self) -> Labels {
+        match self {
+            Labels::Names => Labels::All,
+            Labels::All => Labels::None,
+            Labels::None => Labels::Names,
+        }
+    }
+
+    /// Whether an object of this kind has its name shown.
+    pub fn shows_name(self, kind: ObjectKind) -> bool {
+        self != Labels::None && !matches!(kind, ObjectKind::Conveyor | ObjectKind::CrossConveyor)
+    }
+
+    pub fn shows_annotations(self) -> bool {
+        self == Labels::All
+    }
+
+    /// What the canvas shows now, in words.
+    pub fn describe(self) -> &'static str {
+        match self {
+            Labels::Names => "Names shown, annotations hidden",
+            Labels::All => "Names and annotations shown: a cross conveyor's exits, a conveyor's rises and heights",
+            Labels::None => "No names or annotations shown",
+        }
+    }
 }
 
 /// How long the window keeps drawing frames after something happens while halted, so that the
@@ -454,6 +515,20 @@ pub struct Details {
     pub belt: Option<crabsim::BeltStatistics>,
     /// Each failure profile that can fail, with its figures.
     pub failure_profiles: Vec<crabsim::report::FailureProfileState>,
+    /// How many MUs a Station worked on for their plan's step or detour, and how many not.
+    pub plan: Option<crabsim::PlanCounts>,
+    /// A cross conveyor's switching time and MUs out by side.
+    pub cross: Option<crabsim::CrossStatistics>,
+}
+
+/// The statistics row for the MUs that left a cross conveyor by `side`.
+fn out_by(side: Side) -> &'static str {
+    match side {
+        Side::Front => "Out at the front",
+        Side::Back => "Out at the back",
+        Side::Left => "Out at the left",
+        Side::Right => "Out at the right",
+    }
 }
 
 /// A fill histogram's median as the inspector and the statistics window say it: one number while bars are 1 MU
@@ -593,16 +668,22 @@ impl Inspection {
                 rows.extend(unless_never(interruption_rows));
                 rows
             }
-            // One MU at a time: busy is all full. Its switching time comes with the window's own
-            // view of cross conveyors.
+            // One MU at a time: busy is all full, switching and releasing part of it.
             ObjectKind::CrossConveyor => {
-                let mut rows = vec![
-                    ("MUs in", statistics.mus_in.to_string()),
-                    ("MUs out", statistics.mus_out.to_string()),
-                    ("Busy", share(statistics.time_busy)),
-                    ("Blocked", share(statistics.time_blocked)),
-                    ("Idle", share(statistics.time_idle)),
-                ];
+                let mut rows = vec![("MUs in", statistics.mus_in.to_string()), ("MUs out", statistics.mus_out.to_string()), ("Busy", share(statistics.time_busy))];
+                if let Some(cross) = &details.cross {
+                    rows.push(("  switching", share(cross.time_switching)));
+                }
+                rows.extend([("Blocked", share(statistics.time_blocked)), ("Idle", share(statistics.time_idle))]);
+                // How many left by each side, for the sides any left by.
+                if let Some(cross) = &details.cross {
+                    for side in Side::ALL {
+                        let out = cross.mus_out[side.index()];
+                        if out > 0 {
+                            rows.push((out_by(side), out.to_string()));
+                        }
+                    }
+                }
                 if let Some(belt) = &details.belt {
                     rows.push(("Mean crossing", belt.crossing_mean().map_or_else(|| "–".to_string(), format_time_exact)));
                 }
@@ -651,6 +732,10 @@ impl Inspection {
                 }
                 rows.extend([("Blocked", share(statistics.time_blocked)), ("Idle", share(statistics.time_idle))]);
                 rows.extend(receiving);
+                // Only a Station that worked on MUs with somewhere to go counts them.
+                if let Some(plan) = details.plan.filter(|plan| plan.on_plan + plan.off_plan > 0) {
+                    rows.extend([("On plan", plan.on_plan.to_string()), ("Off plan", plan.off_plan.to_string())]);
+                }
                 rows.extend(interruption_rows);
                 rows
             }
@@ -758,6 +843,29 @@ pub struct StationResult {
     pub paused: f64,
     /// Receiving an MU a conveyor hands over, with nothing else going on.
     pub receiving: f64,
+    /// MUs it worked on for their plan's step or detour, and MUs it didn't (spec issue 148).
+    pub on_plan: u64,
+    pub off_plan: u64,
+    /// From the spread between measuring periods, once `MIN_PERIODS` are complete.
+    pub intervals: Option<StationIntervals>,
+}
+
+/// A cross conveyor's line in the statistics window: its shares of the time measured, from 0 to
+/// 1, and how many MUs left by each side.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CrossResult {
+    pub id: u32,
+    pub name: String,
+    /// Busy, all of it full, as it holds one MU at a time.
+    pub busy: f64,
+    /// Switching or releasing, part of busy.
+    pub switching: f64,
+    pub blocked: f64,
+    pub idle: f64,
+    /// Failed or paused.
+    pub interrupted: f64,
+    /// By `Side::index`.
+    pub mus_out: [u64; 4],
     /// From the spread between measuring periods, once `MIN_PERIODS` are complete.
     pub intervals: Option<StationIntervals>,
 }
@@ -857,10 +965,15 @@ pub struct Results {
     pub with_capacity: bool,
     /// Some Station has been receiving, so the Stations' table has a column for it.
     pub with_receiving: bool,
+    /// Some Station worked on MUs with somewhere to go, so the Stations' table counts them on and
+    /// off plan.
+    pub with_plans: bool,
     /// In model order.
     pub buffers: Vec<BufferResult>,
     /// In model order.
     pub conveyors: Vec<ConveyorResult>,
+    /// In model order.
+    pub crosses: Vec<CrossResult>,
     /// By the catalogue's rule, the same `find_bottleneck` gives agents.
     pub bottleneck: Option<LikelyBottleneck>,
     /// How far measuring periods have got, when the run measures in them.
@@ -887,7 +1000,7 @@ impl ViewState {
     /// A view of `model`, before any output. An object the model hasn't named is called by
     /// its type and id, and one it hasn't placed stands in a row below the origin.
     pub fn new(model: &ModelDescription) -> ViewState {
-        let objects: Vec<ObjectView> = (0..model.object_count())
+        let mut objects: Vec<ObjectView> = (0..model.object_count())
             .map(|id| {
                 let kind = model.kind(id);
                 let size = model.dimensions(id);
@@ -906,22 +1019,26 @@ impl ViewState {
                     rotation_degrees: size.rotation_degrees,
                     z: model.position(id).map_or(0.0, |position| position.z),
                     shape: (kind == ObjectKind::Conveyor).then(|| Shape::straight(size.length, size.width, size.rotation_degrees)),
+                    sides: (kind == ObjectKind::CrossConveyor).then(Default::default),
                 }
             })
             .collect();
-        let connections = objects
-            .iter()
-            .flat_map(|from| model.successors(from.id).iter().map(move |&to| (from, to)))
+        let mut connections: Vec<Connection> = (0..model.object_count())
+            .flat_map(|from| model.successors(from).iter().map(move |&to| (from, to)))
             .map(|(from, to)| {
-                let to = &objects[to as usize];
-                Connection {
-                    from: from.id,
-                    to: to.id,
-                    start: from.leaving_towards(to.centre),
-                    end: to.entering_from(from.centre),
-                }
+                let (from_side, to_side) = model.connection_sides(from, to);
+                Connection { from, to, start: Point::default(), end: Point::default(), from_side, to_side }
             })
             .collect();
+        for connection in &connections {
+            if let Some(side) = connection.from_side {
+                objects[connection.from as usize].set_side(side, SideUse::Exit { to: connection.to, destinations: Vec::new() });
+            }
+            if let Some(side) = connection.to_side {
+                objects[connection.to as usize].set_side(side, SideUse::Entry { from: connection.from });
+            }
+        }
+        place_connections(&objects, &mut connections);
         ViewState {
             objects,
             connections,
@@ -1015,12 +1132,88 @@ impl ViewState {
                 object.shape = Some(shape);
             }
         }
-        let objects = &self.objects;
-        for connection in &mut self.connections {
-            let (from, to) = (&objects[connection.from as usize], &objects[connection.to as usize]);
-            connection.start = from.leaving_towards(to.centre);
-            connection.end = to.entering_from(from.centre);
+        place_connections(&self.objects, &mut self.connections);
+    }
+
+    /// Labels each cross conveyor's exit sides with the destinations they list, as the model file
+    /// names them: for each cross conveyor by id, each side's names.
+    pub fn set_exit_lists(&mut self, lists: Vec<(u32, Vec<(Side, Vec<String>)>)>) {
+        for (id, sides) in lists {
+            let Some(uses) = self.objects.get_mut(id as usize).and_then(|object| object.sides.as_mut()) else { continue };
+            for (side, names) in sides {
+                if let SideUse::Exit { destinations, .. } = &mut uses[side.index()] {
+                    *destinations = names;
+                }
+            }
         }
+    }
+
+    /// Of the cross conveyor `id`'s free sides, the one whose middle is nearest `floor`, which a
+    /// connection dragged to or from it is made at. `None` for any other object, or when every
+    /// side has a connection.
+    pub fn free_side_near(&self, id: u32, floor: Point) -> Option<Side> {
+        let object = self.objects.get(id as usize)?;
+        let sides = object.sides.as_ref()?;
+        Side::ALL
+            .into_iter()
+            .filter(|side| sides[side.index()] == SideUse::Free)
+            .map(|side| (distance(object.side_middle(side), floor), side))
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .map(|(_, side)| side)
+    }
+
+    /// The arrows drawn on each cross conveyor: at each entry side one pointing in, and at each
+    /// exit side one pointing out, from and to the side's middle, inside its footprint.
+    pub fn side_arrows(&self) -> Vec<(Point, Point)> {
+        let mut arrows = Vec::new();
+        for object in &self.objects {
+            let Some(sides) = &object.sides else { continue };
+            let reach = 0.3 * object.length.min(object.width);
+            for side in Side::ALL {
+                let edge = object.side_middle(side);
+                let inside = object.from_local(scaled(side_local(side, object.length, object.width), 1.0 - 2.0 * reach / object.across(side)));
+                match sides[side.index()] {
+                    SideUse::Entry { .. } => arrows.push((edge, inside)),
+                    SideUse::Exit { .. } => arrows.push((inside, edge)),
+                    SideUse::Free => {}
+                }
+            }
+        }
+        arrows
+    }
+
+    /// The straight ways across each cross conveyor: from each entry side's middle to the
+    /// opposite side's, where that side is an exit, the way MUs no exit lists go.
+    pub fn straight_ways(&self) -> Vec<(Point, Point)> {
+        let mut ways = Vec::new();
+        for object in &self.objects {
+            let Some(sides) = &object.sides else { continue };
+            for side in Side::ALL {
+                if matches!(sides[side.index()], SideUse::Entry { .. }) && matches!(sides[side.opposite().index()], SideUse::Exit { .. }) {
+                    ways.push((object.side_middle(side), object.side_middle(side.opposite())));
+                }
+            }
+        }
+        ways
+    }
+
+    /// Each cross conveyor's exit sides that list destinations, labelled with them just outside
+    /// the side, such as "Mill, Rework".
+    pub fn exit_labels(&self) -> Vec<(Point, String)> {
+        let mut labels = Vec::new();
+        for object in &self.objects {
+            let Some(sides) = &object.sides else { continue };
+            for side in Side::ALL {
+                if let SideUse::Exit { destinations, .. } = &sides[side.index()]
+                    && !destinations.is_empty()
+                {
+                    let (sin, cos) = (object.rotation_degrees + side_heading(side)).to_radians().sin_cos();
+                    let edge = object.side_middle(side);
+                    labels.push((Point { x: edge.x + cos * EXIT_LABEL_GAP, y: edge.y + sin * EXIT_LABEL_GAP }, destinations.join(", ")));
+                }
+            }
+        }
+        labels
     }
 
     /// A view of `model` that keeps the window's settings from `old`: its speed, time mode, end
@@ -1400,6 +1593,22 @@ impl ViewState {
                 }
                 continue;
             }
+            // On a cross conveyor an MU's way is a leg from one side straight across: from its
+            // entry side, or turned from the centre towards its exit, standing there to switch.
+            if pictured.kind() == ObjectKind::CrossConveyor && !pictured.motion().is_empty() {
+                for motion in pictured.motion() {
+                    let kind = self.mu_kinds.get(usize::from(motion.kind)).copied().unwrap_or_default();
+                    let (length, width) = if motion.crosswise { (kind.width, kind.length) } else { (kind.length, kind.width) };
+                    let side = motion.from_side.unwrap_or(Side::Back);
+                    let heading = side_heading(side.opposite());
+                    let centre = motion.front_at(now) - length / 2.0;
+                    let start = side_local(side, holder.length, holder.width);
+                    let (sin, cos) = heading.to_radians().sin_cos();
+                    let local = Point { x: start.x + cos * centre, y: start.y + sin * centre };
+                    markers.push(MuMarker { mu: motion.mu_id, holder: holder.id, at: holder.from_local(local), length, width, rotation_degrees: holder.rotation_degrees + heading });
+                }
+                continue;
+            }
             let contents = pictured.contents();
             let (cell_length, cell_width) = holder.mu_cell(contents.len());
             // One scale for all, so MUs of one kind look alike side by side.
@@ -1738,6 +1947,8 @@ impl ViewState {
             fill: object.fill.as_deref().cloned(),
             belt: object.belt.as_deref().copied(),
             failure_profiles: object.failure_profiles.clone(),
+            plan: object.plan,
+            cross: object.cross.as_deref().copied(),
         })
     }
 
@@ -1810,8 +2021,10 @@ impl ViewState {
         let mut stations = Vec::new();
         let mut buffers = Vec::new();
         let mut conveyors = Vec::new();
+        let mut crosses = Vec::new();
         let mut with_capacity = false;
         let mut with_receiving = false;
+        let mut with_plans = false;
         for object in &state.objects {
             let Some(view) = self.objects.get(object.id as usize) else { continue };
             let statistics = &object.statistics;
@@ -1830,6 +2043,8 @@ impl ViewState {
             });
             with_capacity |= view.kind == ObjectKind::Station && object.capacity.limit() > 1;
             with_receiving |= view.kind == ObjectKind::Station && statistics.time_receiving > SimTime::ZERO;
+            let plan = object.plan.unwrap_or_default();
+            with_plans |= view.kind == ObjectKind::Station && plan.on_plan + plan.off_plan > 0;
             let intervals = || {
                 figures(object.id).and_then(|figures| {
                     Some(StationIntervals {
@@ -1869,6 +2084,19 @@ impl ViewState {
                     failed: share(statistics.time_failed),
                     paused: share(statistics.time_paused),
                     receiving: share(statistics.time_receiving),
+                    on_plan: plan.on_plan,
+                    off_plan: plan.off_plan,
+                    intervals: intervals(),
+                }),
+                ObjectKind::CrossConveyor => crosses.push(CrossResult {
+                    id: object.id,
+                    name: view.name.clone(),
+                    busy: share(statistics.time_busy),
+                    switching: object.cross.as_deref().map_or(0.0, |cross| share(cross.time_switching)),
+                    blocked: share(statistics.time_blocked),
+                    idle: share(statistics.time_idle),
+                    interrupted: share(statistics.time_failed + statistics.time_paused),
+                    mus_out: object.cross.as_deref().map_or([0; 4], |cross| cross.mus_out),
                     intervals: intervals(),
                 }),
                 ObjectKind::Conveyor => conveyors.push(ConveyorResult {
@@ -1898,7 +2126,10 @@ impl ViewState {
         let full_or_interrupted = |name: &str| {
             let intervals = match stations.iter().find(|station| station.name == name) {
                 Some(station) => station.intervals,
-                None => conveyors.iter().find(|conveyor| conveyor.name == name)?.intervals,
+                None => match conveyors.iter().find(|conveyor| conveyor.name == name) {
+                    Some(conveyor) => conveyor.intervals,
+                    None => crosses.iter().find(|cross| cross.name == name)?.intervals,
+                },
             };
             intervals.map(|intervals| intervals.full_or_interrupted)
         };
@@ -1917,8 +2148,10 @@ impl ViewState {
             stations,
             with_capacity,
             with_receiving,
+            with_plans,
             buffers,
             conveyors,
+            crosses,
             bottleneck,
             periods: periods.map(|periods| PeriodsSoFar { length: periods.length, complete: periods.complete }),
             too_close,
@@ -2168,7 +2401,16 @@ impl ObjectView {
     fn holds(&self, floor: Point) -> bool {
         if let Some(shape) = &self.shape {
             let local = Point { x: floor.x - self.centre.x, y: floor.y - self.centre.y };
-            return shape.points.windows(2).any(|pair| distance_to_segment(local, pair[0].at, pair[1].at) <= shape.width / 2.0);
+            // Its band ends square at its start and end, as drawn, rather than round, so a click
+            // on the object it meets there, such as a cross conveyor, finds that object.
+            let last = shape.points.len().saturating_sub(2);
+            return shape.points.windows(2).enumerate().any(|(index, pair)| {
+                let (start, end) = (pair[0].at, pair[1].at);
+                let (dx, dy) = (end.x - start.x, end.y - start.y);
+                let along = (local.x - start.x) * dx + (local.y - start.y) * dy;
+                let beyond = (index == 0 && along < 0.0) || (index == last && along > dx * dx + dy * dy);
+                !beyond && distance_to_segment(local, start, end) <= shape.width / 2.0
+            });
         }
         let local = rotate(Point { x: floor.x - self.centre.x, y: floor.y - self.centre.y }, -self.rotation_degrees);
         local.x.abs() <= self.length / 2.0 && local.y.abs() <= self.width / 2.0
@@ -2208,6 +2450,65 @@ impl ObjectView {
         let turned = rotate(local, self.rotation_degrees);
         Point { x: self.centre.x + turned.x, y: self.centre.y + turned.y }
     }
+
+    /// The middle of a cross conveyor's side, on the floor.
+    pub fn side_middle(&self, side: Side) -> Point {
+        self.from_local(side_local(side, self.length, self.width))
+    }
+
+    /// How far it is across from `side` to the opposite side.
+    fn across(&self, side: Side) -> f64 {
+        if side.along_length() { self.length } else { self.width }
+    }
+
+    fn set_side(&mut self, side: Side, used: SideUse) {
+        if let Some(sides) = self.sides.as_mut() {
+            sides[side.index()] = used;
+        }
+    }
+}
+
+/// Where each connection starts and ends: at a cross conveyor's side's middle, at a conveyor's
+/// end, or where the line between the two objects crosses an outline.
+fn place_connections(objects: &[ObjectView], connections: &mut [Connection]) {
+    for connection in connections {
+        let (from, to) = (&objects[connection.from as usize], &objects[connection.to as usize]);
+        let leaves = connection.from_side.map(|side| from.side_middle(side));
+        let arrives = connection.to_side.map(|side| to.side_middle(side));
+        connection.start = leaves.unwrap_or_else(|| from.leaving_towards(arrives.unwrap_or(to.centre)));
+        connection.end = arrives.unwrap_or_else(|| to.entering_from(leaves.unwrap_or(from.centre)));
+    }
+}
+
+/// How far outside its side a cross conveyor's exit is labelled, in metres.
+const EXIT_LABEL_GAP: f64 = 0.35;
+
+/// The middle of a side of a footprint `length` long and `width` wide, in its own frame.
+fn side_local(side: Side, length: f64, width: f64) -> Point {
+    match side {
+        Side::Front => Point { x: length / 2.0, y: 0.0 },
+        Side::Back => Point { x: -length / 2.0, y: 0.0 },
+        Side::Left => Point { x: 0.0, y: width / 2.0 },
+        Side::Right => Point { x: 0.0, y: -width / 2.0 },
+    }
+}
+
+/// The way out through a side, counterclockwise from the object's own x axis.
+fn side_heading(side: Side) -> f64 {
+    match side {
+        Side::Front => 0.0,
+        Side::Left => 90.0,
+        Side::Back => 180.0,
+        Side::Right => 270.0,
+    }
+}
+
+fn scaled(point: Point, by: f64) -> Point {
+    Point { x: point.x * by, y: point.y * by }
+}
+
+fn distance(a: Point, b: Point) -> f64 {
+    ((a.x - b.x).powi(2) + (a.y - b.y).powi(2)).sqrt()
 }
 
 fn rotate(point: Point, degrees: f64) -> Point {

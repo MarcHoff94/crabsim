@@ -564,6 +564,18 @@ impl ModelDescription {
         }
     }
 
+    /// The sides a connection from `from` to `to` leaves and arrives by, each given only where
+    /// that end is a cross conveyor, for views to draw it from and to the side's middle.
+    pub fn connection_sides(&self, from: u32, to: u32) -> (Option<Side>, Option<Side>) {
+        let cross = |id: u32| match self.objects.get(id as usize) {
+            Some(ModelObject::Conveyor(conveyor)) => conveyor.cross(),
+            _ => None,
+        };
+        let leaves = cross(from).and_then(|cross| self.successors(from).iter().position(|&successor| successor == to).and_then(|exit| cross.exit_sides.get(exit).copied()));
+        let arrives = cross(to).and_then(|cross| cross.entry_side(from));
+        (leaves, arrives)
+    }
+
     pub fn set_name(&mut self, id: u32, name: impl Into<String>) {
         self.layout_mut(id).name = Some(name.into());
     }

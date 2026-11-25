@@ -114,6 +114,8 @@ pub enum Command {
     Faster,
     Slower,
     Animate,
+    /// `i`: the canvas's next level of text: names, every name with annotations, or none.
+    Labels,
     /// Into the Go to field.
     GoTo,
     /// To the tab at this place, from 1: Inspector, the statistics window (which was the Results
@@ -302,6 +304,7 @@ impl Keys {
             Key::Char('+') => vec![Command::Faster],
             Key::Char('-') => vec![Command::Slower],
             Key::Char('a') => vec![Command::Animate],
+            Key::Char('i') => vec![Command::Labels],
             Key::Char('/') => open(self, PromptKind::Search),
             Key::Char('e') => open(self, PromptKind::Edit),
             Key::Char('o') => open(self, PromptKind::Open),

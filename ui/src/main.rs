@@ -22,10 +22,10 @@ use bevy::{
 };
 use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui, input::egui_wants_any_pointer_input};
 use clap::Parser;
-use crabsim::{LiveSession, SessionStatus, SimTime, TimeMode, WallClock};
+use crabsim::{LiveSession, SessionStatus, Side, SimTime, TimeMode, WallClock};
 use crabsim_ui::camera::Camera as ViewCamera;
 use crabsim_ui::view::{
-    Change, Control, DEFAULT_SPEED, Deletion, Details, EndTimeProblem, GoingOn, Inspection, Intervention, Interval, JumpProblem, MAX_SPEED,
+    Change, Control, DEFAULT_SPEED, Deletion, Details, EndTimeProblem, GoingOn, Inspection, Intervention, Interval, JumpProblem, Labels, MAX_SPEED,
     MIN_PERIODS, MIN_SPEED, Mark, PERIOD_FAILURE_FACTOR, Point, Shade, StepBack, ViewState, format_time, format_time_exact, label_size, parse_time, rgb,
     wall_time_roughly,
 };
@@ -96,6 +96,7 @@ fn main() {
     };
     let mut view = ViewState::new(workspace.description());
     view.set_shapes(workspace.shapes());
+    view.set_exit_lists(workspace.exit_lists());
     let session = workspace.session(WallClock::new());
     session.set_speed(DEFAULT_SPEED).expect("a positive speed");
     let seed_text = workspace.seed().to_string();
@@ -166,7 +167,7 @@ fn main() {
             description_text: (None, String::new()),
             asking: None,
             confirm_removal: None,
-            class_forms: (None, HashMap::new()),
+            class_window: None,
             several: (Vec::new(), Vec::new()),
             build_error: None,
             several_forms: HashMap::new(),
@@ -179,6 +180,7 @@ fn main() {
             over_egui: false,
             keys: Keys::default(),
             key_note: None,
+            labels: Labels::default(),
             search: (Vec::new(), 0),
             steps_pending: (0, 0),
             keys_help: false,
@@ -314,9 +316,8 @@ struct Ui {
     asking: Option<Asking>,
     /// A removal that takes more than it names, waiting for the user to confirm it.
     confirm_removal: Option<Removal>,
-    /// The fields for the selected class's values, and for which class they were made. `None`
-    /// makes them again from the values read, as after the class changed.
-    class_forms: (Option<String>, HashMap<String, Form>),
+    /// The class window, where a class's values change, open on one class whatever is selected.
+    class_window: Option<ClassWindow>,
     /// Why a building change was refused, to show once the frame's other commands are done.
     build_error: Option<String>,
     /// The objects selected together, and the values they share, each with a value only where
@@ -345,6 +346,9 @@ struct Ui {
     keys: Keys,
     /// A word on what the last key did, such as why it did nothing, shown on the key line.
     key_note: Option<String>,
+    /// Which text the canvas shows: names to start with, never a conveyor's; `i` goes on to names
+    /// with annotations, then to none.
+    labels: Labels,
     /// The last search's matches, by id, and which of them is selected.
     search: (Vec<u32>, usize),
     /// Steps forward and back still to go, asked for with a count.
@@ -477,7 +481,10 @@ enum Building {
     RemoveInstances { names: Vec<String> },
     SetAttributeOnAll { names: Vec<String>, attribute: String, value: serde_json::Value },
     MakeClassFromAll { names: Vec<String>, name: String },
-    Connect { from: String, to: String },
+    /// `from_side` and `to_side` where that end is a cross conveyor.
+    Connect { from: String, to: String, from_side: Option<Side>, to_side: Option<Side> },
+    /// The connection moved to another side of the cross conveyor at one end: `from`'s when `at_from`.
+    ConnectionSide { from: String, to: String, at_from: bool, side: Side },
     Disconnect { from: String, to: String },
     /// A connection moved to another place among its object's exits or its successor's entrances.
     MoveConnection { from: String, to: String, end: End, place: u64 },
@@ -505,7 +512,8 @@ impl Building {
             Building::RemoveInstances { names } => format!("Removing {} objects", names.len()),
             Building::SetAttributeOnAll { names, attribute, .. } => format!("Setting the {} of {} objects", attribute_label(attribute).to_lowercase(), names.len()),
             Building::MakeClassFromAll { name, .. } => format!("Making the class {name}"),
-            Building::Connect { from, to } => format!("Connecting {from} to {to}"),
+            Building::Connect { from, to, .. } => format!("Connecting {from} to {to}"),
+            Building::ConnectionSide { from, to, .. } => format!("Moving the connection from {from} to {to} to another side"),
             Building::Disconnect { from, to } => format!("Removing the connection from {from} to {to}"),
             Building::MoveConnection { from, to, .. } => format!("Moving the connection from {from} to {to}"),
             Building::DescribeConnection { from, to, .. } => format!("Describing the connection from {from} to {to}"),
@@ -529,7 +537,8 @@ impl Building {
             Building::RemoveInstances { names } => workspace.remove_instances(names, take_over).map(|()| None),
             Building::SetAttributeOnAll { names, attribute, value } => workspace.set_attribute_on_all(names, attribute, value.clone(), take_over).map(|()| None),
             Building::MakeClassFromAll { names, name } => workspace.make_class_from_all(names, name, take_over).map(|()| None),
-            Building::Connect { from, to } => workspace.connect(from, to, take_over).map(|()| None),
+            Building::Connect { from, to, from_side, to_side } => workspace.connect_at(from, *from_side, to, *to_side, take_over).map(|()| None),
+            Building::ConnectionSide { from, to, at_from, side } => workspace.set_connection_side(from, to, *at_from, *side, take_over).map(|()| None),
             Building::Disconnect { from, to } => workspace.disconnect(from, to, take_over).map(|()| None),
             Building::MoveConnection { from, to, end, place } => workspace.move_connection(from, to, *end, *place, take_over).map(|()| None),
             Building::DescribeConnection { from, to, description } => {
@@ -546,6 +555,29 @@ impl Building {
             Building::Line { text, selected, at } => workspace.run_commands(text, selected.as_deref(), *at, take_over).map(|placed| placed.last().cloned()),
         }
     }
+}
+
+/// A class's own window, where its values change, as an object window is for an instance.
+struct ClassWindow {
+    class: String,
+    /// Its values, read again when `None`, as after the model changed.
+    values: Option<Result<Vec<AttributeView>, String>>,
+    forms: HashMap<String, Form>,
+    /// The field to give the keyboard once it is drawn, as when opened at a value.
+    focus: Option<String>,
+}
+
+impl ClassWindow {
+    fn new(class: String, focus: Option<String>) -> ClassWindow {
+        ClassWindow { class, values: None, forms: HashMap::new(), focus }
+    }
+}
+
+/// What the docked summary of a class asks for.
+enum ClassDockAsk {
+    OpenWindow,
+    /// Its window, at this attribute's field.
+    OpenAt(String),
 }
 
 /// What a Reset with changes asks before it goes ahead.
@@ -624,6 +656,8 @@ const SELECTION: Color = Color::srgb(1.0, 1.0, 1.0);
 const MU_COLOUR: Color = Color::srgb(0.96, 0.96, 0.93);
 /// The arrow along a conveyor saying which way it goes: faint, under its MUs.
 const BELT_DIRECTION: Color = Color::srgba(1.0, 1.0, 1.0, 0.35);
+/// The way straight across a cross conveyor: fainter still, so its side arrows stand out.
+const STRAIGHT_WAY: Color = Color::srgba(1.0, 1.0, 1.0, 0.18);
 
 /// The model file open and the edit state, which a thread of its own watches while the window is
 /// idle.
@@ -934,11 +968,19 @@ fn canvas_input(
         ui.press = None;
         ui.boxing = None;
         let to = ui.pointer_floor.and_then(|at| ui.view.object_at(at)).filter(|&to| to != from);
-        if let Some(to) = to {
-            let names = |id: u32| ui.view.objects()[id as usize].name.clone();
-            let building = Building::Connect { from: names(from), to: names(to) };
+        if let (Some(to), Some(pointer)) = (to, ui.pointer_floor) {
             ui.view.commanded(time.elapsed());
-            build(ui, building, false);
+            let names = |id: u32| ui.view.objects()[id as usize].name.clone();
+            // At a cross conveyor, the free side nearest where it was let go: on the one let go
+            // over, and on the one dragged from, the side facing it.
+            let side = |id: u32| ui.view.objects()[id as usize].sides.is_some().then(|| ui.view.free_side_near(id, pointer));
+            let (from_side, to_side) = (side(from), side(to));
+            if let Some(full) = [(from, from_side), (to, to_side)].into_iter().find(|(_, side)| *side == Some(None)).map(|(id, _)| names(id)) {
+                ui.build_error = Some(format!("Connecting {} to {} didn't happen: every side of {full} has a connection already", names(from), names(to)));
+            } else {
+                let building = Building::Connect { from: names(from), to: names(to), from_side: from_side.flatten(), to_side: to_side.flatten() };
+                build(ui, building, false);
+            }
         }
     }
     // A release over a panel never reaches the canvas, so a drag ends whenever the button is up.
@@ -1145,6 +1187,19 @@ fn draw_connections(mut gizmos: Gizmos, ui: Res<Ui>) {
     // Each conveyor's direction, along its middle.
     for (start, end) in ui.view.belt_directions() {
         gizmos.arrow(Vec3::new(start.x as f32, start.y as f32, 0.05), Vec3::new(end.x as f32, end.y as f32, 0.05), BELT_DIRECTION).with_tip_length(0.3);
+    }
+    // Each cross conveyor's outline, so it stands out from the conveyors it meets in the same
+    // colour, its entries and exits, and its ways straight across.
+    for object in ui.view.objects().iter().filter(|object| object.sides.is_some()) {
+        let outline = object.outline(0.0);
+        gizmos.linestrip(outline.iter().chain(outline.first()).map(|&point| Vec3::new(point.x as f32, point.y as f32, 0.05)), BELT_DIRECTION);
+    }
+    for (start, end) in ui.view.straight_ways() {
+        gizmos.line(Vec3::new(start.x as f32, start.y as f32, 0.04), Vec3::new(end.x as f32, end.y as f32, 0.04), STRAIGHT_WAY);
+    }
+    for (start, end) in ui.view.side_arrows() {
+        let tip = (((end.x - start.x).powi(2) + (end.y - start.y).powi(2)).sqrt() * 0.6) as f32;
+        gizmos.arrow(Vec3::new(start.x as f32, start.y as f32, 0.05), Vec3::new(end.x as f32, end.y as f32, 0.05), BELT_DIRECTION).with_tip_length(tip);
     }
     for connection in ui.view.connections() {
         let start = Vec3::new(connection.start.x as f32, connection.start.y as f32, 0.0);
@@ -1378,22 +1433,20 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
     if several.len() > 1 && ui.several.0 != several {
         let names: Vec<String> = several.iter().map(|&id| ui.view.objects()[id as usize].name.clone()).collect();
         let shared = shared_values(&ui.workspace, &names);
-        let (drains, mu_classes) = (ui.workspace.drains(), ui.workspace.mu_classes());
-        ui.several_forms = shared.iter().map(|view| (view.attribute.clone(), Form::for_attribute(&view.attribute, view.value.as_ref(), &[], &drains, &mu_classes))).collect();
+        let names = ui.workspace.names();
+        ui.several_forms = shared.iter().map(|view| (view.attribute.clone(), Form::for_attribute(&view.attribute, view.value.as_ref(), &[], &names))).collect();
         ui.several = (several.clone(), shared);
     }
-    let mut class_asked_change = None;
-    // The selected class's fields, made from its values whenever they were read again.
-    if let Some((class, Ok(values))) = &ui.class_selected
-        && ui.class_forms.0.as_deref() != Some(class.as_str())
-    {
-        let states = crabsim_model::State::of(ui.workspace.built_in_of(class).unwrap_or("Station"));
-        let (drains, mu_classes) = (ui.workspace.drains(), ui.workspace.mu_classes());
-        ui.class_forms.1 = values
-            .iter()
-            .map(|view| (view.attribute.clone(), Form::for_attribute(&view.attribute, view.value.as_ref(), states, &drains, &mu_classes)))
-            .collect();
-        ui.class_forms.0 = Some(class.clone());
+    let mut class_dock_asked = None;
+    // The class window's values and fields, read again whenever the model changed.
+    if let Some(window) = ui.class_window.as_mut().filter(|window| window.values.is_none()) {
+        let values = ui.workspace.class_attributes(&window.class);
+        if let Ok(values) = &values {
+            let states = crabsim_model::State::of(ui.workspace.built_in_of(&window.class).unwrap_or("Station"));
+            let names = ui.workspace.names();
+            window.forms = values.iter().map(|view| (view.attribute.clone(), Form::for_attribute(&view.attribute, view.value.as_ref(), states, &names))).collect();
+        }
+        window.values = Some(values);
     }
     let mut connection_asked = None;
     // What has been typed for a description belongs to the connection it was typed for.
@@ -1442,7 +1495,7 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
                 }
                 (Some((class, values)), None, None) => {
                     let entry = ui.workspace.classes().into_iter().find(|entry| &entry.name == class);
-                    class_asked_change = class_view(panel, class, values, entry.as_ref(), &mut ui.class_forms.1, editable).map(|change| (class.clone(), change));
+                    class_dock_asked = class_view(panel, class, values, entry.as_ref());
                 }
                 _ if ui.view.selection().len() > 1 => {
                     let names: Vec<String> = ui.view.selection().iter().map(|&id| ui.view.objects()[id as usize].name.clone()).collect();
@@ -1549,6 +1602,20 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
         }
         ui.view.commanded(wall);
     }
+    match class_dock_asked {
+        Some(ClassDockAsk::OpenWindow) => {
+            if let Some((class, _)) = &ui.class_selected {
+                ui.class_window = Some(ClassWindow::new(class.clone(), None));
+            }
+        }
+        Some(ClassDockAsk::OpenAt(attribute)) => {
+            if let Some((class, _)) = &ui.class_selected {
+                ui.class_window = Some(ClassWindow::new(class.clone(), Some(attribute)));
+            }
+        }
+        None => {}
+    }
+    let class_asked_change = class_window(&ctx, ui, canvas_right_for_windows(&ctx));
     if let Some((class, (change, take_over))) = class_asked_change {
         let building = match change {
             AttributeChange::Set(attribute, value) => Building::SetClassAttribute { class, attribute, value },
@@ -1563,6 +1630,7 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
             ConnectionAsk::Move(end, place) => Building::MoveConnection { from, to, end, place },
             ConnectionAsk::Describe(description) => Building::DescribeConnection { from, to, description },
             ConnectionAsk::Remove => Building::Disconnect { from, to },
+            ConnectionAsk::Side(at_from, side) => Building::ConnectionSide { from, to, at_from, side },
         };
         ui.view.commanded(wall);
         build(ui, building, false);
@@ -1616,10 +1684,17 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
         None => {}
     }
     match class_asked {
+        Some(ClassAsk::Open(class)) => {
+            let values = ui.workspace.class_attributes(&class);
+            ui.class_selected = Some((class.clone(), values));
+            ui.class_window = Some(ClassWindow::new(class, None));
+            ui.view.select(None);
+            ui.tab = Tab::Inspector;
+            ui.view.commanded(wall);
+        }
         Some(ClassAsk::Select(class)) => {
             let values = ui.workspace.class_attributes(&class);
             ui.class_selected = Some((class, values));
-            ui.class_forms.0 = None;
             ui.view.select(None);
             ui.tab = Tab::Inspector;
             ui.view.commanded(wall);
@@ -1736,7 +1811,6 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
         } else if let Some(class) = issue.class {
             let values = ui.workspace.class_attributes(&class);
             ui.class_selected = Some((class, values));
-            ui.class_forms.0 = None;
             ui.view.select(None);
             ui.tab = Tab::Inspector;
         }
@@ -1881,7 +1955,7 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
         );
     }
     if let Some((camera, size)) = ui.camera.and_then(|camera| Some((camera, label_size(&camera)?))) {
-        labels(&ctx, &ui.view, &camera, canvas, size as f32);
+        labels(&ctx, &ui.view, &camera, canvas, size as f32, ui.labels);
         paths_labels(&ctx, ui, &camera, canvas, size as f32);
     }
     // A building change refused this frame, or from the canvas before it, says why last of all.
@@ -1934,6 +2008,7 @@ fn replace_session(ui: &mut Ui, session: &Session, new_model: bool, wall: Durati
     ui.history = None;
     let mut view = ViewState::with_settings_of(ui.workspace.description(), &ui.view);
     view.set_shapes(ui.workspace.shapes());
+    view.set_exit_lists(ui.workspace.exit_lists());
     // The same model, reloaded or with another seed, keeps the object selected, found by its name.
     if !new_model {
         // Everything selected stays selected, found by name, unless an undo or redo says what it
@@ -1977,11 +2052,16 @@ fn replace_session(ui: &mut Ui, session: &Session, new_model: bool, wall: Durati
         ui.camera_moved = false;
         ui.camera = None;
         ui.class_selected = None;
-    } else if let Some((class, _)) = ui.class_selected.take() {
-        // The same model, changed: the class's values are read again, if it's still there.
-        let values = ui.workspace.class_attributes(&class);
-        ui.class_selected = values.is_ok().then_some((class, values));
-        ui.class_forms.0 = None;
+        ui.class_window = None;
+    } else {
+        if let Some((class, _)) = ui.class_selected.take() {
+            // The same model, changed: the class's values are read again, if it's still there.
+            let values = ui.workspace.class_attributes(&class);
+            ui.class_selected = values.is_ok().then_some((class, values));
+        }
+        if let Some(window) = ui.class_window.as_mut() {
+            window.values = None;
+        }
     }
     ui.rebuild_scene = true;
     ui.view.commanded(wall);
@@ -2151,6 +2231,8 @@ enum ModelsAsk {
 enum ClassAsk {
     /// Showing the class's values in the inspector.
     Select(String),
+    /// Its window, where its values change.
+    Open(String),
     /// Placing an instance of the class where it is dropped on the canvas.
     Place(String),
     Derive(String),
@@ -2166,6 +2248,18 @@ enum ConnectionAsk {
     /// Its description, which an empty one removes.
     Describe(String),
     Remove,
+    /// Move it to this side of the cross conveyor at one end: its object's when true.
+    Side(bool, Side),
+}
+
+/// A cross conveyor's side as people read it.
+fn side_label(side: Side) -> &'static str {
+    match side {
+        Side::Front => "Front",
+        Side::Back => "Back",
+        Side::Left => "Left",
+        Side::Right => "Right",
+    }
 }
 
 /// What the inspector asks for with several objects selected.
@@ -2327,6 +2421,8 @@ fn classes_panel(ui: &mut egui::Ui, classes: &[ClassEntry], selected: Option<&st
             let label = row.add(egui::Label::new(text).selectable(false).sense(egui::Sense::click_and_drag())).on_hover_text(hint);
             if building && !entry.mu && label.drag_started() {
                 asked = Some(ClassAsk::Place(entry.name.clone()));
+            } else if label.double_clicked() {
+                asked = Some(ClassAsk::Open(entry.name.clone()));
             } else if label.clicked() {
                 asked = Some(ClassAsk::Select(entry.name.clone()));
             }
@@ -2353,17 +2449,43 @@ fn classes_panel(ui: &mut egui::Ui, classes: &[ClassEntry], selected: Option<&st
     asked
 }
 
-/// A class's values in the inspector, each with where it comes from, read-only.
-fn class_view(
-    ui: &mut egui::Ui,
-    class: &str,
-    values: &Result<Vec<AttributeView>, String>,
-    entry: Option<&ClassEntry>,
-    forms: &mut HashMap<String, Form>,
-    editable: bool,
-) -> Option<(AttributeChange, bool)> {
+/// A class in the docked inspector: what it is and reaches, and each value on one line, which a
+/// click opens its window at, where values change.
+fn class_view(ui: &mut egui::Ui, class: &str, values: &Result<Vec<AttributeView>, String>, entry: Option<&ClassEntry>) -> Option<ClassDockAsk> {
+    let mut asked = None;
     ui.heading("Class");
-    ui.label(egui::RichText::new(class).strong().size(16.0));
+    ui.horizontal(|row| {
+        row.label(egui::RichText::new(class).strong().size(16.0));
+        if row.button("Open in window").on_hover_text("Its values in a window of its own, where they change. Double-click it in the Classes panel").clicked() {
+            asked = Some(ClassDockAsk::OpenWindow);
+        }
+    });
+    class_reach(ui, entry);
+    match values {
+        Err(error) => {
+            ui.label(egui::RichText::new(error).weak());
+        }
+        Ok(values) => {
+            ui.add_space(6.0);
+            ui.separator();
+            for view in values {
+                let Some(value) = &view.value else { continue };
+                ui.horizontal(|row| {
+                    row.label(egui::RichText::new(attribute_label(&view.attribute)).strong());
+                    let summary = crabsim_ui::attributes::summary(value);
+                    let line = row.add(egui::Label::new(summary.as_str()).truncate().sense(egui::Sense::click()));
+                    if line.on_hover_text(format!("{summary}\n\nClick to open its window at this field")).clicked() {
+                        asked = Some(ClassDockAsk::OpenAt(view.attribute.clone()));
+                    }
+                });
+            }
+        }
+    }
+    asked
+}
+
+/// Where a class comes from and what its values reach.
+fn class_reach(ui: &mut egui::Ui, entry: Option<&ClassEntry>) {
     if let Some(parent) = entry.and_then(|entry| entry.parent.as_deref()) {
         ui.label(egui::RichText::new(format!("Derived from {parent}")).weak());
     }
@@ -2377,7 +2499,46 @@ fn class_view(
         "Its values reach every instance of it that doesn't set its own. Drag it onto the canvas to place one."
     };
     ui.label(egui::RichText::new(reach).weak());
-    attributes_section(ui, values, forms, editable, None, "")
+}
+
+/// Where the right edge of the canvas is for placing a window, as last drawn.
+fn canvas_right_for_windows(ctx: &egui::Context) -> f32 {
+    ctx.viewport_rect().right() - INSPECTOR_WIDTH
+}
+
+/// The class window, if open: the class's values, each with where it comes from, changeable with
+/// no run in progress, as an object window's attributes are. Returns the change asked for, with
+/// the class, and whether it takes over from an agent.
+fn class_window(ctx: &egui::Context, ui: &mut Ui, canvas_right: f32) -> Option<(String, (AttributeChange, bool))> {
+    let editable = ui.view.reloads_now();
+    let entry = ui.class_window.as_ref().and_then(|window| ui.workspace.classes().into_iter().find(|entry| entry.name == window.class));
+    let window = ui.class_window.as_mut()?;
+    if let Some(field) = window.focus.take() {
+        want_focus(ctx, &format!("class {field}"));
+    }
+    let mut open = true;
+    let mut asked = None;
+    let title = format!("Class {}", window.class);
+    egui::Window::new(egui::RichText::new(&title).strong())
+        .id(egui::Id::new("class window"))
+        .open(&mut open)
+        .default_width(WINDOW_WIDTH)
+        .default_pos(egui::pos2(canvas_right - WINDOW_WIDTH - 16.0, 80.0))
+        .show(ctx, |inside| {
+            egui::ScrollArea::vertical().show(inside, |inside| {
+                class_reach(inside, entry.as_ref());
+                match &window.values {
+                    None => {}
+                    Some(values) => {
+                        asked = attributes_section(inside, values, &mut window.forms, editable, None, "class ").map(|change| (window.class.clone(), change));
+                    }
+                }
+            });
+        });
+    if !open {
+        ui.class_window = None;
+    }
+    asked
 }
 
 /// The selected instance's name, which can be changed with no run in progress. Returns a new name
@@ -2435,6 +2596,28 @@ fn connection_view(ui: &mut egui::Ui, view: &ConnectionView, description: &mut S
         view.entrance,
         view.entrances,
     );
+    // At a cross conveyor, the side it leaves or comes in by, movable to a free one.
+    for (at_from, choice, name) in [(true, &view.from_side, &view.from), (false, &view.to_side, &view.to)] {
+        let Some(choice) = choice else { continue };
+        ui.horizontal(|row| {
+            row.label(format!("{} {name}'s", if at_from { "Leaves by" } else { "Comes in by" }))
+                .on_hover_text("The side of the cross conveyor it meets, at the side's middle. A side has one connection");
+            row.add_enabled_ui(editable, |row| {
+                egui::ComboBox::from_id_salt(("side", at_from)).selected_text(side_label(choice.side)).show_ui(row, |menu| {
+                    for side in Side::ALL {
+                        let free = side == choice.side || choice.free.contains(&side);
+                        let item = menu.add_enabled(free, egui::Button::selectable(side == choice.side, side_label(side))).on_disabled_hover_text("Another connection meets this side");
+                        if item.clicked() && side != choice.side {
+                            asked = Some(ConnectionAsk::Side(at_from, side));
+                        }
+                    }
+                });
+            })
+            .response
+            .on_disabled_hover_text(RESET_FIRST);
+            row.label("side");
+        });
+    }
     ui.add_space(6.0);
     ui.label(egui::RichText::new("Description").strong());
     let field = ui.add_enabled(editable, egui::TextEdit::singleline(description).hint_text("such as via the lift").desired_width(240.0)).on_disabled_hover_text(RESET_FIRST);
@@ -3806,7 +3989,7 @@ fn results_view(ui: &mut egui::Ui, results: Option<(&str, &crabsim_ui::view::Res
     ui.label(egui::RichText::new("Likely bottleneck").strong()).on_hover_text(crabsim_catalogue::bottleneck::RULE);
     match &results.bottleneck {
         None => {
-            ui.label(egui::RichText::new("The model has no Station or Conveyor.").weak());
+            ui.label(egui::RichText::new("The model has no Station, Conveyor or cross conveyor.").weak());
         }
         Some(likely) => {
             let id = results
@@ -3814,7 +3997,8 @@ fn results_view(ui: &mut egui::Ui, results: Option<(&str, &crabsim_ui::view::Res
                 .iter()
                 .find(|station| station.name == likely.instance)
                 .map(|station| station.id)
-                .or_else(|| results.conveyors.iter().find(|conveyor| conveyor.name == likely.instance).map(|conveyor| conveyor.id));
+                .or_else(|| results.conveyors.iter().find(|conveyor| conveyor.name == likely.instance).map(|conveyor| conveyor.id))
+                .or_else(|| results.crosses.iter().find(|cross| cross.name == likely.instance).map(|cross| cross.id));
             ui.horizontal(|row| {
                 match id {
                     Some(id) => pick(row, id, &likely.instance, &mut chosen),
@@ -3856,10 +4040,12 @@ fn results_view(ui: &mut egui::Ui, results: Option<(&str, &crabsim_ui::view::Res
     let full = results.with_capacity;
     // Only a Station a conveyor hands MUs to is ever receiving.
     let receiving = results.with_receiving;
+    // Only Stations that worked on MUs with somewhere to go count them on and off plan.
+    let plans = results.with_plans;
     // The inspector's width is fixed, and the table with intervals or a Full column is wider, so
     // it scrolls sideways rather than cutting off its last columns.
     egui::ScrollArea::horizontal().id_salt("stations").show(ui, |ui| {
-        egui::Grid::new("stations").num_columns(5 + usize::from(full) + usize::from(receiving)).spacing([4.0, 2.0]).striped(true).show(ui, |grid| {
+        egui::Grid::new("stations").num_columns(5 + usize::from(full) + usize::from(receiving) + 2 * usize::from(plans)).spacing([4.0, 2.0]).striped(true).show(ui, |grid| {
             if grid.selectable_label(*sort == SortBy::Model, "Station").on_hover_text("In model order").clicked() {
                 *sort = SortBy::Model;
             }
@@ -3879,6 +4065,10 @@ fn results_view(ui: &mut egui::Ui, results: Option<(&str, &crabsim_ui::view::Res
             if receiving {
                 grid.label(egui::RichText::new("Receiving").color(shade_colour32(Shade::Receiving)))
                     .on_hover_text("A place reserved for an MU a conveyor is handing over, with nothing else going on");
+            }
+            if plans {
+                grid.label("On plan").on_hover_text("MUs it worked on because their work plan's step or their detour named it");
+                grid.label("Off plan").on_hover_text("MUs with somewhere else to go that it worked on all the same: a sign of a routing mistake");
             }
             grid.end_row();
             for station in stations {
@@ -3902,6 +4092,10 @@ fn results_view(ui: &mut egui::Ui, results: Option<(&str, &crabsim_ui::view::Res
                 }
                 if receiving {
                     grid.label(percent(station.receiving));
+                }
+                if plans {
+                    grid.label(station.on_plan.to_string());
+                    grid.label(station.off_plan.to_string());
                 }
                 grid.end_row();
             }
@@ -3961,6 +4155,51 @@ fn results_view(ui: &mut egui::Ui, results: Option<(&str, &crabsim_ui::view::Res
                     grid.label(conveyor.length_taken.map_or_else(|| "–".to_string(), percent));
                     grid.label(conveyor.mean_crossing.map_or_else(|| "–".to_string(), format_time_exact));
                     grid.label(format_time_exact(conveyor.longest_crossing));
+                    grid.end_row();
+                }
+            });
+        });
+    }
+    if !results.crosses.is_empty() {
+        ui.add_space(8.0);
+        ui.label(egui::RichText::new("Cross conveyors").strong()).on_hover_text("What each cross conveyor did, and how many MUs left by each side");
+        // A side no MU has left by has no column.
+        let sides: Vec<Side> = Side::ALL.into_iter().filter(|side| results.crosses.iter().any(|cross| cross.mus_out[side.index()] > 0)).collect();
+        egui::ScrollArea::horizontal().id_salt("crosses").show(ui, |ui| {
+            egui::Grid::new("crosses").num_columns(6 + sides.len()).spacing([6.0, 2.0]).striped(true).show(ui, |grid| {
+                grid.label("Cross conveyor");
+                grid.label(egui::RichText::new("Busy").color(shade_colour32(Shade::Busy)))
+                    .on_hover_text("An MU on it or partly over it, switching or releasing: all of it full, as it takes one MU at a time, which the likely bottleneck counts");
+                grid.label("Switching").on_hover_text("An MU standing at its centre to turn, or releasing after a turned one: part of busy");
+                grid.label(egui::RichText::new("Blocked").color(shade_colour32(Shade::Blocked))).on_hover_text("Its MU waiting at the side it leaves by");
+                grid.label(egui::RichText::new("Idle").color(shade_colour32(Shade::Idle))).on_hover_text("Empty and ready for the next MU");
+                grid.label(egui::RichText::new("Interrupted").color(shade_colour32(Shade::Failed))).on_hover_text("Failed, stopped or paused");
+                for &side in &sides {
+                    grid.label(format!("Out {}", side_label(side).to_lowercase())).on_hover_text("MUs that left by this side");
+                }
+                grid.end_row();
+                for cross in &results.crosses {
+                    pick(grid, cross.id, &cross.name, &mut chosen);
+                    match cross.intervals {
+                        Some(intervals) => grid.label(percent_interval(intervals.busy)),
+                        None => grid.label(percent(cross.busy)),
+                    };
+                    grid.label(percent(cross.switching));
+                    match cross.intervals {
+                        Some(intervals) => {
+                            for interval in [intervals.blocked, intervals.idle, intervals.interrupted] {
+                                grid.label(percent_interval(interval));
+                            }
+                        }
+                        None => {
+                            for share in [cross.blocked, cross.idle, cross.interrupted] {
+                                grid.label(percent(share));
+                            }
+                        }
+                    }
+                    for &side in &sides {
+                        grid.label(cross.mus_out[side.index()].to_string());
+                    }
                     grid.end_row();
                 }
             });
@@ -4245,13 +4484,166 @@ fn option_field(ui: &mut egui::Ui, form: &mut Form, attribute: &str) {
 /// A value that is one of the model's names, such as a Source's MU class, as a menu of them.
 /// Where the fields differ between several objects, it shows none chosen.
 fn choice_field(ui: &mut egui::Ui, form: &mut Form, attribute: &str) {
-    egui::ComboBox::from_id_salt(("choice", attribute)).selected_text(form.parts[0].text.clone()).show_ui(ui, |menu| {
-        for name in &form.choices {
-            if menu.selectable_label(form.parts[0].text == *name, name).clicked() {
-                form.parts[0].text = name.clone();
+    // An empty choice is none, such as no detour.
+    let shown = |name: &str| if name.is_empty() { "None".to_string() } else { name.to_string() };
+    egui::ComboBox::from_id_salt(("choice", attribute)).selected_text(shown(&form.parts[0].text)).show_ui(ui, |menu| {
+        egui::ScrollArea::vertical().max_height(240.0).show(menu, |menu| {
+            for name in &form.choices {
+                if menu.selectable_label(form.parts[0].text == *name, shown(name)).clicked() {
+                    form.parts[0].text = name.clone();
+                }
             }
+        });
+    });
+}
+
+/// A work plan as a row per step: its place, chosen from the model's `places`, its process time,
+/// empty for the Station's own, Up, Down and Remove, then Add step. Returns whether to apply it
+/// now, as when a place is chosen, a time left or a row moved.
+fn plan_fields(ui: &mut egui::Ui, rows: &mut crabsim_ui::attributes::PlanRows, places: &[String], salt: &str) -> bool {
+    let mut commit = false;
+    let mut action = None;
+    let count = rows.rows.len();
+    if count == 0 {
+        ui.label(egui::RichText::new("No steps: its MUs go nowhere in particular.").weak());
+    }
+    egui::Grid::new((salt, "steps")).num_columns(4).min_col_width(0.0).spacing([4.0, 2.0]).show(ui, |grid| {
+        for (index, row) in rows.rows.iter_mut().enumerate() {
+            grid.push_id((salt, "step", index), |line| {
+                line.label(egui::RichText::new(format!("{}", index + 1)).weak());
+            });
+            commit |= place_field(
+                grid,
+                &mut row.at,
+                places,
+                (salt, "place", index),
+                110.0,
+                "place",
+                "Where the MU goes for this step: an instance, or a class standing for any of its instances. Type to find one",
+                (index == 0).then_some(salt),
+            );
+            commit |= grid
+                .add_sized([64.0, 18.0], egui::TextEdit::singleline(&mut row.time).hint_text("own time"))
+                .on_hover_text("How long a Station this step names works on the MU, such as 0:40. Empty is the Station's own process time")
+                .lost_focus();
+            // In one cell, close together, so a row fits the docked inspector's width.
+            grid.horizontal(|buttons| {
+                buttons.spacing_mut().item_spacing.x = 2.0;
+                if buttons.add_enabled(index > 0, egui::Button::new("Up").small()).on_hover_text("Move this step one earlier").clicked() {
+                    action = Some(RowAction::Down(index - 1));
+                }
+                if buttons.add_enabled(index + 1 < count, egui::Button::new("Down").small()).on_hover_text("Move this step one later").clicked() {
+                    action = Some(RowAction::Down(index));
+                }
+                if buttons.add(egui::Button::new("Remove").small()).on_hover_text("Take this step out of the plan").clicked() {
+                    action = Some(RowAction::Remove(index));
+                }
+            });
+            grid.end_row();
         }
     });
+    match action {
+        Some(RowAction::Down(index)) => rows.swap_with_next(index),
+        Some(RowAction::Remove(index)) => rows.remove(index),
+        _ => {}
+    }
+    commit |= action.is_some();
+    if ui.small_button("Add step").on_hover_text("Another step after the last: choose its place").clicked() {
+        rows.add("");
+    }
+    commit
+}
+
+/// A cross conveyor's exits: for each side, the names it lists, each with Remove, and a field to
+/// add one, completed from the model's `places`. An MU whose next destination a side lists turns
+/// there. Returns whether to apply them now, as when a name is added or removed.
+fn exit_fields(ui: &mut egui::Ui, exits: &mut crabsim_ui::attributes::ExitLists, places: &[String], salt: &str) -> bool {
+    let mut commit = false;
+    let about = ui.label(egui::RichText::new("MUs going to a destination a side lists leave by it, turning at the centre; others go straight across.").weak().small());
+    // Opened at this field, it is scrolled to.
+    focus_if_wanted(ui, &about, salt);
+    for place in 0..exits.sides.len() {
+        let side = exits.sides[place].0;
+        let header = format!("{}: {}", side_label(side), exits.listed(side));
+        egui::CollapsingHeader::new(header).id_salt((salt, "exit", place)).show(ui, |inside| {
+            let mut removed = None;
+            for (index, name) in exits.sides[place].1.iter().enumerate() {
+                inside.horizontal(|row| {
+                    row.label(name);
+                    if row.small_button("Remove").on_hover_text("This side no longer takes MUs going here").clicked() {
+                        removed = Some(index);
+                    }
+                });
+            }
+            if let Some(index) = removed {
+                exits.remove(place, index);
+                commit = true;
+            }
+            let hint = "A destination this side takes: an instance, or a class standing for any of its instances. Type to find one, then Enter";
+            if place_field(inside, &mut exits.typed[place], places, (salt, "add exit", place), 140.0, "add a destination", hint, None) {
+                commit |= exits.add_typed(place);
+            }
+        });
+    }
+    commit
+}
+
+/// How many names a place field suggests at once.
+const SUGGESTIONS: usize = 8;
+
+/// A field for one of the model's names, such as a step's place, with the names that complete
+/// what is typed in a list under it, so a model of thousands of objects needs no list of all of
+/// them. A suggestion clicked takes its place, and Enter takes the first suggestion when what was
+/// typed is no name. Returns whether the name was given now: a suggestion clicked, or the field
+/// left. An empty field gives none.
+#[allow(clippy::too_many_arguments)]
+fn place_field(ui: &mut egui::Ui, text: &mut String, names: &[String], salt: impl std::hash::Hash + std::fmt::Debug, width: f32, hint: &str, hover: &str, focus: Option<&str>) -> bool {
+    let id = ui.make_persistent_id(salt);
+    let field = ui.add_sized([width, 18.0], egui::TextEdit::singleline(text).hint_text(hint)).on_hover_text(hover);
+    // Given the keyboard when a window opens at this field.
+    if let Some(key) = focus {
+        focus_if_wanted(ui, &field, key);
+    }
+    let mut open = ui.data(|data| data.get_temp::<bool>(id).unwrap_or(false));
+    if field.gained_focus() || field.changed() {
+        open = true;
+    }
+    let mut given = false;
+    let mut over_list = false;
+    let suggestions: Vec<&str> = if open { crabsim_ui::attributes::completions(names, text, SUGGESTIONS) } else { Vec::new() };
+    if open {
+        let shown = egui::Area::new(id.with("suggestions")).order(egui::Order::Foreground).fixed_pos(field.rect.left_bottom()).show(ui.ctx(), |area| {
+            egui::Frame::popup(area.style()).show(area, |list| {
+                list.set_min_width(field.rect.width().max(140.0));
+                if suggestions.is_empty() {
+                    list.label(egui::RichText::new("No instance or class is called that").weak());
+                }
+                for &name in &suggestions {
+                    if list.selectable_label(name == text.as_str(), name).clicked() {
+                        *text = name.to_string();
+                        given = true;
+                        open = false;
+                    }
+                }
+            });
+        });
+        over_list = shown.response.contains_pointer();
+    }
+    // Left by a click on the list, the click picks the name; left otherwise, what was typed is it.
+    if field.lost_focus() && !over_list {
+        if ui.input(|input| input.key_pressed(egui::Key::Enter)) && !names.iter().any(|name| name == text.trim()) {
+            if let Some(&first) = suggestions.first() {
+                *text = first.to_string();
+            }
+        }
+        given = true;
+        open = false;
+    }
+    if !field.has_focus() && !over_list && ui.input(|input| input.pointer.any_pressed()) {
+        open = false;
+    }
+    ui.data_mut(|data| data.insert_temp(id, open));
+    given
 }
 
 /// An attribute's name as people read it.
@@ -4285,6 +4677,9 @@ fn attribute_label(attribute: &str) -> &str {
         "max_incline" => "Max. incline °",
         "work_plan" => "Work plan",
         "detour" => "Detour",
+        "switch_time" => "Switch time",
+        "release_time" => "Release time",
+        "exits" => "Exits",
         other => other,
     }
 }
@@ -4417,11 +4812,28 @@ fn attributes_section(
                 distribution_fields(fields, choice, &format!("{salt}{}", view.attribute));
                 return;
             }
+            if let Some(exits) = form.exits.as_mut() {
+                commit |= exit_fields(fields, exits, &form.choices, &format!("{salt}{}", view.attribute));
+                return;
+            }
+            // Typed, with the names that complete it, empty for none.
+            if view.attribute == "detour" {
+                let hint = "Where its MUs go before carrying on with their plan: an instance, or a class standing for any of its instances. Empty for none";
+                let key = format!("{salt}{}", view.attribute);
+                commit |= place_field(fields, &mut form.parts[0].text, &form.choices, (salt, "detour"), 160.0, "none", hint, Some(&key));
+                return;
+            }
+            if view.attribute == "work_plan"
+                && let Some(rows) = form.plan.as_mut()
+            {
+                commit |= plan_fields(fields, rows, &form.choices, &format!("{salt}{}", view.attribute));
+                return;
+            }
             if !form.options.is_empty() {
                 option_field(fields, form, &view.attribute);
                 return;
             }
-            if !form.choices.is_empty() {
+            if !form.choices.is_empty() && form.plan.is_none() {
                 choice_field(fields, form, &view.attribute);
                 return;
             }
@@ -4445,6 +4857,11 @@ fn attributes_section(
                     grid.end_row();
                 }
             });
+            // A Source's own MU values end with its own work plan, empty for its MU class's.
+            if let Some(rows) = form.plan.as_mut() {
+                fields.label(egui::RichText::new("Own work plan, none for its MU class's").weak().small());
+                commit |= plan_fields(fields, rows, &form.choices, &format!("{salt}{}", view.attribute));
+            }
         });
         let waiting = !form.matches(view.value.as_ref());
         if waiting {
@@ -4957,6 +5374,10 @@ fn run_key(ctx: &egui::Context, ui: &mut Ui, session: &Session, command: Command
         Command::Faster => return ui.view.has_model().then(|| Request::Speed(ui.view.speed() * 2.0)),
         Command::Slower => return ui.view.has_model().then(|| Request::Speed(ui.view.speed() / 2.0)),
         Command::Animate => return ui.view.has_model().then(|| Request::Animate(!ui.view.animate())),
+        Command::Labels => {
+            ui.labels = ui.labels.next();
+            ui.key_note = Some(format!("{}. i for the next", ui.labels.describe()));
+        }
         Command::GoTo => want_focus(ctx, "goto"),
         Command::OpenWindow => match ui.view.selected() {
             Some(id) => open_window(ui, id),
@@ -5384,6 +5805,7 @@ fn keys_help(ctx: &egui::Context, ui: &mut Ui) {
                 ("Space", "start or halt"),
                 ("x y", "step forward, back: 10x steps ten"),
                 ("R", "reset"),
+                ("i", "names, then names with annotations (a cross conveyor's exits, a conveyor's rises), then none"),
                 ("+ -", "faster, slower"),
                 ("a", "animate on or off"),
                 ("gt", "go to a time"),
@@ -5682,6 +6104,12 @@ fn validation_window(ctx: &egui::Context, ui: &mut Ui) -> Option<crabsim_ui::wor
 /// A distribution strategy's choices: Round robin or Weighted, and for Weighted what it weighs,
 /// which totals come first, what it ranks, and the Drains it counts.
 fn distribution_fields(ui: &mut egui::Ui, choice: &mut crabsim_ui::attributes::DistributionChoice, salt: &str) {
+    ui.checkbox(&mut choice.by_destination, "By destination").on_hover_text(
+        "Only the successors from which the MU's next destination can be reached, chosen among as below. An MU with no destination, or one none of them reaches, is offered to all",
+    );
+    if choice.by_destination {
+        ui.label(egui::RichText::new("then").weak().small());
+    }
     ui.horizontal(|row| {
         let first = row.selectable_value(&mut choice.weighted, false, "Round robin").on_hover_text("Each successor in turn");
         focus_if_wanted(row, &first, salt);
@@ -5725,22 +6153,30 @@ fn distribution_fields(ui: &mut egui::Ui, choice: &mut crabsim_ui::attributes::D
 
 /// Each object's name under it, and counts of MUs where they aren't drawn, `text_size` pixels
 /// tall, clipped to the canvas.
-fn labels(ctx: &egui::Context, view: &ViewState, camera: &ViewCamera, canvas: egui::Rect, text_size: f32) {
+fn labels(ctx: &egui::Context, view: &ViewState, camera: &ViewCamera, canvas: egui::Rect, text_size: f32, shown: Labels) {
+    let annotations = shown.shows_annotations();
     // Under every window, such as the help on states, as the canvas itself is.
     let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Background, egui::Id::new("labels"))).with_clip_rect(canvas);
     let size = Point { x: canvas.width() as f64, y: canvas.height() as f64 };
-    for object in view.objects() {
+    for object in view.objects().iter().filter(|object| shown.shows_name(object.kind)) {
         let floor = Point { x: object.centre.x, y: object.lowest() };
         let at = camera.to_screen(floor, size);
         let at = egui::pos2(canvas.min.x + at.x as f32, canvas.min.y + at.y as f32 + text_size / 4.0);
         let font = egui::FontId::proportional(text_size);
         painter.text(at, egui::Align2::CENTER_TOP, &object.name, font, egui::Color32::LIGHT_GRAY);
     }
-    // Along each conveyor, its rises, helices and heights, smaller than names.
-    for (floor, text) in view.path_labels() {
+    // Along each conveyor, its rises, helices and heights, smaller than names, when annotations
+    // are shown.
+    for (floor, text) in view.path_labels().into_iter().filter(|_| annotations) {
         let at = camera.to_screen(floor, size);
         let at = egui::pos2(canvas.min.x + at.x as f32, canvas.min.y + at.y as f32);
         painter.text(at, egui::Align2::CENTER_CENTER, text, egui::FontId::proportional(text_size * 0.85), egui::Color32::from_rgb(200, 200, 140));
+    }
+    // Beside each cross conveyor's exit side, the destinations MUs turn there for.
+    for (floor, text) in view.exit_labels().into_iter().filter(|_| annotations) {
+        let at = camera.to_screen(floor, size);
+        let at = egui::pos2(canvas.min.x + at.x as f32, canvas.min.y + at.y as f32);
+        painter.text(at, egui::Align2::CENTER_CENTER, text, egui::FontId::proportional(text_size * 0.85), egui::Color32::from_rgb(150, 200, 230));
     }
     // Where MUs can't be followed, each holder shows how many it holds, in its middle.
     for (id, count) in view.counts(camera) {

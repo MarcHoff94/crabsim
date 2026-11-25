@@ -472,6 +472,20 @@ pub struct Details {
     pub belt: Option<crabsim::BeltStatistics>,
     /// Each failure profile that can fail, with its figures.
     pub failure_profiles: Vec<crabsim::report::FailureProfileState>,
+    /// How many MUs a Station worked on for their plan's step or detour, and how many not.
+    pub plan: Option<crabsim::PlanCounts>,
+    /// A cross conveyor's switching time and MUs out by side.
+    pub cross: Option<crabsim::CrossStatistics>,
+}
+
+/// The statistics row for the MUs that left a cross conveyor by `side`.
+fn out_by(side: Side) -> &'static str {
+    match side {
+        Side::Front => "Out at the front",
+        Side::Back => "Out at the back",
+        Side::Left => "Out at the left",
+        Side::Right => "Out at the right",
+    }
 }
 
 /// A fill histogram's median as the inspector and the statistics window say it: one number while bars are 1 MU
@@ -611,16 +625,22 @@ impl Inspection {
                 rows.extend(unless_never(interruption_rows));
                 rows
             }
-            // One MU at a time: busy is all full. Its switching time comes with the window's own
-            // view of cross conveyors.
+            // One MU at a time: busy is all full, switching and releasing part of it.
             ObjectKind::CrossConveyor => {
-                let mut rows = vec![
-                    ("MUs in", statistics.mus_in.to_string()),
-                    ("MUs out", statistics.mus_out.to_string()),
-                    ("Busy", share(statistics.time_busy)),
-                    ("Blocked", share(statistics.time_blocked)),
-                    ("Idle", share(statistics.time_idle)),
-                ];
+                let mut rows = vec![("MUs in", statistics.mus_in.to_string()), ("MUs out", statistics.mus_out.to_string()), ("Busy", share(statistics.time_busy))];
+                if let Some(cross) = &details.cross {
+                    rows.push(("  switching", share(cross.time_switching)));
+                }
+                rows.extend([("Blocked", share(statistics.time_blocked)), ("Idle", share(statistics.time_idle))]);
+                // How many left by each side, for the sides any left by.
+                if let Some(cross) = &details.cross {
+                    for side in Side::ALL {
+                        let out = cross.mus_out[side.index()];
+                        if out > 0 {
+                            rows.push((out_by(side), out.to_string()));
+                        }
+                    }
+                }
                 if let Some(belt) = &details.belt {
                     rows.push(("Mean crossing", belt.crossing_mean().map_or_else(|| "–".to_string(), format_time_exact)));
                 }
@@ -669,6 +689,10 @@ impl Inspection {
                 }
                 rows.extend([("Blocked", share(statistics.time_blocked)), ("Idle", share(statistics.time_idle))]);
                 rows.extend(receiving);
+                // Only a Station that worked on MUs with somewhere to go counts them.
+                if let Some(plan) = details.plan.filter(|plan| plan.on_plan + plan.off_plan > 0) {
+                    rows.extend([("On plan", plan.on_plan.to_string()), ("Off plan", plan.off_plan.to_string())]);
+                }
                 rows.extend(interruption_rows);
                 rows
             }
@@ -776,6 +800,29 @@ pub struct StationResult {
     pub paused: f64,
     /// Receiving an MU a conveyor hands over, with nothing else going on.
     pub receiving: f64,
+    /// MUs it worked on for their plan's step or detour, and MUs it didn't (spec issue 148).
+    pub on_plan: u64,
+    pub off_plan: u64,
+    /// From the spread between measuring periods, once `MIN_PERIODS` are complete.
+    pub intervals: Option<StationIntervals>,
+}
+
+/// A cross conveyor's line in the statistics window: its shares of the time measured, from 0 to
+/// 1, and how many MUs left by each side.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CrossResult {
+    pub id: u32,
+    pub name: String,
+    /// Busy, all of it full, as it holds one MU at a time.
+    pub busy: f64,
+    /// Switching or releasing, part of busy.
+    pub switching: f64,
+    pub blocked: f64,
+    pub idle: f64,
+    /// Failed or paused.
+    pub interrupted: f64,
+    /// By `Side::index`.
+    pub mus_out: [u64; 4],
     /// From the spread between measuring periods, once `MIN_PERIODS` are complete.
     pub intervals: Option<StationIntervals>,
 }
@@ -875,10 +922,15 @@ pub struct Results {
     pub with_capacity: bool,
     /// Some Station has been receiving, so the Stations' table has a column for it.
     pub with_receiving: bool,
+    /// Some Station worked on MUs with somewhere to go, so the Stations' table counts them on and
+    /// off plan.
+    pub with_plans: bool,
     /// In model order.
     pub buffers: Vec<BufferResult>,
     /// In model order.
     pub conveyors: Vec<ConveyorResult>,
+    /// In model order.
+    pub crosses: Vec<CrossResult>,
     /// By the catalogue's rule, the same `find_bottleneck` gives agents.
     pub bottleneck: Option<LikelyBottleneck>,
     /// How far measuring periods have got, when the run measures in them.
@@ -1852,6 +1904,8 @@ impl ViewState {
             fill: object.fill.as_deref().cloned(),
             belt: object.belt.as_deref().copied(),
             failure_profiles: object.failure_profiles.clone(),
+            plan: object.plan,
+            cross: object.cross.as_deref().copied(),
         })
     }
 
@@ -1924,8 +1978,10 @@ impl ViewState {
         let mut stations = Vec::new();
         let mut buffers = Vec::new();
         let mut conveyors = Vec::new();
+        let mut crosses = Vec::new();
         let mut with_capacity = false;
         let mut with_receiving = false;
+        let mut with_plans = false;
         for object in &state.objects {
             let Some(view) = self.objects.get(object.id as usize) else { continue };
             let statistics = &object.statistics;
@@ -1944,6 +2000,8 @@ impl ViewState {
             });
             with_capacity |= view.kind == ObjectKind::Station && object.capacity.limit() > 1;
             with_receiving |= view.kind == ObjectKind::Station && statistics.time_receiving > SimTime::ZERO;
+            let plan = object.plan.unwrap_or_default();
+            with_plans |= view.kind == ObjectKind::Station && plan.on_plan + plan.off_plan > 0;
             let intervals = || {
                 figures(object.id).and_then(|figures| {
                     Some(StationIntervals {
@@ -1983,6 +2041,19 @@ impl ViewState {
                     failed: share(statistics.time_failed),
                     paused: share(statistics.time_paused),
                     receiving: share(statistics.time_receiving),
+                    on_plan: plan.on_plan,
+                    off_plan: plan.off_plan,
+                    intervals: intervals(),
+                }),
+                ObjectKind::CrossConveyor => crosses.push(CrossResult {
+                    id: object.id,
+                    name: view.name.clone(),
+                    busy: share(statistics.time_busy),
+                    switching: object.cross.as_deref().map_or(0.0, |cross| share(cross.time_switching)),
+                    blocked: share(statistics.time_blocked),
+                    idle: share(statistics.time_idle),
+                    interrupted: share(statistics.time_failed + statistics.time_paused),
+                    mus_out: object.cross.as_deref().map_or([0; 4], |cross| cross.mus_out),
                     intervals: intervals(),
                 }),
                 ObjectKind::Conveyor => conveyors.push(ConveyorResult {
@@ -2012,7 +2083,10 @@ impl ViewState {
         let full_or_interrupted = |name: &str| {
             let intervals = match stations.iter().find(|station| station.name == name) {
                 Some(station) => station.intervals,
-                None => conveyors.iter().find(|conveyor| conveyor.name == name)?.intervals,
+                None => match conveyors.iter().find(|conveyor| conveyor.name == name) {
+                    Some(conveyor) => conveyor.intervals,
+                    None => crosses.iter().find(|cross| cross.name == name)?.intervals,
+                },
             };
             intervals.map(|intervals| intervals.full_or_interrupted)
         };
@@ -2031,8 +2105,10 @@ impl ViewState {
             stations,
             with_capacity,
             with_receiving,
+            with_plans,
             buffers,
             conveyors,
+            crosses,
             bottleneck,
             periods: periods.map(|periods| PeriodsSoFar { length: periods.length, complete: periods.complete }),
             too_close,

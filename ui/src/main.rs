@@ -3866,7 +3866,7 @@ fn results_view(ui: &mut egui::Ui, results: Option<(&str, &crabsim_ui::view::Res
     ui.label(egui::RichText::new("Likely bottleneck").strong()).on_hover_text(crabsim_catalogue::bottleneck::RULE);
     match &results.bottleneck {
         None => {
-            ui.label(egui::RichText::new("The model has no Station or Conveyor.").weak());
+            ui.label(egui::RichText::new("The model has no Station, Conveyor or cross conveyor.").weak());
         }
         Some(likely) => {
             let id = results
@@ -3874,7 +3874,8 @@ fn results_view(ui: &mut egui::Ui, results: Option<(&str, &crabsim_ui::view::Res
                 .iter()
                 .find(|station| station.name == likely.instance)
                 .map(|station| station.id)
-                .or_else(|| results.conveyors.iter().find(|conveyor| conveyor.name == likely.instance).map(|conveyor| conveyor.id));
+                .or_else(|| results.conveyors.iter().find(|conveyor| conveyor.name == likely.instance).map(|conveyor| conveyor.id))
+                .or_else(|| results.crosses.iter().find(|cross| cross.name == likely.instance).map(|cross| cross.id));
             ui.horizontal(|row| {
                 match id {
                     Some(id) => pick(row, id, &likely.instance, &mut chosen),
@@ -3916,10 +3917,12 @@ fn results_view(ui: &mut egui::Ui, results: Option<(&str, &crabsim_ui::view::Res
     let full = results.with_capacity;
     // Only a Station a conveyor hands MUs to is ever receiving.
     let receiving = results.with_receiving;
+    // Only Stations that worked on MUs with somewhere to go count them on and off plan.
+    let plans = results.with_plans;
     // The inspector's width is fixed, and the table with intervals or a Full column is wider, so
     // it scrolls sideways rather than cutting off its last columns.
     egui::ScrollArea::horizontal().id_salt("stations").show(ui, |ui| {
-        egui::Grid::new("stations").num_columns(5 + usize::from(full) + usize::from(receiving)).spacing([4.0, 2.0]).striped(true).show(ui, |grid| {
+        egui::Grid::new("stations").num_columns(5 + usize::from(full) + usize::from(receiving) + 2 * usize::from(plans)).spacing([4.0, 2.0]).striped(true).show(ui, |grid| {
             if grid.selectable_label(*sort == SortBy::Model, "Station").on_hover_text("In model order").clicked() {
                 *sort = SortBy::Model;
             }
@@ -3939,6 +3942,10 @@ fn results_view(ui: &mut egui::Ui, results: Option<(&str, &crabsim_ui::view::Res
             if receiving {
                 grid.label(egui::RichText::new("Receiving").color(shade_colour32(Shade::Receiving)))
                     .on_hover_text("A place reserved for an MU a conveyor is handing over, with nothing else going on");
+            }
+            if plans {
+                grid.label("On plan").on_hover_text("MUs it worked on because their work plan's step or their detour named it");
+                grid.label("Off plan").on_hover_text("MUs with somewhere else to go that it worked on all the same: a sign of a routing mistake");
             }
             grid.end_row();
             for station in stations {
@@ -3962,6 +3969,10 @@ fn results_view(ui: &mut egui::Ui, results: Option<(&str, &crabsim_ui::view::Res
                 }
                 if receiving {
                     grid.label(percent(station.receiving));
+                }
+                if plans {
+                    grid.label(station.on_plan.to_string());
+                    grid.label(station.off_plan.to_string());
                 }
                 grid.end_row();
             }
@@ -4021,6 +4032,51 @@ fn results_view(ui: &mut egui::Ui, results: Option<(&str, &crabsim_ui::view::Res
                     grid.label(conveyor.length_taken.map_or_else(|| "–".to_string(), percent));
                     grid.label(conveyor.mean_crossing.map_or_else(|| "–".to_string(), format_time_exact));
                     grid.label(format_time_exact(conveyor.longest_crossing));
+                    grid.end_row();
+                }
+            });
+        });
+    }
+    if !results.crosses.is_empty() {
+        ui.add_space(8.0);
+        ui.label(egui::RichText::new("Cross conveyors").strong()).on_hover_text("What each cross conveyor did, and how many MUs left by each side");
+        // A side no MU has left by has no column.
+        let sides: Vec<Side> = Side::ALL.into_iter().filter(|side| results.crosses.iter().any(|cross| cross.mus_out[side.index()] > 0)).collect();
+        egui::ScrollArea::horizontal().id_salt("crosses").show(ui, |ui| {
+            egui::Grid::new("crosses").num_columns(6 + sides.len()).spacing([6.0, 2.0]).striped(true).show(ui, |grid| {
+                grid.label("Cross conveyor");
+                grid.label(egui::RichText::new("Busy").color(shade_colour32(Shade::Busy)))
+                    .on_hover_text("An MU on it or partly over it, switching or releasing: all of it full, as it takes one MU at a time, which the likely bottleneck counts");
+                grid.label("Switching").on_hover_text("An MU standing at its centre to turn, or releasing after a turned one: part of busy");
+                grid.label(egui::RichText::new("Blocked").color(shade_colour32(Shade::Blocked))).on_hover_text("Its MU waiting at the side it leaves by");
+                grid.label(egui::RichText::new("Idle").color(shade_colour32(Shade::Idle))).on_hover_text("Empty and ready for the next MU");
+                grid.label(egui::RichText::new("Interrupted").color(shade_colour32(Shade::Failed))).on_hover_text("Failed, stopped or paused");
+                for &side in &sides {
+                    grid.label(format!("Out {}", side_label(side).to_lowercase())).on_hover_text("MUs that left by this side");
+                }
+                grid.end_row();
+                for cross in &results.crosses {
+                    pick(grid, cross.id, &cross.name, &mut chosen);
+                    match cross.intervals {
+                        Some(intervals) => grid.label(percent_interval(intervals.busy)),
+                        None => grid.label(percent(cross.busy)),
+                    };
+                    grid.label(percent(cross.switching));
+                    match cross.intervals {
+                        Some(intervals) => {
+                            for interval in [intervals.blocked, intervals.idle, intervals.interrupted] {
+                                grid.label(percent_interval(interval));
+                            }
+                        }
+                        None => {
+                            for share in [cross.blocked, cross.idle, cross.interrupted] {
+                                grid.label(percent(share));
+                            }
+                        }
+                    }
+                    for &side in &sides {
+                        grid.label(cross.mus_out[side.index()].to_string());
+                    }
                     grid.end_row();
                 }
             });

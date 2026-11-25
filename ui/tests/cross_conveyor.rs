@@ -169,3 +169,74 @@ fn an_mu_entering_a_cross_conveyor_crosses_from_its_entry_side() {
     let marker = watched.view.mu_markers(&close()).into_iter().find(|marker| marker.holder == CROSS).expect("on the cross conveyor");
     assert!(near(marker.at, Point { x: 9.85, y: 0.0 }), "{marker:?}");
 }
+
+// ---------- Statistics ----------
+
+/// The cross line (`demo::cross_line`) in a session, halted after an hour on the clock, with its
+/// full state.
+fn cross_line_run_a_while() -> Watched {
+    let model = crabsim::demo::cross_line();
+    let view = ViewState::new(&model);
+    let clock = FakeClock::default();
+    let session = LiveSession::new(move || model.build(0), clock.clone());
+    let mut watched = Watched { session, clock, view };
+    watched.view.set_statistics_open(true);
+    watched.session.start().unwrap();
+    watched.at(3_600);
+    watched.session.halt().unwrap();
+    watched.frame();
+    watched.details();
+    watched
+}
+
+#[test]
+fn the_statistics_window_gives_each_cross_conveyor_s_shares_and_mus_out_by_side() {
+    let watched = cross_line_run_a_while();
+    let results = watched.view.results().unwrap();
+    let names: Vec<&str> = results.crosses.iter().map(|cross| cross.name.as_str()).collect();
+    assert_eq!(names, ["Fork", "Corner", "Join"], "in model order");
+    let fork = &results.crosses[0];
+    let total = fork.busy + fork.blocked + fork.idle + fork.interrupted;
+    assert!((total - 1.0).abs() < 1e-9, "the Fork's shares add up to {total}");
+    assert!(fork.switching > 0.0 && fork.switching < fork.busy, "switching is part of busy: {fork:?}");
+    // Housings turn left to the Spur, Covers go on to the Lane.
+    assert!(fork.mus_out[Side::Left.index()] > 0 && fork.mus_out[Side::Front.index()] > 0, "{fork:?}");
+    assert_eq!(fork.mus_out[Side::Back.index()] + fork.mus_out[Side::Right.index()], 0);
+}
+
+#[test]
+fn stations_count_the_mus_they_worked_on_on_and_off_plan() {
+    let watched = cross_line_run_a_while();
+    let results = watched.view.results().unwrap();
+    assert!(results.with_plans, "the Stations work on MUs with work plans");
+    let mill = results.stations.iter().find(|station| station.name == "Mill").unwrap();
+    assert!(mill.on_plan > 0 && mill.off_plan == 0, "only Housings reach the Mill: {mill:?}");
+    let without = {
+        let mut watched = Watched::demo();
+        watched.view.set_statistics_open(true);
+        watched.session.start().unwrap();
+        watched.at(600);
+        watched.session.halt().unwrap();
+        watched.frame();
+        watched.details();
+        watched.view.results().unwrap()
+    };
+    assert!(!without.with_plans, "the demo's MUs go nowhere in particular");
+}
+
+#[test]
+fn an_object_window_gives_a_cross_conveyor_s_switching_and_sides_and_a_station_s_plan_counts() {
+    let mut watched = cross_line_run_a_while();
+    let id = |name: &str| watched.view.objects().iter().find(|object| object.name == name).unwrap().id;
+    let (fork, mill) = (id("Fork"), id("Mill"));
+    watched.view.select(Some(fork));
+    watched.details();
+    let rows = watched.view.inspection_of(fork).unwrap().statistics_rows();
+    let labels: Vec<&str> = rows.iter().map(|(label, _)| *label).collect();
+    assert!(labels.contains(&"  switching"), "{labels:?}");
+    assert!(labels.contains(&"Out at the left") && labels.contains(&"Out at the front"), "{labels:?}");
+    assert!(!labels.contains(&"Out at the back"), "no MU left by the back: {labels:?}");
+    let rows = watched.view.inspection_of(mill).unwrap().statistics_rows();
+    let on = rows.iter().find(|(label, _)| *label == "On plan").map(|(_, value)| value.clone());
+    assert!(on.is_some_and(|on| on != "0"), "{rows:?}");
+}

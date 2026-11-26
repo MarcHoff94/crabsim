@@ -39,6 +39,26 @@ impl Default for Triggers {
     }
 }
 
+impl TriggerPoint {
+    /// Its bit in a `Points` set.
+    pub(crate) fn bit(self) -> Points {
+        match self {
+            TriggerPoint::Front => FRONT,
+            TriggerPoint::BookingPoint => BOOKING_POINT,
+            TriggerPoint::Rear => REAR,
+        }
+    }
+
+    pub(crate) const ALL: [TriggerPoint; 3] = [TriggerPoint::Front, TriggerPoint::BookingPoint, TriggerPoint::Rear];
+}
+
+/// A set of trigger points, a bit each: which of a move's moments are now.
+pub(crate) type Points = u8;
+pub(crate) const FRONT: Points = 1;
+pub(crate) const BOOKING_POINT: Points = 2;
+pub(crate) const REAR: Points = 4;
+pub(crate) const ALL_POINTS: Points = FRONT | BOOKING_POINT | REAR;
+
 impl Triggers {
     /// The trigger points set, front first.
     pub fn points(self) -> impl Iterator<Item = TriggerPoint> {
@@ -63,6 +83,11 @@ impl Hook {
 }
 
 /// An object's hooks. A Drain has only `on_entry`, and a Source's entry is its MU being created.
+///
+/// At a conveyor or cross conveyor, and at an object taking an MU from one or handing one to one,
+/// the trigger points are three moments (spec issue 156, PR 1b): the MU's front, booking point and
+/// rear crossing the end of the one giving it, which is the start of the one taking it. Between two
+/// objects without geometry they are one instant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ObjectHooks {
     /// As an MU comes in.
@@ -72,6 +97,11 @@ pub struct ObjectHooks {
     /// Chooses the successor when an MU wants to leave, instead of the object's own distribution
     /// strategy, which its answer `Decision::Default` hands the choice back to.
     pub distribution: Option<HookFunction>,
+    /// Asks the distribution as the MU comes in, at this trigger point, rather than when it wants
+    /// to leave: the moment moved, at the user's own risk. The answer is kept with the MU until it
+    /// leaves, and an MU with none, such as a starting MU, is asked when it wants to leave. A cross
+    /// conveyor's distribution always runs as it lets the MU in.
+    pub distribution_on_entry: Option<TriggerPoint>,
 }
 
 /// A moment in a run's life, around crabsim's own Init and Reset.
@@ -167,6 +197,9 @@ pub struct HookTable {
     /// By object id. Shorter than the model where the last objects have none.
     objects: Vec<ObjectHooks>,
     lifecycle: [Option<HookFunction>; 4],
+    /// By object id, whether it is a conveyor or cross conveyor, whose geometry spreads a move's
+    /// trigger points over time. Given when a run is built.
+    belts: Vec<bool>,
 }
 
 impl HookTable {
@@ -180,6 +213,16 @@ impl HookTable {
 
     pub fn set_lifecycle(&mut self, moment: Lifecycle, function: Option<HookFunction>) {
         self.lifecycle[moment.index()] = function;
+    }
+
+    /// Says which objects are conveyors or cross conveyors, by id.
+    pub(crate) fn set_belts(&mut self, belts: Vec<bool>) {
+        self.belts = belts;
+    }
+
+    /// Whether the object is a conveyor or cross conveyor.
+    pub(crate) fn is_belt(&self, id: u32) -> bool {
+        self.belts.get(id as usize).copied().unwrap_or(false)
     }
 
     pub fn object(&self, id: u32) -> ObjectHooks {
@@ -227,25 +270,42 @@ pub struct Coded {
     pub builtin: crate::flows::Distributing,
     /// The MU a call is due or running for, so one MU is asked about once.
     pub(crate) asked: Option<u32>,
-    /// The answer for an MU, kept until it leaves. MU ids are never reused, so an answer for an MU
-    /// that has gone is never read again.
-    pub(crate) decided: Option<(u32, Decision)>,
+    /// The answers for MUs it holds or is taking, each kept until its MU leaves: one at a time
+    /// when it is asked as an MU wants to leave, and one for each MU it holds when the moment has
+    /// moved to their entry.
+    pub(crate) decided: Vec<(u32, Decision)>,
 }
 
 impl Coded {
     pub fn new(function: HookFunction, builtin: crate::flows::Distributing) -> Coded {
-        Coded { function, builtin, asked: None, decided: None }
+        Coded { function, builtin, asked: None, decided: Vec::new() }
     }
 
     /// What was asked and answered goes, as at Reset.
     pub(crate) fn forget(&mut self) {
         self.asked = None;
-        self.decided = None;
+        self.decided.clear();
     }
 
     /// The answer for this MU, if there is one.
     pub(crate) fn decision(&self, mu: u32) -> Option<Decision> {
-        self.decided.filter(|&(decided, _)| decided == mu).map(|(_, decision)| decision)
+        self.decided.iter().find(|&&(decided, _)| decided == mu).map(|&(_, decision)| decision)
+    }
+
+    /// Keeps the answer for this MU, in place of any it had.
+    pub(crate) fn decide(&mut self, mu: u32, decision: Decision) {
+        match self.decided.iter_mut().find(|(decided, _)| *decided == mu) {
+            Some(kept) => kept.1 = decision,
+            None => self.decided.push((mu, decision)),
+        }
+    }
+
+    /// The MU has left, or been taken out: its answer goes.
+    pub(crate) fn forget_mu(&mut self, mu: u32) {
+        self.decided.retain(|&(decided, _)| decided != mu);
+        if self.asked == Some(mu) {
+            self.asked = None;
+        }
     }
 
     /// Whether a call is due or running for this MU and has no answer yet.

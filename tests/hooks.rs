@@ -545,3 +545,475 @@ fn going_back_by_reset_and_replaying_gives_the_same_run() {
 fn an_event_in_the_queue_stays_32_bytes() {
     assert_eq!(size_of::<crabsim::event::ScheduledEvent>(), 32);
 }
+
+// Conveyors and cross conveyors (spec issue 156, PR 1b): the trigger points spread over time where
+// geometry counts, the rear event, a distribution at a conveyor's end and as a cross conveyor lets
+// an MU in, a distribution's moment moved, and moving MUs onto and off belts.
+
+fn every_point(function: u32) -> Option<Hook> {
+    Some(Hook { function, triggers: Triggers { front: true, booking_point: true, rear: true } })
+}
+
+fn both(function_in: u32, function_out: u32) -> ObjectHooks {
+    ObjectHooks { on_entry: every_point(function_in), on_exit: every_point(function_out), ..ObjectHooks::default() }
+}
+
+/// The calls logged, as (time in seconds, what, object, trigger point), leaving out lifecycle and
+/// timer calls.
+fn calls_of(log: &Mutex<Vec<Logged>>) -> Vec<(f64, &'static str, u32, Option<TriggerPoint>)> {
+    log.lock()
+        .unwrap()
+        .iter()
+        .filter_map(|logged| match logged {
+            Logged::Call(time, call) => match &call.kind {
+                CallKind::Entry { object, at, .. } => Some((time.as_secs_f64(), "entry", *object, Some(*at))),
+                CallKind::Exit { object, at, .. } => Some((time.as_secs_f64(), "exit", *object, Some(*at))),
+                CallKind::Distribution { object, .. } => Some((time.as_secs_f64(), "distribution", *object, None)),
+                _ => None,
+            },
+            Logged::Cleared => None,
+        })
+        .collect()
+}
+
+/// A Source every 100 s, of MUs 1 m long with their booking point in the middle, onto two
+/// conveyors of 5 m at 1 m/s, one after the other, then a Drain.
+struct Belts {
+    model: ModelDescription,
+    source: u32,
+    first: u32,
+    second: u32,
+    drain: u32,
+}
+
+fn belts() -> Belts {
+    let mut model = ModelDescription::new();
+    let metre = model.add_mu_kind(crabsim::MuKind { length: 1.0, width: 0.5, booking_point: 0.5 });
+    let source = model.add_source(secs(100));
+    model.set_mu_kind(source, metre);
+    let first = model.add_conveyor(5.0, 0.6, 1.0);
+    let second = model.add_conveyor(5.0, 0.6, 1.0);
+    let drain = model.add_drain();
+    for (from, to) in [(source, first), (first, second), (second, drain)] {
+        model.connect(from, to);
+    }
+    Belts { model, source, first, second, drain }
+}
+
+#[test]
+fn on_a_conveyor_front_booking_point_and_rear_each_run_when_they_cross() {
+    use TriggerPoint::{BookingPoint, Front, Rear};
+    let Belts { mut model, source, first, second, drain } = belts();
+    let code = Code::new(|_, _, _| Ok(None));
+    let log = code.log();
+    model.set_hooks(Box::new(code));
+    model.set_object_hooks(source, ObjectHooks { on_exit: every_point(ON_EXIT), ..ObjectHooks::default() });
+    model.set_object_hooks(first, both(ON_ENTRY, ON_EXIT));
+    model.set_object_hooks(second, both(ON_ENTRY, ON_EXIT));
+    model.set_object_hooks(drain, ObjectHooks { on_entry: every_point(ON_ENTRY), ..ObjectHooks::default() });
+    let mut run = model.build(0);
+    run.init().unwrap();
+    // The Source's first MU, made at 0 s, is ready to leave at 100 s.
+    run.advance_to(secs(130)).unwrap();
+    let calls = calls_of(&log);
+    let expected = [
+        // Onto the first conveyor from the Source: its booking point at the start, its front half
+        // a metre ahead, its rear half a metre behind, crossing half a second later.
+        (100.0, "exit", source, Some(Front)),
+        (100.0, "exit", source, Some(BookingPoint)),
+        (100.0, "entry", first, Some(Front)),
+        (100.0, "entry", first, Some(BookingPoint)),
+        (100.5, "exit", source, Some(Rear)),
+        (100.5, "entry", first, Some(Rear)),
+        // Its front reaches the end of the first at 104.5 s, where the second takes it, its booking
+        // point crosses at 105 s and its rear at 105.5 s.
+        (104.5, "exit", first, Some(Front)),
+        (104.5, "entry", second, Some(Front)),
+        (105.0, "exit", first, Some(BookingPoint)),
+        (105.0, "entry", second, Some(BookingPoint)),
+        (105.5, "exit", first, Some(Rear)),
+        (105.5, "entry", second, Some(Rear)),
+        // The same into the Drain, an object without geometry, from 109.5 s.
+        (109.5, "exit", second, Some(Front)),
+        (109.5, "entry", drain, Some(Front)),
+        (110.0, "exit", second, Some(BookingPoint)),
+        (110.0, "entry", drain, Some(BookingPoint)),
+        (110.5, "exit", second, Some(Rear)),
+        (110.5, "entry", drain, Some(Rear)),
+    ];
+    assert_eq!(calls, expected);
+}
+
+#[test]
+fn hooks_at_the_booking_point_alone_ask_for_no_rear_event_and_change_nothing() {
+    let Belts { mut model, first, second, .. } = belts();
+    let plain = model.build(0);
+    model.set_hooks(Box::new(Code::new(|_, _, _| Ok(None))));
+    model.set_object_hooks(first, ObjectHooks { on_entry: Some(Hook::new(ON_ENTRY)), on_exit: Some(Hook::new(ON_EXIT)), ..ObjectHooks::default() });
+    model.set_object_hooks(second, ObjectHooks { on_entry: Some(Hook::new(ON_ENTRY)), ..ObjectHooks::default() });
+    let hooked = model.build(0);
+    let run_for_a_day = |mut run: SimulationRun| {
+        run.set_recording(Recording::ALL);
+        let mut occurrences = run.init().unwrap();
+        occurrences.extend(run.advance_to(secs(86_400)).unwrap());
+        (occurrences, run.state())
+    };
+    assert_eq!(run_for_a_day(hooked), run_for_a_day(plain));
+}
+
+#[test]
+fn default_on_conveyors_and_cross_conveyors_changes_nothing() {
+    for (name, plain) in [("conveyor line", crabsim::demo::conveyor_line()), ("cross line", crabsim::demo::cross_line())] {
+        let mut coded = plain.clone();
+        coded.set_hooks(Box::new(Code::new(|_, _, _| Ok(Some(Decision::Default)))));
+        for id in 0..coded.object_count() {
+            if !coded.successors(id).is_empty() {
+                coded.set_object_hooks(id, distribution(DISTRIBUTE));
+            }
+        }
+        let run_for_a_day = |model: &ModelDescription| {
+            let mut run = recorded(model.build(7));
+            let mut occurrences = run.init().unwrap();
+            occurrences.extend(run.advance_to(secs(86_400)).unwrap());
+            (occurrences, run.state())
+        };
+        let (plain_occurrences, plain_state) = run_for_a_day(&plain);
+        let (coded_occurrences, coded_state) = run_for_a_day(&coded);
+        assert_eq!(coded_occurrences.len(), plain_occurrences.len(), "{name}");
+        assert!(coded_occurrences == plain_occurrences, "{name}: the occurrences differ");
+        assert_eq!(coded_state, plain_state, "{name}");
+    }
+}
+
+/// A Source every 10 s onto a conveyor of 5 m at 1 m/s, which forks to two Drains.
+fn conveyor_fork() -> Fork {
+    let mut model = ModelDescription::new();
+    let source = model.add_source(secs(10));
+    let fork = model.add_conveyor(5.0, 0.6, 1.0);
+    let a = model.add_drain();
+    let b = model.add_drain();
+    model.connect(source, fork);
+    model.connect(fork, a);
+    model.connect(fork, b);
+    Fork { model, source, fork, a, b }
+}
+
+#[test]
+fn a_conveyors_distribution_runs_as_its_front_mu_reaches_the_end() {
+    let Fork { mut model, fork, a, b, .. } = conveyor_fork();
+    let code = Code::new(move |_, _, _| Ok(Some(Decision::Successor(b))));
+    let log = code.log();
+    model.set_hooks(Box::new(code));
+    model.set_object_hooks(fork, distribution(DISTRIBUTE));
+    let mut run = recorded(model.build(0));
+    run.init().unwrap();
+    let occurrences = run.advance_to(secs(100)).unwrap();
+    assert_eq!(left_at(&occurrences, a), 0);
+    assert_eq!(left_at(&occurrences, b), 9);
+    // The built-in MU is 0.6 m long with its booking point in the middle: it enters at 10 s with
+    // its front 0.3 m on, which reaches the end 4.7 s later.
+    let asked: Vec<f64> = calls_of(&log).iter().filter(|call| call.1 == "distribution").map(|call| call.0).collect();
+    assert_eq!(asked[..3], [14.7, 24.7, 34.7]);
+    // Asked and answered at one instant, the MU never stood.
+    assert!(!occurrences.iter().any(|o| matches!(o.kind, OccurrenceKind::Blocked { object_id } if object_id == fork)));
+}
+
+#[test]
+fn hold_keeps_a_conveyors_mu_at_its_end_until_code_moves_it_off() {
+    let Fork { mut model, fork, a, b, .. } = conveyor_fork();
+    model.set_hooks(Box::new(Code::new(move |call, run, _| {
+        match &call.kind {
+            CallKind::Distribution { .. } => return Ok(Some(Decision::Hold)),
+            CallKind::Lifecycle(Lifecycle::AfterInit) => run.call_at(secs(30), TIMER, 0).unwrap(),
+            CallKind::Timer { .. } => {
+                let held = run.state(fork).unwrap().contents[0];
+                run.move_mu(held, fork, b).unwrap();
+            }
+            _ => {}
+        }
+        Ok(None)
+    })));
+    model.set_object_hooks(fork, distribution(DISTRIBUTE));
+    model.set_lifecycle_hook(Lifecycle::AfterInit, Some(LIFECYCLE));
+    let mut run = recorded(model.build(0));
+    run.init().unwrap();
+    let occurrences = run.advance_to(secs(29)).unwrap();
+    assert_eq!(left_at(&occurrences, a) + left_at(&occurrences, b), 0);
+    let state = run.state();
+    let held = &state.objects[fork as usize];
+    assert_eq!(held.contents.len(), 2, "the second MU closed up behind the held one");
+    assert!((held.positions[0].front - 5.0).abs() < 1e-9 && held.positions[0].speed == 0.0, "the held MU stands at the end: {:?}", held.positions[0]);
+    let occurrences = run.advance_to(secs(31)).unwrap();
+    assert_eq!(left_at(&occurrences, b), 1, "code moved it off");
+    let state = run.state();
+    let after = &state.objects[fork as usize];
+    assert_eq!(after.contents.len(), 2, "the next MU took its place at the end, and another came on at 30 s");
+    assert_eq!(after.statistics.mus_out, 1);
+}
+
+#[test]
+fn a_cross_conveyors_distribution_chooses_its_exit_as_it_lets_the_mu_in() {
+    use crabsim::Side;
+    let mut model = ModelDescription::new();
+    let small = model.add_mu_kind(crabsim::MuKind { length: 0.4, width: 0.4, booking_point: 0.5 });
+    let source = model.add_source(secs(20));
+    model.set_mu_kind(source, small);
+    let feed = model.add_conveyor(3.0, 0.6, 1.0);
+    let cross = model.add_cross_conveyor(0.6, 0.6, 1.0);
+    let straight = model.add_drain();
+    let left = model.add_drain();
+    model.connect(source, feed);
+    model.connect_at(feed, None, cross, Some(Side::Back));
+    model.connect_at(cross, Some(Side::Front), straight, None);
+    model.connect_at(cross, Some(Side::Left), left, None);
+    let code = Code::new(move |_, _, memory| {
+        memory.counter += 1;
+        Ok(Some(match memory.counter % 3 {
+            0 => Decision::Default,
+            1 => Decision::Successor(left),
+            _ => Decision::Successor(straight),
+        }))
+    });
+    let log = code.log();
+    model.set_hooks(Box::new(code));
+    model.set_object_hooks(cross, distribution(DISTRIBUTE));
+    let mut run = recorded(model.build(0));
+    run.init().unwrap();
+    let occurrences = run.advance_to(secs(20 * 30)).unwrap();
+    let asked = calls_of(&log).iter().filter(|call| call.1 == "distribution").count();
+    // Every MU is asked once, the left gets every third from the first, default sends the rest
+    // straight on, where no exit lists them.
+    assert_eq!(asked, 29);
+    assert_eq!(left_at(&occurrences, left), 10);
+    assert_eq!(left_at(&occurrences, straight), 19);
+    assert_eq!(run.state().objects[cross as usize].cross.as_ref().unwrap().mus_out[Side::Left.index()], 10);
+}
+
+#[test]
+fn a_distribution_moved_to_entry_is_asked_as_the_mu_comes_in_and_kept_until_it_leaves() {
+    let mut model = ModelDescription::new();
+    let source = model.add_source(secs(10));
+    let buffer = model.add_buffer(Capacity::Unlimited);
+    model.set_dwelling_time(buffer, secs(35));
+    let a = model.add_drain();
+    let b = model.add_drain();
+    model.connect(source, buffer);
+    model.connect(buffer, a);
+    model.connect(buffer, b);
+    let code = Code::new(move |call, _, _| match &call.kind {
+        // Odd MUs to A, even ones to B, decided as each comes in.
+        CallKind::Distribution { mu, .. } => Ok(Some(Decision::Successor(if mu.id % 2 == 1 { a } else { b }))),
+        _ => Ok(None),
+    });
+    let log = code.log();
+    model.set_hooks(Box::new(code));
+    model.set_object_hooks(buffer, ObjectHooks { distribution: Some(DISTRIBUTE), distribution_on_entry: Some(TriggerPoint::BookingPoint), ..ObjectHooks::default() });
+    let mut run = recorded(model.build(0));
+    run.init().unwrap();
+    let occurrences = run.advance_to(secs(200)).unwrap();
+    let asked: Vec<f64> = calls_of(&log).iter().filter(|call| call.1 == "distribution").map(|call| call.0).collect();
+    assert_eq!(asked, [10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0, 110.0, 120.0, 130.0, 140.0, 150.0, 160.0, 170.0, 180.0, 190.0, 200.0], "once each, as it came in");
+    let to_a: Vec<u32> = occurrences.iter().filter_map(|o| match o.kind { OccurrenceKind::MuLeft { mu_id, at, .. } if at == a => Some(mu_id), _ => None }).collect();
+    let to_b: Vec<u32> = occurrences.iter().filter_map(|o| match o.kind { OccurrenceKind::MuLeft { mu_id, at, .. } if at == b => Some(mu_id), _ => None }).collect();
+    assert_eq!(to_a, [1, 3, 5, 7, 9, 11, 13, 15]);
+    assert_eq!(to_b, [2, 4, 6, 8, 10, 12, 14, 16]);
+    assert_eq!(run.state().objects[buffer as usize].contents.len(), 4, "MUs 17 to 20, still dwelling");
+}
+
+#[test]
+fn a_distribution_moved_to_a_sources_entry_is_asked_once_per_mu() {
+    let mut model = ModelDescription::new();
+    let source = model.add_source(secs(10));
+    let a = model.add_drain();
+    let b = model.add_drain();
+    model.connect(source, a);
+    model.connect(source, b);
+    let code = Code::new(move |_, _, _| Ok(Some(Decision::Successor(b))));
+    let log = code.log();
+    model.set_hooks(Box::new(code));
+    model.set_object_hooks(source, ObjectHooks { distribution: Some(DISTRIBUTE), distribution_on_entry: Some(TriggerPoint::BookingPoint), ..ObjectHooks::default() });
+    let mut run = recorded(model.build(0));
+    run.init().unwrap();
+    let occurrences = run.advance_to(secs(55)).unwrap();
+    let asked: Vec<f64> = calls_of(&log).iter().filter(|call| call.1 == "distribution").map(|call| call.0).collect();
+    // Made at 0 s, it waits for its interval, then leaves as answered at 10 s, when the next is made.
+    assert_eq!(asked, [0.0, 10.0, 20.0, 30.0, 40.0, 50.0], "as each MU is made, never again as it leaves");
+    assert_eq!(left_at(&occurrences, b), 5);
+    assert_eq!(left_at(&occurrences, a), 0);
+}
+
+#[test]
+fn code_moves_an_mu_onto_a_conveyor_it_isnt_connected_to() {
+    let mut model = ModelDescription::new();
+    let buffer = model.add_buffer(Capacity::Unlimited);
+    let belt = model.add_conveyor(5.0, 0.6, 1.0);
+    let drain = model.add_drain();
+    model.connect(belt, drain);
+    model.set_starting_mus(buffer, &[1]);
+    let code = Code::new(move |call, run, _| {
+        if call.kind == CallKind::Lifecycle(Lifecycle::AfterInit) {
+            run.move_mu(1, buffer, belt).unwrap();
+        }
+        Ok(None)
+    });
+    let log = code.log();
+    model.set_hooks(Box::new(code));
+    model.set_lifecycle_hook(Lifecycle::AfterInit, Some(LIFECYCLE));
+    model.set_object_hooks(buffer, ObjectHooks { on_exit: every_point(ON_EXIT), ..ObjectHooks::default() });
+    model.set_object_hooks(belt, ObjectHooks { on_entry: every_point(ON_ENTRY), ..ObjectHooks::default() });
+    let mut run = recorded(model.build(0));
+    let mut occurrences = run.init().unwrap();
+    occurrences.extend(run.advance_to(secs(10)).unwrap());
+    assert!(occurrences.contains(&Occurrence { time: SimTime::ZERO, kind: OccurrenceKind::MuMoved { mu_id: 1, from: buffer, to: belt } }));
+    // The built-in MU, 0.6 m long, enters with its booking point at the start and its front 0.3 m
+    // on: its front reaches the end at 4.7 s, its booking point 0.3 s later.
+    let left = occurrences.iter().find(|o| matches!(o.kind, OccurrenceKind::MuLeft { mu_id: 1, at, .. } if at == drain)).expect("it travelled to the Drain");
+    assert_eq!(left.time, SimTime::from_millis(5_000));
+    use TriggerPoint::{BookingPoint, Front, Rear};
+    // Taken out by code, it leaves the Buffer whole at once, and its rear crosses the conveyor's
+    // start 0.3 s after it is put on.
+    assert_eq!(calls_of(&log), [
+        (0.0, "exit", buffer, Some(Front)),
+        (0.0, "exit", buffer, Some(BookingPoint)),
+        (0.0, "exit", buffer, Some(Rear)),
+        (0.0, "entry", belt, Some(Front)),
+        (0.0, "entry", belt, Some(BookingPoint)),
+        (0.3, "entry", belt, Some(Rear)),
+    ]);
+}
+
+#[test]
+fn code_takes_an_mu_off_a_conveyor_and_those_behind_move_up() {
+    let mut model = ModelDescription::new();
+    let source = model.add_source(secs(1));
+    let belt = model.add_conveyor(10.0, 0.6, 1.0);
+    let slow = station(&mut model, 1000);
+    let aside = model.add_drain();
+    model.connect(source, belt);
+    model.connect(belt, slow);
+    model.set_hooks(Box::new(Code::new(move |call, run, _| {
+        match call.kind {
+            CallKind::Lifecycle(Lifecycle::AfterInit) => run.call_at(secs(60), TIMER, 0).unwrap(),
+            CallKind::Timer { .. } => {
+                // The MU second from the end, in an accumulated queue.
+                let second = run.state(belt).unwrap().contents[1];
+                run.move_mu(second, belt, aside).unwrap();
+            }
+            _ => {}
+        }
+        Ok(None)
+    })));
+    model.set_lifecycle_hook(Lifecycle::AfterInit, Some(LIFECYCLE));
+    let mut run = recorded(model.build(0));
+    run.init().unwrap();
+    run.advance_to(secs(59)).unwrap();
+    let before = run.state().objects[belt as usize].clone();
+    assert_eq!(before.process, ProcessState::Blocked, "full and standing behind the busy Station");
+    let occurrences = run.advance_to(secs(61)).unwrap();
+    assert_eq!(left_at(&occurrences, aside), 1);
+    let after = run.state().objects[belt as usize].clone();
+    assert_eq!(after.contents.len(), before.contents.len() - 1 + 1, "one off, and the Source's waiting MU came on in the room");
+    assert!(!after.contents.contains(&before.contents[1]));
+    assert_eq!(after.statistics.mus_out, 1 + 1, "the one in the Station, and the one taken off");
+    let behind = after.positions.iter().find(|position| position.mu_id == before.contents[2]).unwrap();
+    assert!((behind.front - 9.4).abs() < 1e-6, "the MU behind closed up to the front one: {behind:?}");
+}
+
+#[test]
+fn an_mu_being_handed_over_cant_be_moved() {
+    let Belts { mut model, first, second, drain, .. } = belts();
+    let refusals = Arc::new(Mutex::new(Vec::new()));
+    let seen = refusals.clone();
+    model.set_hooks(Box::new(Code::new(move |call, run, _| {
+        match call.kind {
+            CallKind::Lifecycle(Lifecycle::AfterInit) => {
+                // Between the second taking it at 104.5 s and its booking point crossing at 105 s,
+                // then with its rear still on the first, until 105.5 s.
+                run.call_at(SimTime::from_millis(104_700), TIMER, first).unwrap();
+                run.call_at(SimTime::from_millis(105_200), TIMER, second).unwrap();
+            }
+            CallKind::Timer { data } => {
+                let mu = run.state(data).unwrap().contents[0];
+                seen.lock().unwrap().push(run.move_mu(mu, data, drain).unwrap_err().0);
+            }
+            _ => {}
+        }
+        Ok(None)
+    })));
+    model.set_lifecycle_hook(Lifecycle::AfterInit, Some(LIFECYCLE));
+    let mut run = model.build(0);
+    run.init().unwrap();
+    run.advance_to(secs(120)).unwrap();
+    assert_eq!(*refusals.lock().unwrap(), [
+        format!("MU 1 is being handed over to object {second}, and a transfer once begun always finishes"),
+        format!("MU 1 still has its rear on object {first}, and a transfer once begun always finishes"),
+    ]);
+}
+
+#[test]
+fn conveyor_hooks_at_the_rear_go_back_exactly_by_checkpoint_and_by_reset() {
+    let Belts { mut model, source, first, second, drain } = belts();
+    let code = Code::new(|_, _, _| Ok(None));
+    let log = code.log();
+    model.set_hooks(Box::new(code));
+    model.set_object_hooks(source, ObjectHooks { on_exit: every_point(ON_EXIT), ..ObjectHooks::default() });
+    model.set_object_hooks(first, both(ON_ENTRY, ON_EXIT));
+    model.set_object_hooks(second, both(ON_ENTRY, ON_EXIT));
+    model.set_object_hooks(drain, ObjectHooks { on_entry: every_point(ON_ENTRY), ..ObjectHooks::default() });
+    let calls_since = |from: usize| log.lock().unwrap()[from..].to_vec();
+    let mut run = recorded(model.build(0));
+    let mut first_run = run.init().unwrap();
+    // Between a handover and the rear crossing, onto the second conveyor and into the Drain, with
+    // the calls at the rear kept.
+    first_run.extend(run.advance_to(SimTime::from_millis(205_200)).unwrap());
+    let first_calls = calls_since(0);
+    let mut checkpoint = run.clone();
+    let mark = log.lock().unwrap().len();
+    let rest = run.advance_to(secs(1_000)).unwrap();
+    let rest_calls = calls_since(mark);
+    let mark = log.lock().unwrap().len();
+    assert_eq!(checkpoint.advance_to(secs(1_000)).unwrap(), rest);
+    assert_eq!(calls_since(mark), rest_calls, "the checkpoint made the same calls, those at the rear kept included");
+    first_run.extend(rest);
+    run.reset();
+    let mark = log.lock().unwrap().len();
+    let mut second_run = run.init().unwrap();
+    second_run.extend(run.advance_to(SimTime::from_millis(205_200)).unwrap());
+    let second_calls: Vec<Logged> = calls_since(mark).into_iter().filter(|logged| *logged != Logged::Cleared).collect();
+    assert_eq!(second_calls, first_calls, "no call kept at a rear outlives Reset");
+    second_run.extend(run.advance_to(secs(1_000)).unwrap());
+    assert_eq!(second_run, first_run);
+}
+
+#[test]
+fn a_distribution_moved_to_the_rear_isnt_asked_where_the_mu_has_left_by_then() {
+    let mut model = ModelDescription::new();
+    let source = model.add_source(secs(10));
+    let belt = model.add_conveyor(5.0, 0.6, 1.0);
+    // It passes each MU on at once, before its rear has crossed the conveyor's end.
+    let fork = station(&mut model, 0);
+    let a = model.add_drain();
+    let b = model.add_drain();
+    for (from, to) in [(source, belt), (belt, fork), (fork, a), (fork, b)] {
+        model.connect(from, to);
+    }
+    let code = Code::new(move |_, _, _| Ok(Some(Decision::Successor(b))));
+    let log = code.log();
+    model.set_hooks(Box::new(code));
+    model.set_object_hooks(fork, ObjectHooks { distribution: Some(DISTRIBUTE), distribution_on_entry: Some(TriggerPoint::Rear), ..ObjectHooks::default() });
+    let mut run = recorded(model.build(0));
+    run.init().unwrap();
+    let occurrences = run.advance_to(secs(50)).unwrap();
+    // Asked as each MU wants to leave, at its handover, and never again once it has gone.
+    let asked: Vec<f64> = calls_of(&log).iter().filter(|call| call.1 == "distribution").map(|call| call.0).collect();
+    assert_eq!(asked, [15.0, 25.0, 35.0, 45.0]);
+    assert_eq!(left_at(&occurrences, b), 4);
+}
+
+#[test]
+#[should_panic(expected = "a cross conveyor's distribution runs as it lets an MU in, a moment that can't move")]
+fn a_cross_conveyors_distribution_moment_cant_move() {
+    let mut model = ModelDescription::new();
+    let cross = model.add_cross_conveyor(0.6, 0.6, 1.0);
+    model.set_object_hooks(cross, ObjectHooks { distribution: Some(DISTRIBUTE), distribution_on_entry: Some(TriggerPoint::Front), ..ObjectHooks::default() });
+}

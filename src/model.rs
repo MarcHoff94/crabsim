@@ -507,12 +507,17 @@ impl ModelDescription {
         self.hooks = Some(hooks);
     }
 
-    /// Sets the object's hooks, replacing any it had. A Drain has only a hook on entry, and
-    /// conveyors have none until spec issue 156's PR 1b.
+    /// Sets the object's hooks, replacing any it had. A Drain has only a hook on entry, and a cross
+    /// conveyor's distribution runs as it lets an MU in, a moment that can't move.
     pub fn set_object_hooks(&mut self, id: u32, hooks: crate::hooks::ObjectHooks) {
+        if hooks.distribution_on_entry.is_some() && hooks.distribution.is_none() {
+            panic!("a distribution's moment moves only with a distribution hook");
+        }
         match self.objects.get(id as usize) {
             Some(ModelObject::Drain(_)) if hooks.on_exit.is_some() || hooks.distribution.is_some() => panic!("a Drain has only a hook on entry"),
-            Some(ModelObject::Conveyor(_)) if hooks != crate::hooks::ObjectHooks::default() => panic!("a conveyor's hooks aren't built yet"),
+            Some(ModelObject::Conveyor(conveyor)) if conveyor.cross().is_some() && hooks.distribution_on_entry.is_some() => {
+                panic!("a cross conveyor's distribution runs as it lets an MU in, a moment that can't move")
+            }
             Some(_) => self.hook_table.set_object(id, hooks),
             None => panic!("object {id} is not in the model"),
         }

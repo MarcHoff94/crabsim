@@ -150,7 +150,7 @@ impl ModelObject {
             ModelObject::MultiStation(station) => station.take_out(mu_id, context, others),
             ModelObject::Buffer(buffer) => buffer.take_out(mu_id, context, others),
             ModelObject::Drain(_) => Err(crate::hooks::Refusal::new(format!("object {} is a Drain, which holds no MU", self.get_object_id()))),
-            ModelObject::Conveyor(_) => Err(crate::hooks::Refusal::new(format!("object {} is a conveyor, and crabsim can't take an MU off a conveyor yet", self.get_object_id()))),
+            ModelObject::Conveyor(conveyor) => conveyor.take_out(mu_id, context, others),
             #[cfg(test)]
             ModelObject::RecordsThenFails(_) => Err(crate::hooks::Refusal::new("a test object holds no MU")),
         }

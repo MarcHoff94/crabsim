@@ -1,10 +1,10 @@
 use crate::error::{AdvanceFailure, RunError};
 use crate::event::{EventContext, EventType, ScheduledEvent, NO_OBJECT};
-use crate::flows::{EventInterface, MaterialFlow};
+use crate::flows::{EventInterface, MaterialFlow, Offer};
 use crate::hooks::{CallKind, Decision, HookCall, HookError, HookFunction, HookTable, Hooks, Lifecycle, Refusal};
 use crate::report::ObjectState;
 use crate::distribution::DistributionRule;
-use crate::materialflow_objects::{ByDestination, Distributing, ModelObject, OtherObjects, Ranked};
+use crate::materialflow_objects::{ByDestination, Conveyor, Distributing, ModelObject, OtherObjects, Ranked};
 use crate::routing::Routing;
 use std::sync::Arc;
 use crate::report::{Occurrence, OccurrenceKind, Recording, RunState};
@@ -106,6 +106,8 @@ impl SimulationRun {
     /// Gives the run user code and which objects have which hooks (ADR 0029). An object with a
     /// distribution hook keeps its own strategy, which the hook can hand the choice back to.
     pub(crate) fn attach_hooks(&mut self, table: HookTable, hooks: Box<dyn Hooks>) {
+        let mut table = table;
+        table.set_belts(self.objects.iter().map(ModelObject::reads_mu_kind).collect());
         for (id, function) in table.distributions() {
             if let Some(distribution) = self.objects.get_mut(id as usize).and_then(ModelObject::distribution_mut) {
                 let builtin = std::mem::take(distribution);
@@ -344,7 +346,7 @@ impl SimulationRun {
             }
         }
         if let Some(Distributing::Code(coded)) = target.distribution_mut() {
-            coded.decided = Some((mu, decision));
+            coded.decide(mu, decision);
         }
         self.execute_now(object, EventType::Decided)
     }
@@ -677,18 +679,35 @@ impl HookRun<'_> {
             return Err(Refusal::new(format!("MU {mu} would move from object {from} into itself")));
         }
         let run = &mut *self.run;
+        let now = run.time;
         let target = &run.objects[to as usize];
-        if target.reads_mu_kind() {
-            return Err(Refusal::new(format!("object {to} is a conveyor, and crabsim can't move an MU onto a conveyor from code yet")));
-        }
-        if !target.is_entrance_allowed() {
+        let onto_belt = target.reads_mu_kind();
+        if onto_belt {
+            // It goes on as from an object without geometry: lengthwise, its booking point at the start.
+            let held = run.objects[from as usize].report(now);
+            let Some(kind) = held.contents.iter().position(|&held| held == mu).and_then(|at| held.content_kinds.get(at).copied()) else {
+                return Err(Refusal::new(format!("object {from} doesn't hold MU {mu}")));
+            };
+            if target.as_conveyor().and_then(Conveyor::cross).is_some_and(|cross| cross.entry_side(from).is_none()) {
+                return Err(Refusal::new(format!("object {to} is a cross conveyor, which takes an MU only from one of its predecessors, at the side it comes in by")));
+            }
+            if !target.accepts(&Offer { kind, from, from_belt: false, crosswise: false }, now) {
+                return Err(Refusal::new(format!("object {to} doesn't take MU {mu} now")));
+            }
+        } else if !target.is_entrance_allowed() {
             return Err(Refusal::new(format!("object {to} doesn't take an MU now")));
         }
         let (before, from_object) = run.objects.split_at_mut(from as usize);
         let (object, after) = from_object.split_at_mut(1);
         let mut others = OtherObjects::new(before, after);
         let taken = object[0].take_out(mu, &mut run.context, &mut others)?;
-        run.context.moved(&taken, from, to);
+        if let Some(Distributing::Code(coded)) = object[0].distribution_mut() {
+            coded.forget_mu(mu);
+        }
+        run.context.moved_by_code(&taken, from, to);
+        if onto_belt {
+            others.get_mut(to).arriving(from, false);
+        }
         let entered = others.get_mut(to).enter(taken, &mut run.context).expect("an object that takes an MU now takes it");
         if let Some(entered) = entered {
             run.context.schedule(entered);

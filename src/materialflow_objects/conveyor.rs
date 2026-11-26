@@ -767,6 +767,16 @@ impl Conveyor {
 		context.schedule(EventTemplate { eventtype: EventType::Conveyor(ConveyorTicket { step: ConveyorStep::RearOff as u8, plan: mu_id }), exec_time: after, object_id: self.base.object_id });
 	}
 
+	/// The rear of the MU it handed to an object without geometry crosses its end, if it is still
+	/// the one whose calls it keeps.
+	#[cold]
+	#[inline(never)]
+	fn rear_off_due(&mut self, mu_id: u32, context: &mut EventContext, others: &OtherObjects<'_>) {
+		if self.rear_off.as_ref().is_some_and(|rear| rear.mu_id == mu_id && rear.due == context.time) {
+			self.flush_rear_off(context, others);
+		}
+	}
+
 	/// User code answered where its MU goes (ADR 0029): a cross conveyor chooses the exit of the MU
 	/// it lets in, and a conveyor offers its front MU at the end.
 	#[cold]
@@ -796,15 +806,15 @@ impl Conveyor {
 				self.replan(context, others);
 				Ok(())
 			}
-			// The MU has gone whole, so neither a new plan nor an interruption holds its rear back.
-			EventType::Conveyor(ticket) if ticket.step() == ConveyorStep::RearOff => {
-				if self.rear_off.as_ref().is_some_and(|rear| rear.mu_id == ticket.plan && rear.due == context.time) {
-					self.flush_rear_off(context, others);
+			// A rear crossing its end belongs to no plan, its MU gone whole, so neither a new plan nor
+			// an interruption holds it back. Its ticket carries the MU, so it is checked here, off the
+			// path of the conveyor's own events.
+			EventType::Conveyor(ticket) if ticket.plan != self.plan || self.interruptions.is_interrupted() => {
+				if self.rear_off.is_some() && ticket.step() == ConveyorStep::RearOff {
+					self.rear_off_due(ticket.plan, context, others);
 				}
 				Ok(())
 			}
-			EventType::Decided => self.decided(context, others),
-			EventType::Conveyor(ticket) if ticket.plan != self.plan || self.interruptions.is_interrupted() => Ok(()),
 			EventType::Conveyor(ticket) => {
 				let now = context.time;
 				match ticket.step() {
@@ -866,11 +876,17 @@ impl Conveyor {
 						}
 						return Ok(());
 					}
-					ConveyorStep::Wake | ConveyorStep::RearOff => unreachable!("handled above"),
+					// Its MU's id happens to be the plan's count.
+					ConveyorStep::RearOff => {
+						self.rear_off_due(ticket.plan, context, others);
+						return Ok(());
+					}
+					ConveyorStep::Wake => unreachable!("handled above"),
 				}
 				self.replan(context, others);
 				Ok(())
 			}
+			EventType::Decided => self.decided(context, others),
 			&EventType::BlockedRetry { from } => {
 				// Nothing waits at the end: a retry already queued when the front MU was taken.
 				if !self.front_at_end || self.handing_to.is_some() || self.belt.is_empty() {

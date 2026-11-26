@@ -788,7 +788,9 @@ pub fn try_to_reserve_successor<T: SuccessorContainer + EventInterface>(
 }
 
 /// Offers the MU a conveyor would hand over by its own strategy, `builtin`, for a distribution hook
-/// that handed the choice back, with `index` the successor answering a retry.
+/// that handed the choice back, with `index` the successor answering a retry. Its strategies are
+/// wrapped in `ByCode`, so the reserving code on every conveyor's path keeps its one caller and
+/// stays inlined there, as for `move_by_builtin`.
 fn reserve_by_builtin<T: SuccessorContainer + EventInterface>(
 	obj: &mut T,
 	context: &mut EventContext,
@@ -799,12 +801,12 @@ fn reserve_by_builtin<T: SuccessorContainer + EventInterface>(
 ) -> Option<u32> {
 	match builtin {
 		Distributing::RoundRobin => match index {
-			Some(index) => reserve_with_strategy(obj, context, others, mu_id, &mut OnlySuccessor(index, &mut RoundRobinStrategy)),
-			None => reserve_with_strategy(obj, context, others, mu_id, &mut RoundRobinStrategy),
+			Some(index) => reserve_with_strategy(obj, context, others, mu_id, &mut ByCode(OnlySuccessor(index, &mut RoundRobinStrategy))),
+			None => reserve_with_strategy(obj, context, others, mu_id, &mut ByCode(RoundRobinStrategy)),
 		},
 		Distributing::Weighted(ranked) => match index {
-			Some(index) => reserve_with_strategy(obj, context, others, mu_id, &mut OnlySuccessor(index, ranked)),
-			None => reserve_with_strategy(obj, context, others, mu_id, ranked),
+			Some(index) => reserve_with_strategy(obj, context, others, mu_id, &mut ByCode(OnlySuccessor(index, ranked))),
+			None => reserve_with_strategy(obj, context, others, mu_id, &mut ByCode(ranked)),
 		},
 		Distributing::ByDestination(by) => {
 			let destination = offered_destination(obj, context);
@@ -815,8 +817,8 @@ fn reserve_by_builtin<T: SuccessorContainer + EventInterface>(
 				_ => Then::RoundRobin,
 			};
 			match index {
-				Some(index) => reserve_with_strategy(obj, context, others, mu_id, &mut Toward { allowed, inner: OnlySuccessor(index, &mut then) }),
-				None => reserve_with_strategy(obj, context, others, mu_id, &mut Toward { allowed, inner: then }),
+				Some(index) => reserve_with_strategy(obj, context, others, mu_id, &mut ByCode(Toward { allowed, inner: OnlySuccessor(index, &mut then) })),
+				None => reserve_with_strategy(obj, context, others, mu_id, &mut ByCode(Toward { allowed, inner: then })),
 			}
 		}
 		Distributing::Code(_) => unreachable!("a distribution hook hands back to the object's own strategy, never to code"),
@@ -838,7 +840,7 @@ fn reserve_by_code<T: SuccessorContainer + EventInterface>(obj: &mut T, context:
 	let answering = index.map(|index| obj.successors()[index]);
 	let reserved = match coded.decision(mu.id) {
 		Some(crate::hooks::Decision::Successor(to)) => match obj.successors().iter().position(|&succ| succ == to) {
-			Some(exit) if answering.is_none_or(|from| from == to) => reserve_with_strategy(obj, context, others, mu_id, &mut OneExit { exit, answering: answering.is_some() }),
+			Some(exit) if answering.is_none_or(|from| from == to) => reserve_with_strategy(obj, context, others, mu_id, &mut ByCode(OneExit { exit, answering: answering.is_some() })),
 			_ => None,
 		},
 		Some(crate::hooks::Decision::Hold) => None,
@@ -897,10 +899,7 @@ fn reserve_with_strategy<T: SuccessorContainer + EventInterface, S: Distribution
 	let (idx, succ_id) = chosen?;
 	// Its front crosses the end now, as the successor reserves a place (ADR 0023).
 	if context.has_hooks() {
-		if let Some(mu) = obj.offered_mu(context.time) {
-			let mu = mu.clone();
-			context.front_crossed(&mu, pred_id, succ_id);
-		}
+		front_crossed(obj, context, pred_id, succ_id);
 	}
 	others.get_mut(succ_id).reserve(mu_id, context);
 	// Its MU no longer waits anywhere.
@@ -909,6 +908,15 @@ fn reserve_with_strategy<T: SuccessorContainer + EventInterface, S: Distribution
 	}
 	strategy.moved(idx, n, obj.succ_pointer_mut());
 	Some(succ_id)
+}
+
+/// Notes the hooks at the front of the MU `obj` offers, as `succ_id` reserves a place for it.
+#[cold]
+#[inline(never)]
+fn front_crossed<T: SuccessorContainer + EventInterface>(obj: &T, context: &mut EventContext, pred_id: u32, succ_id: u32) {
+	if let Some(mu) = obj.offered_mu(context.time).cloned() {
+		context.front_crossed(&mu, pred_id, succ_id);
+	}
 }
 
 /// Offers only the exit at `exit`, not moving the object's turn on: a cross conveyor's MU, whose

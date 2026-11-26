@@ -2,7 +2,7 @@
 use crate::time::SimTime;
 use crate::error::{InitError, MaterialflowError, RunTimeError};
 use crate::event::{EventContext, EventTemplate, EventType};
-use crate::report::{ObjectState, OccurrenceKind};
+use crate::report::ObjectState;
 use crate::materialflow_objects::OtherObjects;
 use crate::random_numbers::{Distribution, DistributionSampler};
 use crate::statistics::StatisticsKeeper;
@@ -286,7 +286,7 @@ pub struct Offer {
 }
 
 /// What `obj` offers at `now`, if it has an MU to hand over.
-pub fn offer_of<T: SuccessorContainer + EventInterface>(obj: &T, now: SimTime) -> Option<Offer> {
+pub fn offer_of<T: SuccessorContainer + EventInterface + ?Sized>(obj: &T, now: SimTime) -> Option<Offer> {
 	obj.offered_kind(now).map(|kind| Offer { kind, from: *obj.get_object_id(), from_belt: obj.on_belt(), crosswise: obj.offered_crosswise() })
 }
 
@@ -425,6 +425,36 @@ pub enum Distributing {
 	/// Among the successors from which the MU's next destination can be reached (ADR 0025), by
 	/// round robin or a ranking. Boxed, since only objects routing by destination pay for it.
 	ByDestination(Box<ByDestination>),
+	/// By user code's distribution hook (ADR 0029), which may hand the choice back to the object's
+	/// own strategy. Boxed, since only objects with the hook pay for it.
+	Code(Box<crate::hooks::Coded>),
+}
+
+impl Distributing {
+	/// Whether user code has been asked about this MU and hasn't answered yet: the object then
+	/// leaves its state as it is, since the answer comes at the same instant.
+	#[inline]
+	pub fn awaits(&self, mu: Option<u32>) -> bool {
+		match (self, mu) {
+			(Distributing::Code(coded), Some(mu)) => coded.awaits(mu),
+			_ => false,
+		}
+	}
+
+	/// Whether user code chooses: a distribution hook. Checked before anything else about code, so
+	/// objects without it pay one comparison.
+	#[inline]
+	pub fn is_code(&self) -> bool {
+		matches!(self, Distributing::Code(_))
+	}
+
+	/// The object's own strategy: itself, or the one a distribution hook hands back to.
+	pub fn builtin_mut(&mut self) -> &mut Distributing {
+		match self {
+			Distributing::Code(coded) => &mut coded.builtin,
+			other => other,
+		}
+	}
 }
 
 /// An object routing by destination: which of its exits reach each destination, worked out when
@@ -504,7 +534,7 @@ impl DistributionStrategy for Then<'_> {
 }
 
 /// Where the MU `obj` would hand over at `now` goes next, or `NO_DESTINATION`.
-fn offered_destination<T: SuccessorContainer>(obj: &T, context: &EventContext) -> DestinationId {
+fn offered_destination<T: SuccessorContainer + ?Sized>(obj: &T, context: &EventContext) -> DestinationId {
 	obj.offered_mu(context.time).map_or(NO_DESTINATION, |mu| context.routing.next_destination(mu))
 }
 
@@ -521,7 +551,7 @@ fn with_toward<T: SuccessorContainer, R>(obj: &mut T, destination: DestinationId
 	let then = match then {
 		Distributing::RoundRobin => Then::RoundRobin,
 		Distributing::Weighted(ranked) => Then::Ranked(ranked),
-		Distributing::ByDestination(_) => unreachable!("by destination chooses by round robin or weighted"),
+		Distributing::ByDestination(_) | Distributing::Code(_) => unreachable!("by destination chooses by round robin or weighted"),
 	};
 	let result = move_it(obj, allowed, then);
 	*obj.distribution_mut() = distribution;
@@ -580,7 +610,7 @@ impl DistributionStrategy for LowestIndexStrategy {
 
 /// New implementation that accepts a distribution strategy.
 pub fn try_to_move_to_successor_with_strategy<
-	T: SuccessorContainer + EventInterface,
+	T: SuccessorContainer + EventInterface + ?Sized,
 	S: DistributionStrategy,
 >(obj: &mut T, context: &mut EventContext, others: &mut OtherObjects<'_>, strategy: &mut S) -> Result<Option<EventTemplate>, MaterialflowError> {
 	let n = obj.successors().len();
@@ -609,7 +639,7 @@ pub fn try_to_move_to_successor_with_strategy<
 				for &refused_by in obj.successors() {
 					others.get_mut(refused_by).relist_blocked(pred_id, next);
 				}
-				context.record(OccurrenceKind::MuMoved { mu_id, from: pred_id, to: succ_id });
+				context.moved(&mu, pred_id, succ_id);
 				log::info!("seq={} MU {} moved from {} to {}", seq, mu_id, pred_id, succ_id);
 				if geometry {
 					arriving_from(others, succ_id, pred_id);
@@ -664,7 +694,7 @@ pub fn try_to_move_to_successor_with_strategy<
 /// which every run goes through for every move, so models without conveyors pay nothing for it.
 #[cold]
 #[inline(never)]
-fn accepts_offered<T: SuccessorContainer + EventInterface>(obj: &T, successor: &crate::materialflow_objects::ModelObject, now: SimTime) -> bool {
+fn accepts_offered<T: SuccessorContainer + EventInterface + ?Sized>(obj: &T, successor: &crate::materialflow_objects::ModelObject, now: SimTime) -> bool {
 	offer_of(obj, now).is_some_and(|offer| successor.accepts(&offer, now))
 }
 
@@ -703,6 +733,7 @@ pub fn retry_move_to_successor<T: SuccessorContainer + EventInterface>(
 		return Ok(None);
 	};
 	match obj.distribution_mut() {
+		Distributing::Code(_) => move_by_code(obj, context, others, Some(from)),
 		Distributing::RoundRobin => try_to_move_to_successor_with_strategy(obj, context, others, &mut OnlySuccessor(index, &mut RoundRobinStrategy)),
 		Distributing::Weighted(_) => with_ranked(obj, |obj, ranked| try_to_move_to_successor_with_strategy(obj, context, others, &mut OnlySuccessor(index, ranked))),
 		Distributing::ByDestination(_) => with_toward(obj, offered_destination(obj, context), |obj, allowed, mut then| {
@@ -752,6 +783,7 @@ pub fn try_to_reserve_successor<T: SuccessorContainer + EventInterface>(
 			Some(index) => reserve_with_strategy(obj, context, others, mu_id, &mut Toward { allowed, inner: OnlySuccessor(index, &mut then) }),
 			None => reserve_with_strategy(obj, context, others, mu_id, &mut Toward { allowed, inner: then }),
 		}),
+		Distributing::Code(_) => unreachable!("a conveyor's distribution hook isn't built yet, and ModelDescription refuses one"),
 	}
 }
 
@@ -831,6 +863,7 @@ pub fn choose_exit<T: SuccessorContainer>(obj: &mut T, others: &OtherObjects<'_>
 			Distributing::Weighted(ranked) => pick_exit(ranked, successors, &mut pointer, others, allowed, offer, now),
 			_ => pick_exit(&mut RoundRobinStrategy, successors, &mut pointer, others, allowed, offer, now),
 		},
+		Distributing::Code(_) => unreachable!("a cross conveyor's distribution hook isn't built yet, and ModelDescription refuses one"),
 	};
 	*obj.succ_pointer_mut() = pointer;
 	*obj.distribution_mut() = distribution;
@@ -857,7 +890,116 @@ pub fn try_to_move_to_successor<T: SuccessorContainer + EventInterface>(
 		Distributing::ByDestination(_) => with_toward(obj, offered_destination(obj, context), |obj, allowed, then| {
 			try_to_move_to_successor_with_strategy(obj, context, others, &mut Toward { allowed, inner: then })
 		}),
+		Distributing::Code(_) => move_by_code(obj, context, others, None),
 	}
+}
+
+/// Passes on the MU `obj` offers by the object's own strategy, `builtin`, as `try_to_move_to_successor`
+/// and `retry_move_to_successor` do, for a distribution hook that handed the choice back. It never
+/// calls them, so they stay free of recursion and are inlined where every move goes through them.
+fn move_by_builtin(obj: &mut dyn PassesOn, context: &mut EventContext, others: &mut OtherObjects<'_>, retry_from: Option<u32>, builtin: &mut Distributing) -> Result<Option<EventTemplate>, MaterialflowError> {
+	let index = match retry_from {
+		Some(from) => match obj.successors().iter().position(|&succ| succ == from) {
+			Some(index) => Some(index),
+			None => return Ok(None),
+		},
+		None => None,
+	};
+	match builtin {
+		Distributing::RoundRobin => match index {
+			Some(index) => try_to_move_to_successor_with_strategy(obj, context, others, &mut ByCode(OnlySuccessor(index, &mut RoundRobinStrategy))),
+			None => try_to_move_to_successor_with_strategy(obj, context, others, &mut ByCode(RoundRobinStrategy)),
+		},
+		Distributing::Weighted(ranked) => match index {
+			Some(index) => try_to_move_to_successor_with_strategy(obj, context, others, &mut ByCode(OnlySuccessor(index, ranked))),
+			None => try_to_move_to_successor_with_strategy(obj, context, others, &mut ByCode(ranked)),
+		},
+		Distributing::ByDestination(by) => {
+			let destination = offered_destination(obj, context);
+			let ByDestination { then, reaching } = &mut **by;
+			let allowed = reaching.get(usize::from(destination)).and_then(|exits| exits.as_deref());
+			let mut then = match then {
+				Distributing::Weighted(ranked) => Then::Ranked(ranked),
+				_ => Then::RoundRobin,
+			};
+			match index {
+				Some(index) => try_to_move_to_successor_with_strategy(obj, context, others, &mut ByCode(Toward { allowed, inner: OnlySuccessor(index, &mut then) })),
+				None => try_to_move_to_successor_with_strategy(obj, context, others, &mut ByCode(Toward { allowed, inner: then })),
+			}
+		}
+		Distributing::Code(_) => unreachable!("a distribution hook hands back to the object's own strategy, never to code"),
+	}
+}
+
+/// An object that passes MUs on, as one type: the code for a distribution hook is compiled once,
+/// not once for each type of object, which kept the move code on every model's per-event path
+/// from being compiled as it was (spec issue 156).
+pub trait PassesOn: SuccessorContainer + EventInterface {}
+
+impl<T: SuccessorContainer + EventInterface> PassesOn for T {}
+
+/// A strategy used for a distribution hook that handed the choice back, doing exactly what the
+/// strategy inside does. A type of its own, so the move code is compiled apart for it: the copies
+/// on every model's per-event path keep a single caller each, and stay inlined there.
+struct ByCode<S>(S);
+
+impl<S: DistributionStrategy> DistributionStrategy for ByCode<S> {
+	fn order(&self, n: usize, start: usize) -> impl Iterator<Item = usize> {
+		self.0.order(n, start)
+	}
+	fn moved(&mut self, idx: usize, n: usize, pointer: &mut usize) {
+		self.0.moved(idx, n, pointer);
+	}
+	fn answers_retry(&self) -> bool {
+		self.0.answers_retry()
+	}
+}
+
+impl<S: DistributionStrategy> DistributionStrategy for &mut S {
+	fn order(&self, n: usize, start: usize) -> impl Iterator<Item = usize> {
+		(**self).order(n, start)
+	}
+	fn moved(&mut self, idx: usize, n: usize, pointer: &mut usize) {
+		(**self).moved(idx, n, pointer);
+	}
+	fn answers_retry(&self) -> bool {
+		(**self).answers_retry()
+	}
+}
+
+/// Passes on the MU `obj` offers as user code's distribution hook answered (ADR 0029), or asks it,
+/// once per MU. With `retry_from`, it answers that successor's retry. An answer of a successor
+/// offers the MU to it alone, waiting in its line only; hold offers it nowhere; and default hands
+/// the choice to the object's own strategy, as without code.
+#[cold]
+#[inline(never)]
+fn move_by_code(obj: &mut dyn PassesOn, context: &mut EventContext, others: &mut OtherObjects<'_>, retry_from: Option<u32>) -> Result<Option<EventTemplate>, MaterialflowError> {
+	let Some(mu) = obj.offered_mu(context.time).cloned() else {
+		return Ok(None);
+	};
+	let mut distribution = std::mem::take(obj.distribution_mut());
+	let Distributing::Code(coded) = &mut distribution else {
+		unreachable!("only an object with a distribution hook is moved by code")
+	};
+	let result = match coded.decision(mu.id) {
+		Some(crate::hooks::Decision::Successor(to)) => match obj.successors().iter().position(|&succ| succ == to) {
+			Some(exit) if retry_from.is_none_or(|from| from == to) => {
+				try_to_move_to_successor_with_strategy(obj, context, others, &mut OneExit { exit, answering: retry_from.is_some() })
+			}
+			_ => Ok(None),
+		},
+		Some(crate::hooks::Decision::Hold) => Ok(None),
+		Some(crate::hooks::Decision::Default) => move_by_builtin(obj, context, others, retry_from, &mut coded.builtin),
+		None => {
+			if coded.asked != Some(mu.id) {
+				coded.asked = Some(mu.id);
+				context.ask(*obj.get_object_id(), mu, coded.function);
+			}
+			Ok(None)
+		}
+	};
+	*obj.distribution_mut() = distribution;
+	result
 }
 
 

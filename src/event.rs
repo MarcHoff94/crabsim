@@ -36,6 +36,15 @@ pub struct EventContext {
     /// The events the object in hand schedules, in order. The run moves them into its queue
     /// after each event and keeps the memory, so scheduling allocates nothing once it has grown.
     scheduled: Vec<EventTemplate>,
+    /// Which objects have which hooks (ADR 0029), or `None` in a model without user code, which
+    /// then pays one check at each entry and exit.
+    hooks: Option<std::sync::Arc<crate::hooks::HookTable>>,
+    /// The calls of user code noted since the run last made them, first noted first. The run
+    /// makes them right after the event that noted them.
+    calls: std::collections::VecDeque<crate::hooks::HookCall>,
+    /// Whether anything watches MUs move or come into being: recording, or user code. One check
+    /// at each move and creation, the same a run recording nothing always paid.
+    watching: bool,
 }
 
 impl EventContext {
@@ -48,7 +57,119 @@ impl EventContext {
             recording,
             occurrences: Vec::new(),
             scheduled: Vec::new(),
+            hooks: None,
+            calls: std::collections::VecDeque::new(),
+            watching: recording != Recording::NOTHING,
         }
+    }
+
+    /// The same, noting calls of user code by this table of hooks.
+    pub fn with_hooks(mut self, hooks: Option<std::sync::Arc<crate::hooks::HookTable>>) -> EventContext {
+        self.hooks = hooks;
+        self.watching = self.recording != Recording::NOTHING || self.hooks.is_some();
+        self
+    }
+
+    /// Records the MU moving from `from` into `to`, about to enter it, and notes the hooks on exit
+    /// and entry it sets off (ADR 0029). Calls run after the event, so noting the entry before the
+    /// MU is in changes nothing.
+    #[inline(always)]
+    pub fn moved(&mut self, mu: &crate::flows::MoveableUnit, from: u32, to: u32) {
+        if self.watching {
+            self.record(OccurrenceKind::MuMoved { mu_id: mu.id, from, to });
+            if self.hooks.is_some() {
+                self.moved_hooked(mu, from, to);
+            }
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn moved_hooked(&mut self, mu: &crate::flows::MoveableUnit, from: u32, to: u32) {
+        self.left_with_hooks(from, mu, to);
+        if let Some(hook) = self.entry_hook(to) {
+            // The MU as it comes in: reaching its next destination moves its plan on.
+            let mut arrived = mu.clone();
+            if arrived.is_routed() {
+                self.routing.arrive(&mut arrived, to);
+            }
+            self.note_entry(to, &arrived, hook);
+        }
+    }
+
+    /// Records a Source creating the MU, and notes the Source's hook on entry, its MU coming into
+    /// being (ADR 0029).
+    #[inline(always)]
+    pub fn created(&mut self, mu: &crate::flows::MoveableUnit, at: u32, duration: SimTime) {
+        if self.watching {
+            self.record(OccurrenceKind::MuCreated { mu_id: mu.id, at, duration, kind: mu.kind() });
+            if self.hooks.is_some() {
+                self.entered_with_hooks(at, mu);
+            }
+        }
+    }
+
+    /// The object's hook on entry, if it has one.
+    #[inline]
+    pub fn entry_hook(&self, object: u32) -> Option<crate::hooks::Hook> {
+        self.hooks.as_ref().and_then(|table| table.object(object).on_entry)
+    }
+
+    /// Notes the calls of an object's hook on entry for the MU that came in, one for each of its
+    /// trigger points.
+    #[cold]
+    pub fn note_entry(&mut self, object: u32, mu: &crate::flows::MoveableUnit, hook: crate::hooks::Hook) {
+        for at in hook.triggers.points() {
+            self.calls.push_back(crate::hooks::HookCall { function: hook.function, kind: crate::hooks::CallKind::Entry { object, mu: mu.clone(), at } });
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn entered_with_hooks(&mut self, object: u32, mu: &crate::flows::MoveableUnit) {
+        if let Some(hook) = self.entry_hook(object) {
+            self.note_entry(object, mu, hook);
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn left_with_hooks(&mut self, object: u32, mu: &crate::flows::MoveableUnit, to: u32) {
+        if let Some(hook) = self.hooks.as_ref().and_then(|table| table.object(object).on_exit) {
+            self.note_exit(object, mu, to, hook);
+        }
+    }
+
+    fn note_exit(&mut self, object: u32, mu: &crate::flows::MoveableUnit, to: u32, hook: crate::hooks::Hook) {
+        for at in hook.triggers.points() {
+            self.calls.push_back(crate::hooks::HookCall { function: hook.function, kind: crate::hooks::CallKind::Exit { object, mu: mu.clone(), at, to } });
+        }
+    }
+
+    /// Notes a call asking which successor gets the MU that wants to leave `object`.
+    pub fn ask(&mut self, object: u32, mu: crate::flows::MoveableUnit, function: crate::hooks::HookFunction) {
+        self.calls.push_back(crate::hooks::HookCall { function, kind: crate::hooks::CallKind::Distribution { object, mu } });
+    }
+
+    /// Notes any call.
+    pub(crate) fn note(&mut self, call: crate::hooks::HookCall) {
+        self.calls.push_back(call);
+    }
+
+    /// Whether calls of user code are waiting to be made.
+    #[inline]
+    pub fn has_calls(&self) -> bool {
+        !self.calls.is_empty()
+    }
+
+    /// The next call to make, first noted first.
+    pub(crate) fn next_call(&mut self) -> Option<crate::hooks::HookCall> {
+        self.calls.pop_front()
+    }
+
+    /// Drops the calls not made, after a run error.
+    pub(crate) fn drop_calls(&mut self) {
+        self.calls.clear();
     }
 
     /// The same, reading this model's work plans and destinations.
@@ -59,6 +180,7 @@ impl EventContext {
 
     pub fn set_recording(&mut self, recording: Recording) {
         self.recording = recording;
+        self.watching = recording != Recording::NOTHING || self.hooks.is_some();
     }
 
     /// Keeps this occurrence if the run is recording its kind.
@@ -120,7 +242,15 @@ pub enum EventType {
     StopOff,
     /// One of a conveyor's own events, for the plan it was queued in.
     Conveyor(crate::materialflow_objects::conveyor::ConveyorTicket),
+    /// User code answered which successor gets the object's MU (ADR 0029): it tries to pass it on.
+    /// The run hands it over at once, never through the queue.
+    Decided,
+    /// A timer user code started: the run calls `function` with `data`. Queued for no object.
+    Timer { function: u32, data: u32 },
 }
+
+/// The object id a timer is queued for, which no object has.
+pub const NO_OBJECT: u32 = u32::MAX;
 
 /// An event an object wants to happen, `exec_time` from now.
 #[derive(Debug, Clone)]

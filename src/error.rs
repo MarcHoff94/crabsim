@@ -29,6 +29,23 @@ pub enum RunError {
     /// The run was asked to go beyond the latest time an MU can hold as its departure, about
     /// 8,900 years (ADR 0027).
     BeyondTimeLimit { time: SimTime },
+    /// User code failed, or answered something the run can't do (ADR 0029). Boxed, since every
+    /// event returns a `Result` with this in it, and that must stay small.
+    Hook(Box<HookFailure>),
+}
+
+/// Which call of user code failed, when, and why.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HookFailure {
+    pub call: crate::hooks::HookCall,
+    pub time: SimTime,
+    pub message: String,
+}
+
+impl RunError {
+    pub(crate) fn hook(call: &crate::hooks::HookCall, time: SimTime, message: String) -> RunError {
+        RunError::Hook(Box::new(HookFailure { call: call.clone(), time, message }))
+    }
 }
 
 impl fmt::Display for RunError {
@@ -44,6 +61,9 @@ impl fmt::Display for RunError {
             }
             RunError::ZeroTimeLoop { time } => {
                 write!(f, "simulation time is stuck at {:.3}s: events keep happening without it advancing", time.as_secs_f64())
+            }
+            RunError::Hook(failure) => {
+                write!(f, "user code failed at {} in {}: {}", crate::time::format_time_exact(failure.time), crate::hooks::describe(&failure.call), failure.message)
             }
             RunError::BeyondTimeLimit { time } => write!(
                 f,

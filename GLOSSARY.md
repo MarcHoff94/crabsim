@@ -288,7 +288,7 @@ A successor that can receive an MU chooses which MU it wants from its predecesso
 The rule for which MU leaves an object next. By default, the earliest finished MU leaves first, with ties broken by entry order. A Buffer's is **first in, first out**, the default, or **last in, first out**, each among the MUs whose dwelling time is over.
 
 **Distribution strategy**:
-The rule for which successor receives the MU that is leaving, set per Source or Station as its `distribution` (ADR 0016). **Round robin**, the default, offers each MU to the successors in turn. **Weighted** ranks the successors by a weight, such as each one's best route onward to a Drain by process time, and offers the MU to the best one that can take it, those ranking equal taking turns. **By destination** narrows the successors to those from which the MU's next destination can be reached along the connections, and then round robin or weighted chooses among them. An MU with no destination left, or one no successor reaches, is offered to every successor.
+The rule for which successor receives the MU that is leaving, set per Source or Station as its `distribution` (ADR 0016). **Round robin**, the default, offers each MU to the successors in turn. **Weighted** ranks the successors by a weight, such as each one's best route onward to a Drain by process time, and offers the MU to the best one that can take it, those ranking equal taking turns. **By destination** narrows the successors to those from which the MU's next destination can be reached along the connections, and then round robin or weighted chooses among them. An MU with no destination left, or one no successor reaches, is offered to every successor. An object may instead have a distribution hook, user code choosing one successor, holding the MU or leaving the choice to its strategy (ADR 0029).
 
 **Macro**:
 A named list of commands in the command line's language, run as `@name` with arguments for its `$1`, `$2` and so on. Macros live in `macros.json` beside the models, each with its author. An agent's macros last for its work and are then archived, unless the user keeps one.
@@ -412,6 +412,37 @@ _Avoid_: Batch (a batch start is a Station starting work on several MUs at once)
 
 **Recording**:
 Keeping the occurrences of chosen kinds from a simulation run. It is opt-in, and it is the only way to get data per MU.
+
+### User code
+
+**User code**:
+Code a user, or an agent they ask, attaches to a model to decide and act where crabsim's own rules don't reach, such as which successor an MU goes to. It runs inside crabsim's sandbox, sees the run through addresses and changes it only through actions (ADR 0029).
+_Avoid_: Script, plugin, macro (a list of commands that changes a model file)
+
+**Code module**:
+A compiled WebAssembly file in the models folder's `code/` folder, holding functions that hooks name. The user compiles it, from Rust or any language that compiles to WebAssembly, and crabsim reads it and never writes it. Its sources may sit beside it, so people and agents can read what ran.
+_Avoid_: Library, plugin, DLL
+
+**Hook**:
+A point in a simulation run where a function of a code module runs, named on a class or instance with its parameters and inherited as a whole. Every object that holds an MU has three: **on entry**, as an MU comes in; **on exit**, as it leaves; and **distribution**, which chooses the successor. The model has four more: before and after Init, and before and after Reset, around crabsim's own. A hook runs alone, and any hook its actions set off runs after it, at the same time.
+_Avoid_: Callback, event (an engine internal), trigger
+
+**Trigger point**:
+Where along an MU a hook runs: its **front**, its **booking point**, the default, or its **rear**, entering or leaving, chosen by flags on the hook. At an object without geometry the three are the start of Receiving, the handover and the MU's rear leaving the conveyor before it, and all three are the same instant between two objects without geometry. A code distribution may be moved to another trigger point than its object's, at the user's own risk.
+
+**Hold**:
+What a distribution hook may answer instead of a successor: the object keeps the MU until code moves it. Its other answers are one connected successor, which the MU then waits for alone, and **default**, which leaves the choice to the object's distribution strategy.
+
+**Action**:
+A change user code asks crabsim to make to the run, such as moving an MU, setting a process time, pausing an object or calling the code again at a later time. crabsim checks it and carries it out with its own code, as if the engine had done it, or refuses it and says why. Code changes nothing in a run any other way.
+_Avoid_: Command (a line in the command language), intervention (a change from outside the run)
+
+**Address**:
+How user code, the command line and `e` name a value, such as `Station 1.process_time`, `self.successors[2]` or `mu.destination`. In user code, reading by address gives a copy at that moment, and writing goes through an action.
+_Avoid_: Path (a conveyor's line)
+
+**Fuel**:
+How much work a call of user code may do, counted in WebAssembly instructions, the same on every machine. A call that runs out ends the run with an error naming its hook, object and MU. A run reports the fuel its code used, apart from its results.
 
 ### Working with agents
 

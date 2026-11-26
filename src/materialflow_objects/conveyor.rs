@@ -630,7 +630,7 @@ impl Conveyor {
 		self.belt_statistics.crossed(context.time.saturating_sub(on.entered));
 		self.taken -= self.along(&on);
 		let from = self.base.object_id;
-		context.record(OccurrenceKind::MuMoved { mu_id: on.mu.id, from, to });
+		context.moved(&on.mu, from, to);
 		log::info!("seq={} MU {} moved from conveyor {} to {}", context.seq, on.mu.id, from, to);
 		let to_belt = others.get(to).as_conveyor().is_some();
 		if to_belt {

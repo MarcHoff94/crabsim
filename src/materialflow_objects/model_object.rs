@@ -135,9 +135,34 @@ impl ModelObject {
     /// and detour (ADR 0026). Every MU enters an object through here. An MU with nowhere to go
     /// costs one comparison.
     #[inline]
+    /// Its hook on entry, if it has one, was noted with the move (`EventContext::moved`).
     pub fn enter(&mut self, mut mu: MoveableUnit, context: &mut EventContext) -> Result<Option<EventTemplate>, MaterialflowError> {
         let arrival = if mu.is_routed() { context.routing.arrive(&mut mu, *self.get_object_id()) } else { Arrival::Unrouted };
         self.process_mu_entrance(mu, arrival, context)
+    }
+
+    /// Takes the MU out of the object for user code, whatever it is doing (ADR 0029), or says why
+    /// it can't.
+    pub(crate) fn take_out(&mut self, mu_id: u32, context: &mut EventContext, others: &mut OtherObjects<'_>) -> Result<MoveableUnit, crate::hooks::Refusal> {
+        match self {
+            ModelObject::Source(source) => source.take_out(mu_id, context, others),
+            ModelObject::Station(station) => station.take_out(mu_id, context, others),
+            ModelObject::MultiStation(station) => station.take_out(mu_id, context, others),
+            ModelObject::Buffer(buffer) => buffer.take_out(mu_id, context, others),
+            ModelObject::Drain(_) => Err(crate::hooks::Refusal::new(format!("object {} is a Drain, which holds no MU", self.get_object_id()))),
+            ModelObject::Conveyor(_) => Err(crate::hooks::Refusal::new(format!("object {} is a conveyor, and crabsim can't take an MU off a conveyor yet", self.get_object_id()))),
+            #[cfg(test)]
+            ModelObject::RecordsThenFails(_) => Err(crate::hooks::Refusal::new("a test object holds no MU")),
+        }
+    }
+
+    /// Gives the MU in work at a Station this much work from now, for user code (ADR 0029).
+    pub(crate) fn set_work_time(&mut self, mu_id: u32, work: SimTime, context: &mut EventContext) -> Result<(), crate::hooks::Refusal> {
+        match self {
+            ModelObject::Station(station) => station.set_work_time(mu_id, work, context),
+            ModelObject::MultiStation(station) => station.set_work_time(mu_id, work, context),
+            _ => Err(crate::hooks::Refusal::new(format!("object {} isn't a Station, so it works on no MU", self.get_object_id()))),
+        }
     }
 
     /// Whether it asks which MU it is offered before taking one: an object whose geometry counts.

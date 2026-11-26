@@ -123,25 +123,14 @@ impl SingleStation {
 				if let Some(mu_id) = self.content.as_ref().map(|mu| mu.id) {
 					context.record(OccurrenceKind::WorkFinished { mu_id, at: self.base.object_id });
 				}
-				match try_to_move_to_successor(self, context, others).map_err(|_| RunTimeError {})? {
-					Some(entered) => {
-						self.entrancelocked = false;
-						self.set_state(ProcessState::Idle, context);
-						// The retries to those waiting go first, then the successor's own event.
-						self.notify_blocked_predecessors(context).map_err(|_| RunTimeError {})?;
-						context.schedule(entered);
-					}
-					None if self.content.is_none() => {
-						self.entrancelocked = false;
-						self.set_state(ProcessState::Idle, context);
-						self.notify_blocked_predecessors(context).map_err(|_| RunTimeError {})?;
-					}
-					None => {
-						self.set_state(ProcessState::Blocked, context);
-						self.entrancelocked = true;
-					}
+				self.pass_on(context, others)
+			}
+			// User code answered where its finished MU goes (ADR 0029).
+			EventType::Decided => {
+				if self.is_interrupted() || !matches!(self.finish, Finish::ReadySince(_)) {
+					return Ok(());
 				}
-				Ok(())
+				self.pass_on(context, others)
 			}
 			&EventType::BlockedRetry { from } => {
 				// An empty station can still get a retry already queued when its MU left. It
@@ -171,6 +160,7 @@ impl SingleStation {
 						self.set_state(ProcessState::Idle, context);
 						self.notify_blocked_predecessors(context).map_err(|_| RunTimeError {})?;
 					}
+					None if self.awaits_code() => {}
 					None => self.set_state(ProcessState::Blocked, context),
 				}
 				Ok(())
@@ -178,14 +168,80 @@ impl SingleStation {
 			_ => self.handle_interruption(eventtype, context, others).unwrap_or(Err(RunTimeError {})),
 		}
 	}
+	/// Offers its finished MU to its successors: it moves on, or the Station is blocked.
+	fn pass_on(&mut self, context: &mut EventContext, others: &mut OtherObjects<'_>) -> Result<(), RunTimeError> {
+		match try_to_move_to_successor(self, context, others).map_err(|_| RunTimeError {})? {
+			Some(entered) => {
+				self.entrancelocked = false;
+				self.set_state(ProcessState::Idle, context);
+				// The retries to those waiting go first, then the successor's own event.
+				self.notify_blocked_predecessors(context).map_err(|_| RunTimeError {})?;
+				context.schedule(entered);
+			}
+			None if self.content.is_none() => {
+				self.entrancelocked = false;
+				self.set_state(ProcessState::Idle, context);
+				self.notify_blocked_predecessors(context).map_err(|_| RunTimeError {})?;
+			}
+			// User code is asked where it goes, and answers at this instant (ADR 0029).
+			None if self.awaits_code() => {}
+			None => {
+				self.set_state(ProcessState::Blocked, context);
+				self.entrancelocked = true;
+			}
+		}
+		Ok(())
+	}
+	/// Whether user code has yet to answer where its MU goes.
+	fn awaits_code(&self) -> bool {
+		self.distribution.awaits(self.content.as_ref().map(|mu| mu.id))
+	}
+	/// Takes the MU out for user code (ADR 0029), whatever it is doing: work on it stops, and the
+	/// exit queued for it is stale.
+	pub(crate) fn take_out(&mut self, mu_id: u32, context: &mut EventContext, others: &mut OtherObjects<'_>) -> Result<MoveableUnit, crate::hooks::Refusal> {
+		if self.content.as_ref().map(|mu| mu.id) != Some(mu_id) {
+			return Err(crate::hooks::Refusal::new(format!("object {} doesn't hold MU {mu_id}", self.base.object_id)));
+		}
+		let mu = self.content.take().expect("checked above");
+		if matches!(self.finish, Finish::At(_) | Finish::Interrupted(_)) {
+			self.stop_count += 1;
+		}
+		self.finish = Finish::Unknown;
+		for &successor in &self.succ {
+			others.get_mut(successor).relist_blocked(self.base.object_id, None);
+		}
+		self.statistics.count_mu_out();
+		self.entrancelocked = false;
+		self.set_state(ProcessState::Idle, context);
+		retries_for_blocked(&mut self.blockedlist, self.base.object_id, context);
+		self.update_statistics(context.time);
+		Ok(mu)
+	}
+	/// Gives the MU in work this much work left from now, for user code (ADR 0029).
+	pub(crate) fn set_work_time(&mut self, mu_id: u32, work: SimTime, context: &mut EventContext) -> Result<(), crate::hooks::Refusal> {
+		if self.content.as_ref().map(|mu| mu.id) != Some(mu_id) {
+			return Err(crate::hooks::Refusal::new(format!("object {} doesn't hold MU {mu_id}", self.base.object_id)));
+		}
+		match self.finish {
+			Finish::At(_) => {
+				self.stop_count += 1;
+				let exit = self.start_work(mu_id, work, context);
+				context.schedule(exit);
+				Ok(())
+			}
+			Finish::Interrupted(_) => {
+				self.finish = Finish::Interrupted(work);
+				Ok(())
+			}
+			_ => Err(crate::hooks::Refusal::new(format!("MU {mu_id} isn't in work at object {}", self.base.object_id))),
+		}
+	}
 	/// The first interruption of a stop freezes the work, so time spent stopped counts once
 	/// however many overlap.
 	fn freeze_work(&mut self, context: &mut EventContext) {
-		if matches!(self.state, ProcessState::Processing) {
-			let completion = match self.finish {
-				Finish::At(completion) => completion,
-				_ => SimTime::ZERO,
-			};
+		// Only work in progress freezes: a finished MU whose successor user code is choosing has
+		// none.
+		if let (ProcessState::Processing, Finish::At(completion)) = (&self.state, self.finish) {
 			self.finish = Finish::Interrupted(completion.saturating_sub(context.time));
 			self.stop_count += 1;
 		}
@@ -220,6 +276,7 @@ impl SingleStation {
 					self.set_state(ProcessState::Idle, context);
 					let _ = self.notify_blocked_predecessors(context);
 				}
+				None if self.awaits_code() => {}
 				None => self.set_state(ProcessState::Blocked, context),
 			}
 		} else {

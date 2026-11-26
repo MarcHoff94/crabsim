@@ -101,6 +101,9 @@ pub struct ModelDescription {
     plans: Vec<Vec<PlanStep>>,
     /// The objects each destination stands for, by `DestinationId` (ADR 0025).
     destinations: Vec<Vec<u32>>,
+    /// User code (ADR 0029), which every run gets a copy of, and which objects have which hooks.
+    hooks: Option<Box<dyn crate::hooks::Hooks>>,
+    hook_table: crate::hooks::HookTable,
 }
 
 impl Default for ModelDescription {
@@ -113,6 +116,8 @@ impl Default for ModelDescription {
             mu_kinds: vec![MuKind::default()],
             plans: vec![Vec::new()],
             destinations: Vec::new(),
+            hooks: None,
+            hook_table: crate::hooks::HookTable::default(),
         }
     }
 }
@@ -488,7 +493,34 @@ impl ModelDescription {
                 }
             }
         }
-        SimulationRun::new(objects, seed, self.streams.clone(), self.distributions.clone(), std::sync::Arc::new(routing))
+        let mut run = SimulationRun::new(objects, seed, self.streams.clone(), self.distributions.clone(), std::sync::Arc::new(routing));
+        if !self.hook_table.is_empty() {
+            let hooks = self.hooks.clone().expect("a model with hooks has user code: set it with set_hooks");
+            run.attach_hooks(self.hook_table.clone(), hooks);
+        }
+        run
+    }
+
+    /// Gives the model user code (ADR 0029), which the hooks set on objects and on the model call.
+    /// Every run built gets its own copy.
+    pub fn set_hooks(&mut self, hooks: Box<dyn crate::hooks::Hooks>) {
+        self.hooks = Some(hooks);
+    }
+
+    /// Sets the object's hooks, replacing any it had. A Drain has only a hook on entry, and
+    /// conveyors have none until spec issue 156's PR 1b.
+    pub fn set_object_hooks(&mut self, id: u32, hooks: crate::hooks::ObjectHooks) {
+        match self.objects.get(id as usize) {
+            Some(ModelObject::Drain(_)) if hooks.on_exit.is_some() || hooks.distribution.is_some() => panic!("a Drain has only a hook on entry"),
+            Some(ModelObject::Conveyor(_)) if hooks != crate::hooks::ObjectHooks::default() => panic!("a conveyor's hooks aren't built yet"),
+            Some(_) => self.hook_table.set_object(id, hooks),
+            None => panic!("object {id} is not in the model"),
+        }
+    }
+
+    /// Sets the model's hook at a moment of a run's life.
+    pub fn set_lifecycle_hook(&mut self, moment: crate::hooks::Lifecycle, function: Option<crate::hooks::HookFunction>) {
+        self.hook_table.set_lifecycle(moment, function);
     }
 
     /// Sets how the object picks the successor for its MU (ADR 0016). Round robin unless set.

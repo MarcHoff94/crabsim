@@ -145,6 +145,9 @@ impl Buffer {
             // earlier MU and keeps that place, so there is nothing to try.
             EventType::MUExit(_) if self.blocked => Ok(()),
             EventType::MUExit(_) => self.pass_on(context, others, None),
+            // User code answered where its offered MU goes (ADR 0029).
+            EventType::Decided if interrupted => Ok(()),
+            EventType::Decided => self.pass_on(context, others, None),
             // Only a Buffer that was refused is waiting. A retry can also arrive after its MU
             // went elsewhere, and then an MU that became ready since must take its own turn.
             EventType::BlockedRetry { .. } if !self.blocked => Ok(()),
@@ -173,7 +176,10 @@ impl Buffer {
             }
             .map_err(|_| RunTimeError {})?;
             if self.content.len() == held {
-                self.set_blocked(true, context);
+                // User code is asked where it goes, and answers at this instant (ADR 0029).
+                if !(self.distribution.is_code() && self.distribution.awaits(self.offered(context.time).map(|at| self.content[at].mu.id))) {
+                    self.set_blocked(true, context);
+                }
                 break;
             }
             moved = true;
@@ -219,6 +225,29 @@ impl Buffer {
         if let Some((held, time)) = self.statistics.observe_stretch(now, state, self.content.len() as u64) {
             self.fill.add(held, time);
         }
+    }
+
+    /// Takes the MU out for user code (ADR 0029), wherever it is in the Buffer.
+    pub(crate) fn take_out(&mut self, mu_id: u32, context: &mut EventContext, others: &mut OtherObjects<'_>) -> Result<MoveableUnit, crate::hooks::Refusal> {
+        let Some(at) = self.content.iter().position(|held| held.mu.id == mu_id) else {
+            return Err(crate::hooks::Refusal::new(format!("object {} doesn't hold MU {mu_id}", self.base.object_id)));
+        };
+        let offered = self.offered(context.time);
+        let mu = self.content.remove(at).expect("found above").mu;
+        self.statistics.count_mu_out();
+        if self.blocked && offered == Some(at) {
+            // The MU it waited in line with has gone: it waits on by the next, if one may leave.
+            let next = self.offered_since(context.time);
+            for &successor in &self.succ {
+                others.get_mut(successor).relist_blocked(self.base.object_id, next);
+            }
+            if next.is_none() {
+                self.set_blocked(false, context);
+            }
+        }
+        retries_for_blocked(&mut self.blockedlist, self.base.object_id, context);
+        self.update_statistics(context.time);
+        Ok(mu)
     }
 
     /// About how much memory its MUs take, for a checkpoint holding them.

@@ -28,7 +28,7 @@ impl Source {
 		if self.content.is_none() {
 			let next_mu_event = self.create_mu(context).map_err(|_| RunTimeError {})?;
 			context.schedule(next_mu_event);
-		} else if moved.is_none() {
+		} else if moved.is_none() && !self.distribution.awaits(self.content.as_ref().map(|mu| mu.id)) {
 			self.become_blocked(context);
 		}
 		if let Some(entered) = moved {
@@ -102,13 +102,41 @@ impl Source {
 		self.content = Some(mu);
 		self.statistics.count_mu_in();
 		log::info!("Source {} created MU {}", self.base.object_id, mu_id);
-		context.record(OccurrenceKind::MuCreated { mu_id, at: self.base.object_id, duration: self.proc_time, kind: self.mu_kind });
+		// Its MU coming into being is its entry (ADR 0029).
+		if let Some(mu) = &self.content {
+			context.created(mu, self.base.object_id, self.proc_time);
+		}
 		if self.state == ProcessState::Blocked {
 			context.record(OccurrenceKind::Unblocked { object_id: self.base.object_id });
 		}
 		self.state = ProcessState::Processing;
 		self.completion_time = Some(context.time + self.proc_time);
 		Ok(self.exit_event(mu_id, self.proc_time))
+	}
+	/// Takes the MU out for user code (ADR 0029). Taken during its interval, the next MU comes when
+	/// the interval ends, as if this one had left then. Taken once ready, the next interval starts
+	/// now, as when an MU leaves.
+	pub(crate) fn take_out(&mut self, mu_id: u32, context: &mut EventContext, others: &mut OtherObjects<'_>) -> Result<MoveableUnit, crate::hooks::Refusal> {
+		if self.content.as_ref().map(|mu| mu.id) != Some(mu_id) {
+			return Err(crate::hooks::Refusal::new(format!("object {} doesn't hold MU {mu_id}", self.base.object_id)));
+		}
+		let mut mu = self.content.take().expect("checked above");
+		mu.set_left_source(context.time);
+		self.statistics.count_mu_out();
+		let in_interval = self.frozen.is_some() || self.completion_time.is_some_and(|completion| completion > context.time);
+		if !in_interval {
+			for &successor in &self.succ {
+				others.get_mut(successor).relist_blocked(self.base.object_id, None);
+			}
+			if let Ok(next) = self.create_mu(context) {
+				context.schedule(next);
+				if self.interruptions.is_interrupted() {
+					self.stop_began(context);
+				}
+			}
+		}
+		self.update_statistics(context.time);
+		Ok(mu)
 	}
 	fn handle_event(
 		&mut self,
@@ -120,6 +148,9 @@ impl Source {
 			// An exit queued before an interruption froze the interval is stale.
 			&EventType::MUExit(ticket) if self.interruptions.is_interrupted() || ticket.stop_count != self.stop_count => Ok(()),
 			&EventType::MUExit(_) => handle_source_mu_exit(self, context, others),
+			// User code answered where its MU goes (ADR 0029).
+			EventType::Decided if self.interruptions.is_interrupted() || self.content.is_none() => Ok(()),
+			EventType::Decided => self.pass_on(context, others),
 			&EventType::BlockedRetry { from } => {
 				// Interrupted while its MU waits, it keeps its place in the line, as if refused
 				// (spec issue 122).
@@ -316,9 +347,9 @@ impl Interruptible for Source {
 	fn stop_ended(&mut self, context: &mut EventContext, others: &mut OtherObjects<'_>) -> Result<(), RunTimeError> {
 		if let Some(left) = self.frozen.take() {
 			self.completion_time = Some(context.time + left);
-			if let Some(mu_id) = self.content.as_ref().map(|mu| mu.id) {
-				context.schedule(self.exit_event(mu_id, left));
-			}
+			// Its MU may have been taken by user code meanwhile: the interval still ends then.
+			let mu_id = self.content.as_ref().map_or(0, |mu| mu.id);
+			context.schedule(self.exit_event(mu_id, left));
 		} else if self.content.is_some() {
 			self.pass_on(context, others)?;
 		}

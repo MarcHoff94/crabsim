@@ -236,6 +236,9 @@ impl MultiStation {
 				}
 				self.pass_on(context, others, None)
 			}
+			// User code answered where a finished MU goes (ADR 0029).
+			EventType::Decided if self.is_interrupted() => Ok(()),
+			EventType::Decided => self.pass_on(context, others, None),
 			EventType::BlockedRetry { from } => {
 				if !self.waiting {
 					return Ok(());
@@ -271,7 +274,9 @@ impl MultiStation {
 			}
 			.map_err(|_| RunTimeError {})?;
 			if self.places.len() == held {
-				refused = true;
+				// User code is asked where it goes, and answers at this instant (ADR 0029): the
+				// Station stays as it was until then.
+				refused = !(self.distribution.is_code() && self.distribution.awaits(self.offered().map(|at| self.places[at].mu.id))) || self.waiting;
 				break;
 			}
 			moved = true;
@@ -289,6 +294,52 @@ impl MultiStation {
 			if self.is_entrance_allowed() {
 				retries_for_blocked(&mut self.blockedlist, self.base.object_id, context);
 			}
+		}
+		Ok(())
+	}
+
+	/// Takes the MU out for user code (ADR 0029), whatever it is doing.
+	pub(crate) fn take_out(&mut self, mu_id: u32, context: &mut EventContext, others: &mut OtherObjects<'_>) -> Result<MoveableUnit, crate::hooks::Refusal> {
+		let Some(at) = self.places.iter().position(|place| place.mu.id == mu_id) else {
+			return Err(crate::hooks::Refusal::new(format!("object {} doesn't hold MU {mu_id}", self.base.object_id)));
+		};
+		let offered = self.offered();
+		let was_blocked = self.process_state() == ProcessState::Blocked;
+		let mu = self.places.remove(at).mu;
+		self.statistics.count_mu_out();
+		if self.waiting && offered == Some(at) {
+			// The MU it waited in line with has gone: it waits on by the next finished one, if any.
+			let next = self.offered_since(context.time);
+			for &successor in &self.succ {
+				others.get_mut(successor).relist_blocked(self.base.object_id, next);
+			}
+			self.waiting = next.is_some();
+		}
+		if self.places.is_empty() {
+			self.batch_closed = false;
+		}
+		self.report_blocking(was_blocked, context);
+		if self.is_entrance_allowed() {
+			retries_for_blocked(&mut self.blockedlist, self.base.object_id, context);
+		}
+		self.update_statistics(context.time);
+		Ok(mu)
+	}
+
+	/// Gives the MU this much work from now, or when its batch starts, for user code (ADR 0029).
+	pub(crate) fn set_work_time(&mut self, mu_id: u32, work: SimTime, context: &mut EventContext) -> Result<(), crate::hooks::Refusal> {
+		let Some(at) = self.places.iter().position(|place| place.mu.id == mu_id) else {
+			return Err(crate::hooks::Refusal::new(format!("object {} doesn't hold MU {mu_id}", self.base.object_id)));
+		};
+		match self.places[at].work {
+			Work::At(_) => {
+				self.places[at].step_time = Some(work);
+				let exit = self.start_work(at, context);
+				context.schedule(exit);
+			}
+			Work::Interrupted(_) => self.places[at].work = Work::Interrupted(work),
+			Work::Waiting => self.places[at].step_time = Some(work),
+			Work::ReadySince(_) => return Err(crate::hooks::Refusal::new(format!("MU {mu_id} isn't in work at object {}", self.base.object_id))),
 		}
 		Ok(())
 	}

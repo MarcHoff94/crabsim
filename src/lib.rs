@@ -4,6 +4,7 @@ pub mod demo;
 pub mod distribution;
 pub mod error;
 pub mod event;
+pub mod hooks;
 pub mod live_session;
 pub mod materialflow_objects;
 pub mod model;
@@ -19,7 +20,7 @@ pub use crate::materialflow_objects::flows; // keep single module re-export
 pub use crate::materialflow_objects::flows::{BaseObject, DestinationId, FailureProfile, MoveableUnit, MuKindId, ProcessState, TimeBasis, NO_DESTINATION};
 pub use crate::routing::{Arrival, PlanCounts, PlanStep, Routing};
 
-pub use crate::error::{AdvanceFailure, InitError, MaterialflowError, RunError, RunTimeError};
+pub use crate::error::{AdvanceFailure, HookFailure, InitError, MaterialflowError, RunError, RunTimeError};
 pub use crate::event::{EventContext, EventTemplate, EventType, ExitTicket};
 pub use crate::live_session::{
     Clock, LiveSession, SessionOutput, SessionError, SessionSettings, SessionStatus, TimeMode, WallClock,
@@ -29,6 +30,7 @@ pub use crate::materialflow_objects::{Buffer, CrossStatistics, Drain, ExitStrate
 pub use crate::model::{Dimensions, ModelDescription, MuKind, Position};
 pub use crate::picture::{ObjectPicture, Picture};
 pub use crate::report::{Capacity, ActiveInterruption, ObjectKind, ObjectState, Occurrence, OccurrenceKind, OccurrenceType, Recording, RunState, Interruption};
-pub use crate::simulation_run::{BoundedAdvance, SimulationRun, ZERO_TIME_EVENT_LIMIT};
+pub use crate::simulation_run::{BoundedAdvance, HookRun, SimulationRun, ZERO_TIME_EVENT_LIMIT};
+pub use crate::hooks::{CallKind, Decision, Hook, HookCall, HookError, HookFunction, Hooks, Lifecycle, ObjectHooks, Refusal, TriggerPoint, Triggers};
 pub use crate::statistics::{BeltStatistics, DrainStatistics, FillStatistics, Histogram, MeasuringPeriods, ObjectStatistics, PeriodFigures, Spread, HISTOGRAM_BARS};
 pub use crate::time::SimTime;

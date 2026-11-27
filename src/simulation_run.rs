@@ -100,6 +100,7 @@ impl SimulationRun {
         };
         run.route_by_destination();
         run.rank_successors();
+        run.context = run.default_context();
         run
     }
 
@@ -115,8 +116,20 @@ impl SimulationRun {
             }
         }
         self.hook_table = Some(Arc::new(table));
-        self.context = self.new_context(1);
+        self.context = self.default_context();
         self.hooks = Some(hooks);
+    }
+
+    /// A context for a run in its default state: new MU ids come after the highest starting MU's,
+    /// and it knows where each starting MU is.
+    fn default_context(&self) -> EventContext {
+        let starting: Vec<(u32, u32)> = self.state().objects.iter().flat_map(|o| o.contents.iter().map(move |&mu| (mu, o.id))).collect();
+        let highest_starting_mu = starting.iter().map(|&(mu, _)| mu).max().unwrap_or(0);
+        let mut context = self.new_context(highest_starting_mu + 1);
+        for (mu, object) in starting {
+            context.starts_at(mu, object);
+        }
+        context
     }
 
     /// A context for events from now on, handing out MU ids from `first_mu_id`.
@@ -244,8 +257,7 @@ impl SimulationRun {
         if let Some(error) = self.hook_error.take() {
             return Err(error);
         }
-        let highest_starting_mu = self.state().objects.iter().flat_map(|o| o.contents.clone()).max().unwrap_or(0);
-        self.context = self.new_context(highest_starting_mu + 1);
+        self.context = self.default_context();
         self.context.time = SimTime::ZERO;
         self.context.record(OccurrenceKind::RunInitialised);
         self.lifecycle(Lifecycle::BeforeInit)?;
@@ -374,6 +386,12 @@ impl SimulationRun {
         self.context.return_scheduled(scheduled);
     }
 
+    /// The object holding the MU, if it is in the run: where it was made, moved last, or held from
+    /// Init. A table every move writes keeps it (`MuLocations`), so this costs no search.
+    pub fn location_of(&self, mu: u32) -> Option<u32> {
+        self.context.location_of(mu)
+    }
+
     /// Processes the next event, if there is one.
     pub fn step(&mut self) -> Result<Vec<Occurrence>, AdvanceFailure> {
         let outcome = self.require_initialised().and_then(|()| self.process_next());
@@ -460,7 +478,7 @@ impl SimulationRun {
         self.statistics_since = SimTime::ZERO;
         self.periods = None;
         self.period_end = SimTime::MAX;
-        self.context = self.new_context(1);
+        self.context = self.default_context();
         self.rank_successors();
         if let Some(hooks) = &mut self.hooks {
             hooks.clear();
@@ -668,12 +686,22 @@ impl HookRun<'_> {
         if id < self.object_count() { Ok(()) } else { Err(Refusal::new(format!("object {id} is not in the model"))) }
     }
 
+    /// The object holding the MU, if it is in the run.
+    pub fn location(&self, mu: u32) -> Option<u32> {
+        self.run.location_of(mu)
+    }
+
+    /// The object holding the MU, or why there is none.
+    fn holder(&self, mu: u32) -> Result<u32, Refusal> {
+        self.location(mu).ok_or_else(|| Refusal::new(format!("MU {mu} isn't in the run")))
+    }
+
     /// Moves the MU from the object holding it into another that takes it now, connected or not,
     /// whatever the MU is doing: work on it stops. Its old object's hook on exit and its new
     /// object's hook on entry run after this call.
-    pub fn move_mu(&mut self, mu: u32, from: u32, to: u32) -> Result<(), Refusal> {
+    pub fn move_mu(&mut self, mu: u32, to: u32) -> Result<(), Refusal> {
         self.allow(true)?;
-        self.exists(from)?;
+        let from = self.holder(mu)?;
         self.exists(to)?;
         if from == to {
             return Err(Refusal::new(format!("MU {mu} would move from object {from} into itself")));
@@ -722,9 +750,9 @@ impl HookRun<'_> {
     /// and within the gap of no other MU. `move_mu` puts it on as an object without geometry would,
     /// its booking point at the start. Its hooks run as for `move_mu`, the conveyor's on entry at
     /// the rear once its rear is on if it hangs behind the start.
-    pub fn place_mu(&mut self, mu: u32, from: u32, to: u32, at: f64, point: crate::hooks::TriggerPoint) -> Result<(), Refusal> {
+    pub fn place_mu(&mut self, mu: u32, to: u32, at: f64, point: crate::hooks::TriggerPoint) -> Result<(), Refusal> {
         self.allow(true)?;
-        self.exists(from)?;
+        let from = self.holder(mu)?;
         self.exists(to)?;
         if from == to {
             return Err(Refusal::new(format!("MU {mu} would move from object {from} into itself")));

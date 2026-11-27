@@ -48,6 +48,8 @@ pub struct EventContext {
     /// Whether anything watches MUs move or come into being: recording, or user code. One check
     /// at each move and creation, the same a run recording nothing always paid.
     watching: bool,
+    /// Where each MU in the run is, written at every move.
+    locations: crate::locations::MuLocations,
 }
 
 impl EventContext {
@@ -64,6 +66,7 @@ impl EventContext {
             calls: std::collections::VecDeque::new(),
             rears: std::collections::VecDeque::new(),
             watching: recording != Recording::NOTHING,
+            locations: crate::locations::MuLocations::new(first_mu_id),
         }
     }
 
@@ -79,6 +82,7 @@ impl EventContext {
     /// MU is in changes nothing.
     #[inline(always)]
     pub fn moved(&mut self, mu: &crate::flows::MoveableUnit, from: u32, to: u32) {
+        self.locations.set(mu.id, to);
         if self.watching {
             self.record(OccurrenceKind::MuMoved { mu_id: mu.id, from, to });
             if self.hooks.is_some() {
@@ -90,6 +94,7 @@ impl EventContext {
     /// The same for a move user code made: the MU leaves its object whole at once, whatever
     /// geometry that object has.
     pub(crate) fn moved_by_code(&mut self, mu: &crate::flows::MoveableUnit, from: u32, to: u32) {
+        self.locations.set(mu.id, to);
         self.record(OccurrenceKind::MuMoved { mu_id: mu.id, from, to });
         if self.hooks.is_some() {
             self.moved_hooked(mu, from, to, true);
@@ -143,6 +148,7 @@ impl EventContext {
     /// being (ADR 0029).
     #[inline(always)]
     pub fn created(&mut self, mu: &crate::flows::MoveableUnit, at: u32, duration: SimTime) {
+        self.locations.set(mu.id, at);
         if self.watching {
             self.record(OccurrenceKind::MuCreated { mu_id: mu.id, at, duration, kind: mu.kind() });
             if self.hooks.is_some() {
@@ -157,6 +163,22 @@ impl EventContext {
         if let Some(table) = self.hooks.clone() {
             self.note_entry(&table, object, mu, crate::hooks::ALL_POINTS, 0);
         }
+    }
+
+    /// The MU has left the run, into a Drain.
+    #[inline]
+    pub fn left_run(&mut self, mu: u32) {
+        self.locations.gone(mu);
+    }
+
+    /// The object holding the MU, if it is in the run.
+    pub fn location_of(&self, mu: u32) -> Option<u32> {
+        self.locations.of(mu)
+    }
+
+    /// A starting MU is at `object`, from Init.
+    pub(crate) fn starts_at(&mut self, mu: u32, object: u32) {
+        self.locations.set(mu, object);
     }
 
     /// Whether the run has user code, which a conveyor asks before doing anything for its hooks.

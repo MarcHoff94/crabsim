@@ -6,6 +6,7 @@ pub mod error;
 pub mod event;
 pub mod hooks;
 pub mod live_session;
+pub mod locations;
 pub mod materialflow_objects;
 pub mod model;
 pub mod report;

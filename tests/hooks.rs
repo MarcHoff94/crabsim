@@ -152,7 +152,7 @@ fn hold_keeps_the_mu_until_code_moves_it() {
         }
         CallKind::Timer { .. } => {
             let held = run.state(fork).unwrap().contents[0];
-            run.move_mu(held, fork, a).unwrap();
+            run.move_mu(held, a).unwrap();
             Ok(None)
         }
         _ => Ok(None),
@@ -311,7 +311,7 @@ fn code_moves_the_fourth_mu_out_of_a_buffer() {
     model.set_hooks(Box::new(Code::new(move |call, run, _| {
         if call.kind == CallKind::Lifecycle(Lifecycle::AfterInit) {
             let fourth = run.state(buffer).unwrap().contents[3];
-            run.move_mu(fourth, buffer, drain).unwrap();
+            run.move_mu(fourth, drain).unwrap();
         }
         Ok(None)
     })));
@@ -338,7 +338,7 @@ fn moving_an_mu_in_work_stops_its_work_and_frees_the_station() {
             CallKind::Lifecycle(Lifecycle::AfterInit) => run.call_at(secs(4), TIMER, 0).unwrap(),
             CallKind::Timer { .. } => {
                 let in_work = run.state(work).unwrap().contents[0];
-                run.move_mu(in_work, work, aside).unwrap();
+                run.move_mu(in_work, aside).unwrap();
             }
             _ => {}
         }
@@ -366,7 +366,7 @@ fn a_refused_move_leaves_the_mu_where_it_was_and_tells_the_code_why() {
     let Fork { mut model, source, fork, .. } = fork();
     let code = Code::new(move |call, run, _| {
         if let CallKind::Entry { mu, .. } = &call.kind {
-            let refusal = run.move_mu(mu.id, source, fork).unwrap_err();
+            let refusal = run.move_mu(mu.id, fork).unwrap_err();
             return Err(HookError(refusal.0));
         }
         Ok(None)
@@ -457,10 +457,10 @@ fn hooks_moving_an_mu_back_and_forth_end_in_a_zero_time_loop() {
     model.set_starting_mus(here, &[1]);
     model.set_hooks(Box::new(Code::new(move |call, run, _| {
         match &call.kind {
-            CallKind::Lifecycle(Lifecycle::AfterInit) => run.move_mu(1, here, there).unwrap(),
+            CallKind::Lifecycle(Lifecycle::AfterInit) => run.move_mu(1, there).unwrap(),
             CallKind::Entry { object, mu, .. } => {
                 let other = if *object == here { there } else { here };
-                run.move_mu(mu.id, *object, other).unwrap();
+                run.move_mu(mu.id, other).unwrap();
             }
             _ => {}
         }
@@ -727,7 +727,7 @@ fn hold_keeps_a_conveyors_mu_at_its_end_until_code_moves_it_off() {
             CallKind::Lifecycle(Lifecycle::AfterInit) => run.call_at(secs(30), TIMER, 0).unwrap(),
             CallKind::Timer { .. } => {
                 let held = run.state(fork).unwrap().contents[0];
-                run.move_mu(held, fork, b).unwrap();
+                run.move_mu(held, b).unwrap();
             }
             _ => {}
         }
@@ -852,7 +852,7 @@ fn code_moves_an_mu_onto_a_conveyor_it_isnt_connected_to() {
     model.set_starting_mus(buffer, &[1]);
     let code = Code::new(move |call, run, _| {
         if call.kind == CallKind::Lifecycle(Lifecycle::AfterInit) {
-            run.move_mu(1, buffer, belt).unwrap();
+            run.move_mu(1, belt).unwrap();
         }
         Ok(None)
     });
@@ -897,7 +897,7 @@ fn code_takes_an_mu_off_a_conveyor_and_those_behind_move_up() {
             CallKind::Timer { .. } => {
                 // The MU second from the end, in an accumulated queue.
                 let second = run.state(belt).unwrap().contents[1];
-                run.move_mu(second, belt, aside).unwrap();
+                run.move_mu(second, aside).unwrap();
             }
             _ => {}
         }
@@ -934,7 +934,7 @@ fn an_mu_being_handed_over_cant_be_moved() {
             }
             CallKind::Timer { data } => {
                 let mu = run.state(data).unwrap().contents[0];
-                seen.lock().unwrap().push(run.move_mu(mu, data, drain).unwrap_err().0);
+                seen.lock().unwrap().push(run.move_mu(mu, drain).unwrap_err().0);
             }
             _ => {}
         }
@@ -1028,7 +1028,7 @@ fn an_mu_moved_off_a_conveyor_by_code_leaves_it_whole_at_once() {
             CallKind::Timer { .. } => {
                 // Half way along the conveyor, its rear well inside it.
                 let mu = run.state(fork).unwrap().contents[0];
-                run.move_mu(mu, fork, b).unwrap();
+                run.move_mu(mu, b).unwrap();
             }
             _ => {}
         }
@@ -1084,7 +1084,7 @@ fn code_places_an_mu_on_a_conveyor_with_its_front_booking_point_or_rear_where_it
     use TriggerPoint::{BookingPoint, Front, Rear};
     // The built-in MU is 0.6 m long, its booking point in the middle.
     for (point, front) in [(Front, 2.0), (BookingPoint, 2.3), (Rear, 2.6)] {
-        let (mut run, log, _, belt, drain) = placed_on_a_belt(move |run, buffer, belt| run.place_mu(1, buffer, belt, 2.0, point));
+        let (mut run, log, _, belt, drain) = placed_on_a_belt(move |run, _, belt| run.place_mu(1, belt, 2.0, point));
         let mut occurrences = run.init().unwrap();
         let state = run.state();
         let position = &state.objects[belt as usize].positions[0];
@@ -1102,7 +1102,7 @@ fn code_places_an_mu_on_a_conveyor_with_its_front_booking_point_or_rear_where_it
 #[test]
 fn placing_an_mus_booking_point_at_the_start_is_moving_it_there() {
     let run_for = |placed: bool| {
-        let (mut run, log, _, _, _) = placed_on_a_belt(move |run, buffer, belt| if placed { run.place_mu(1, buffer, belt, 0.0, TriggerPoint::BookingPoint) } else { run.move_mu(1, buffer, belt) });
+        let (mut run, log, _, _, _) = placed_on_a_belt(move |run, _, belt| if placed { run.place_mu(1, belt, 0.0, TriggerPoint::BookingPoint) } else { run.move_mu(1, belt) });
         let mut occurrences = run.init().unwrap();
         occurrences.extend(run.advance_to(secs(10)).unwrap());
         let calls = calls_of(&log);
@@ -1117,7 +1117,7 @@ fn placing_an_mus_booking_point_at_the_start_is_moving_it_there() {
 fn placing_an_mu_where_it_doesnt_fit_is_refused() {
     use TriggerPoint::{BookingPoint, Front, Rear};
     let refusal = |at: f64, point: TriggerPoint| {
-        let (mut run, _, buffer, _, _) = placed_on_a_belt(move |run, buffer, belt| run.place_mu(1, buffer, belt, at, point));
+        let (mut run, _, buffer, _, _) = placed_on_a_belt(move |run, _, belt| run.place_mu(1, belt, at, point));
         let message = match run.init() {
             Err(RunError::Hook(failure)) => failure.message,
             other => panic!("expected a refusal at {at} m by its {point:?}, got {other:?}"),
@@ -1150,7 +1150,7 @@ fn a_placed_mu_keeps_the_gap_to_the_mus_on_the_conveyor() {
                 // The Source's first MU, 1001, entered at 100 s, its front 0.3 m on, and has its
                 // front at 5.3 m now, its rear at 4.7 m.
                 for (at, point) in [(4.6, TriggerPoint::Front), (5.4, TriggerPoint::Rear), (4.5, TriggerPoint::Front)] {
-                    if let Err(refusal) = run.place_mu(1000, held, belt, at, point) {
+                    if let Err(refusal) = run.place_mu(1000, belt, at, point) {
                         seen.lock().unwrap().push(refusal.0);
                     }
                 }
@@ -1193,7 +1193,7 @@ fn only_a_conveyor_has_places_for_an_mu() {
     model.set_hooks(Box::new(Code::new(move |call, run, _| {
         if call.kind == CallKind::Lifecycle(Lifecycle::AfterInit) {
             for to in [station, cross] {
-                seen.lock().unwrap().push(run.place_mu(1000, held, to, 0.3, TriggerPoint::Front).unwrap_err().0);
+                seen.lock().unwrap().push(run.place_mu(1000, to, 0.3, TriggerPoint::Front).unwrap_err().0);
             }
         }
         Ok(None)
@@ -1205,4 +1205,56 @@ fn only_a_conveyor_has_places_for_an_mu() {
         format!("object {station} isn't a conveyor, so an MU has no place on it"),
         format!("object {cross} is a cross conveyor, which takes an MU only at one of its sides: move it there with move_mu"),
     ]);
+}
+
+#[test]
+fn the_run_knows_where_every_mu_is() {
+    let mut model = ModelDescription::new();
+    let source = model.add_source(secs(10));
+    let work = station(&mut model, 3);
+    let belt = model.add_conveyor(5.0, 0.6, 1.0);
+    let store = model.add_buffer(Capacity::Unlimited);
+    let drain = model.add_drain();
+    for (from, to) in [(source, work), (work, belt), (belt, drain)] {
+        model.connect(from, to);
+    }
+    model.set_starting_mus(store, &[50]);
+    let mut run = model.build(0);
+    assert_eq!(run.location_of(50), Some(store), "a starting MU, before Init");
+    run.init().unwrap();
+    // MU 51, the Source's first, is made at 0 s and goes into the Station at 10 s, onto the
+    // conveyor at 13 s, its front 0.3 m on, and into the Drain once its booking point crosses the
+    // end, 4.7 s and 0.3 s later.
+    for (at, expected) in [(5_000, Some(source)), (11_000, Some(work)), (15_000, Some(belt)), (18_100, None)] {
+        run.advance_to(SimTime::from_millis(at)).unwrap();
+        assert_eq!(run.location_of(51), expected, "at {at} ms");
+    }
+    assert_eq!(run.location_of(50), Some(store));
+    assert_eq!(run.location_of(10_000), None, "never made");
+    run.reset();
+    assert_eq!((run.location_of(50), run.location_of(51)), (Some(store), None), "after Reset, as before Init");
+}
+
+#[test]
+fn code_moves_an_mu_by_its_id_alone() {
+    let refusals = Arc::new(Mutex::new(Vec::new()));
+    let seen = refusals.clone();
+    let mut model = ModelDescription::new();
+    let store = model.add_buffer(Capacity::Unlimited);
+    let drain = model.add_drain();
+    model.set_starting_mus(store, &[7]);
+    model.set_hooks(Box::new(Code::new(move |call, run, _| {
+        if call.kind == CallKind::Lifecycle(Lifecycle::AfterInit) {
+            assert_eq!(run.location(7), Some(store));
+            run.move_mu(7, drain).unwrap();
+            seen.lock().unwrap().push(run.move_mu(7, drain).unwrap_err().0);
+            seen.lock().unwrap().push(run.place_mu(8, drain, 0.0, TriggerPoint::Front).unwrap_err().0);
+        }
+        Ok(None)
+    })));
+    model.set_lifecycle_hook(Lifecycle::AfterInit, Some(LIFECYCLE));
+    let mut run = recorded(model.build(0));
+    let occurrences = run.init().unwrap();
+    assert!(occurrences.iter().any(|o| matches!(o.kind, OccurrenceKind::MuLeft { mu_id: 7, .. })));
+    assert_eq!(*refusals.lock().unwrap(), ["MU 7 isn't in the run", "MU 8 isn't in the run"], "gone into the Drain, and never made");
 }

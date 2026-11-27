@@ -17,7 +17,8 @@ crabsim exists to simulate long periods as fast as possible: a year of the demo 
 - **Conveyors** carry MUs along a path of straights, arcs, transition curves and helices, rising or falling, at a speed, holding as many as fit. MUs close up behind one that stops, or the whole conveyor stops with it, and pass smoothly from one conveyor to the next. An object taking an MU from a conveyor is Receiving until the MU is in. A conveyor measures how full it was and how long MUs took to cross it, and can be the likely bottleneck. Only a path's length in 3D changes results, so a curve costs nothing more to run. `models/conveyor-line.json` is an example.
 - **Failures** come from named failure profiles, several on one object if you like, such as "Tool wear" and "Jam", each with its own availability, repair time and random numbers, counting down on simulation time, working time or only while busy. The statistics show what each one cost.
 - **Work plans and destinations** send each MU the way its next step lies, and at a **cross conveyor** MUs go straight through or turn, after a switch time ([#148](https://github.com/MarcHoff94/crabsim/issues/148)). `models/cross-line.json` is an example.
-- **Not yet:** MUs that drive themselves, such as shuttles, accelerating and braking on their trips; and failure profiles that take turns, so that a failure due while another is being repaired waits for it ([#129](https://github.com/MarcHoff94/crabsim/issues/129)). The plan for what comes next is in `docs/agents/handoff.md`.
+- **User code** decides what built-in rules can't, through hooks on every object that holds an MU: as an MU comes in or leaves, at its front, booking point or rear, and choosing where it goes next. Code reads the whole run and acts through crabsim: moving any MU by its id, onto a conveyor at a given place too, setting process times, pausing objects and starting timers. Today the engine runs hooks written in Rust, as a library; hooks compiled to WebAssembly and named in model files come next ([#156](https://github.com/MarcHoff94/crabsim/issues/156)).
+- **Not yet:** user code in model files, the window and the command line (above); MUs that drive themselves, such as shuttles, accelerating and braking on their trips; and failure profiles that take turns, so that a failure due while another is being repaired waits for it ([#129](https://github.com/MarcHoff94/crabsim/issues/129)). The plan for what comes next is in `docs/agents/handoff.md`.
 
 ## Requirements
 
@@ -158,7 +159,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-The same seed always gives the same result. For a run to watch, `LiveSession` takes commands, such as `start`, `halt`, `set_speed`, `go_back`, `step_back` and `pause`, and sends back outputs, which `Picture` turns into what a UI shows. `CLAUDE.md` describes all of it.
+The same seed always gives the same result. `run.location_of(mu)` says which object holds an MU.
+
+User code implements the `Hooks` trait and acts on the run through `HookRun`. A distribution that sends every third MU to the second successor and leaves the rest to the object's own strategy:
+
+```rust
+use crabsim::{CallKind, Decision, HookCall, HookError, HookRun, Hooks};
+
+#[derive(Clone, Default)]
+struct EveryThird {
+    counted: u64,
+}
+
+impl Hooks for EveryThird {
+    fn call(&mut self, call: &HookCall, run: &mut HookRun<'_>) -> Result<Option<Decision>, HookError> {
+        let CallKind::Distribution { object, .. } = call.kind else { return Ok(None) };
+        self.counted += 1;
+        if self.counted % 3 != 0 {
+            return Ok(Some(Decision::Default));
+        }
+        let second = run.state(object).and_then(|state| state.successors.get(1).copied());
+        Ok(Some(second.map_or(Decision::Default, Decision::Successor)))
+    }
+    fn clear(&mut self) {
+        self.counted = 0;
+    }
+    fn clone_hooks(&self) -> Box<dyn Hooks> {
+        Box::new(self.clone())
+    }
+}
+```
+
+On a model, before building its runs, `model.set_hooks(Box::new(EveryThird::default()))` and `model.set_object_hooks(fork, ObjectHooks { distribution: Some(1), ..ObjectHooks::default() })`, where 1 is the number the code is called with. For a run to watch, `LiveSession` takes commands, such as `start`, `halt`, `set_speed`, `go_back`, `step_back` and `pause`, and sends back outputs, which `Picture` turns into what a UI shows. `CLAUDE.md` describes all of it.
 
 ## Project layout
 
@@ -168,7 +200,8 @@ The same seed always gives the same result. For a run to watch, `LiveSession` ta
   - **`live_session.rs`:** plays a run on a clock.
   - **`picture.rs`:** what a UI shows.
   - **`statistics.rs`:** statistics.
-  - **`materialflow_objects/`:** Sources, Stations, Buffers, Drains and Conveyors.
+  - **`hooks.rs`:** user code's hooks, and **`locations.rs`** where each MU is.
+  - **`materialflow_objects/`:** Sources, Stations, Buffers, Drains, Conveyors and cross conveyors.
 - `model/` reads, checks and saves model files, and works out conveyors' paths (`model/src/path.rs`). `models/` holds the example models and the format's schema.
 - `catalogue/` is the operation catalogue: every capability as an operation with typed input and output, which the front-ends below all use.
 - `cli/` is the command line, `mcp/` the MCP server for agents, and `ui/` the window, a Bevy application.
@@ -181,4 +214,5 @@ The same seed always gives the same result. For a run to watch, `LiveSession` ta
 - **`CLAUDE.md`:** how the code is built and the conventions to keep.
 - **`docs/agents/handoff.md`:** the agreed design, including what isn't built yet, and the order of work.
 - **`docs/design/first-profile.md`:** the current performance baseline.
+- **`docs/design/performance-trade-offs.md`:** every performance trade-off made, what it cost, and the ideas for making crabsim faster.
 - **`docs/design/ui-prototype.md`:** the throwaway prototype that settled the window's technology, on the branch `prototype/ui-bevy`.

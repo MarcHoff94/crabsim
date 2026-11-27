@@ -524,11 +524,11 @@ fn model_order(model_text: &str) -> HashMap<String, usize> {
 /// Refuses an agent a change to a run the user started: agents may read the user's runs, but
 /// only the user may relabel or forget them (ADR 0011).
 fn refuse_users_run(catalogue: &Catalogue, number: i64, run: &str, what: &str) -> Result<(), OperationError> {
-    if catalogue.source() != crate::Source::Mcp {
+    if catalogue.source().is_user() {
         return Ok(());
     }
     let source: Option<String> = catalogue.store()?.connection().query_row("SELECT source FROM runs WHERE number = ?1", [number], |row| row.get(0)).optional()?;
-    if source.as_deref().is_some_and(|source| source != crate::Source::Mcp.name()) {
+    if source.as_deref().is_some_and(|source| source == crate::Source::Cli.name() || source == crate::Source::Ui.name()) {
         return Err(OperationError::invalid_input(format!("`{run}` was started by the user, so only the user can {what} it. Agents may read it")));
     }
     Ok(())
@@ -591,10 +591,18 @@ impl Operation for ForgetRun {
     fn run(catalogue: &Catalogue, input: crate::jobs::RunInput) -> Result<ForgetRunOutput, OperationError> {
         let number = run_number(&input.run)?;
         refuse_users_run(catalogue, number, &input.run, "forget")?;
-        if catalogue.source() == crate::Source::Mcp {
-            let process: Option<Option<String>> = catalogue.store()?.connection().query_row("SELECT process FROM runs WHERE number = ?1", [number], |row| row.get(0)).optional()?;
-            if let Some(process) = process
-                && process.as_deref() != Some(catalogue.process_id())
+        if !catalogue.source().is_user() {
+            // An agent over MCP is its process; one through the CLI is its name, whose runs each
+            // came from a command of its own.
+            let who = catalogue.who()?;
+            let found: Option<(Option<String>, Option<String>)> =
+                catalogue.store()?.connection().query_row("SELECT process, agent FROM runs WHERE number = ?1", [number], |row| Ok((row.get(0)?, row.get(1)?))).optional()?;
+            let own = |(process, agent): &(Option<String>, Option<String>)| match catalogue.source() {
+                crate::Source::CliAgent => agent.as_deref() == Some(who.as_str()),
+                _ => process.as_deref() == Some(catalogue.process_id()),
+            };
+            if let Some(found) = found
+                && !own(&found)
             {
                 return Err(OperationError::invalid_input(format!(
                     "`{}` was started by another agent session, so this one can't forget it: an agent forgets only its own runs. Label it instead, or ask the user",

@@ -44,6 +44,17 @@
       "description": "The model's hooks around crabsim's own Init and Reset, each running user code (ADR 0029).",
       "$ref": "#/$defs/ModelHooksFile"
     },
+    "stages": {
+      "description": "How each stage's checks run (ADR 0030), where they differ from the defaults: verification a day after no warm-up, one deterministic observation; validation a day, ten observations.",
+      "$ref": "#/$defs/StagesFile"
+    },
+    "requests": {
+      "description": "What the user wants from the model, in their own words, each with an agent's restatement and the expectations that check it (ADR 0030).",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/RequestFile"
+      }
+    },
     "expectations": {
       "description": "What the model must achieve: checks crabsim judges on its own after a run (ADR 0030).",
       "type": "array",
@@ -1218,6 +1229,87 @@
         "code"
       ]
     },
+    "StagesFile": {
+      "description": "Each stage's run settings.",
+      "type": "object",
+      "properties": {
+        "verification": {
+          "$ref": "#/$defs/RunSettingsFile"
+        },
+        "validation": {
+          "$ref": "#/$defs/RunSettingsFile"
+        }
+      },
+      "additionalProperties": false
+    },
+    "RunSettingsFile": {
+      "description": "How a stage's checks run, each part left out taking its default.",
+      "type": "object",
+      "properties": {
+        "length": {
+          "description": "How long each observation runs after the warm-up, such as \"1d\" or \"8:00:00\".",
+          "$ref": "#/$defs/Time"
+        },
+        "warm_up": {
+          "description": "Simulated time at the start of each observation that statistics leave out.",
+          "$ref": "#/$defs/Time"
+        },
+        "observations": {
+          "description": "How many observations, from 1 to 10,000.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 1,
+          "maximum": 10000
+        }
+      },
+      "additionalProperties": false
+    },
+    "RequestFile": {
+      "description": "A request: what the user wants from the model.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "description": "Unique among the model's requests, with no spaces, such as `r1`.",
+          "type": "string",
+          "pattern": "^\\S+$"
+        },
+        "words": {
+          "description": "The user's own words, exactly.",
+          "type": "string"
+        },
+        "restatement": {
+          "description": "An agent's restatement in precise terms.",
+          "type": "string"
+        },
+        "expectations": {
+          "description": "The ids of the expectations that check it.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "accepted": {
+          "description": "The user accepted its restatement and expectations, which only the user does. False if left out.",
+          "type": "boolean"
+        },
+        "state": {
+          "description": "`open`, the default, or `built` once whoever builds it says so. Whether it is met is what crabsim's checks say, never written here.",
+          "$ref": "#/$defs/RequestStateFile"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "words"
+      ]
+    },
+    "RequestStateFile": {
+      "type": "string",
+      "enum": [
+        "open",
+        "built"
+      ]
+    },
     "ExpectationFile": {
       "description": "An expectation: a check of the model crabsim judges on its own.",
       "type": "object",
@@ -1242,6 +1334,29 @@
         "source": {
           "description": "Where it comes from: a SysML element, a document or a person.",
           "type": "string"
+        },
+        "state": {
+          "description": "`proposed`, the default, by an agent and not accepted yet; `accepted` by the user, or written by the user, which only the user changes; or `questioned` by an agent, still in force until the user answers.",
+          "$ref": "#/$defs/AgreementFile"
+        },
+        "question": {
+          "description": "Why an agent questions it: only while it is questioned.",
+          "type": "string"
+        },
+        "length": {
+          "description": "How long its check runs after the warm-up, where it differs from its stage's.",
+          "$ref": "#/$defs/Time"
+        },
+        "warm_up": {
+          "description": "Its check's warm-up, where it differs from its stage's.",
+          "$ref": "#/$defs/Time"
+        },
+        "observations": {
+          "description": "Its check's observations, where they differ from its stage's.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 1,
+          "maximum": 10000
         }
       },
       "additionalProperties": false,
@@ -1255,6 +1370,14 @@
       "enum": [
         "verification",
         "validation"
+      ]
+    },
+    "AgreementFile": {
+      "type": "string",
+      "enum": [
+        "proposed",
+        "accepted",
+        "questioned"
       ]
     }
   }

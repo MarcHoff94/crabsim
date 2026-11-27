@@ -701,3 +701,65 @@ pub fn exported(exported: &Value) -> String {
     );
     text
 }
+
+/// The catalogue's operations, a line each: name, effect and the first sentence of what it does.
+pub fn operations(operations: &[crabsim_catalogue::OperationInfo]) -> String {
+    let rows: Vec<Vec<String>> = operations
+        .iter()
+        .map(|operation| {
+            let first = operation.description.split(". ").next().unwrap_or(operation.description).trim_end_matches('.');
+            let effect = serde_json::to_value(operation.effect).ok().as_ref().map(cell).unwrap_or_default().replace('_', " ");
+            let user = if operation.user_only { " (user only)" } else { "" };
+            vec![operation.name.to_string(), format!("{effect}{user}"), format!("{first}.")]
+        })
+        .collect();
+    let mut text = table(&["Operation", "Effect", "What it does"], &rows);
+    text += "\n`crabsim operations <name>` gives one in full, with its input and output schemas, and `crabsim call --models <folder> [--agent <name>] <name> '<json>'` runs it.\n";
+    text
+}
+
+/// Where a model stands, as `get_status` gives it.
+pub fn status(status: &Value) -> String {
+    let mut text = format!("{}: {}\n", cell(&status["path"]), cell(&status["stage"]));
+    for stage in ["verification", "validation"] {
+        text += &format!("  {stage}: {}\n", cell(&status[stage]["summary"]));
+    }
+    let requests: Vec<Vec<String>> = status["requests"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|request| {
+            let accepted = if request["accepted"] == true { "accepted" } else { "not accepted" };
+            let ids: Vec<String> = request["expectations"].as_array().into_iter().flatten().map(cell).collect();
+            let said = match request["restatement"].as_str() {
+                Some(restatement) => format!("\"{}\": {restatement}", cell(&request["words"])),
+                None => format!("\"{}\"", cell(&request["words"])),
+            };
+            vec![cell(&request["id"]), cell(&request["state"]), accepted.to_string(), ids.join(", "), said]
+        })
+        .collect();
+    if !requests.is_empty() {
+        text += "\nRequests\n";
+        text += &table(&["Id", "State", "Agreed", "Expectations", "Words and restatement"], &requests);
+    }
+    let expectations: Vec<Vec<String>> = status["expectations"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|expectation| {
+            let verdict = match (expectation["verdict"].as_str(), expectation["current"] == true) {
+                (None, _) => "unchecked".to_string(),
+                (Some(verdict), true) => verdict.replace('_', " "),
+                (Some(verdict), false) => format!("{} before a change", verdict.replace('_', " ")),
+            };
+            let notes: Vec<String> = [&expectation["question"], &expectation["note"]].into_iter().filter(|value| value.is_string()).map(cell).collect();
+            vec![cell(&expectation["id"]), cell(&expectation["stage"]), cell(&expectation["state"]), verdict, cell(&expectation["found"]), cell(&expectation["text"]), notes.join("; ")]
+        })
+        .collect();
+    if !expectations.is_empty() {
+        text += "\nExpectations\n";
+        text += &table(&["Id", "Stage", "State", "Verdict", "Found", "Expectation", "Notes"], &expectations);
+    }
+    text += &format!("\nNext: {}\n", cell(&status["next"]));
+    text
+}

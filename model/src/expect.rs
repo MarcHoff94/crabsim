@@ -30,16 +30,32 @@ pub struct Expectation {
     pub assumptions: Option<String>,
     /// Where it comes from: a SysML element, a document or a person.
     pub source: Option<String>,
+    /// Where it stands between an agent and the user: proposed, the default, accepted or
+    /// questioned.
+    pub state: crate::Agreement,
+    /// Why an agent questions it, while it is questioned.
+    pub question: Option<String>,
+    /// How its check runs, where it differs from its stage's settings.
+    pub run: crate::RunSettings,
 }
 
 impl Expectation {
     pub fn new(id: impl Into<String>, text: impl Into<String>) -> Expectation {
-        Expectation { id: id.into(), text: text.into(), stage: CheckStage::Verification, assumptions: None, source: None }
+        Expectation {
+            id: id.into(),
+            text: text.into(),
+            stage: CheckStage::Verification,
+            assumptions: None,
+            source: None,
+            state: crate::Agreement::Proposed,
+            question: None,
+            run: crate::RunSettings::default(),
+        }
     }
 }
 
 /// The stage an expectation belongs to (ADR 0030).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, serde::Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum CheckStage {
     /// What was specified, checked in a deterministic run.
@@ -354,6 +370,11 @@ impl Check {
             CheckSubject::Named(name) => Some(name),
             CheckSubject::Model => None,
         }
+    }
+
+    /// The same line about another subject.
+    pub fn with_subject(&self, subject: CheckSubject) -> Check {
+        Check { subject, ..self.clone() }
     }
 
     /// The same line naming `to` where it named `from`, for a rename.

@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 pub const STORE_FILE: &str = "results.sqlite";
 
 /// The tables' version, kept in SQLite's `user_version`. A change to the tables raises it.
-const TABLES_VERSION: i64 = 8;
+const TABLES_VERSION: i64 = 9;
 
 /// The most rows `query_results` returns.
 pub const QUERY_ROW_LIMIT: usize = 1_000;
@@ -45,7 +45,11 @@ CREATE TABLE IF NOT EXISTS runs (
     process TEXT,
     crabsim_build TEXT,
     agent TEXT,
-    deterministic INTEGER NOT NULL DEFAULT 0
+    deterministic INTEGER NOT NULL DEFAULT 0,
+    stage TEXT,
+    check_number INTEGER,
+    checked_change INTEGER,
+    expectations TEXT
 );
 CREATE TABLE IF NOT EXISTS observations (
     run TEXT NOT NULL,
@@ -113,7 +117,7 @@ macro_rules! tables_description {
     () => {
         concat!(
             "Tables: ",
-            "runs(id TEXT such as 'run-3', model_path, model_text: the canonical model file the run used, model_hash: SHA-256 of model_text so equal hashes mean the same model, seed TEXT, length_s, warm_up_s, observations, label, source: 'mcp' or 'cli', crabsim_version, started and finished: UTC ISO 8601, state: queued|running|done|failed|cancelled|interrupted, process: the lock id of the crabsim process that ran it, crabsim_build: the git commit crabsim was built from, agent: such as 'agent-3 (claude-code)' or 'the user', deterministic: 1 for a run without randomness, no object failing). ",
+            "runs(id TEXT such as 'run-3', model_path, model_text: the canonical model file the run used, model_hash: SHA-256 of model_text so equal hashes mean the same model, seed TEXT, length_s, warm_up_s, observations, label, source: 'mcp' or 'cli', crabsim_version, started and finished: UTC ISO 8601, state: queued|running|done|failed|cancelled|interrupted, process: the lock id of the crabsim process that ran it, crabsim_build: the git commit crabsim was built from, agent: such as 'agent-3 (claude-code)' or 'the user', deterministic: 1 for a run without randomness, no object failing, stage: 'verification' or 'validation' for a run checking a stage, NULL for an experiment, check_number: the number of the first run of the check it is part of, one run for each of the stage's settings, checked_change: the number of the newest change in the model file's history it checked, expectations: a JSON list of the ids of the expectations it judged, NULL for all). ",
             "expectation_values(run, observation, expectation: its id, object: the instance, NULL for the model or a class's mean, value REAL: in the figure's own unit, a share 0 to 1, times in seconds, a state 1 when in it and 0 otherwise, NULL where it had none), one row per expectation and subject of an observation that ran to its end, the model's expectations as model_text holds them. ",
             "violations(run, observation, expectation, time_s: simulated seconds since Init, object, mu: the MU's id, value), the first moment each limit with `always` was broken in an observation. ",
             "observations(run, number from 1, seed TEXT: the observation's own seed, events, wall_time_s, error, error_time_s: simulated seconds). ",
@@ -169,6 +173,15 @@ impl Store {
             let has: bool = transaction.query_row("SELECT count(*) FROM pragma_table_info('runs') WHERE name = 'deterministic'", [], |row| row.get(0))?;
             if !has {
                 transaction.execute_batch("ALTER TABLE runs ADD COLUMN deterministic INTEGER NOT NULL DEFAULT 0")?;
+            }
+        }
+        // Versions before 9 had no stages' checks (ADR 0030): their runs were experiments.
+        if (1..=8).contains(&version) {
+            for (column, kind) in [("stage", "TEXT"), ("check_number", "INTEGER"), ("checked_change", "INTEGER"), ("expectations", "TEXT")] {
+                let has: bool = transaction.query_row("SELECT count(*) FROM pragma_table_info('runs') WHERE name = ?1", [column], |row| row.get(0))?;
+                if !has {
+                    transaction.execute_batch(&format!("ALTER TABLE runs ADD COLUMN {column} {kind}"))?;
+                }
             }
         }
         // Version 5 had failure profiles without their time basis and achieved availability.

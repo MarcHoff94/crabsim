@@ -34,8 +34,10 @@ pub(crate) struct Broken {
     pub class_attributes: HashSet<(usize, &'static str)>,
 }
 
-const TOP_LEVEL: [&str; 8] = ["$schema", "format_version", "description", "classes", "instances", "connections", "hooks", "expectations"];
-const EXPECTATION: [&str; 5] = ["id", "text", "stage", "assumptions", "source"];
+const TOP_LEVEL: [&str; 10] = ["$schema", "format_version", "description", "classes", "instances", "connections", "hooks", "stages", "requests", "expectations"];
+const EXPECTATION: [&str; 10] = ["id", "text", "stage", "assumptions", "source", "state", "question", "length", "warm_up", "observations"];
+const REQUEST: [&str; 6] = ["id", "words", "restatement", "expectations", "accepted", "state"];
+const RUN_SETTINGS: [&str; 3] = ["length", "warm_up", "observations"];
 const INSTANCE: [&str; 5] = ["name", "class", "stream", "position", "attributes"];
 const CONNECTION: [&str; 7] = ["from", "to", "exit", "entrance", "description", "from_side", "to_side"];
 const CLASS: [&str; 3] = ["name", "parent", "attributes"];
@@ -184,7 +186,85 @@ impl Reader {
                 Vec::new()
             }
         };
-        Model { schema, description, classes, instances, connections, hooks, expectations }
+        let requests = match fields.get("requests") {
+            None => Vec::new(),
+            Some(Value::Array(requests)) => requests.iter().enumerate().map(|(index, value)| self.request(index, value)).collect(),
+            Some(_) => {
+                self.problem("/requests".into(), None, "`requests` should be a list");
+                Vec::new()
+            }
+        };
+        let mut stages = crate::Stages::default();
+        if let Some(value) = fields.get("stages") {
+            if let Some(fields) = self.object(value, "/stages", None, "`stages`", &["verification", "validation"]) {
+                for stage in [crate::CheckStage::Verification, crate::CheckStage::Validation] {
+                    if let Some(value) = fields.get(stage.name()) {
+                        let pointer = format!("/stages/{}", stage.name());
+                        if let Some(settings) = self.object(value, &pointer, None, "a stage's settings", &RUN_SETTINGS) {
+                            *stages.of_mut(stage) = self.run_settings(settings, &pointer, None);
+                        }
+                    }
+                }
+            }
+        }
+        Model { schema, description, classes, instances, connections, hooks, expectations, requests, stages }
+    }
+
+    /// How a check runs: its length, warm-up and observations, each optional.
+    fn run_settings(&mut self, fields: &Map<String, Value>, pointer: &str, name: Option<&str>) -> crate::RunSettings {
+        let mut run = crate::RunSettings::default();
+        if let Some(value) = fields.get("length") {
+            run.length = self.time(value, &format!("{pointer}/length"), name);
+        }
+        if let Some(value) = fields.get("warm_up") {
+            run.warm_up = self.time(value, &format!("{pointer}/warm_up"), name);
+        }
+        if let Some(value) = fields.get("observations") {
+            run.observations = self.count(value, &format!("{pointer}/observations"), name).map(|count| count.min(u64::from(u32::MAX)) as u32);
+        }
+        run
+    }
+
+    /// One request (ADR 0030): the user's words, an agent's restatement and its expectations.
+    fn request(&mut self, index: usize, value: &Value) -> crate::Request {
+        let pointer = format!("/requests/{index}");
+        let mut request = crate::Request::default();
+        let Some(fields) = self.object(value, &pointer, None, "a request", &REQUEST) else {
+            return request;
+        };
+        let id = fields.get("id").and_then(|value| value.as_str()).map(str::to_owned);
+        let name = id.as_deref();
+        if let Some(value) = fields.get("id") {
+            request.id = self.text(value, &format!("{pointer}/id"), name).unwrap_or_default();
+        }
+        if let Some(value) = fields.get("words") {
+            request.words = self.text(value, &format!("{pointer}/words"), name).unwrap_or_default();
+        }
+        request.restatement = fields.get("restatement").and_then(|value| self.text(value, &format!("{pointer}/restatement"), name));
+        match fields.get("expectations") {
+            None => {}
+            Some(Value::Array(ids)) => {
+                for (place, value) in ids.iter().enumerate() {
+                    if let Some(id) = self.text(value, &format!("{pointer}/expectations/{place}"), name) {
+                        request.expectations.push(id);
+                    }
+                }
+            }
+            Some(_) => self.problem(format!("{pointer}/expectations"), name, "`expectations` should be a list of expectations' ids"),
+        }
+        if let Some(value) = fields.get("accepted") {
+            request.accepted = self.yes_or_no(value, &format!("{pointer}/accepted"), name).unwrap_or(false);
+        }
+        match fields.get("state").map(|value| value.as_str()) {
+            None | Some(Some("open")) => {}
+            Some(Some("built")) => request.built = true,
+            Some(_) => self.problem(
+                format!("{pointer}/state"),
+                name,
+                "a request's `state` is `open` or `built`: whether it is met is what crabsim's checks say, not the file",
+            ),
+        }
+        request
     }
 
     /// One expectation (ADR 0030). Its line is checked once the whole model is read, since it
@@ -215,6 +295,14 @@ impl Reader {
         }
         expectation.assumptions = fields.get("assumptions").and_then(|value| self.text(value, &format!("{pointer}/assumptions"), id.as_deref()));
         expectation.source = fields.get("source").and_then(|value| self.text(value, &format!("{pointer}/source"), id.as_deref()));
+        if let Some(value) = fields.get("state") {
+            match value.as_str().and_then(crate::Agreement::named) {
+                Some(state) => expectation.state = state,
+                None => self.problem(format!("{pointer}/state"), id.as_deref(), "`state` is `proposed`, `accepted` or `questioned`"),
+            }
+        }
+        expectation.question = fields.get("question").and_then(|value| self.text(value, &format!("{pointer}/question"), id.as_deref()));
+        expectation.run = self.run_settings(fields, &pointer, id.as_deref());
         expectation
     }
 

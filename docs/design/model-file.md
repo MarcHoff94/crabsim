@@ -31,6 +31,7 @@ A file holds the model only: classes, instances, their attributes, names, positi
 - `connections` is optional, and its order means nothing.
 - `hooks` is optional: the model's hooks around crabsim's own Init and Reset, `before_init`, `after_init`, `before_reset` and `after_reset`, each `{"code": {"function": "<module>.<function>", "with": {…}}}` (ADR 0029, see "User code" below).
 - `expectations` is optional: what the model must achieve, checks crabsim judges on its own after a run (ADR 0030, see "Expectations" below).
+- `requests` and `stages` are optional: what the user asked for, with the expectations that check it, and how each stage's checks run (ADR 0030, see "Requests, agreeing and stages" below).
 
 ## Instances
 
@@ -208,6 +209,26 @@ What a model must achieve, as checks crabsim judges itself after every run (ADR 
 - **Problems** point at the expectation's `id` or `text`: a line that doesn't parse says at which character and what it expected there, and one that doesn't fit the model names what's missing, such as "there is no instance `Press`: `Press` is a class, which takes `every` or `mean` before it". Renaming an instance or a class through `edit_model` renames it in the lines naming it. Removing one an expectation names is refused until the expectation goes too.
 - **Judged outside the run,** from its states: since start and now from the state at its end, `last` from the difference of the statistics at the end and at the stretch's start, where the run stops on its way, and a limit from the extreme the statistics keep (the most MUs held, the longest and shortest lead time). Only an observation that broke a limit runs again, with the same seed, recording MUs coming and going until it finds the moment and the MU that first broke it. A run with no expectations stops nowhere and runs nothing again.
 - **Verdicts** (`crabsim_model::expect::judge`): over an experiment's observations, met when the mean's 95% interval lies wholly on the right side of the value, not met when wholly on the wrong side, and undecided when it straddles it, with about how many observations would decide it. One observation, or a deterministic run, decides by its value, a random run's single observation saying "so far". `=`, `!=` and states are judged observation by observation: met when every one holds, not met when none does, undecided otherwise. A limit is not met if any observation broke it. A figure with no value, such as a mean lead time with no MU in the Drain, or a stretch longer than the run, is an error. `every` takes its worst instance: not met, then error, then undecided, then met.
+
+## Requests, agreeing and stages
+
+What the user agreed with an agent, and how crabsim checks it (ADR 0030, spec issue 162, PR 2):
+
+```json
+"stages": { "verification": { "length": "2d" }, "validation": { "length": "30d", "warm_up": "1d", "observations": 20 } },
+"requests": [
+  { "id": "r1", "words": "the presses must earn their keep", "restatement": "both Presses working at least 60% of the time", "expectations": ["presses-busy"], "accepted": true, "state": "built" }
+],
+"expectations": [
+  { "id": "presses-busy", "text": "every Press.working_share since start >= 60%", "state": "accepted" },
+  { "id": "buffer-limit", "text": "Buffer X.mus always <= 20", "state": "questioned", "question": "Press B is slower than the Source, so the Buffer fills without end", "length": "8:00:00" }
+]
+```
+
+- **An expectation's `state`** is `proposed`, the default and then left out, for one an agent wrote; `accepted`, for one the user accepted or wrote, which only the user changes; or `questioned`, with its `question`, an agent's reason, required then and only then. A questioned expectation is still in force until the user answers it: by accepting it again, changing it, which accepts it, or removing it.
+- **A request** has an `id` (unique, no spaces, `r1`, `r2` and so on from `add_request`), the user's own `words` (required), an agent's `restatement`, the `expectations` that check it by id (each one there, none twice), `accepted` (false by default, left out) and `state`, `open` (the default, left out) or `built`, which whoever builds it sets. Whether it is met is never written here: crabsim works it out from the checks it keeps, `met` when every expectation of it was met in its latest check of the model as it is, `broken` when one wasn't, `built` until then. So a check never changes the model file, its hash, its history or anyone's claim.
+- **`stages`** give `verification` and `validation` each a `length`, `warm_up` and `observations`, every part left out taking its default: a day, no warm-up, one observation for verification, which runs deterministically, and ten for validation, which runs with randomness. An expectation may give its own `length`, `warm_up` and `observations`, which its check runs with instead: a stage is checked with one run for each set of settings its expectations have.
+- **Only the user agrees:** the catalogue refuses an agent anything that accepts an expectation or a request, or changes or removes an accepted one, or changes how an accepted expectation is checked, whichever operation it tries (`edit_model`, `write_model`, `adopt_model`, `delete_model`, `undo_model`, `redo_model`). Renaming what an accepted expectation names keeps it accepted: an instance is the same when it keeps its stream (ADR 0012). An agent may change its own proposals, question an accepted expectation and mark a request built.
 
 ## Names
 

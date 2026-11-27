@@ -184,3 +184,74 @@ fn a_limit_is_judged_from_the_end_of_the_warm_up() {
     assert!(violation.time > HOUR && violation.time < hours(2), "{violation:?}");
     assert_eq!(observe(&model, 1, true, SimTime::ZERO, HOUR)[0].violation, None, "not broken in the first hour");
 }
+
+/// `line` with requests and stages beside its expectations.
+fn agreed(expectations: Value, requests: Value, stages: Value) -> String {
+    let mut model: Value = serde_json::from_str(&line(expectations)).unwrap();
+    model["requests"] = requests;
+    model["stages"] = stages;
+    model.to_string()
+}
+
+#[test]
+fn requests_agreement_and_stage_settings_are_read_and_written_back() {
+    let text = agreed(
+        json!([
+            { "id": "busy", "text": "every Press.working_share since start >= 60%", "state": "accepted" },
+            { "id": "full", "text": "Buffer.mus always <= 20", "state": "questioned", "question": "Press B is slower than the Source, so the Buffer fills without end", "length": "8:00:00" },
+            { "id": "rate", "text": "model.throughput_per_hour since start >= 280/h", "stage": "validation", "observations": 30 }
+        ]),
+        json!([{ "id": "r1", "words": "the presses must earn their keep", "restatement": "both Presses working at least 60% of the time, and the Buffer never over 20", "expectations": ["busy", "full"], "accepted": true, "state": "built" }]),
+        json!({ "verification": { "length": "2d" }, "validation": { "length": "30d", "warm_up": "1d", "observations": 20 } }),
+    );
+    let model = load(&text).unwrap();
+    let request = &model.requests[0];
+    assert_eq!((request.id.as_str(), request.accepted, request.built), ("r1", true, true));
+    assert_eq!(request.expectations, ["busy", "full"]);
+    assert_eq!(model.expectations[0].state, crabsim_model::Agreement::Accepted);
+    assert_eq!(model.expectations[1].state, crabsim_model::Agreement::Questioned);
+    assert_eq!(model.expectations[2].state, crabsim_model::Agreement::Proposed, "the default");
+    let day = SimTime::from_secs(86_400);
+    // Each expectation's own settings over its stage's, over the defaults.
+    assert_eq!(model.settings_of(0), crabsim_model::Settings { length: SimTime::from_secs(2 * 86_400), warm_up: SimTime::ZERO, observations: 1 });
+    assert_eq!(model.settings_of(1), crabsim_model::Settings { length: SimTime::from_secs(8 * 3600), warm_up: SimTime::ZERO, observations: 1 });
+    assert_eq!(model.settings_of(2), crabsim_model::Settings { length: SimTime::from_secs(30 * 86_400), warm_up: day, observations: 30 });
+    assert_eq!(model.checks_of(CheckStage::Verification).len(), 2, "two settings, two runs");
+    let saved = model.save();
+    assert_eq!(load(&saved).unwrap(), model);
+    assert_eq!(load(&saved).unwrap().save(), saved);
+    // The defaults aren't written.
+    assert!(!saved.contains("\"proposed\"") && !saved.contains("\"open\""), "{saved}");
+}
+
+#[test]
+fn a_request_or_its_agreement_that_doesnt_fit_is_a_problem_where_it_is() {
+    let text = agreed(
+        json!([
+            { "id": "busy", "text": "every Press.working_share since start >= 60%", "state": "questioned" },
+            { "id": "full", "text": "Buffer.mus always <= 20", "question": "why?", "observations": 0 },
+            { "id": "agreed", "text": "Buffer.mus always <= 20", "state": "agreed" }
+        ]),
+        json!([
+            { "id": "r1", "words": "", "expectations": ["busy", "missing", "busy"], "state": "met" },
+            { "id": "r1", "words": "again" }
+        ]),
+        json!({ "verification": { "length": "0" }, "checking": {} }),
+    );
+    let found = problems(&text);
+    for expected in [
+        "/stages/checking: unknown field",
+        "/stages/verification/length: a check runs for longer than 0",
+        "/requests/0/words: a request needs the user's own `words`",
+        "/requests/0/expectations/1: there is no expectation `missing`",
+        "/requests/0/expectations/2: `busy` is listed twice",
+        "/requests/0/state: a request's `state` is `open` or `built`",
+        "/requests/1/id: request 0 already has this id",
+        "/expectations/0/question: a questioned expectation says why",
+        "/expectations/1/question: only a questioned expectation has a `question`",
+        "/expectations/1/observations: a check has from 1 to 10000 observations",
+        "/expectations/2/state: `state` is `proposed`, `accepted` or `questioned`",
+    ] {
+        assert!(found.iter().any(|problem| problem.starts_with(expected)), "no {expected:?} in {found:#?}");
+    }
+}

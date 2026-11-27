@@ -49,8 +49,71 @@ pub struct ModelFile {
     pub connections: Option<Vec<ConnectionFile>>,
     /// The model's hooks around crabsim's own Init and Reset, each running user code (ADR 0029).
     pub hooks: Option<ModelHooksFile>,
+    /// How each stage's checks run (ADR 0030), where they differ from the defaults: verification
+    /// a day after no warm-up, one deterministic observation; validation a day, ten observations.
+    pub stages: Option<StagesFile>,
+    /// What the user wants from the model, in their own words, each with an agent's restatement
+    /// and the expectations that check it (ADR 0030).
+    pub requests: Option<Vec<RequestFile>>,
     /// What the model must achieve: checks crabsim judges on its own after a run (ADR 0030).
     pub expectations: Option<Vec<ExpectationFile>>,
+}
+
+/// Each stage's run settings.
+#[derive(JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct StagesFile {
+    pub verification: Option<RunSettingsFile>,
+    pub validation: Option<RunSettingsFile>,
+}
+
+/// How a stage's checks run, each part left out taking its default.
+#[derive(JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RunSettingsFile {
+    /// How long each observation runs after the warm-up, such as "1d" or "8:00:00".
+    pub length: Option<Time>,
+    /// Simulated time at the start of each observation that statistics leave out.
+    pub warm_up: Option<Time>,
+    /// How many observations, from 1 to 10,000.
+    #[schemars(range(min = 1, max = 10_000))]
+    pub observations: Option<u32>,
+}
+
+/// A request: what the user wants from the model.
+#[derive(JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RequestFile {
+    /// Unique among the model's requests, with no spaces, such as `r1`.
+    #[schemars(extend("pattern" = r"^\S+$"))]
+    pub id: String,
+    /// The user's own words, exactly.
+    pub words: String,
+    /// An agent's restatement in precise terms.
+    pub restatement: Option<String>,
+    /// The ids of the expectations that check it.
+    pub expectations: Option<Vec<String>>,
+    /// The user accepted its restatement and expectations, which only the user does. False if
+    /// left out.
+    pub accepted: Option<bool>,
+    /// `open`, the default, or `built` once whoever builds it says so. Whether it is met is what
+    /// crabsim's checks say, never written here.
+    pub state: Option<RequestStateFile>,
+}
+
+#[derive(JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RequestStateFile {
+    Open,
+    Built,
+}
+
+#[derive(JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AgreementFile {
+    Proposed,
+    Accepted,
+    Questioned,
 }
 
 /// An expectation: a check of the model crabsim judges on its own.
@@ -72,6 +135,19 @@ pub struct ExpectationFile {
     pub assumptions: Option<String>,
     /// Where it comes from: a SysML element, a document or a person.
     pub source: Option<String>,
+    /// `proposed`, the default, by an agent and not accepted yet; `accepted` by the user, or
+    /// written by the user, which only the user changes; or `questioned` by an agent, still in
+    /// force until the user answers.
+    pub state: Option<AgreementFile>,
+    /// Why an agent questions it: only while it is questioned.
+    pub question: Option<String>,
+    /// How long its check runs after the warm-up, where it differs from its stage's.
+    pub length: Option<Time>,
+    /// Its check's warm-up, where it differs from its stage's.
+    pub warm_up: Option<Time>,
+    /// Its check's observations, where they differ from its stage's.
+    #[schemars(range(min = 1, max = 10_000))]
+    pub observations: Option<u32>,
 }
 
 #[derive(JsonSchema)]

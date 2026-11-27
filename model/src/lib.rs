@@ -13,6 +13,8 @@ mod build;
 mod check;
 mod code;
 pub use code::CODE_FOLDER;
+pub mod agree;
+pub use agree::{Agreement, Request, RequestState, RunSettings, Settings, Stages};
 pub mod expect;
 pub use expect::{CheckStage, Expectation};
 pub use crabsim_code;
@@ -101,6 +103,11 @@ pub struct Model {
     /// What the model must achieve, each a check crabsim judges on its own (ADR 0030), in the
     /// order the file lists them.
     pub expectations: Vec<Expectation>,
+    /// What the user wants from the model, in their own words, each with the expectations that
+    /// check it (ADR 0030).
+    pub requests: Vec<Request>,
+    /// How each stage's checks run, where it differs from the defaults.
+    pub stages: Stages,
 }
 
 /// The way from one instance to another along which MUs pass, with its place in the order its
@@ -901,7 +908,9 @@ fn order(pointer: &str) -> Vec<(u64, String)> {
             "classes" => (0, String::new()),
             "instances" => (1, String::new()),
             "connections" => (2, String::new()),
-            "expectations" => (3, String::new()),
+            "stages" => (3, String::new()),
+            "requests" => (4, String::new()),
+            "expectations" => (5, String::new()),
             _ => part.parse::<u64>().map_or((u64::MAX, part.to_string()), |n| (n, String::new())),
         })
         .collect()

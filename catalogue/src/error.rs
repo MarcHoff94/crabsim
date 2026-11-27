@@ -43,6 +43,9 @@ pub enum ErrorKind {
     /// The change to undo or redo was made by someone else: an agent undoes and redoes only its
     /// own latest changes.
     NotYours,
+    /// The change would accept something, or change or remove what the user accepted: only the
+    /// user does that. An agent may question an accepted expectation instead (ADR 0030).
+    Agreed,
 }
 
 /// One thing wrong with a model, as `crabsim-model` reports it.

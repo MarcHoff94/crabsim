@@ -43,7 +43,8 @@ const INSTRUCTIONS: &str = "crabsim is a discrete-event material-flow simulator.
 Start with model_file_format, which explains how models are written and how their objects behave. \
 To understand a model, start with describe_model, a summary whose size doesn't grow with the model, then narrow down with query_model (neighbours, upstream, downstream, paths, subgraph_around, find_instances, class_tree) rather than reading the whole file. \
 Typical work: list_models and describe_model, get_attributes to see an object's values and where they come from, edit_model to change a model with a batch of changes, or write_model for a new one; then start_run, poll run_status until it's done, and read run_results. \
-Every run's results stay in a results store, which query_results reads with SQL to compare runs and models.";
+Every run's results stay in a results store, which query_results reads with SQL to compare runs and models. \
+Starting a session on a model, call get_status first: it gives the model's stage, the user's requests, every expectation's verdict and the next step.";
 
 struct Server {
     catalogue: Arc<Catalogue>,
@@ -99,6 +100,7 @@ impl Server {
             }
             None => INSTRUCTIONS.to_string(),
         };
+        let instructions = format!("{instructions} {}", crabsim_catalogue::PROCESS);
         Server { catalogue: Arc::new(catalogue), tools, instructions }
     }
 }

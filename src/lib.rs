@@ -4,6 +4,7 @@ pub mod demo;
 pub mod distribution;
 pub mod error;
 pub mod event;
+pub mod figures;
 pub mod hooks;
 pub mod live_session;
 pub mod locations;

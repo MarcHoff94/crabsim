@@ -167,6 +167,7 @@ fn the_shortest_inputs_an_operation_accepts_pass_its_input_schema() {
         ("label_run", json!({ "run": "run-1" })),
         ("forget_run", json!({ "run": "run-1" })),
         ("query_results", json!({ "sql": "SELECT 1" })),
+        ("list_figures", json!({})),
     ];
     for operation in setup.catalogue.operations() {
         assert!(inputs.iter().any(|(name, _)| *name == operation.name), "add the shortest input of {} here", operation.name);

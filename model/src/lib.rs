@@ -13,6 +13,8 @@ mod build;
 mod check;
 mod code;
 pub use code::CODE_FOLDER;
+pub mod expect;
+pub use expect::{CheckStage, Expectation};
 pub use crabsim_code;
 pub mod path;
 mod read;
@@ -96,6 +98,9 @@ pub struct Model {
     pub connections: Vec<Connection>,
     /// The model's hooks around Init and Reset (ADR 0029). None by default.
     pub hooks: ModelHooks,
+    /// What the model must achieve, each a check crabsim judges on its own (ADR 0030), in the
+    /// order the file lists them.
+    pub expectations: Vec<Expectation>,
 }
 
 /// The way from one instance to another along which MUs pass, with its place in the order its
@@ -896,6 +901,7 @@ fn order(pointer: &str) -> Vec<(u64, String)> {
             "classes" => (0, String::new()),
             "instances" => (1, String::new()),
             "connections" => (2, String::new()),
+            "expectations" => (3, String::new()),
             _ => part.parse::<u64>().map_or((u64::MAX, part.to_string()), |n| (n, String::new())),
         })
         .collect()

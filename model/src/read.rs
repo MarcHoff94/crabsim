@@ -34,7 +34,8 @@ pub(crate) struct Broken {
     pub class_attributes: HashSet<(usize, &'static str)>,
 }
 
-const TOP_LEVEL: [&str; 7] = ["$schema", "format_version", "description", "classes", "instances", "connections", "hooks"];
+const TOP_LEVEL: [&str; 8] = ["$schema", "format_version", "description", "classes", "instances", "connections", "hooks", "expectations"];
+const EXPECTATION: [&str; 5] = ["id", "text", "stage", "assumptions", "source"];
 const INSTANCE: [&str; 5] = ["name", "class", "stream", "position", "attributes"];
 const CONNECTION: [&str; 7] = ["from", "to", "exit", "entrance", "description", "from_side", "to_side"];
 const CLASS: [&str; 3] = ["name", "parent", "attributes"];
@@ -175,7 +176,46 @@ impl Reader {
             None => crate::ModelHooks::default(),
             Some(value) => self.model_hooks(value),
         };
-        Model { schema, description, classes, instances, connections, hooks }
+        let expectations = match fields.get("expectations") {
+            None => Vec::new(),
+            Some(Value::Array(expectations)) => expectations.iter().enumerate().map(|(index, value)| self.expectation(index, value)).collect(),
+            Some(_) => {
+                self.problem("/expectations".into(), None, "`expectations` should be a list");
+                Vec::new()
+            }
+        };
+        Model { schema, description, classes, instances, connections, hooks, expectations }
+    }
+
+    /// One expectation (ADR 0030). Its line is checked once the whole model is read, since it
+    /// names instances and classes, and kept in its canonical form when it parses.
+    fn expectation(&mut self, index: usize, value: &Value) -> crate::Expectation {
+        let pointer = format!("/expectations/{index}");
+        let mut expectation = crate::Expectation::new(String::new(), String::new());
+        let Some(fields) = self.object(value, &pointer, None, "an expectation", &EXPECTATION) else {
+            return expectation;
+        };
+        let id = fields.get("id").and_then(|value| value.as_str()).map(str::to_owned);
+        // A missing id or text is left empty, which the checks report as they do an empty one.
+        for key in ["id", "text"] {
+            if let Some(value) = fields.get(key) {
+                if let Some(text) = self.text(value, &format!("{pointer}/{key}"), id.as_deref()) {
+                    if key == "id" { expectation.id = text } else { expectation.text = text }
+                }
+            }
+        }
+        if let Ok(check) = crate::expect::Check::parse(&expectation.text) {
+            expectation.text = check.text();
+        }
+        if let Some(value) = fields.get("stage") {
+            match value.as_str().and_then(crate::CheckStage::named) {
+                Some(stage) => expectation.stage = stage,
+                None => self.problem(format!("{pointer}/stage"), id.as_deref(), "`stage` is `verification` or `validation`"),
+            }
+        }
+        expectation.assumptions = fields.get("assumptions").and_then(|value| self.text(value, &format!("{pointer}/assumptions"), id.as_deref()));
+        expectation.source = fields.get("source").and_then(|value| self.text(value, &format!("{pointer}/source"), id.as_deref()));
+        expectation
     }
 
     fn connection(&mut self, index: usize, value: &Value) -> Connection {

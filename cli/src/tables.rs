@@ -143,7 +143,56 @@ pub fn results(results: &Value) -> String {
         }
         text += &table(&["Statistic", "Mean", "95% interval", "Min", "Max"], &rows);
     }
+    if results["expectations"].is_array() {
+        text += "\n";
+        text += &expectations(&results["expectations"]);
+    }
     text
+}
+
+/// Each expectation's verdict, as `run_results` gives them: what it reached, and why or what next.
+pub fn expectations(expectations: &Value) -> String {
+    let mut rows = Vec::new();
+    for expectation in expectations.as_array().into_iter().flatten() {
+        let reached = match (&expectation["met"], &expectation["extreme"], &expectation["mean"]) {
+            (Value::String(met), _, _) => format!("{met} met"),
+            (_, Value::String(extreme), _) => extreme.clone(),
+            (_, _, Value::String(mean)) => mean.clone(),
+            _ => String::new(),
+        };
+        let interval = match expectation["ci95"].as_array() {
+            Some(bounds) => format!("{} to {}", cell(&bounds[0]), cell(&bounds[1])),
+            None => String::new(),
+        };
+        let mut notes = Vec::new();
+        for subject in expectation["subjects"].as_array().into_iter().flatten().filter(|subject| subject["verdict"] != "met") {
+            let value = [&subject["mean"], &subject["extreme"], &subject["why"]].into_iter().find(|value| value.is_string()).map(cell).unwrap_or_default();
+            notes.push(format!("{} {}: {value}", cell(&subject["name"]), cell(&subject["verdict"]).replace('_', " ")));
+        }
+        let violation = &expectation["violation"];
+        if violation.is_object() {
+            notes.push(format!("first broken at {} by MU {} in {}, observation {}", cell(&violation["time"]), cell(&violation["mu"]), cell(&violation["object"]), cell(&violation["observation"])));
+        }
+        notes.extend([&expectation["why"], &expectation["advice"]].into_iter().filter(|value| value.is_string()).map(cell));
+        rows.push(vec![cell(&expectation["id"]), cell(&expectation["verdict"]).replace('_', " "), cell(&expectation["text"]), reached, interval, notes.join("; ")]);
+    }
+    let mut text = String::from("Expectations\n");
+    text += &table(&["Id", "Verdict", "Expectation", "Reached", "95% interval", "Notes"], &rows);
+    text
+}
+
+/// The vocabulary of figures, as `list_figures` gives it.
+pub fn figures(figures: &Value) -> String {
+    let rows: Vec<Vec<String>> = figures["figures"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|figure| {
+            let list = |key: &str| figure[key].as_array().into_iter().flatten().map(cell).collect::<Vec<_>>().join(", ");
+            vec![cell(&figure["name"]), cell(&figure["unit"]), list("of"), list("scopes"), cell(&figure["meaning"])]
+        })
+        .collect();
+    table(&["Figure", "Unit", "Of", "Scopes", "Meaning"], &rows)
 }
 
 /// What `edit_model` did.

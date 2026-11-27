@@ -18,7 +18,8 @@ A file holds the model only: classes, instances, their attributes, names, positi
   "classes": [ ... ],
   "instances": [ ... ],
   "connections": [ ... ],
-  "hooks": { ... }
+  "hooks": { ... },
+  "expectations": [ ... ]
 }
 ```
 
@@ -29,6 +30,7 @@ A file holds the model only: classes, instances, their attributes, names, positi
 - `instances` is in Init order: ids follow it.
 - `connections` is optional, and its order means nothing.
 - `hooks` is optional: the model's hooks around crabsim's own Init and Reset, `before_init`, `after_init`, `before_reset` and `after_reset`, each `{"code": {"function": "<module>.<function>", "with": {…}}}` (ADR 0029, see "User code" below).
+- `expectations` is optional: what the model must achieve, checks crabsim judges on its own after a run (ADR 0030, see "Expectations" below).
 
 ## Instances
 
@@ -181,6 +183,31 @@ A hook names a function of a code module with values for its parameters (ADR 002
 - `at`, for `on_entry` and `on_exit`, lists the trigger points the hook runs at, each once, front first: `"front"`, `"booking_point"` and `"rear"`. The booking point alone by default, and then left out.
 - **Checked in two steps.** Reading the file checks a hook's shape: `function`'s form, `with` an object, `at` and `asked_on_entry` trigger points, a Drain without `on_exit`. Building it with its code (`Model::to_description_in`, `load_code`, `code_problems`) checks the rest against the modules in `code/`: a module that's missing or isn't a crabsim module of this interface version, a function it doesn't have, a parameter it doesn't declare or one missing, and a value that doesn't fit its type, such as an instance's name that isn't in the model. Each is a problem where it is written, a class's on the class. The CLI, `start_run` and the window build every model this way, so a model with code never runs without it.
 - **A model without code** builds exactly as before. `to_description` builds a model's structure without its code, for what only reads it, such as `query_model`.
+
+## Expectations
+
+What a model must achieve, as checks crabsim judges itself after every run (ADR 0030, spec issue 162, PR 1):
+
+```json
+"expectations": [
+  { "id": "presses-busy", "text": "every Press.working_share since start >= 60%", "assumptions": "one shift", "source": "the planner" },
+  { "id": "buffer-limit", "text": "Buffer X.mus always <= 20" },
+  { "id": "output", "text": "model.throughput_per_hour last 8h >= 400/h", "stage": "validation" }
+]
+```
+
+- `id` is required, unique among the expectations and without spaces. `edit_model`'s `add_expectation` gives the first free of `e1`, `e2` and so on when it's left out.
+- `text` is required: one line, `[every|mean] <subject>.<figure> <scope> <comparison> <value>`, parsed by `crabsim_model::expect::Check` and saved in its canonical form once it parses, such as `every Press.working_share since start >= 60%`.
+  - **The subject** is an instance by its name, a class with `every` (each of its instances must meet it) or `mean` (their mean), a class counting every instance whose chain holds it and a built-in class every instance of it, or `model`, its Drains together. The address ends at the last `.` followed by a figure's name, so a name may hold dots.
+  - **The figure** is one of the vocabulary's (`crabsim::figures`, the operation `list_figures`), whose names are the results store's, such as `working_share` or `mean_lead_time_s`, and it must be one of its subject's built-in class: a Drain has no `working_full_share`. The model's figures are `throughput_per_hour`, `mean_lead_time_s` and `lead_time_s`. An MU's figures (`class`, `next_destination`, `plan_step`) are for rules and code, not expectations.
+  - **The scope** is required, one the figure can be read over: `since start` (since statistics began, after the warm-up), `now` (at the run's end), `last <time>` (the stretch before the end, such as `last 1h`) or `always`, a limit at every moment. A limit is upper (`<=`, `<`) on `mus`, the most MUs held, which Stations, Buffers, Conveyors and cross conveyors keep, and either way on a Drain's `lead_time_s`, each MU's; the fewest MUs held is `min_mus since start`. `mean` takes no `always`.
+  - **The comparison** is `>=`, `<=`, `>`, `<`, `=` or `!=`, a state only `=` or `!=`.
+  - **The value** has an explicit unit: a share as a percentage (`60%`), a rate with its unit (`4000/h`, `70/min`, `96000/d`), a time with its unit (`90s`, `30min`, `2h`, `1d`) or as the UI writes time (`1:30`, saved as `00:01:30`), MUs and counts plainly (`20`), a state by its name, one its subject's class can be in. A bare number for a share or a time is a problem, so a line never means something other than it says.
+- `stage` is `verification`, the default and then left out, or `validation`.
+- `assumptions` and `source` are optional text: what it takes for granted, and where it comes from, such as a SysML element, a document or a person, so a later import of SysML v2 requirements maps onto the record.
+- **Problems** point at the expectation's `id` or `text`: a line that doesn't parse says at which character and what it expected there, and one that doesn't fit the model names what's missing, such as "there is no instance `Press`: `Press` is a class, which takes `every` or `mean` before it". Renaming an instance or a class through `edit_model` renames it in the lines naming it. Removing one an expectation names is refused until the expectation goes too.
+- **Judged outside the run,** from its states: since start and now from the state at its end, `last` from the difference of the statistics at the end and at the stretch's start, where the run stops on its way, and a limit from the extreme the statistics keep (the most MUs held, the longest and shortest lead time). Only an observation that broke a limit runs again, with the same seed, recording MUs coming and going until it finds the moment and the MU that first broke it. A run with no expectations stops nowhere and runs nothing again.
+- **Verdicts** (`crabsim_model::expect::judge`): over an experiment's observations, met when the mean's 95% interval lies wholly on the right side of the value, not met when wholly on the wrong side, and undecided when it straddles it, with about how many observations would decide it. One observation, or a deterministic run, decides by its value, a random run's single observation saying "so far". `=`, `!=` and states are judged observation by observation: met when every one holds, not met when none does, undecided otherwise. A limit is not met if any observation broke it. A figure with no value, such as a mean lead time with no MU in the Drain, or a stretch longer than the run, is an error. `every` takes its worst instance: not met, then error, then undecided, then met.
 
 ## Names
 

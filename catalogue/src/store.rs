@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 pub const STORE_FILE: &str = "results.sqlite";
 
 /// The tables' version, kept in SQLite's `user_version`. A change to the tables raises it.
-const TABLES_VERSION: i64 = 7;
+const TABLES_VERSION: i64 = 8;
 
 /// The most rows `query_results` returns.
 pub const QUERY_ROW_LIMIT: usize = 1_000;
@@ -44,7 +44,8 @@ CREATE TABLE IF NOT EXISTS runs (
     state TEXT NOT NULL,
     process TEXT,
     crabsim_build TEXT,
-    agent TEXT
+    agent TEXT,
+    deterministic INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS observations (
     run TEXT NOT NULL,
@@ -87,6 +88,24 @@ CREATE TABLE IF NOT EXISTS failure_profiles (
     availability REAL
 );
 CREATE INDEX IF NOT EXISTS failure_profiles_by_object ON failure_profiles (run, object);
+CREATE TABLE IF NOT EXISTS expectation_values (
+    run TEXT NOT NULL,
+    observation INTEGER NOT NULL,
+    expectation TEXT NOT NULL,
+    object TEXT,
+    value REAL
+);
+CREATE INDEX IF NOT EXISTS expectation_values_by_run ON expectation_values (run, expectation);
+CREATE TABLE IF NOT EXISTS violations (
+    run TEXT NOT NULL,
+    observation INTEGER NOT NULL,
+    expectation TEXT NOT NULL,
+    time_s REAL NOT NULL,
+    object TEXT NOT NULL,
+    mu INTEGER NOT NULL,
+    value REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS violations_by_run ON violations (run, expectation);
 ";
 
 /// The tables and statistic names, as `query_results` describes them to an agent.
@@ -94,7 +113,9 @@ macro_rules! tables_description {
     () => {
         concat!(
             "Tables: ",
-            "runs(id TEXT such as 'run-3', model_path, model_text: the canonical model file the run used, model_hash: SHA-256 of model_text so equal hashes mean the same model, seed TEXT, length_s, warm_up_s, observations, label, source: 'mcp' or 'cli', crabsim_version, started and finished: UTC ISO 8601, state: queued|running|done|failed|cancelled|interrupted, process: the lock id of the crabsim process that ran it, crabsim_build: the git commit crabsim was built from, agent: such as 'agent-3 (claude-code)' or 'the user'). ",
+            "runs(id TEXT such as 'run-3', model_path, model_text: the canonical model file the run used, model_hash: SHA-256 of model_text so equal hashes mean the same model, seed TEXT, length_s, warm_up_s, observations, label, source: 'mcp' or 'cli', crabsim_version, started and finished: UTC ISO 8601, state: queued|running|done|failed|cancelled|interrupted, process: the lock id of the crabsim process that ran it, crabsim_build: the git commit crabsim was built from, agent: such as 'agent-3 (claude-code)' or 'the user', deterministic: 1 for a run without randomness, no object failing). ",
+            "expectation_values(run, observation, expectation: its id, object: the instance, NULL for the model or a class's mean, value REAL: in the figure's own unit, a share 0 to 1, times in seconds, a state 1 when in it and 0 otherwise, NULL where it had none), one row per expectation and subject of an observation that ran to its end, the model's expectations as model_text holds them. ",
+            "violations(run, observation, expectation, time_s: simulated seconds since Init, object, mu: the MU's id, value), the first moment each limit with `always` was broken in an observation. ",
             "observations(run, number from 1, seed TEXT: the observation's own seed, events, wall_time_s, error, error_time_s: simulated seconds). ",
             "statistics(run, observation, object: instance name, class, built_in_class: Source|Station|Buffer|Drain|Conveyor|CrossConveyor, statistic, value REAL), one row per figure of an observation that ran to its end. ",
             "histograms(run, observation, object, from_mus, to_mus: NULL for a last bar that takes everything from from_mus, time_s), how long each Buffer or Conveyor held each number of MUs, one row per bar with any time, the bars 1 MU wide or, with more MUs, a wider power of 2 unless the model sets histogram_bar_width. ",
@@ -142,6 +163,13 @@ impl Store {
         // Versions 1 and 2 didn't record which build and which agent or user started a run.
         if (1..=2).contains(&version) {
             transaction.execute_batch("ALTER TABLE runs ADD COLUMN crabsim_build TEXT; ALTER TABLE runs ADD COLUMN agent TEXT")?;
+        }
+        // Versions before 8 had no deterministic runs (ADR 0030): theirs had randomness.
+        if (1..=7).contains(&version) {
+            let has: bool = transaction.query_row("SELECT count(*) FROM pragma_table_info('runs') WHERE name = 'deterministic'", [], |row| row.get(0))?;
+            if !has {
+                transaction.execute_batch("ALTER TABLE runs ADD COLUMN deterministic INTEGER NOT NULL DEFAULT 0")?;
+            }
         }
         // Version 5 had failure profiles without their time basis and achieved availability.
         if version == 5 {

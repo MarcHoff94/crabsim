@@ -10,7 +10,7 @@ use serde_json::json;
 fn a_new_store_has_the_documented_tables() {
     let setup = Setup::new("tables");
     let tables = setup.ok("query_results", json!({ "sql": "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name" }));
-    assert_eq!(tables["rows"], json!([["failure_profiles"], ["histograms"], ["observations"], ["runs"], ["statistics"]]));
+    assert_eq!(tables["rows"], json!([["expectation_values"], ["failure_profiles"], ["histograms"], ["observations"], ["runs"], ["statistics"], ["violations"]]));
     let columns = |table: &str| {
         let info = setup.ok("query_results", json!({ "sql": format!("SELECT name FROM pragma_table_xinfo('{table}') ORDER BY cid") }));
         info["rows"].as_array().unwrap().iter().map(|row| row[0].as_str().unwrap().to_string()).collect::<Vec<_>>()
@@ -19,16 +19,20 @@ fn a_new_store_has_the_documented_tables() {
         columns("runs"),
         [
             "number", "id", "model_path", "model_text", "model_hash", "seed", "length_s", "warm_up_s", "observations", "label", "source",
-            "crabsim_version", "started", "finished", "state", "process", "crabsim_build", "agent"
+            "crabsim_version", "started", "finished", "state", "process", "crabsim_build", "agent", "deterministic"
         ]
     );
     assert_eq!(columns("observations"), ["run", "number", "seed", "events", "wall_time_s", "error", "error_time_s"]);
     assert_eq!(columns("statistics"), ["run", "observation", "object", "class", "built_in_class", "statistic", "value"]);
     assert_eq!(columns("histograms"), ["run", "observation", "object", "from_mus", "to_mus", "time_s"]);
     assert_eq!(columns("failure_profiles"), ["run", "observation", "object", "profile", "failures", "failed_s", "time_basis", "availability"]);
+    assert_eq!(columns("expectation_values"), ["run", "observation", "expectation", "object", "value"]);
+    assert_eq!(columns("violations"), ["run", "observation", "expectation", "time_s", "object", "mu", "value"]);
     let query = setup.catalogue.operations().find(|o| o.name == "query_results").unwrap();
     assert!(query.description.contains("histograms(run, observation, object, from_mus, to_mus"), "documented for agents");
     assert!(query.description.contains("failure_profiles(run, observation, object, profile"), "documented for agents");
+    assert!(query.description.contains("expectation_values(run, observation, expectation: its id, object"), "documented for agents");
+    assert!(query.description.contains("violations(run, observation, expectation, time_s"), "documented for agents");
 }
 
 #[test]

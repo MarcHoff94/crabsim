@@ -37,9 +37,29 @@ pub(crate) fn write(model: &Model) -> String {
         }
         file.insert("hooks".into(), Value::Object(hooks));
     }
+    if !model.expectations.is_empty() {
+        file.insert("expectations".into(), Value::Array(model.expectations.iter().map(expectation).collect()));
+    }
     let mut text = serde_json::to_string_pretty(&Value::Object(file)).expect("a model always serialises");
     text.push('\n');
     text
+}
+
+/// An expectation, its stage left out while it is verification, the default.
+fn expectation(expectation: &crate::Expectation) -> Value {
+    let mut fields = Map::new();
+    fields.insert("id".into(), json!(expectation.id));
+    fields.insert("text".into(), json!(expectation.text));
+    if expectation.stage != crate::CheckStage::default() {
+        fields.insert("stage".into(), json!(expectation.stage.name()));
+    }
+    if let Some(assumptions) = &expectation.assumptions {
+        fields.insert("assumptions".into(), json!(assumptions));
+    }
+    if let Some(source) = &expectation.source {
+        fields.insert("source".into(), json!(source));
+    }
+    Value::Object(fields)
 }
 
 fn time(time: SimTime) -> Value {

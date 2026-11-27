@@ -253,10 +253,10 @@ fn run_problems(run: &RunSettings, problem: &mut dyn FnMut(&str, String)) {
     if run.length == Some(SimTime::ZERO) {
         problem("/length", "a check runs for longer than 0".into());
     }
-    if let Some(observations) = run.observations {
-        if !(1..=MAX_OBSERVATIONS).contains(&observations) {
-            problem("/observations", format!("a check has from 1 to {MAX_OBSERVATIONS} observations"));
-        }
+    if let Some(observations) = run.observations
+        && !(1..=MAX_OBSERVATIONS).contains(&observations)
+    {
+        problem("/observations", format!("a check has from 1 to {MAX_OBSERVATIONS} observations"));
     }
 }
 

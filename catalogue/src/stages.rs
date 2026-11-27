@@ -214,7 +214,8 @@ pub struct ExpectationStatus {
     pub verdict: Option<Verdict>,
     /// The verdict is of the model as it is now, the line unchanged.
     pub current: bool,
-    /// What the check found, in the line's unit: the mean, or for a limit the extreme.
+    /// What the check found, in the line's unit: the mean, for a limit the extreme, or with
+    /// `every` how many instances met it, such as "2 of 12 met".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub found: Option<String>,
     /// Why it couldn't be judged, or what to do next, such as run more observations.
@@ -328,7 +329,7 @@ pub(crate) fn status(catalogue: &Catalogue, path: &str) -> Result<GetStatusOutpu
                 question: expectation.question.clone(),
                 verdict: result.map(|result| result.verdict),
                 current: check_current && same_line,
-                found: result.and_then(|result| result.extreme.clone().or_else(|| result.mean.clone()).or_else(|| result.met.clone())),
+                found: result.and_then(|result| result.extreme.clone().or_else(|| result.mean.clone()).or_else(|| result.met.as_ref().map(|met| format!("{met} met")))),
                 note: result.and_then(|result| result.why.clone().or_else(|| result.advice.clone())),
                 requests: model.requests.iter().filter(|request| request.expectations.contains(&expectation.id)).map(|request| request.id.clone()).collect(),
             }

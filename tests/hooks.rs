@@ -1017,3 +1017,40 @@ fn a_cross_conveyors_distribution_moment_cant_move() {
     let cross = model.add_cross_conveyor(0.6, 0.6, 1.0);
     model.set_object_hooks(cross, ObjectHooks { distribution: Some(DISTRIBUTE), distribution_on_entry: Some(TriggerPoint::Front), ..ObjectHooks::default() });
 }
+
+#[test]
+fn an_mu_moved_off_a_conveyor_by_code_leaves_it_whole_at_once() {
+    use TriggerPoint::{BookingPoint, Front, Rear};
+    let Fork { mut model, fork, a, b, .. } = conveyor_fork();
+    let code = Code::new(move |call, run, _| {
+        match call.kind {
+            CallKind::Lifecycle(Lifecycle::AfterInit) => run.call_at(SimTime::from_millis(12_500), TIMER, 0).unwrap(),
+            CallKind::Timer { .. } => {
+                // Half way along the conveyor, its rear well inside it.
+                let mu = run.state(fork).unwrap().contents[0];
+                run.move_mu(mu, fork, b).unwrap();
+            }
+            _ => {}
+        }
+        Ok(None)
+    });
+    let log = code.log();
+    model.set_hooks(Box::new(code));
+    model.set_lifecycle_hook(Lifecycle::AfterInit, Some(LIFECYCLE));
+    model.set_object_hooks(fork, ObjectHooks { on_exit: every_point(ON_EXIT), ..ObjectHooks::default() });
+    model.set_object_hooks(b, ObjectHooks { on_entry: every_point(ON_ENTRY), ..ObjectHooks::default() });
+    let mut run = recorded(model.build(0));
+    run.init().unwrap();
+    let occurrences = run.advance_to(secs(19)).unwrap();
+    assert_eq!(calls_of(&log), [
+        (12.5, "exit", fork, Some(Front)),
+        (12.5, "exit", fork, Some(BookingPoint)),
+        (12.5, "exit", fork, Some(Rear)),
+        (12.5, "entry", b, Some(Front)),
+        (12.5, "entry", b, Some(BookingPoint)),
+        (12.5, "entry", b, Some(Rear)),
+    ], "every point at the move, and nothing later");
+    assert!(occurrences.iter().any(|o| o.time == SimTime::from_millis(12_500) && matches!(o.kind, OccurrenceKind::MuLeft { at, .. } if at == b)));
+    assert_eq!(left_at(&occurrences, a), 0);
+    assert!(run.state().objects[fork as usize].contents.is_empty(), "nothing of it stays on the conveyor");
+}

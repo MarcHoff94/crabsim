@@ -444,6 +444,36 @@ _Avoid_: Path (a conveyor's line)
 **Fuel**:
 How much work a call of user code may do, counted in WebAssembly instructions, the same on every machine. A call that runs out ends the run with an error naming its hook, object and MU. A run reports the fuel its code used, apart from its results.
 
+### Agreeing and checking
+
+**Request**:
+What a user wants from the model, in their own words, with an agent's restatement in precise terms, the expectations that check it and its state: open, built, met or broken. The user accepts the restatement and its expectations together (ADR 0030).
+_Avoid_: Requirement (SysML's word for an expectation), task, ticket
+
+**Expectation**:
+A check of a model that crabsim judges on its own, agreed with the user: a figure at the end of a run, such as "Station A busy at least 70%", or a limit during it, such as "Buffer X never holds more than 20". It names an object, a class with `every` or `mean`, or the model, and belongs to a stage. An agent proposes it, the user accepts it, and only the user changes an accepted one; an agent may question it, with its reason.
+_Avoid_: Requirement, test, assertion, constraint
+
+**Reference figure**:
+An expectation from the real line, such as "Drain takes 4,100 parts a day, ± 3%", with where it came from, checked at the validation stage.
+
+**Verdict**:
+What crabsim says of an expectation: **met**, **not met**, **undecided**, when an experiment's 95% interval straddles its limit and more observations would tell, or **error**, when it couldn't be judged. In a single run or a live session, met so far.
+
+**Stage**:
+How far a model is checked: **draft**; **verified**, when a deterministic run meets its own expectations; **validated**, when runs with randomness also meet its reference figures. crabsim sets it, and drops it back when a change breaks a check.
+_Avoid_: Phase, status
+
+**Verification**:
+Checking that the model does what was specified, in a deterministic run: no failures, every random time at its mean.
+
+**Validation**:
+Checking that the model behaves like the real line, in runs with randomness, against reference figures.
+
+**Rule**:
+A decision written as when/then lines that crabsim reads in order, such as "when the MU's class is Frame, to the one of Line A and Line B holding fewest MUs". Between the built-in strategies and user code: readable and checkable as the built-in ones are, without a program.
+_Avoid_: Script, code, policy
+
 ### Working with agents
 
 **Agent**:

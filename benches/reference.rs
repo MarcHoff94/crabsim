@@ -164,6 +164,8 @@ enum Model {
     Conveyors,
     /// `crabsim::demo::cross_line`, with work plans and three cross conveyors.
     Crosses,
+    /// `crowded_buffer`: about 50,000 MUs in a Buffer at once.
+    Crowded,
 }
 
 impl Model {
@@ -174,6 +176,7 @@ impl Model {
             Model::Buffered => 8,
             Model::Conveyors => 8,
             Model::Crosses => 16,
+            Model::Crowded => 4,
         }
     }
 }
@@ -187,7 +190,7 @@ struct Scenario {
     occurrences: Occurrences,
 }
 
-const SCENARIOS: [Scenario; 9] = [
+const SCENARIOS: [Scenario; 10] = [
     Scenario { name: "demo-headless", model: Model::Demo, lines: 1, length: YEAR, length_label: "1 year", occurrences: Occurrences::Headless },
     // The same run over ten times the length: peak memory should stay where it is.
     Scenario { name: "demo-headless-10y", model: Model::Demo, lines: 1, length: YEAR.times(10), length_label: "10 years", occurrences: Occurrences::Headless },
@@ -218,7 +221,26 @@ const SCENARIOS: [Scenario; 9] = [
     // Two products following work plans, turned or passed straight through by three cross
     // conveyors (spec issue 148). Its own figures from before are what it compares with.
     Scenario { name: "cross-line", model: Model::Crosses, lines: 1, length: YEAR, length_label: "1 year", occurrences: Occurrences::Headless },
+    // About 50,000 MUs in a Buffer at once, each leaving it about 50,000 MU ids after it was made:
+    // the most the run's table of where each MU is has to keep (`crabsim::locations`).
+    Scenario { name: "crowded-buffer", model: Model::Crowded, lines: 1, length: SimTime::from_secs(30 * 86_400), length_label: "30 days", occurrences: Occurrences::Headless },
 ];
+
+/// A Source making an MU every second into a Buffer with no limit that keeps each for 50,000 s,
+/// then a Station of half a second and a Drain: once it has filled, after 50,000 s, about 50,000
+/// MUs are in the run.
+fn crowded_buffer() -> ModelDescription {
+    let mut model = ModelDescription::new();
+    let source = model.add_source(SimTime::from_secs(1));
+    let buffer = model.add_buffer(crabsim::report::Capacity::Unlimited);
+    model.set_dwelling_time(buffer, SimTime::from_secs(50_000));
+    let station = model.add_station(SimTime::from_millis(500), FailureProfile::new(1.0, Distribution::CONSTANT { value: 0.0 }, 0));
+    let drain = model.add_drain();
+    for (from, to) in [(source, buffer), (buffer, station), (station, drain)] {
+        model.connect(from, to);
+    }
+    model
+}
 
 /// One repetition of a scenario.
 struct Measurement {
@@ -269,6 +291,7 @@ fn measure(scenario: &Scenario, seed: u64) -> Measurement {
         Model::Buffered => crabsim::demo::buffered_line().build(seed),
         Model::Conveyors => crabsim::demo::conveyor_line().build(seed),
         Model::Crosses => crabsim::demo::cross_line().build(seed),
+        Model::Crowded => crowded_buffer().build(seed),
     };
     if !matches!(scenario.occurrences, Occurrences::Headless) {
         run.set_recording(Recording::ALL);

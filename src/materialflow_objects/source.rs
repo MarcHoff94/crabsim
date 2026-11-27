@@ -113,6 +113,10 @@ impl Source {
 		self.completion_time = Some(context.time + self.proc_time);
 		Ok(self.exit_event(mu_id, self.proc_time))
 	}
+	/// Whether its MU's interval is still running, or frozen, so it isn't ready to leave.
+	fn in_interval(&self, now: SimTime) -> bool {
+		self.frozen.is_some() || self.completion_time.is_some_and(|completion| completion > now)
+	}
 	/// Takes the MU out for user code (ADR 0029). Taken during its interval, the next MU comes when
 	/// the interval ends, as if this one had left then. Taken once ready, the next interval starts
 	/// now, as when an MU leaves.
@@ -123,8 +127,7 @@ impl Source {
 		let mut mu = self.content.take().expect("checked above");
 		mu.set_left_source(context.time);
 		self.statistics.count_mu_out();
-		let in_interval = self.frozen.is_some() || self.completion_time.is_some_and(|completion| completion > context.time);
-		if !in_interval {
+		if !self.in_interval(context.time) {
 			for &successor in &self.succ {
 				others.get_mut(successor).relist_blocked(self.base.object_id, None);
 			}
@@ -148,8 +151,9 @@ impl Source {
 			// An exit queued before an interruption froze the interval is stale.
 			&EventType::MUExit(ticket) if self.interruptions.is_interrupted() || ticket.stop_count != self.stop_count => Ok(()),
 			&EventType::MUExit(_) => handle_source_mu_exit(self, context, others),
-			// User code answered where its MU goes (ADR 0029).
-			EventType::Decided if self.interruptions.is_interrupted() || self.content.is_none() => Ok(()),
+			// User code answered where its MU goes (ADR 0029). Answered as the MU was made, where the
+			// distribution's moment has moved there, it waits for its interval.
+			EventType::Decided if self.interruptions.is_interrupted() || self.content.is_none() || self.in_interval(context.time) => Ok(()),
 			EventType::Decided => self.pass_on(context, others),
 			&EventType::BlockedRetry { from } => {
 				// Interrupted while its MU waits, it keeps its place in the line, as if refused

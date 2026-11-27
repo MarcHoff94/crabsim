@@ -42,9 +42,14 @@ pub struct EventContext {
     /// The calls of user code noted since the run last made them, first noted first. The run
     /// makes them right after the event that noted them.
     calls: std::collections::VecDeque<crate::hooks::HookCall>,
+    /// The calls at the rear of the MU that moved last, until the conveyor that tracks its rear
+    /// takes them (`take_rears`).
+    rears: std::collections::VecDeque<crate::hooks::HookCall>,
     /// Whether anything watches MUs move or come into being: recording, or user code. One check
     /// at each move and creation, the same a run recording nothing always paid.
     watching: bool,
+    /// Where each MU in the run is, written at every move.
+    locations: crate::locations::MuLocations,
 }
 
 impl EventContext {
@@ -59,7 +64,9 @@ impl EventContext {
             scheduled: Vec::new(),
             hooks: None,
             calls: std::collections::VecDeque::new(),
+            rears: std::collections::VecDeque::new(),
             watching: recording != Recording::NOTHING,
+            locations: crate::locations::MuLocations::new(first_mu_id),
         }
     }
 
@@ -75,32 +82,73 @@ impl EventContext {
     /// MU is in changes nothing.
     #[inline(always)]
     pub fn moved(&mut self, mu: &crate::flows::MoveableUnit, from: u32, to: u32) {
+        self.locations.set(mu.id, to);
         if self.watching {
             self.record(OccurrenceKind::MuMoved { mu_id: mu.id, from, to });
             if self.hooks.is_some() {
-                self.moved_hooked(mu, from, to);
+                self.moved_hooked(mu, from, to, false);
             }
         }
     }
 
+    /// The same for a move user code made: the MU leaves its object whole at once, whatever
+    /// geometry that object has.
+    pub(crate) fn moved_by_code(&mut self, mu: &crate::flows::MoveableUnit, from: u32, to: u32) {
+        self.locations.set(mu.id, to);
+        self.record(OccurrenceKind::MuMoved { mu_id: mu.id, from, to });
+        if self.hooks.is_some() {
+            self.moved_hooked(mu, from, to, true);
+        }
+    }
+
+    /// Notes the hooks a move sets off at the trigger points that are now, and keeps those at the
+    /// MU's rear for later (`take_rears`), where a conveyor's geometry puts it later: from a conveyor
+    /// the move is its booking point crossing the end, its front having crossed as the place was
+    /// reserved (`front_crossed`); onto a conveyor from anything else it enters with its booking
+    /// point at the start, its front ahead of it.
     #[cold]
     #[inline(never)]
-    fn moved_hooked(&mut self, mu: &crate::flows::MoveableUnit, from: u32, to: u32) {
-        self.left_with_hooks(from, mu, to);
-        if let Some(hook) = self.entry_hook(to) {
+    fn moved_hooked(&mut self, mu: &crate::flows::MoveableUnit, from: u32, to: u32, by_code: bool) {
+        use crate::hooks::{ALL_POINTS, BOOKING_POINT, FRONT, REAR};
+        let Some(table) = self.hooks.clone() else { return };
+        // Moved by code, it leaves its object whole at once.
+        let entry_now = if table.is_belt(from) && !by_code {
+            BOOKING_POINT
+        } else if table.is_belt(to) {
+            FRONT | BOOKING_POINT
+        } else {
+            ALL_POINTS
+        };
+        let exit_now = if by_code { ALL_POINTS } else { entry_now };
+        let later = |now: crate::hooks::Points| ALL_POINTS & !now & REAR;
+        self.note_exit(&table, from, mu, to, exit_now, later(exit_now));
+        let mut arrived = mu.clone();
+        if arrived.is_routed() {
             // The MU as it comes in: reaching its next destination moves its plan on.
-            let mut arrived = mu.clone();
-            if arrived.is_routed() {
-                self.routing.arrive(&mut arrived, to);
-            }
-            self.note_entry(to, &arrived, hook);
+            self.routing.arrive(&mut arrived, to);
         }
+        self.note_entry(&table, to, &arrived, entry_now, later(entry_now));
+    }
+
+    /// The front of the MU a conveyor offers has crossed its end: `to` has reserved a place for it
+    /// (ADR 0023). Notes the hooks at the front, of the conveyor's exit and `to`'s entry.
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn front_crossed(&mut self, mu: &crate::flows::MoveableUnit, from: u32, to: u32) {
+        let Some(table) = self.hooks.clone() else { return };
+        self.note_exit(&table, from, mu, to, crate::hooks::FRONT, 0);
+        let mut arrived = mu.clone();
+        if arrived.is_routed() {
+            self.routing.arrive(&mut arrived, to);
+        }
+        self.note_entry(&table, to, &arrived, crate::hooks::FRONT, 0);
     }
 
     /// Records a Source creating the MU, and notes the Source's hook on entry, its MU coming into
     /// being (ADR 0029).
     #[inline(always)]
     pub fn created(&mut self, mu: &crate::flows::MoveableUnit, at: u32, duration: SimTime) {
+        self.locations.set(mu.id, at);
         if self.watching {
             self.record(OccurrenceKind::MuCreated { mu_id: mu.id, at, duration, kind: mu.kind() });
             if self.hooks.is_some() {
@@ -109,41 +157,92 @@ impl EventContext {
         }
     }
 
-    /// The object's hook on entry, if it has one.
-    #[inline]
-    pub fn entry_hook(&self, object: u32) -> Option<crate::hooks::Hook> {
-        self.hooks.as_ref().and_then(|table| table.object(object).on_entry)
-    }
-
-    /// Notes the calls of an object's hook on entry for the MU that came in, one for each of its
-    /// trigger points.
-    #[cold]
-    pub fn note_entry(&mut self, object: u32, mu: &crate::flows::MoveableUnit, hook: crate::hooks::Hook) {
-        for at in hook.triggers.points() {
-            self.calls.push_back(crate::hooks::HookCall { function: hook.function, kind: crate::hooks::CallKind::Entry { object, mu: mu.clone(), at } });
-        }
-    }
-
     #[cold]
     #[inline(never)]
     fn entered_with_hooks(&mut self, object: u32, mu: &crate::flows::MoveableUnit) {
-        if let Some(hook) = self.entry_hook(object) {
-            self.note_entry(object, mu, hook);
+        if let Some(table) = self.hooks.clone() {
+            self.note_entry(&table, object, mu, crate::hooks::ALL_POINTS, 0);
         }
     }
 
-    #[cold]
-    #[inline(never)]
-    fn left_with_hooks(&mut self, object: u32, mu: &crate::flows::MoveableUnit, to: u32) {
-        if let Some(hook) = self.hooks.as_ref().and_then(|table| table.object(object).on_exit) {
-            self.note_exit(object, mu, to, hook);
+    /// The MU has left the run, into a Drain.
+    #[inline]
+    pub fn left_run(&mut self, mu: u32) {
+        self.locations.gone(mu);
+    }
+
+    /// The object holding the MU, if it is in the run.
+    pub fn location_of(&self, mu: u32) -> Option<u32> {
+        self.locations.of(mu)
+    }
+
+    /// A starting MU is at `object`, from Init.
+    pub(crate) fn starts_at(&mut self, mu: u32, object: u32) {
+        self.locations.set(mu, object);
+    }
+
+    /// Whether the run has user code, which a conveyor asks before doing anything for its hooks.
+    #[inline]
+    pub fn has_hooks(&self) -> bool {
+        self.hooks.is_some()
+    }
+
+    /// Notes the calls of an object's hook on entry for the MU that came in at the trigger points
+    /// in `now`, and keeps those in `later` for when its rear crosses, with the distribution where
+    /// its moment has moved to the MU's entry: the hook on entry first at each point.
+    fn note_entry(&mut self, table: &crate::hooks::HookTable, object: u32, mu: &crate::flows::MoveableUnit, now: crate::hooks::Points, later: crate::hooks::Points) {
+        use crate::hooks::{CallKind, HookCall};
+        let hooks = table.object(object);
+        for at in crate::hooks::TriggerPoint::ALL {
+            let bit = at.bit();
+            if (now | later) & bit == 0 {
+                continue;
+            }
+            let calls = if now & bit != 0 { &mut self.calls } else { &mut self.rears };
+            if let Some(hook) = hooks.on_entry.filter(|hook| hook.triggers.points().any(|point| point == at)) {
+                calls.push_back(HookCall { function: hook.function, kind: CallKind::Entry { object, mu: mu.clone(), at } });
+            }
+            if let (Some(function), Some(moment)) = (hooks.distribution, hooks.distribution_on_entry) {
+                if moment == at {
+                    calls.push_back(HookCall { function, kind: CallKind::Distribution { object, mu: mu.clone() } });
+                }
+            }
         }
     }
 
-    fn note_exit(&mut self, object: u32, mu: &crate::flows::MoveableUnit, to: u32, hook: crate::hooks::Hook) {
+    /// The same for an object's hook on exit, the MU leaving it for `to`.
+    fn note_exit(&mut self, table: &crate::hooks::HookTable, object: u32, mu: &crate::flows::MoveableUnit, to: u32, now: crate::hooks::Points, later: crate::hooks::Points) {
+        use crate::hooks::{CallKind, HookCall};
+        let Some(hook) = table.object(object).on_exit else { return };
         for at in hook.triggers.points() {
-            self.calls.push_back(crate::hooks::HookCall { function: hook.function, kind: crate::hooks::CallKind::Exit { object, mu: mu.clone(), at, to } });
+            let bit = at.bit();
+            let calls = if now & bit != 0 {
+                &mut self.calls
+            } else if later & bit != 0 {
+                &mut self.rears
+            } else {
+                continue;
+            };
+            calls.push_back(HookCall { function: hook.function, kind: CallKind::Exit { object, mu: mu.clone(), at, to } });
         }
+    }
+
+    /// The calls at the rear of the MU that moved last, which the conveyor its geometry belongs to
+    /// keeps until its rear crosses, then hands back through `note_calls`. Empty without hooks.
+    #[inline]
+    pub(crate) fn take_rears(&mut self) -> std::collections::VecDeque<crate::hooks::HookCall> {
+        if self.rears.is_empty() { std::collections::VecDeque::new() } else { std::mem::take(&mut self.rears) }
+    }
+
+    /// Notes calls kept for later, now that their moment has come.
+    pub(crate) fn note_calls(&mut self, calls: std::collections::VecDeque<crate::hooks::HookCall>) {
+        self.calls.extend(calls);
+    }
+
+    /// Whether a call asking about this MU's successor at `object` is already waiting to be made,
+    /// noted at the MU's entry where the distribution's moment has moved there.
+    pub(crate) fn is_asking(&self, object: u32, mu: u32) -> bool {
+        self.calls.iter().any(|call| matches!(&call.kind, crate::hooks::CallKind::Distribution { object: asked, mu: asked_mu } if *asked == object && asked_mu.id == mu))
     }
 
     /// Notes a call asking which successor gets the MU that wants to leave `object`.
@@ -170,6 +269,7 @@ impl EventContext {
     /// Drops the calls not made, after a run error.
     pub(crate) fn drop_calls(&mut self) {
         self.calls.clear();
+        self.rears.clear();
     }
 
     /// The same, reading this model's work plans and destinations.

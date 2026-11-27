@@ -128,6 +128,7 @@ impl MaterialFlow for Drain {
         let lead_time = context.time.saturating_sub(mu.left_source());
         self.statistics.count_exit(context.time, lead_time);
         context.record(OccurrenceKind::MuLeft { mu_id: mu.id, at: self.base.object_id, lead_time });
+        context.left_run(mu.id);
         log::info!(
             "MU {} exited at time {}.{:03}s",
             mu.id,

@@ -783,7 +783,88 @@ pub fn try_to_reserve_successor<T: SuccessorContainer + EventInterface>(
 			Some(index) => reserve_with_strategy(obj, context, others, mu_id, &mut Toward { allowed, inner: OnlySuccessor(index, &mut then) }),
 			None => reserve_with_strategy(obj, context, others, mu_id, &mut Toward { allowed, inner: then }),
 		}),
-		Distributing::Code(_) => unreachable!("a conveyor's distribution hook isn't built yet, and ModelDescription refuses one"),
+		Distributing::Code(_) => reserve_by_code(obj, context, others, mu_id, index),
+	}
+}
+
+/// Offers the MU a conveyor would hand over by its own strategy, `builtin`, for a distribution hook
+/// that handed the choice back, with `index` the successor answering a retry. Its strategies are
+/// wrapped in `ByCode`, so the reserving code on every conveyor's path keeps its one caller and
+/// stays inlined there, as for `move_by_builtin`.
+fn reserve_by_builtin<T: SuccessorContainer + EventInterface>(
+	obj: &mut T,
+	context: &mut EventContext,
+	others: &mut OtherObjects<'_>,
+	mu_id: u32,
+	index: Option<usize>,
+	builtin: &mut Distributing,
+) -> Option<u32> {
+	match builtin {
+		Distributing::RoundRobin => match index {
+			Some(index) => reserve_with_strategy(obj, context, others, mu_id, &mut ByCode(OnlySuccessor(index, &mut RoundRobinStrategy))),
+			None => reserve_with_strategy(obj, context, others, mu_id, &mut ByCode(RoundRobinStrategy)),
+		},
+		Distributing::Weighted(ranked) => match index {
+			Some(index) => reserve_with_strategy(obj, context, others, mu_id, &mut ByCode(OnlySuccessor(index, ranked))),
+			None => reserve_with_strategy(obj, context, others, mu_id, &mut ByCode(ranked)),
+		},
+		Distributing::ByDestination(by) => {
+			let destination = offered_destination(obj, context);
+			let ByDestination { then, reaching } = &mut **by;
+			let allowed = reaching.get(usize::from(destination)).and_then(|exits| exits.as_deref());
+			let mut then = match then {
+				Distributing::Weighted(ranked) => Then::Ranked(ranked),
+				_ => Then::RoundRobin,
+			};
+			match index {
+				Some(index) => reserve_with_strategy(obj, context, others, mu_id, &mut ByCode(Toward { allowed, inner: OnlySuccessor(index, &mut then) })),
+				None => reserve_with_strategy(obj, context, others, mu_id, &mut ByCode(Toward { allowed, inner: then })),
+			}
+		}
+		Distributing::Code(_) => unreachable!("a distribution hook hands back to the object's own strategy, never to code"),
+	}
+}
+
+/// Offers the MU a conveyor would hand over as user code's distribution hook answered (ADR 0029),
+/// or asks it, once per MU, as `move_by_code` does for objects without geometry. A successor
+/// answered is offered the MU alone, hold offers it nowhere, and default leaves it to the
+/// conveyor's own strategy.
+#[cold]
+#[inline(never)]
+fn reserve_by_code<T: SuccessorContainer + EventInterface>(obj: &mut T, context: &mut EventContext, others: &mut OtherObjects<'_>, mu_id: u32, index: Option<usize>) -> Option<u32> {
+	let mu = obj.offered_mu(context.time).cloned()?;
+	let mut distribution = std::mem::take(obj.distribution_mut());
+	let Distributing::Code(coded) = &mut distribution else {
+		unreachable!("only an object with a distribution hook is moved by code")
+	};
+	let answering = index.map(|index| obj.successors()[index]);
+	let reserved = match coded.decision(mu.id) {
+		Some(crate::hooks::Decision::Successor(to)) => match obj.successors().iter().position(|&succ| succ == to) {
+			Some(exit) if answering.is_none_or(|from| from == to) => reserve_with_strategy(obj, context, others, mu_id, &mut ByCode(OneExit { exit, answering: answering.is_some() })),
+			_ => None,
+		},
+		Some(crate::hooks::Decision::Hold) => None,
+		Some(crate::hooks::Decision::Default) => reserve_by_builtin(obj, context, others, mu_id, index, &mut coded.builtin),
+		None => {
+			ask_once(coded, context, *obj.get_object_id(), mu.clone());
+			None
+		}
+	};
+	if reserved.is_some() {
+		coded.forget_mu(mu.id);
+	}
+	*obj.distribution_mut() = distribution;
+	reserved
+}
+
+/// Asks user code where the MU goes, unless it has been asked already, or a call asking it is
+/// waiting, noted as the MU came in where the distribution's moment has moved there.
+pub(crate) fn ask_once(coded: &mut crate::hooks::Coded, context: &mut EventContext, object: u32, mu: MoveableUnit) {
+	if coded.asked != Some(mu.id) {
+		coded.asked = Some(mu.id);
+		if !context.is_asking(object, mu.id) {
+			context.ask(object, mu, coded.function);
+		}
 	}
 }
 
@@ -816,6 +897,10 @@ fn reserve_with_strategy<T: SuccessorContainer + EventInterface, S: Distribution
 		}
 	}
 	let (idx, succ_id) = chosen?;
+	// Its front crosses the end now, as the successor reserves a place (ADR 0023).
+	if context.has_hooks() {
+		front_crossed(obj, context, pred_id, succ_id);
+	}
 	others.get_mut(succ_id).reserve(mu_id, context);
 	// Its MU no longer waits anywhere.
 	for &refused_by in obj.successors() {
@@ -823,6 +908,15 @@ fn reserve_with_strategy<T: SuccessorContainer + EventInterface, S: Distribution
 	}
 	strategy.moved(idx, n, obj.succ_pointer_mut());
 	Some(succ_id)
+}
+
+/// Notes the hooks at the front of the MU `obj` offers, as `succ_id` reserves a place for it.
+#[cold]
+#[inline(never)]
+fn front_crossed<T: SuccessorContainer + EventInterface>(obj: &T, context: &mut EventContext, pred_id: u32, succ_id: u32) {
+	if let Some(mu) = obj.offered_mu(context.time).cloned() {
+		context.front_crossed(&mu, pred_id, succ_id);
+	}
 }
 
 /// Offers only the exit at `exit`, not moving the object's turn on: a cross conveyor's MU, whose
@@ -856,14 +950,19 @@ pub fn choose_exit<T: SuccessorContainer>(obj: &mut T, others: &OtherObjects<'_>
 	let mut distribution = std::mem::take(obj.distribution_mut());
 	let mut pointer = obj.succ_pointer();
 	let successors = obj.successors();
-	let chosen = match &mut distribution {
+	// User code's answer of default leaves the choice to the cross conveyor's own strategy.
+	let own = match &mut distribution {
+		Distributing::Code(coded) => &mut coded.builtin,
+		other => other,
+	};
+	let chosen = match own {
 		Distributing::RoundRobin => pick_exit(&mut RoundRobinStrategy, successors, &mut pointer, others, allowed, offer, now),
 		Distributing::Weighted(ranked) => pick_exit(ranked, successors, &mut pointer, others, allowed, offer, now),
 		Distributing::ByDestination(by) => match &mut by.then {
 			Distributing::Weighted(ranked) => pick_exit(ranked, successors, &mut pointer, others, allowed, offer, now),
 			_ => pick_exit(&mut RoundRobinStrategy, successors, &mut pointer, others, allowed, offer, now),
 		},
-		Distributing::Code(_) => unreachable!("a cross conveyor's distribution hook isn't built yet, and ModelDescription refuses one"),
+		Distributing::Code(_) => unreachable!("a distribution hook hands back to the object's own strategy, never to code"),
 	};
 	*obj.succ_pointer_mut() = pointer;
 	*obj.distribution_mut() = distribution;
@@ -991,13 +1090,14 @@ fn move_by_code(obj: &mut dyn PassesOn, context: &mut EventContext, others: &mut
 		Some(crate::hooks::Decision::Hold) => Ok(None),
 		Some(crate::hooks::Decision::Default) => move_by_builtin(obj, context, others, retry_from, &mut coded.builtin),
 		None => {
-			if coded.asked != Some(mu.id) {
-				coded.asked = Some(mu.id);
-				context.ask(*obj.get_object_id(), mu, coded.function);
-			}
+			ask_once(coded, context, *obj.get_object_id(), mu.clone());
 			Ok(None)
 		}
 	};
+	// The MU it offered has moved on, so its answer goes with it.
+	if obj.offered_mu(context.time).is_none_or(|offered| offered.id != mu.id) {
+		coded.forget_mu(mu.id);
+	}
 	*obj.distribution_mut() = distribution;
 	result
 }

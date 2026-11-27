@@ -65,6 +65,11 @@ pub enum ConveyorStep {
 	/// On a cross conveyor, it has reserved room for a conveyor's MU: choose that MU's exit, and
 	/// nothing else.
 	Decide,
+	/// The rear of its last MU crosses its start, which user code's hooks at the rear wait for.
+	RearIn,
+	/// The rear of the MU it handed to an object without geometry crosses its end, at its speed,
+	/// which user code's hooks at the rear wait for. Not part of a plan: the MU has gone.
+	RearOff,
 }
 
 /// Names a conveyor's event and the plan it belongs to. Anything that changes the conveyor makes
@@ -89,6 +94,8 @@ impl ConveyorTicket {
 			7 => ConveyorStep::Switched,
 			8 => ConveyorStep::Released,
 			9 => ConveyorStep::Decide,
+			10 => ConveyorStep::RearIn,
+			11 => ConveyorStep::RearOff,
 			_ => ConveyorStep::Wake,
 		}
 	}
@@ -122,6 +129,17 @@ pub(crate) struct Lead {
 
 /// A conveyor that reserved a place for an MU whose predecessor isn't known yet.
 const NOBODY: u32 = u32::MAX;
+
+/// User code's calls at an MU's rear (spec issue 156, PR 1b), kept by the conveyor its rear is on
+/// until it crosses: the hooks on exit of the object it came from and on entry of the one it went
+/// to. Only kept where a hook asks for the rear.
+#[derive(Debug, Clone)]
+pub(crate) struct RearCalls {
+	mu_id: u32,
+	/// When the rear crosses, for an MU handed to an object without geometry, gone from the conveyor.
+	due: SimTime,
+	calls: VecDeque<crate::hooks::HookCall>,
+}
 
 #[derive(Clone)]
 pub struct Conveyor {
@@ -194,6 +212,21 @@ pub struct Conveyor {
 	pub(crate) cross: Option<Box<Cross>>,
 	/// The model's kinds of MU, by `MuKindId`, given when a run is built.
 	pub(crate) kinds: Vec<MuKind>,
+	/// What it keeps for user code (ADR 0029), made when first needed, so a conveyor in a model
+	/// without hooks pays one pointer and one check as it replans.
+	code: Option<Box<ForCode>>,
+}
+
+/// What a conveyor keeps for user code.
+#[derive(Debug, Clone, Default)]
+struct ForCode {
+	/// The calls at the rear of its last MU, until that rear crosses its start.
+	rear_in: Option<RearCalls>,
+	/// The calls at the rear of the MU it handed to an object without geometry, until that rear
+	/// would cross its end.
+	rear_off: Option<RearCalls>,
+	/// A replan stopped to ask user code where the MU it lets in goes, so the answer replans.
+	replan_when_decided: bool,
 }
 
 impl Conveyor {
@@ -230,6 +263,7 @@ impl Conveyor {
 			arriving: None,
 			cross: None,
 			kinds: vec![MuKind::default()],
+			code: None,
 		}
 	}
 
@@ -498,6 +532,12 @@ impl Conveyor {
 		let now = context.time;
 		if self.cross.as_ref().is_some_and(|cross| !cross.decided) {
 			self.decide_exit(context, others);
+			// User code is asked where the MU goes and answers at this instant: the events are
+			// worked out then, once (ADR 0029).
+			if self.distribution.is_code() && self.cross.as_ref().is_some_and(|cross| !cross.decided) && self.awaits_exit(others) {
+				self.for_code().replan_when_decided = true;
+				return;
+			}
 		}
 		let had_lead = self.led_by.is_some();
 		let mut lead = self.lead(others, now);
@@ -506,6 +546,11 @@ impl Conveyor {
 		}
 		let (closes_up, tail) = self.settle(lead, others, context);
 		self.short_until = tail.and_then(|(rear, speed)| self.short_until(rear, speed, now));
+		// Before its front MU's events, so an MU as long as the conveyor has its rear in before it
+		// leaves.
+		if self.code.is_some() {
+			self.plan_rear_in(context);
+		}
 		if let Some(first) = self.belt.front() {
 			if first.speed > 0.0 {
 				let front = self.front(0, now);
@@ -564,6 +609,56 @@ impl Conveyor {
 					context.schedule(self.event(ConveyorStep::Room, after));
 				}
 			}
+		}
+	}
+
+	/// The rear of its last MU, whose calls at the rear it keeps, crosses the start now, or is planned
+	/// to as it moves.
+	#[cold]
+	#[inline(never)]
+	fn plan_rear_in(&mut self, context: &mut EventContext) {
+		let now = context.time;
+		let code = self.for_code();
+		code.replan_when_decided = false;
+		if code.rear_in.is_none() {
+			return;
+		}
+		let Some(last) = self.belt.len().checked_sub(1) else {
+			self.for_code().rear_in = None;
+			return;
+		};
+		let rear = self.rear(last, now);
+		if rear >= -EPSILON {
+			self.flush_rear_in(context);
+		} else if self.belt[last].speed > 0.0 {
+			context.schedule(self.event(ConveyorStep::RearIn, Self::time_for(-rear, self.belt[last].speed)));
+		}
+	}
+
+	/// What it keeps for user code, made now if it has none yet.
+	#[cold]
+	fn for_code(&mut self) -> &mut ForCode {
+		self.code.get_or_insert_with(Box::default)
+	}
+
+	/// The calls at the rear of its last MU are made now.
+	fn flush_rear_in(&mut self, context: &mut EventContext) {
+		if let Some(rear) = self.code.as_deref_mut().and_then(|code| code.rear_in.take()) {
+			context.note_calls(rear.calls);
+		}
+	}
+
+	/// The calls at the rear of the MU it handed to an object without geometry are made now, but
+	/// for a distribution asked there of an object that has passed the MU on already.
+	fn flush_rear_off(&mut self, context: &mut EventContext, others: &OtherObjects<'_>) {
+		if let Some(mut rear) = self.code.as_deref_mut().and_then(|code| code.rear_off.take()) {
+			let now = context.time;
+			let mu_id = rear.mu_id;
+			rear.calls.retain(|call| match call.kind {
+				crate::hooks::CallKind::Distribution { object, .. } => others.get(object).report(now).contents.contains(&mu_id),
+				_ => true,
+			});
+			context.note_calls(rear.calls);
 		}
 	}
 
@@ -633,6 +728,9 @@ impl Conveyor {
 		context.moved(&on.mu, from, to);
 		log::info!("seq={} MU {} moved from conveyor {} to {}", context.seq, on.mu.id, from, to);
 		let to_belt = others.get(to).as_conveyor().is_some();
+		if context.has_hooks() {
+			self.handed_over_for_code(&on, to_belt, context);
+		}
 		if to_belt {
 			// Its rear may still be on this one, which the MUs behind must not run into.
 			self.led_by = Some(to);
@@ -659,6 +757,72 @@ impl Conveyor {
 		Ok(())
 	}
 
+	/// What user code needs as the MU is handed over: its answer goes with it, and into an object
+	/// without geometry the calls at its rear wait for its rear to cross the end at this conveyor's
+	/// speed. Onto a conveyor, that one keeps them.
+	#[cold]
+	#[inline(never)]
+	fn handed_over_for_code(&mut self, on: &OnBelt, to_belt: bool, context: &mut EventContext) {
+		if let Distributing::Code(coded) = &mut self.distribution {
+			coded.forget_mu(on.mu.id);
+		}
+		if !to_belt {
+			let rears = context.take_rears();
+			if !rears.is_empty() {
+				let rest = self.along(on) - self.booking_offset_of(on);
+				self.keep_rear_off(on.mu.id, rears, Self::time_for(rest, self.speed), context);
+			}
+		}
+	}
+
+	/// Keeps the calls at the rear of the MU it handed to an object without geometry until `after`
+	/// from now, making any kept before first: that MU's rear crossed by now.
+	#[cold]
+	#[inline(never)]
+	fn keep_rear_off(&mut self, mu_id: u32, calls: VecDeque<crate::hooks::HookCall>, after: SimTime, context: &mut EventContext) {
+		if let Some(earlier) = self.for_code().rear_off.take() {
+			context.note_calls(earlier.calls);
+		}
+		if after == SimTime::ZERO {
+			context.note_calls(calls);
+			return;
+		}
+		self.for_code().rear_off = Some(RearCalls { mu_id, due: context.time + after, calls });
+		context.schedule(EventTemplate { eventtype: EventType::Conveyor(ConveyorTicket { step: ConveyorStep::RearOff as u8, plan: mu_id }), exec_time: after, object_id: self.base.object_id });
+	}
+
+	/// The rear of the MU it handed to an object without geometry crosses its end, if it is still
+	/// the one whose calls it keeps.
+	#[cold]
+	#[inline(never)]
+	fn rear_off_due(&mut self, mu_id: u32, context: &mut EventContext, others: &OtherObjects<'_>) {
+		if self.code.as_ref().and_then(|code| code.rear_off.as_ref()).is_some_and(|rear| rear.mu_id == mu_id && rear.due == context.time) {
+			self.flush_rear_off(context, others);
+		}
+	}
+
+	/// User code answered where its MU goes (ADR 0029): a cross conveyor chooses the exit of the MU
+	/// it lets in, and a conveyor offers its front MU at the end.
+	#[cold]
+	#[inline(never)]
+	fn decided(&mut self, context: &mut EventContext, others: &mut OtherObjects<'_>) -> Result<(), RunTimeError> {
+		if self.interruptions.is_interrupted() {
+			return Ok(());
+		}
+		if let Some(cross) = &self.cross {
+			if !cross.decided {
+				self.decide_exit(context, others);
+			}
+			if std::mem::take(&mut self.for_code().replan_when_decided) {
+				self.replan(context, others);
+			}
+		} else if self.front_at_end && self.handing_to.is_none() && !self.belt.is_empty() {
+			self.offer(context, others, None)?;
+			self.replan(context, others);
+		}
+		Ok(())
+	}
+
 	fn handle_event(&mut self, context: &mut EventContext, eventtype: &EventType, others: &mut OtherObjects<'_>) -> Result<(), RunTimeError> {
 		match eventtype {
 			EventType::Conveyor(ticket) if ticket.step() == ConveyorStep::Wake => {
@@ -666,7 +830,15 @@ impl Conveyor {
 				self.replan(context, others);
 				Ok(())
 			}
-			EventType::Conveyor(ticket) if ticket.plan != self.plan || self.interruptions.is_interrupted() => Ok(()),
+			// A rear crossing its end belongs to no plan, its MU gone whole, so neither a new plan nor
+			// an interruption holds it back. Its ticket carries the MU, so it is checked here, off the
+			// path of the conveyor's own events.
+			EventType::Conveyor(ticket) if ticket.plan != self.plan || self.interruptions.is_interrupted() => {
+				if self.code.is_some() && ticket.step() == ConveyorStep::RearOff {
+					self.rear_off_due(ticket.plan, context, others);
+				}
+				Ok(())
+			}
 			EventType::Conveyor(ticket) => {
 				let now = context.time;
 				match ticket.step() {
@@ -680,6 +852,11 @@ impl Conveyor {
 						self.front_at_end = true;
 						self.ready_since = now;
 						self.offer(context, others, None)?;
+						// User code answers where it goes at this instant, and its MUs move on as they
+						// were until then (ADR 0029).
+						if self.distribution.awaits(self.belt.front().map(|on| on.mu.id)) {
+							return Ok(());
+						}
 					}
 					ConveyorStep::Booked => {
 						let to = self.handing_to.expect("a successor took the front MU");
@@ -716,11 +893,24 @@ impl Conveyor {
 						retries_for_blocked(&mut self.blockedlist, self.base.object_id, context);
 						return Ok(());
 					}
+					// Nothing on it moves differently.
+					ConveyorStep::RearIn => {
+						if self.code.is_some() {
+							self.plan_rear_in(context);
+						}
+						return Ok(());
+					}
+					// Its MU's id happens to be the plan's count.
+					ConveyorStep::RearOff => {
+						self.rear_off_due(ticket.plan, context, others);
+						return Ok(());
+					}
 					ConveyorStep::Wake => unreachable!("handled above"),
 				}
 				self.replan(context, others);
 				Ok(())
 			}
+			EventType::Decided => self.decided(context, others),
 			&EventType::BlockedRetry { from } => {
 				// Nothing waits at the end: a retry already queued when the front MU was taken.
 				if !self.front_at_end || self.handing_to.is_some() || self.belt.is_empty() {
@@ -804,17 +994,30 @@ impl Conveyor {
 	/// next destination, straight across included, its own strategy picks the first whose
 	/// successor would take the MU now, otherwise the first in its order, which the MU then waits
 	/// for. An MU no exit lists goes straight across.
-	fn decide_exit(&mut self, context: &EventContext, others: &OtherObjects<'_>) {
+	fn decide_exit(&mut self, context: &mut EventContext, others: &OtherObjects<'_>) {
 		let Some(cross) = self.cross.as_deref() else { return };
-		let (destination, kind, crosswise, side) = match self.belt.front() {
-			Some(on) => (context.routing.next_destination(&on.mu), on.mu.kind(), on.crosswise, cross.leg_from),
+		let (mu, crosswise, side) = match self.belt.front() {
+			Some(on) => (&on.mu, on.crosswise, cross.leg_from),
 			None => {
 				let Some(giver) = self.reserved_by.filter(|&from| from != NOBODY) else { return };
 				let Some((mu, crosswise)) = others.get(giver).as_conveyor().and_then(Conveyor::handed_mu) else { return };
 				let Some(side) = cross.entry_side(giver) else { return };
-				(context.routing.next_destination(mu), mu.kind(), crosswise, side)
+				(mu, crosswise, side)
 			}
 		};
+		let (destination, kind) = (context.routing.next_destination(mu), mu.kind());
+		if self.distribution.is_code() {
+			let mu = mu.clone();
+			match self.exit_by_code(&mu, context) {
+				CodeExit::Decided(exit) => {
+					self.cross.as_deref_mut().expect("a cross conveyor").decide(side, exit);
+					return;
+				}
+				CodeExit::Asked => return,
+				CodeExit::Builtin => {}
+			}
+		}
+		let Some(cross) = self.cross.as_deref() else { return };
 		let takes = cross.exits_taking(destination);
 		let exit = if takes == 0 {
 			cross.exit_at(side.opposite())
@@ -830,6 +1033,40 @@ impl Conveyor {
 		self.cross.as_deref_mut().expect("a cross conveyor").decide(side, exit);
 	}
 
+	/// User code's answer for where the MU it lets in goes: an exit, none for hold, so it stays at
+	/// the end it reaches until code moves it, or its own strategy. Asks once if there is no answer
+	/// yet, which comes at this instant.
+	#[cold]
+	#[inline(never)]
+	fn exit_by_code(&mut self, mu: &MoveableUnit, context: &mut EventContext) -> CodeExit {
+		let id = self.base.object_id;
+		let Distributing::Code(coded) = &mut self.distribution else { return CodeExit::Builtin };
+		let decision = coded.decision(mu.id);
+		if decision.is_some() {
+			coded.forget_mu(mu.id);
+		}
+		match decision {
+			Some(crate::hooks::Decision::Successor(to)) => CodeExit::Decided(self.succ.iter().position(|&succ| succ == to)),
+			Some(crate::hooks::Decision::Hold) => CodeExit::Decided(None),
+			Some(crate::hooks::Decision::Default) => CodeExit::Builtin,
+			None => {
+				crate::flows::ask_once(coded, context, id, mu.clone());
+				CodeExit::Asked
+			}
+		}
+	}
+
+	/// Whether user code has been asked where the MU it lets in goes, and hasn't answered yet.
+	#[cold]
+	#[inline(never)]
+	fn awaits_exit(&self, others: &OtherObjects<'_>) -> bool {
+		let mu = match self.belt.front() {
+			Some(on) => Some(on.mu.id),
+			None => self.reserved_by.filter(|&from| from != NOBODY).and_then(|giver| others.get(giver).as_conveyor()).and_then(Conveyor::handed_mu).map(|(mu, _)| mu.id),
+		};
+		self.distribution.awaits(mu)
+	}
+
 	/// The MU it is handing over to the next object, and whether it lies crosswise.
 	fn handed_mu(&self) -> Option<(&MoveableUnit, bool)> {
 		self.handing_to.and(self.belt.front()).map(|on| (&on.mu, on.crosswise))
@@ -839,6 +1076,8 @@ impl Conveyor {
 	/// orientation, so it lies crosswise to its new way, or lengthwise again if it came in
 	/// crosswise.
 	fn leave_sideways(&mut self, context: &mut EventContext) {
+		// Its rear crossed the side it came in by on its way to the centre.
+		self.flush_rear_in(context);
 		let cross = self.cross.as_deref_mut().expect("only a cross conveyor turns MUs");
 		cross.switch = None;
 		cross.stage = Stage::Leaving;
@@ -849,6 +1088,149 @@ impl Conveyor {
 		self.belt[0].along = self.extent(self.belt[0].mu.kind(), self.belt[0].crosswise).0;
 		let front = (self.length + self.along(&self.belt[0])) / 2.0;
 		self.plan_mu(0, front, self.speed, context);
+	}
+
+	/// Takes the MU off for user code (ADR 0029), wherever it is, unless it is being handed over: to
+	/// a successor that has taken it, or from the conveyor before, which still holds its rear (ADR
+	/// 0023). The MUs behind it move on, and those waiting are offered the room.
+	pub(crate) fn take_out(&mut self, mu_id: u32, context: &mut EventContext, others: &mut OtherObjects<'_>) -> Result<MoveableUnit, crate::hooks::Refusal> {
+		let id = self.base.object_id;
+		let now = context.time;
+		let Some(at) = self.belt.iter().position(|on| on.mu.id == mu_id) else {
+			return Err(crate::hooks::Refusal::new(format!("object {id} doesn't hold MU {mu_id}")));
+		};
+		let last = self.belt.len() - 1;
+		if let (0, Some(to)) = (at, self.handing_to) {
+			return Err(crate::hooks::Refusal::new(format!("MU {mu_id} is being handed over to object {to}, and a transfer once begun always finishes")));
+		}
+		if let (true, Some(from)) = (at == last, self.straddle_from) {
+			if self.rear(at, now) < -EPSILON {
+				return Err(crate::hooks::Refusal::new(format!("MU {mu_id} still has its rear on object {from}, and a transfer once begun always finishes")));
+			}
+			self.straddle_from = None;
+			Self::wake(from, context, others);
+		}
+		let on = self.belt.remove(at).expect("found above");
+		if at == 0 && self.front_at_end {
+			self.front_at_end = false;
+			for &successor in &self.succ {
+				others.get_mut(successor).relist_blocked(id, None);
+			}
+		}
+		if let Some(code) = self.code.as_deref_mut().filter(|code| code.rear_in.as_ref().is_some_and(|rear| rear.mu_id == mu_id)) {
+			code.rear_in = None;
+		}
+		self.taken -= self.along(&on);
+		if self.belt.is_empty() {
+			self.short_until = None;
+		}
+		if let Some(cross) = self.cross.as_deref_mut() {
+			cross.stage = Stage::Approaching;
+			cross.turning = false;
+			cross.exit = None;
+			cross.decided = false;
+			cross.switch = None;
+			(self.length, self.width) = cross.dimensions_from(cross.leg_from);
+		}
+		self.statistics.count_mu_out();
+		self.retried = false;
+		self.replan(context, others);
+		self.update_state(context);
+		Ok(on.mu)
+	}
+
+	/// Where user code may place an MU of this kind with its `point` at `at` metres from the start
+	/// (ADR 0029): the front it would have there, or why not. It must lie on the conveyor, its front
+	/// at most at the end and its booking point at or past the start, its rear behind the start only
+	/// as the last MU, and come within the gap of no other MU, nor of the one it hands over or takes
+	/// in. Only a conveyor that would take an MU now, and not a cross conveyor, which takes one only
+	/// at a side.
+	pub(crate) fn place_for(&self, kind: MuKindId, at: f64, point: crate::hooks::TriggerPoint, others: &OtherObjects<'_>, now: SimTime) -> Result<f64, crate::hooks::Refusal> {
+		use crate::hooks::{Refusal, TriggerPoint};
+		let id = self.base.object_id;
+		if self.cross.is_some() {
+			return Err(Refusal::new(format!("object {id} is a cross conveyor, which takes an MU only at one of its sides: move it there with move_mu")));
+		}
+		if self.interruptions.is_interrupted() {
+			return Err(Refusal::new(format!("object {id} doesn't take an MU now")));
+		}
+		if !(-EPSILON..=self.length + EPSILON).contains(&at) {
+			return Err(Refusal::new(format!("{at} m isn't on object {id}, which is {} m long", self.length)));
+		}
+		let (along, across) = self.extent(kind, false);
+		if across > self.width + EPSILON || along > self.length + EPSILON {
+			return Err(Refusal::new(format!("an MU of kind {kind} doesn't fit on object {id}")));
+		}
+		let offset = self.booking_offset(kind, false);
+		let front = match point {
+			TriggerPoint::Front => at,
+			TriggerPoint::BookingPoint => at + offset,
+			TriggerPoint::Rear => at + along,
+		};
+		let rear = front - along;
+		if front > self.length + EPSILON {
+			return Err(Refusal::new(format!("its front would be {:.3} m past the end of object {id}", front - self.length)));
+		}
+		if front - offset < -EPSILON {
+			return Err(Refusal::new(format!("its booking point would be {:.3} m before the start of object {id}", offset - front)));
+		}
+		// The MU it hands over to the next conveyor, or the last MU there it takes room under.
+		let next = self.handing_to.or(self.led_by);
+		let lead = next.and_then(|next| others.get(next).as_conveyor()).and_then(|next| next.tail_lead(id, now));
+		let mut ahead = lead.map(|lead| (format!("the last MU on object {}", next.unwrap_or(id)), self.length + lead.rear));
+		let mut behind = None;
+		for at in 0..self.belt.len() {
+			let other = self.front(at, now);
+			if other > front {
+				ahead = Some((format!("MU {}", self.belt[at].mu.id), self.rear(at, now)));
+			} else {
+				behind = Some((self.belt[at].mu.id, other));
+				break;
+			}
+		}
+		if let Some((other, _)) = ahead.filter(|&(_, ahead_rear)| front + self.gap > ahead_rear + EPSILON) {
+			return Err(Refusal::new(format!("there's no room on object {id} there: it would come within the gap of {other}, ahead of it")));
+		}
+		match behind {
+			Some((other, other_front)) if other_front + self.gap > rear + EPSILON => Err(Refusal::new(format!("there's no room on object {id} there: it would come within the gap of MU {other}, behind it"))),
+			None if self.reserved_by.is_some() || self.straddle_from.is_some() => Err(Refusal::new(format!("object {id} is taking in an MU at its start"))),
+			_ => Ok(front),
+		}
+	}
+
+	/// Places the MU user code moves onto it with its front at `front`, as `place_for` found, whole
+	/// at once but for a rear still behind the start, and works out its events again.
+	pub(crate) fn place(&mut self, mut mu: MoveableUnit, front: f64, context: &mut EventContext, others: &mut OtherObjects<'_>) {
+		let now = context.time;
+		if mu.is_routed() {
+			context.routing.arrive(&mut mu, self.base.object_id);
+		}
+		let at = (0..self.belt.len()).take_while(|&at| self.front(at, now) > front).count();
+		let along = self.extent(mu.kind(), false).0;
+		let speed = if self.interruptions.is_interrupted() { 0.0 } else { self.speed };
+		self.taken += along;
+		if context.has_hooks() {
+			self.placed_for_code(mu.id, front - along, context);
+		}
+		self.belt.insert(at, OnBelt { mu, front, since: now, speed, entered: now, crosswise: false, along });
+		self.plan_mu(at, front, speed, context);
+		self.statistics.count_mu_in();
+		self.retried = false;
+		self.replan(context, others);
+		self.update_state(context);
+	}
+
+	/// The calls at the rear of the MU placed now: made at once if all of it is on, otherwise kept
+	/// until its rear crosses the start.
+	#[cold]
+	#[inline(never)]
+	fn placed_for_code(&mut self, mu_id: u32, rear: f64, context: &mut EventContext) {
+		if rear >= -EPSILON {
+			let calls = context.take_rears();
+			context.note_calls(calls);
+		} else {
+			self.keep_rear_in(mu_id, context);
+		}
 	}
 
 	/// Sets where the MU at `at` is, exactly, without saying so: its movement doesn't change.
@@ -945,6 +1327,30 @@ impl Conveyor {
 	}
 }
 
+impl Conveyor {
+	/// Keeps user code's calls at the rear of the MU entering now until its rear crosses the start,
+	/// making those of the MU before it first: that one's rear crossed by now.
+	#[cold]
+	#[inline(never)]
+	fn keep_rear_in(&mut self, mu_id: u32, context: &mut EventContext) {
+		self.flush_rear_in(context);
+		let calls = context.take_rears();
+		if !calls.is_empty() {
+			self.for_code().rear_in = Some(RearCalls { mu_id, due: SimTime::MAX, calls });
+		}
+	}
+}
+
+/// What user code answered about where the MU a cross conveyor lets in goes.
+enum CodeExit {
+	/// This exit, or none.
+	Decided(Option<usize>),
+	/// A call is asking, and its answer comes at this instant.
+	Asked,
+	/// The cross conveyor's own strategy chooses.
+	Builtin,
+}
+
 impl MaterialFlow for Conveyor {
 	/// It takes an MU only once it knows which: see `accepts`.
 	#[inline(never)]
@@ -1014,6 +1420,9 @@ impl MaterialFlow for Conveyor {
 		let along = self.extent(mu.kind(), crosswise).0;
 		self.taken += along;
 		self.short_until = self.short_until(front - along, speed, context.time);
+		if context.has_hooks() {
+			self.keep_rear_in(mu.id, context);
+		}
 		self.belt.push_back(OnBelt { mu, front, since: context.time, speed, entered: context.time, crosswise, along });
 		let at = self.belt.len() - 1;
 		self.plan_mu(at, front, speed, context);
@@ -1082,6 +1491,7 @@ impl EventInterface for Conveyor {
 		self.clears_at = None;
 		self.short_until = None;
 		self.arriving = None;
+		self.code = None;
 		if let Some(cross) = self.cross.as_deref_mut() {
 			cross.reset();
 			(self.length, self.width) = (cross.length, cross.width);
@@ -1220,6 +1630,7 @@ impl SuccessorContainer for Conveyor {
 		self.led_by = None;
 		self.straddle_from = None;
 		self.reserved_by = None;
+		self.code = None;
 		self.state = ProcessState::Idle;
 	}
 	#[inline(never)]

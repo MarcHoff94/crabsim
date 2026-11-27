@@ -1,10 +1,10 @@
 use crate::error::{AdvanceFailure, RunError};
 use crate::event::{EventContext, EventType, ScheduledEvent, NO_OBJECT};
-use crate::flows::{EventInterface, MaterialFlow};
+use crate::flows::{EventInterface, MaterialFlow, Offer};
 use crate::hooks::{CallKind, Decision, HookCall, HookError, HookFunction, HookTable, Hooks, Lifecycle, Refusal};
 use crate::report::ObjectState;
 use crate::distribution::DistributionRule;
-use crate::materialflow_objects::{ByDestination, Distributing, ModelObject, OtherObjects, Ranked};
+use crate::materialflow_objects::{ByDestination, Conveyor, Distributing, ModelObject, OtherObjects, Ranked};
 use crate::routing::Routing;
 use std::sync::Arc;
 use crate::report::{Occurrence, OccurrenceKind, Recording, RunState};
@@ -100,12 +100,15 @@ impl SimulationRun {
         };
         run.route_by_destination();
         run.rank_successors();
+        run.context = run.default_context();
         run
     }
 
     /// Gives the run user code and which objects have which hooks (ADR 0029). An object with a
     /// distribution hook keeps its own strategy, which the hook can hand the choice back to.
     pub(crate) fn attach_hooks(&mut self, table: HookTable, hooks: Box<dyn Hooks>) {
+        let mut table = table;
+        table.set_belts(self.objects.iter().map(ModelObject::reads_mu_kind).collect());
         for (id, function) in table.distributions() {
             if let Some(distribution) = self.objects.get_mut(id as usize).and_then(ModelObject::distribution_mut) {
                 let builtin = std::mem::take(distribution);
@@ -113,8 +116,20 @@ impl SimulationRun {
             }
         }
         self.hook_table = Some(Arc::new(table));
-        self.context = self.new_context(1);
+        self.context = self.default_context();
         self.hooks = Some(hooks);
+    }
+
+    /// A context for a run in its default state: new MU ids come after the highest starting MU's,
+    /// and it knows where each starting MU is.
+    fn default_context(&self) -> EventContext {
+        let starting: Vec<(u32, u32)> = self.state().objects.iter().flat_map(|o| o.contents.iter().map(move |&mu| (mu, o.id))).collect();
+        let highest_starting_mu = starting.iter().map(|&(mu, _)| mu).max().unwrap_or(0);
+        let mut context = self.new_context(highest_starting_mu + 1);
+        for (mu, object) in starting {
+            context.starts_at(mu, object);
+        }
+        context
     }
 
     /// A context for events from now on, handing out MU ids from `first_mu_id`.
@@ -242,8 +257,7 @@ impl SimulationRun {
         if let Some(error) = self.hook_error.take() {
             return Err(error);
         }
-        let highest_starting_mu = self.state().objects.iter().flat_map(|o| o.contents.clone()).max().unwrap_or(0);
-        self.context = self.new_context(highest_starting_mu + 1);
+        self.context = self.default_context();
         self.context.time = SimTime::ZERO;
         self.context.record(OccurrenceKind::RunInitialised);
         self.lifecycle(Lifecycle::BeforeInit)?;
@@ -344,7 +358,7 @@ impl SimulationRun {
             }
         }
         if let Some(Distributing::Code(coded)) = target.distribution_mut() {
-            coded.decided = Some((mu, decision));
+            coded.decide(mu, decision);
         }
         self.execute_now(object, EventType::Decided)
     }
@@ -370,6 +384,12 @@ impl SimulationRun {
             self.push_event(self.time + new_event.exec_time, new_event.eventtype, new_event.object_id);
         }
         self.context.return_scheduled(scheduled);
+    }
+
+    /// The object holding the MU, if it is in the run: where it was made, moved last, or held from
+    /// Init. A table every move writes keeps it (`MuLocations`), so this costs no search.
+    pub fn location_of(&self, mu: u32) -> Option<u32> {
+        self.context.location_of(mu)
     }
 
     /// Processes the next event, if there is one.
@@ -458,7 +478,7 @@ impl SimulationRun {
         self.statistics_since = SimTime::ZERO;
         self.periods = None;
         self.period_end = SimTime::MAX;
-        self.context = self.new_context(1);
+        self.context = self.default_context();
         self.rank_successors();
         if let Some(hooks) = &mut self.hooks {
             hooks.clear();
@@ -666,33 +686,105 @@ impl HookRun<'_> {
         if id < self.object_count() { Ok(()) } else { Err(Refusal::new(format!("object {id} is not in the model"))) }
     }
 
+    /// The object holding the MU, if it is in the run.
+    pub fn location(&self, mu: u32) -> Option<u32> {
+        self.run.location_of(mu)
+    }
+
+    /// The object holding the MU, or why there is none.
+    fn holder(&self, mu: u32) -> Result<u32, Refusal> {
+        self.location(mu).ok_or_else(|| Refusal::new(format!("MU {mu} isn't in the run")))
+    }
+
     /// Moves the MU from the object holding it into another that takes it now, connected or not,
     /// whatever the MU is doing: work on it stops. Its old object's hook on exit and its new
     /// object's hook on entry run after this call.
-    pub fn move_mu(&mut self, mu: u32, from: u32, to: u32) -> Result<(), Refusal> {
+    pub fn move_mu(&mut self, mu: u32, to: u32) -> Result<(), Refusal> {
         self.allow(true)?;
-        self.exists(from)?;
+        let from = self.holder(mu)?;
         self.exists(to)?;
         if from == to {
             return Err(Refusal::new(format!("MU {mu} would move from object {from} into itself")));
         }
         let run = &mut *self.run;
+        let now = run.time;
         let target = &run.objects[to as usize];
-        if target.reads_mu_kind() {
-            return Err(Refusal::new(format!("object {to} is a conveyor, and crabsim can't move an MU onto a conveyor from code yet")));
-        }
-        if !target.is_entrance_allowed() {
+        let onto_belt = target.reads_mu_kind();
+        if onto_belt {
+            // It goes on as from an object without geometry: lengthwise, its booking point at the start.
+            let held = run.objects[from as usize].report(now);
+            let Some(kind) = held.contents.iter().position(|&held| held == mu).and_then(|at| held.content_kinds.get(at).copied()) else {
+                return Err(Refusal::new(format!("object {from} doesn't hold MU {mu}")));
+            };
+            if target.as_conveyor().and_then(Conveyor::cross).is_some_and(|cross| cross.entry_side(from).is_none()) {
+                return Err(Refusal::new(format!("object {to} is a cross conveyor, which takes an MU only from one of its predecessors, at the side it comes in by")));
+            }
+            if !target.accepts(&Offer { kind, from, from_belt: false, crosswise: false }, now) {
+                return Err(Refusal::new(format!("object {to} doesn't take MU {mu} now")));
+            }
+        } else if !target.is_entrance_allowed() {
             return Err(Refusal::new(format!("object {to} doesn't take an MU now")));
         }
         let (before, from_object) = run.objects.split_at_mut(from as usize);
         let (object, after) = from_object.split_at_mut(1);
         let mut others = OtherObjects::new(before, after);
         let taken = object[0].take_out(mu, &mut run.context, &mut others)?;
-        run.context.moved(&taken, from, to);
+        if let Some(Distributing::Code(coded)) = object[0].distribution_mut() {
+            coded.forget_mu(mu);
+        }
+        run.context.moved_by_code(&taken, from, to);
+        if onto_belt {
+            others.get_mut(to).arriving(from, false);
+        }
         let entered = others.get_mut(to).enter(taken, &mut run.context).expect("an object that takes an MU now takes it");
         if let Some(entered) = entered {
             run.context.schedule(entered);
         }
+        run.queue_scheduled();
+        Ok(())
+    }
+
+    /// Moves the MU from the object holding it onto a conveyor, connected or not, with its `point`
+    /// (front, booking point or rear) `at` metres from the conveyor's start, whole at once, where
+    /// there is room for it: its front at most at the end, its booking point at or past the start,
+    /// and within the gap of no other MU. `move_mu` puts it on as an object without geometry would,
+    /// its booking point at the start. Its hooks run as for `move_mu`, the conveyor's on entry at
+    /// the rear once its rear is on if it hangs behind the start.
+    pub fn place_mu(&mut self, mu: u32, to: u32, at: f64, point: crate::hooks::TriggerPoint) -> Result<(), Refusal> {
+        self.allow(true)?;
+        let from = self.holder(mu)?;
+        self.exists(to)?;
+        if from == to {
+            return Err(Refusal::new(format!("MU {mu} would move from object {from} into itself")));
+        }
+        let run = &mut *self.run;
+        let now = run.time;
+        let held = run.objects[from as usize].report(now);
+        let Some(kind) = held.contents.iter().position(|&held| held == mu).and_then(|at| held.content_kinds.get(at).copied()) else {
+            return Err(Refusal::new(format!("object {from} doesn't hold MU {mu}")));
+        };
+        let front = {
+            let (before, to_object) = run.objects.split_at_mut(to as usize);
+            let (object, after) = to_object.split_at_mut(1);
+            let Some(conveyor) = object[0].as_conveyor() else {
+                return Err(Refusal::new(format!("object {to} isn't a conveyor, so an MU has no place on it")));
+            };
+            conveyor.place_for(kind, at, point, &OtherObjects::new(before, after), now)?
+        };
+        let (before, from_object) = run.objects.split_at_mut(from as usize);
+        let (object, after) = from_object.split_at_mut(1);
+        let mut others = OtherObjects::new(before, after);
+        let taken = object[0].take_out(mu, &mut run.context, &mut others)?;
+        if let Some(Distributing::Code(coded)) = object[0].distribution_mut() {
+            coded.forget_mu(mu);
+        }
+        run.context.moved_by_code(&taken, from, to);
+        run.queue_scheduled();
+        let index = to as usize;
+        let (before, to_object) = run.objects.split_at_mut(index);
+        let (object, after) = to_object.split_at_mut(1);
+        let mut others = OtherObjects::new(before, after);
+        object[0].as_conveyor_mut().expect("checked above").place(taken, front, &mut run.context, &mut others);
         run.queue_scheduled();
         Ok(())
     }

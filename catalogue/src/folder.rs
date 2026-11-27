@@ -25,8 +25,9 @@ pub struct ModelsFolder {
 
 impl ModelsFolder {
     /// Opens `folder` as a models folder. Refused if it isn't a folder, or if it holds a
-    /// `Cargo.toml`, a `.git` or any `.rs` file at any depth, so crabsim's operations can't be
-    /// pointed at a source tree, such as crabsim's own repository, by mistake.
+    /// `Cargo.toml`, a `.git` or any `.rs` file at any depth outside its `code/` folder, so
+    /// crabsim's operations can't be pointed at a source tree, such as crabsim's own repository,
+    /// by mistake.
     pub fn open(folder: &Path) -> Result<ModelsFolder, OperationError> {
         let root = std::fs::canonicalize(folder)
             .map_err(|error| OperationError::not_found(format!("the models folder {} can't be opened: {error}", folder.display())))?;
@@ -169,8 +170,10 @@ fn outside(path: &str) -> OperationError {
 }
 
 /// The first sign of source code in `folder`: a `Cargo.toml`, a `.git` or a `.rs` file at any
-/// depth. Links aren't followed, so a link can't make the search loop.
+/// depth, but in its `code/` folder, where code modules' sources belong. Links aren't followed, so
+/// a link can't make the search loop.
 fn source_code_in(folder: &Path) -> Option<PathBuf> {
+    let root = folder.to_path_buf();
     let mut folders = vec![folder.to_path_buf()];
     while let Some(folder) = folders.pop() {
         let Ok(entries) = std::fs::read_dir(&folder) else { continue };
@@ -179,6 +182,11 @@ fn source_code_in(folder: &Path) -> Option<PathBuf> {
             let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
             if name == "cargo.toml" || name == ".git" || name.ends_with(".rs") {
                 return Some(path);
+            }
+            // A code module's sources may sit beside it in `code/` (spec issue 156), which
+            // crabsim reads only for its `.wasm` files.
+            if folder == root && name == crabsim_model::CODE_FOLDER {
+                continue;
             }
             if entry.file_type().is_ok_and(|kind| kind.is_dir()) && name != CRABSIM_FOLDER {
                 folders.push(path);

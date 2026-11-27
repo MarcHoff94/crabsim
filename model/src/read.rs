@@ -34,11 +34,11 @@ pub(crate) struct Broken {
     pub class_attributes: HashSet<(usize, &'static str)>,
 }
 
-const TOP_LEVEL: [&str; 6] = ["$schema", "format_version", "description", "classes", "instances", "connections"];
+const TOP_LEVEL: [&str; 7] = ["$schema", "format_version", "description", "classes", "instances", "connections", "hooks"];
 const INSTANCE: [&str; 5] = ["name", "class", "stream", "position", "attributes"];
 const CONNECTION: [&str; 7] = ["from", "to", "exit", "entrance", "description", "from_side", "to_side"];
 const CLASS: [&str; 3] = ["name", "parent", "attributes"];
-const ATTRIBUTES: [&str; 31] = [
+const ATTRIBUTES: [&str; 33] = [
     "interval",
     "process_time",
     "failures",
@@ -70,6 +70,8 @@ const ATTRIBUTES: [&str; 31] = [
     "switch_time",
     "release_time",
     "exits",
+    "on_entry",
+    "on_exit",
 ];
 /// The kinds of segment a path has (ADR 0024).
 const SEGMENTS: [&str; 4] = ["straight", "arc", "transition", "helix"];
@@ -169,7 +171,11 @@ impl Reader {
                 Vec::new()
             }
         };
-        Model { schema, description, classes, instances, connections }
+        let hooks = match fields.get("hooks") {
+            None => crate::ModelHooks::default(),
+            Some(value) => self.model_hooks(value),
+        };
+        Model { schema, description, classes, instances, connections, hooks }
     }
 
     fn connection(&mut self, index: usize, value: &Value) -> Connection {
@@ -406,6 +412,8 @@ impl Reader {
                 "switch_time" => self.time(value, &at, name).map(|time| attributes.switch_time = Some(time)),
                 "release_time" => self.time(value, &at, name).map(|time| attributes.release_time = Some(time)),
                 "exits" => self.exits(value, &at, name).map(|exits| attributes.exits = Some(exits)),
+                "on_entry" => self.code_hook(value, &at, name).map(|hook| attributes.on_entry = Some(hook)),
+                "on_exit" => self.code_hook(value, &at, name).map(|hook| attributes.on_exit = Some(hook)),
                 _ => unreachable!("every attribute is read"),
             };
             if read.is_none() {
@@ -670,6 +678,9 @@ impl Reader {
             self.problem(pointer.to_owned(), name, format!("unknown distribution `{text}`: {SAY}"));
             return None;
         }
+        if value.get("code").is_some() {
+            return self.code_distribution(value, pointer, name);
+        }
         let fields = self.object(value, pointer, name, "a distribution", &["weighted", "by_destination"])?;
         if let Some(by_destination) = fields.get("by_destination") {
             let at = format!("{pointer}/by_destination");
@@ -678,7 +689,7 @@ impl Reader {
                 None => DistributionStrategy::RoundRobin,
                 Some(then) => self.distribution(then, &format!("{at}/then"), name)?,
             };
-            if matches!(then, DistributionStrategy::ByDestination(_)) {
+            if matches!(then, DistributionStrategy::ByDestination(_) | DistributionStrategy::Code(_)) {
                 self.problem(format!("{at}/then"), name, "by destination chooses among the ways that reach by \"round_robin\" or {\"weighted\": ...}, not by destination again");
                 return None;
             }
@@ -738,6 +749,117 @@ impl Reader {
             rank: if rank? == 0 { Rank::Route } else { Rank::Successor },
             drains: drains?,
         }))
+    }
+
+    /// `{"function": "<module>.<function>", "with": {…}}`, `with` optional when the function has
+    /// no parameters. Whether the module has the function, and the values fit its parameters, is
+    /// checked against the code (`Model::code_problems`).
+    fn code_call(&mut self, value: &Value, pointer: &str, name: Option<&str>) -> Option<crate::CodeCall> {
+        let fields = self.object(value, pointer, name, "a call of code", &["function", "with"])?;
+        let function = match fields.get("function") {
+            None => {
+                self.problem(pointer.to_owned(), name, "`function` is missing: name the code's function as \"<module>.<function>\"");
+                None
+            }
+            Some(Value::String(function)) if crate::is_function_name(function) => Some(function.clone()),
+            Some(other) => {
+                self.problem(format!("{pointer}/function"), name, format!("{other} isn't a function's name: write \"<module>.<function>\", such as \"routing.every_nth\""));
+                None
+            }
+        };
+        let with = match fields.get("with") {
+            None => Some(Map::new()),
+            Some(Value::Object(with)) => Some(with.clone()),
+            Some(_) => {
+                self.problem(format!("{pointer}/with"), name, "`with` holds the function's parameters by name, such as {\"n\": 3}");
+                None
+            }
+        };
+        Some(crate::CodeCall { function: function?, with: with? })
+    }
+
+    /// `{"code": {…}, "at": ["front", "booking_point", "rear"]}`, `at` optional and the booking
+    /// point alone by default.
+    fn code_hook(&mut self, value: &Value, pointer: &str, name: Option<&str>) -> Option<crate::CodeHook> {
+        let fields = self.object(value, pointer, name, "a hook", &["code", "at"])?;
+        let code = match fields.get("code") {
+            None => {
+                self.problem(pointer.to_owned(), name, "`code` is missing: a hook is {\"code\": {\"function\": \"<module>.<function>\"}}");
+                None
+            }
+            Some(code) => self.code_call(code, &format!("{pointer}/code"), name),
+        };
+        let at = match fields.get("at") {
+            None => Some(vec![crabsim::TriggerPoint::BookingPoint]),
+            Some(Value::Array(points)) if !points.is_empty() => {
+                let read: Vec<Option<crabsim::TriggerPoint>> = points.iter().map(|point| point.as_str().and_then(crate::trigger_point_from_name)).collect();
+                if read.iter().any(Option::is_none) {
+                    self.problem(format!("{pointer}/at"), name, "a trigger point is \"front\", \"booking_point\" or \"rear\"");
+                    None
+                } else {
+                    // Front first, each once.
+                    Some(crabsim::TriggerPoint::ALL.into_iter().filter(|point| read.contains(&Some(*point))).collect())
+                }
+            }
+            Some(_) => {
+                self.problem(format!("{pointer}/at"), name, "`at` is a list of trigger points, such as [\"front\", \"rear\"]");
+                None
+            }
+        };
+        Some(crate::CodeHook { code: code?, at: at? })
+    }
+
+    /// `{"code": {…}, "default": <strategy>, "asked_on_entry": "booking_point"}`, the last two
+    /// optional.
+    fn code_distribution(&mut self, value: &Value, pointer: &str, name: Option<&str>) -> Option<DistributionStrategy> {
+        let fields = self.object(value, pointer, name, "a distribution by code", &["code", "default", "asked_on_entry"])?;
+        let code = self.code_call(fields.get("code").expect("looked for"), &format!("{pointer}/code"), name);
+        let default = match fields.get("default") {
+            None => Some(DistributionStrategy::RoundRobin),
+            Some(default) => match self.distribution(default, &format!("{pointer}/default"), name)? {
+                DistributionStrategy::Code(_) => {
+                    self.problem(format!("{pointer}/default"), name, "code's default is a built-in strategy: \"round_robin\", {\"weighted\": …} or {\"by_destination\": …}");
+                    None
+                }
+                strategy => Some(strategy),
+            },
+        };
+        let asked_on_entry = match fields.get("asked_on_entry") {
+            None => Some(None),
+            Some(point) => match point.as_str().and_then(crate::trigger_point_from_name) {
+                Some(point) => Some(Some(point)),
+                None => {
+                    self.problem(format!("{pointer}/asked_on_entry"), name, "`asked_on_entry` is a trigger point: \"front\", \"booking_point\" or \"rear\"");
+                    None
+                }
+            },
+        };
+        Some(DistributionStrategy::Code(Box::new(crate::CodeDistribution { code: code?, default: default?, asked_on_entry: asked_on_entry? })))
+    }
+
+    /// `{"before_init": {"code": {…}}, "after_init": …, "before_reset": …, "after_reset": …}`.
+    fn model_hooks(&mut self, value: &Value) -> crate::ModelHooks {
+        let mut hooks = crate::ModelHooks::default();
+        let Some(fields) = self.object(value, "/hooks", None, "the model's hooks", &["before_init", "after_init", "before_reset", "after_reset"]) else {
+            return hooks;
+        };
+        for (key, hook) in fields {
+            let pointer = format!("/hooks/{key}");
+            let Some(hook_fields) = self.object(hook, &pointer, None, "a hook", &["code"]) else { continue };
+            let Some(code) = hook_fields.get("code") else {
+                self.problem(pointer, None, "`code` is missing: a hook is {\"code\": {\"function\": \"<module>.<function>\"}}");
+                continue;
+            };
+            let call = self.code_call(code, &format!("{pointer}/code"), None);
+            match key.as_str() {
+                "before_init" => hooks.before_init = call,
+                "after_init" => hooks.after_init = call,
+                "before_reset" => hooks.before_reset = call,
+                "after_reset" => hooks.after_reset = call,
+                _ => {}
+            }
+        }
+        hooks
     }
 
     /// Notes by state. A key that isn't a state, or a note that isn't text, is a problem, and the

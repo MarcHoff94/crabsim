@@ -7,6 +7,7 @@ description = "crabsim's model files: reading, validating, saving and building t
 
 [dependencies]
 crabsim = { path = ".." }
+crabsim-code = { path = "../code-host" }
 serde = { version = "1", features = ["derive"] }
 # `preserve_order` keeps keys in the order they are written, so a saved file has one canonical form.
 serde_json = { version = "1", features = ["preserve_order"] }

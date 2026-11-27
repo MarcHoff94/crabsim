@@ -16,6 +16,13 @@ An idea for something faster goes under "Ideas", with what it would gain and wha
 
 ## Trade-offs made
 
+### WebAssembly hooks, PR 2 (2026-11-27, spec issue 156)
+- **Chosen:** a plain WebAssembly module with a hand-written interface, run by wasmtime, rather than a component under a WIT world (`code-interface.md`). The reason was checkpoints, not speed: a component's memory can't be read through wasmtime's API, so it couldn't be copied.
+- **Cost on models without code: none.** The engine's per-event path is unchanged: PR 2 added only `HookRun::seed` and `stream` and made `TriggerPoint::ALL` public. A model without code builds exactly as before (a test compares every occurrence and the final state), and the host crate is never on its path.
+- **Cost of a call,** `cargo bench -p crabsim-code --bench calls`, the demo for 30 days with a distribution hook at each of its 3 forks answering default, against the same model without code, best of 3 in the container: about 190 ns a call in WebAssembly and 178 ns natively, so simulated time a wall second falls from 26.4M to 17.4M. Two and a half events' worth, where the spec expected about one.
+- **Where it goes:** callgrind puts most of it in the engine's path for code (`move_by_code`, the hook checks at every move once a model has any hook, `run_calls`), and about a sixth in the host's `Code::call`. wasmtime's own call is about 15 ns, the difference between WebAssembly and native.
+- **Decided by** Claude while building; the owner confirmed on 2026-11-27, dropping the component model, after a measurement in wasmtime 51 (scratch benchmark, 10 million calls, median of 5): an empty call 14 ns as a plain module against 43 ns as a component, each read from crabsim about 2 ns against about 26 ns, so a component would cost about 15% more on a hook that reads nothing and 50 to 100% more on real ones. A component's checkpoint through `save_state`/`restore_state` was 15 µs against 26 µs at 100 bytes, but 57 µs against 26 µs at 64 KB and about 1.05 ms against 350 µs at 1 MB, and would lose any state its author forgot to save.
+
 ### Every run knows where each MU is (2026-11-27, spec issue 156, PR 1b)
 - **Chosen:** a table of the object holding each MU (`src/locations.rs`), in every run, so that user code, the window, the catalogue and agents find an MU by its id alone (`SimulationRun::location_of`). The owner chose it over a table kept only in runs with user code, which would cost other runs nothing, "for now, to see what it costs".
 - **How it's built:** a window over the MU ids, a move one bounds check and one write. It grows while at least half its slots hold an MU, so a crowded model stays in it at most 8 bytes per MU. Stray long-stayers and starting MUs go to a map. A Drain takes its MUs out, so memory stays flat.
@@ -62,6 +69,18 @@ An idea for something faster goes under "Ideas", with what it would gain and wha
 - **Scheduling without a `Vec` per event** (PR 126) took allocations per event to 0 and made demo headless 45% faster and 6,006 objects 23% (handoff, build step 7).
 
 ## Ideas
+
+- **Pooling or copy-on-write memory for code's instances,** asked to be explored by the owner on 2026-11-27.
+  - A checkpoint of a run with code makes a fresh instance and copies the module's memory into it. Measured with wasmtime 51 in the container, most of that is first-touch page faults on the fresh memory, about 1.4 µs per 4 KB page: 26 µs for 64 KB and about 350 µs for 1 MB, where the copy alone is 1.3 µs and 40 to 50 µs. A Rust module's default 1 MB stack puts real modules near the 1 MB figure.
+  - wasmtime's pooling allocator keeps memories mapped between instances, and a copy-on-write snapshot would share pages until written. Either would make checkpoints, and Reset, with code much cheaper.
+  - Cost: the pooling allocator reserves address space up front and caps instances per engine; copy-on-write needs wasmtime's memory images or our own mapping.
+  - Measure with a live session's checkpoints on a model with code, before and after.
+
+- **Make a code distribution's call cheaper in the engine** (PR 2's measurement above).
+  - Check for hooks only at objects that have them, rather than at every move of a model that has any (`note_entry`, `moved_hooked`).
+  - Skip the `Decided` event's second pass through the move for a default answer, which tries the built-in strategy straight away.
+  - Gain: up to most of the 190 ns a call, measured with `cargo bench -p crabsim-code --bench calls` and callgrind.
+- **Don't clone the host's shared `Arc` on every call** in `Code::call`, a pair of atomic operations per call. Small.
 
 - **Keep the MU table only in runs with user code.**
   - Gain: about 2.4% of instructions on models without conveyors, 0.4% with them, back for models without code.

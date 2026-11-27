@@ -69,7 +69,7 @@ fn every_attribute_comes_with_its_value_and_where_it_comes_from() {
     let names: Vec<String> = workspace.attributes("P1").unwrap().into_iter().map(|view| view.attribute).collect();
     assert_eq!(
         names,
-        ["process_time", "failures", "starting_mus", "capacity", "start", "dimensions", "description", "state_notes", "distribution", "detour"],
+        ["process_time", "failures", "starting_mus", "capacity", "start", "dimensions", "description", "state_notes", "distribution", "detour", "on_entry", "on_exit"],
         "a Station's attributes, in a fixed order"
     );
     assert_eq!(of(&workspace, "P1", "process_time"), (Some(json!("00:00:05")), ValueFrom::Class("Press".into())));

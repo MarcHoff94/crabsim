@@ -76,7 +76,12 @@ fn valid_files() -> Vec<Value> {
         ],
     });
     let cross: Value = serde_json::from_str(&std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../models/cross-line.json")).unwrap()).unwrap();
-    vec![demo, everything, cross]
+    let mut code: Value = serde_json::from_str(&std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../code-examples/routing/every-nth.json")).unwrap()).unwrap();
+    code["instances"][2]["attributes"]["on_entry"] = json!({ "code": { "function": "routing.report", "with": { "drain": "Drain", "every": "0:30" } }, "at": ["front", "rear"] });
+    code["instances"][3]["attributes"]["on_exit"] = json!({ "code": { "function": "routing.shortest_queue" } });
+    code["instances"][3]["attributes"]["distribution"] = json!({ "code": { "function": "routing.shortest_queue" }, "default": { "weighted": { "by": "process_time" } }, "asked_on_entry": "booking_point" });
+    code["hooks"]["before_reset"] = json!({ "code": { "function": "routing.report", "with": { "drain": "Drain", "every": "1:00" } } });
+    vec![demo, everything, cross, code]
 }
 
 // ---------- The committed file ----------

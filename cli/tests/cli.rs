@@ -624,3 +624,41 @@ fn undo_names_an_agents_change_before_undoing_it_and_needs_a_take_over_past_its_
     ok(&["undo", "--models", models.arg(), "demo.json", "--yes", "--take-over"]);
     assert_eq!(std::fs::read_to_string(&file).unwrap(), before);
 }
+
+/// A folder holding the example model with code and its module in `code/`.
+fn folder_with_code(name: &str) -> std::path::PathBuf {
+    let folder = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("cli-code-{name}"));
+    let _ = std::fs::remove_dir_all(&folder);
+    std::fs::create_dir_all(folder.join("code")).unwrap();
+    let repository = crabsim_code::testing::repository();
+    std::fs::copy(repository.join("code-examples/routing/every-nth.json"), folder.join("every-nth.json")).unwrap();
+    std::fs::copy(crabsim_code::testing::routing(), folder.join("code/routing.wasm")).unwrap();
+    folder
+}
+
+#[test]
+fn a_model_with_code_runs_with_its_module_and_logs_to_the_file_asked_for() {
+    let folder = folder_with_code("logs");
+    let log = folder.join("code.log");
+    let output = crabsim(&["--model", folder.join("every-nth.json").to_str().unwrap(), "--length", "2:00:00", "--code-log", log.to_str().unwrap()]);
+    assert!(output.status.success(), "{output:?}");
+    let printed = stdout(&output);
+    assert!(printed.lines().any(|line| line.starts_with("code: routing, SHA-256 ") && line.len() == "code: routing, SHA-256 ".len() + 64), "{printed}");
+    let lines: Vec<String> = std::fs::read_to_string(&log).unwrap().lines().map(str::to_string).collect();
+    assert_eq!(lines.len(), 3, "{lines:?}");
+    assert_eq!(lines[0], "00:00:00  -  routing.report: Drain has taken 0 MUs");
+    assert!(lines[2].starts_with("02:00:00  -  routing.report: Drain has taken "), "{lines:?}");
+    // Every third MU goes left.
+    let row = |name: &str| printed.lines().find(|line| line.split_whitespace().nth(1) == Some(name)).unwrap().split_whitespace().nth(3).unwrap().parse::<u64>().unwrap();
+    assert!((row("Right") as i64 - 2 * row("Left") as i64).abs() <= 2, "{printed}");
+}
+
+#[test]
+fn a_model_whose_module_is_missing_says_so_and_runs_nothing() {
+    let folder = folder_with_code("missing");
+    std::fs::remove_file(folder.join("code/routing.wasm")).unwrap();
+    let output = crabsim(&["--model", folder.join("every-nth.json").to_str().unwrap()]);
+    assert!(!output.status.success());
+    let errors = String::from_utf8(output.stderr).unwrap();
+    assert!(errors.contains("/instances/1/attributes/distribution/code/function \"Fork\": there is no code module `routing`: no file code/routing.wasm"), "{errors}");
+}

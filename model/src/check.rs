@@ -393,6 +393,12 @@ impl<'m> Checker<'m> {
         {
             self.problem(owner, "/attributes/distribution/weighted/by", "weigh by process_time, interval, starting_mus or capacity");
         }
+        if built_in == "CrossConveyor"
+            && let Some(crate::DistributionStrategy::Code(code)) = &attributes.distribution
+            && code.asked_on_entry.is_some()
+        {
+            self.problem(owner, "/attributes/distribution/asked_on_entry", "a cross conveyor's distribution always runs as it lets the MU in, so its moment can't move");
+        }
         for (state, note) in attributes.state_notes.iter().flatten() {
             let at = format!("/attributes/state_notes/{}", state.name());
             if !crate::State::of(built_in).contains(state) {

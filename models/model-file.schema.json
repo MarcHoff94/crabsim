@@ -39,6 +39,10 @@
       "items": {
         "$ref": "#/$defs/ConnectionFile"
       }
+    },
+    "hooks": {
+      "description": "The model's hooks around crabsim's own Init and Reset, each running user code (ADR 0029).",
+      "$ref": "#/$defs/ModelHooksFile"
     }
   },
   "additionalProperties": false,
@@ -228,6 +232,14 @@
         "exits": {
           "description": "CrossConveyor: each exit side's destinations. An MU whose next destination one of them stands for leaves by that side, turning at the centre, unless the side straight across takes it too; every other MU goes straight through. None by default. Inherited as a whole.",
           "$ref": "#/$defs/ExitsFile"
+        },
+        "on_entry": {
+          "description": "Any type: user code run as an MU comes in (ADR 0029). None by default. Inherited as a whole.",
+          "$ref": "#/$defs/CodeHookFile"
+        },
+        "on_exit": {
+          "description": "Any type but Drain: user code run as an MU leaves, after it has moved on. None by default. Inherited as a whole.",
+          "$ref": "#/$defs/CodeHookFile"
         }
       },
       "additionalProperties": false
@@ -580,6 +592,9 @@
         },
         {
           "$ref": "#/$defs/ByDestinationFile"
+        },
+        {
+          "$ref": "#/$defs/CodeDistributionFile"
         }
       ]
     },
@@ -684,6 +699,69 @@
         {
           "$ref": "#/$defs/WeightedFile"
         }
+      ]
+    },
+    "CodeDistributionFile": {
+      "description": "A distribution user code chooses: one successor, which the MU then waits for alone, hold, or its default strategy.",
+      "type": "object",
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/CodeCallFile"
+        },
+        "default": {
+          "description": "The strategy that chooses when the code answers default. Round robin when left out.",
+          "$ref": "#/$defs/CodeDefaultFile"
+        },
+        "asked_on_entry": {
+          "description": "Asks the code as the MU comes in, at this trigger point, rather than when it wants to leave, at the user's own risk. Not for a CrossConveyor.",
+          "$ref": "#/$defs/TriggerPointFile"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "code"
+      ]
+    },
+    "CodeCallFile": {
+      "description": "A call of user code: a module's function and its parameters' values.",
+      "type": "object",
+      "properties": {
+        "function": {
+          "description": "`<module>.<function>`, the module being `code/<module>.wasm` in the models folder.",
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]+\\.[A-Za-z0-9_]+$"
+        },
+        "with": {
+          "description": "Each parameter's value by name, as the function declares them: a number, true or false, a time as text such as \"1:30\", or an instance's name.",
+          "type": "object",
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "function"
+      ]
+    },
+    "CodeDefaultFile": {
+      "description": "Round robin, weighted or by destination.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/RoundRobinFile"
+        },
+        {
+          "$ref": "#/$defs/WeightedFile"
+        },
+        {
+          "$ref": "#/$defs/ByDestinationFile"
+        }
+      ]
+    },
+    "TriggerPointFile": {
+      "type": "string",
+      "enum": [
+        "front",
+        "booking_point",
+        "rear"
       ]
     },
     "MuValuesFile": {
@@ -969,6 +1047,27 @@
       },
       "additionalProperties": false
     },
+    "CodeHookFile": {
+      "description": "A hook on entry or on exit: user code run at each trigger point it names.",
+      "type": "object",
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/CodeCallFile"
+        },
+        "at": {
+          "description": "Where along the MU it runs, each once: its front, its booking point or its rear. The booking point alone by default.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TriggerPointFile"
+          },
+          "minItems": 1
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "code"
+      ]
+    },
     "InstanceFile": {
       "description": "One material-flow object.",
       "type": "object",
@@ -1079,6 +1178,37 @@
         "back",
         "left",
         "right"
+      ]
+    },
+    "ModelHooksFile": {
+      "description": "The model's hooks: before Init, with objects in their default state and nothing queued; after Init, every object's Init done; before Reset, which may only read and log; and after Reset, objects back in their default state and the code's memory fresh.",
+      "type": "object",
+      "properties": {
+        "before_init": {
+          "$ref": "#/$defs/LifecycleHookFile"
+        },
+        "after_init": {
+          "$ref": "#/$defs/LifecycleHookFile"
+        },
+        "before_reset": {
+          "$ref": "#/$defs/LifecycleHookFile"
+        },
+        "after_reset": {
+          "$ref": "#/$defs/LifecycleHookFile"
+        }
+      },
+      "additionalProperties": false
+    },
+    "LifecycleHookFile": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/CodeCallFile"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "code"
       ]
     }
   }

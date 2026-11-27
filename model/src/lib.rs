@@ -11,6 +11,9 @@
 
 mod build;
 mod check;
+mod code;
+pub use code::CODE_FOLDER;
+pub use crabsim_code;
 pub mod path;
 mod read;
 pub mod schema;
@@ -91,6 +94,8 @@ pub struct Model {
     /// The ways MUs pass from one instance to another, in any order: each carries its own place
     /// in both orders it belongs to.
     pub connections: Vec<Connection>,
+    /// The model's hooks around Init and Reset (ADR 0029). None by default.
+    pub hooks: ModelHooks,
 }
 
 /// The way from one instance to another along which MUs pass, with its place in the order its
@@ -257,6 +262,11 @@ pub struct Attributes {
     /// one of them stands for turns there, unless the side straight across takes it too; any other
     /// goes straight through. None by default. Inherited as a whole.
     pub exits: Option<Exits>,
+    /// User code run as an MU comes in (ADR 0029). None by default. Inherited as a whole.
+    pub on_entry: Option<CodeHook>,
+    /// User code run as an MU leaves, after it has moved on. None by default, and a Drain has
+    /// none. Inherited as a whole.
+    pub on_exit: Option<CodeHook>,
 }
 
 /// One step of a work plan: where the MU goes, an instance or a class standing for any of its
@@ -304,17 +314,109 @@ pub enum DistributionStrategy {
     /// Only the successors from which the MU's next destination can be reached (ADR 0025), and
     /// among them this strategy, round robin or weighted, never by destination again.
     ByDestination(Box<DistributionStrategy>),
+    /// User code chooses (ADR 0029): one successor, hold, or its `default` strategy.
+    Code(Box<CodeDistribution>),
 }
 
 impl DistributionStrategy {
-    /// The weighted strategy that ranks the successors, alone or after by destination.
+    /// The weighted strategy that ranks the successors, alone, after by destination, or as code's
+    /// default.
     pub fn weighted(&self) -> Option<&WeightedStrategy> {
         match self {
             DistributionStrategy::RoundRobin => None,
             DistributionStrategy::Weighted(weighted) => Some(weighted),
             DistributionStrategy::ByDestination(then) => then.weighted(),
+            DistributionStrategy::Code(code) => code.default.weighted(),
         }
     }
+
+    /// The built-in strategy that chooses: this one, or code's default.
+    pub fn built_in(&self) -> &DistributionStrategy {
+        match self {
+            DistributionStrategy::Code(code) => &code.default,
+            other => other,
+        }
+    }
+}
+
+/// A call of user code a hook makes: a module's function and its parameter values, checked
+/// against what the function declares when the model is built with its code.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CodeCall {
+    /// `<module>.<function>`, the module being `code/<module>.wasm` in the models folder.
+    pub function: String,
+    /// Each parameter's value by name, as the file gives it.
+    pub with: serde_json::Map<String, serde_json::Value>,
+}
+
+/// A hook on entry or on exit: the code it runs and where along the MU (ADR 0029).
+#[derive(Debug, Clone, PartialEq)]
+pub struct CodeHook {
+    pub code: CodeCall,
+    /// The trigger points it runs at, each once, front first. The booking point by default.
+    pub at: Vec<crabsim::TriggerPoint>,
+}
+
+/// A distribution user code chooses.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CodeDistribution {
+    pub code: CodeCall,
+    /// The strategy that chooses when the code answers default. Round robin by default.
+    pub default: DistributionStrategy,
+    /// The trigger point on entry at which the code is asked, rather than when the MU wants to
+    /// leave: the moment moved, at the user's own risk. Not for a cross conveyor.
+    pub asked_on_entry: Option<crabsim::TriggerPoint>,
+}
+
+/// The model's hooks around crabsim's own Init and Reset.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ModelHooks {
+    pub before_init: Option<CodeCall>,
+    pub after_init: Option<CodeCall>,
+    /// May only read and log.
+    pub before_reset: Option<CodeCall>,
+    pub after_reset: Option<CodeCall>,
+}
+
+impl ModelHooks {
+    /// Each moment's name in a file, with its hook.
+    pub fn each(&self) -> [(&'static str, crabsim::Lifecycle, Option<&CodeCall>); 4] {
+        use crabsim::Lifecycle;
+        [
+            ("before_init", Lifecycle::BeforeInit, self.before_init.as_ref()),
+            ("after_init", Lifecycle::AfterInit, self.after_init.as_ref()),
+            ("before_reset", Lifecycle::BeforeReset, self.before_reset.as_ref()),
+            ("after_reset", Lifecycle::AfterReset, self.after_reset.as_ref()),
+        ]
+    }
+
+    pub fn is_empty(&self) -> bool {
+        *self == ModelHooks::default()
+    }
+}
+
+/// Whether `text` names a function as `<module>.<function>`, each a name of letters, digits,
+/// `_` and `-` for the module.
+pub fn is_function_name(text: &str) -> bool {
+    let Some((module, function)) = text.split_once('.') else { return false };
+    !module.is_empty()
+        && !function.is_empty()
+        && module.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        && function.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// A trigger point's name in a file.
+pub fn trigger_point_name(point: crabsim::TriggerPoint) -> &'static str {
+    match point {
+        crabsim::TriggerPoint::Front => "front",
+        crabsim::TriggerPoint::BookingPoint => "booking_point",
+        crabsim::TriggerPoint::Rear => "rear",
+    }
+}
+
+/// A trigger point from its name in a file.
+pub fn trigger_point_from_name(name: &str) -> Option<crabsim::TriggerPoint> {
+    crabsim::TriggerPoint::ALL.into_iter().find(|&point| trigger_point_name(point) == name)
 }
 
 /// How a weighted object ranks its successors.
@@ -382,6 +484,8 @@ impl Attributes {
             Attribute::SwitchTime => self.switch_time.is_some(),
             Attribute::ReleaseTime => self.release_time.is_some(),
             Attribute::Exits => self.exits.is_some(),
+            Attribute::OnEntry => self.on_entry.is_some(),
+            Attribute::OnExit => self.on_exit.is_some(),
         }
     }
 
@@ -419,6 +523,8 @@ impl Attributes {
             Attribute::SwitchTime => self.switch_time = from.switch_time,
             Attribute::ReleaseTime => self.release_time = from.release_time,
             Attribute::Exits => self.exits = from.exits.clone(),
+            Attribute::OnEntry => self.on_entry = from.on_entry.clone(),
+            Attribute::OnExit => self.on_exit = from.on_exit.clone(),
         }
     }
 }
@@ -457,10 +563,12 @@ pub enum Attribute {
     SwitchTime,
     ReleaseTime,
     Exits,
+    OnEntry,
+    OnExit,
 }
 
 impl Attribute {
-    pub const ALL: [Attribute; 31] = [
+    pub const ALL: [Attribute; 33] = [
         Attribute::Interval,
         Attribute::ProcessTime,
         Attribute::Failures,
@@ -492,6 +600,8 @@ impl Attribute {
         Attribute::SwitchTime,
         Attribute::ReleaseTime,
         Attribute::Exits,
+        Attribute::OnEntry,
+        Attribute::OnExit,
     ];
 
     /// Its name in a file.
@@ -528,6 +638,8 @@ impl Attribute {
             Attribute::SwitchTime => "switch_time",
             Attribute::ReleaseTime => "release_time",
             Attribute::Exits => "exits",
+            Attribute::OnEntry => "on_entry",
+            Attribute::OnExit => "on_exit",
         }
     }
 
@@ -536,7 +648,8 @@ impl Attribute {
         matches!(
             (built_in, self),
             (BUILT_IN_MU_CLASS, Attribute::Length | Attribute::Width | Attribute::BookingPoint | Attribute::Description | Attribute::WorkPlan)
-                | ("Source" | "Station" | "Buffer" | "Drain" | "Conveyor" | "CrossConveyor", Attribute::Dimensions | Attribute::Description | Attribute::StateNotes | Attribute::Failures)
+                | ("Source" | "Station" | "Buffer" | "Drain" | "Conveyor" | "CrossConveyor", Attribute::Dimensions | Attribute::Description | Attribute::StateNotes | Attribute::Failures | Attribute::OnEntry)
+                | ("Source" | "Station" | "Buffer" | "Conveyor" | "CrossConveyor", Attribute::OnExit)
                 | (
                     "CrossConveyor",
                     Attribute::Length | Attribute::Width | Attribute::Speed | Attribute::SwitchTime | Attribute::ReleaseTime | Attribute::Exits | Attribute::Distribution

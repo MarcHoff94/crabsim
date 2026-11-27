@@ -1,0 +1,14 @@
+# Code that misbehaves, for crabsim-code's tests of the sandbox.
+[package]
+name = "faults"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+crabsim-guest = { path = "../../../../guest" }
+
+[workspace]

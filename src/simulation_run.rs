@@ -669,6 +669,16 @@ impl HookRun<'_> {
         self.run.objects.get(id as usize)
     }
 
+    /// The run's seed, from which code's random numbers come, as every object's do (ADR 0012).
+    pub fn seed(&self) -> u64 {
+        self.run.seed
+    }
+
+    /// The object's stream, which with the seed gives its random numbers (ADR 0012).
+    pub fn stream(&self, id: u32) -> Option<u64> {
+        self.run.streams.get(id as usize).copied()
+    }
+
     /// The object's whole state now, as `SimulationRun::state` gives it.
     pub fn state(&self, id: u32) -> Option<ObjectState> {
         self.object(id).map(|object| object.report(self.run.time))

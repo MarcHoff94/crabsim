@@ -43,6 +43,13 @@
     "hooks": {
       "description": "The model's hooks around crabsim's own Init and Reset, each running user code (ADR 0029).",
       "$ref": "#/$defs/ModelHooksFile"
+    },
+    "expectations": {
+      "description": "What the model must achieve: checks crabsim judges on its own after a run (ADR 0030).",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ExpectationFile"
+      }
     }
   },
   "additionalProperties": false,
@@ -1209,6 +1216,45 @@
       "additionalProperties": false,
       "required": [
         "code"
+      ]
+    },
+    "ExpectationFile": {
+      "description": "An expectation: a check of the model crabsim judges on its own.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "description": "Unique among the model's expectations, with no spaces, such as `presses-busy`.",
+          "type": "string",
+          "pattern": "^\\S+$"
+        },
+        "text": {
+          "description": "The check as one line: `[every|mean] <instance, class or model>.<figure> <now|since start| last <time>|always> <comparison> <value>`, such as `every Press.working_share since start >= 60%`, `Buffer X.mus always <= 20` or `model.throughput_per_hour last 8h >= 400/h`. The figures are the results store's, which list_figures gives with their units and scopes.",
+          "type": "string"
+        },
+        "stage": {
+          "description": "The stage it belongs to: `verification`, the default, checked in a deterministic run, or `validation`, checked in runs with randomness.",
+          "$ref": "#/$defs/StageFile"
+        },
+        "assumptions": {
+          "description": "What it takes for granted, such as \"two shifts a day\".",
+          "type": "string"
+        },
+        "source": {
+          "description": "Where it comes from: a SysML element, a document or a person.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "text"
+      ]
+    },
+    "StageFile": {
+      "type": "string",
+      "enum": [
+        "verification",
+        "validation"
       ]
     }
   }

@@ -481,7 +481,24 @@ impl ModelDescription {
     /// Builds a run of this model, in its default state. Names, positions and dimensions stay
     /// behind: the run has no use for them.
     pub fn build(&self, seed: u64) -> SimulationRun {
+        self.build_with(seed, false)
+    }
+
+    /// A run with no randomness, for verification (ADR 0030): no object fails, and every time
+    /// drawn from a distribution would be its mean, which today means only the failures, since
+    /// process times and intervals are fixed. User code's random numbers stay as they are: they
+    /// come from the seed, so the run is still the same every time for a seed.
+    pub fn build_deterministic(&self, seed: u64) -> SimulationRun {
+        self.build_with(seed, true)
+    }
+
+    fn build_with(&self, seed: u64, deterministic: bool) -> SimulationRun {
         let mut objects = self.objects.clone();
+        if deterministic {
+            for object in &mut objects {
+                object.set_failure_profiles(Vec::new());
+            }
+        }
         let routing = if self.destinations.is_empty() && self.plans.iter().all(Vec::is_empty) { Routing::default() } else { Routing::new(&self.plans, &self.destinations) };
         // Each conveyor reads MUs' sizes from its own copy of the kinds, so a run shares nothing,
         // and each cross conveyor works out which of its exits take which destination.

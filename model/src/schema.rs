@@ -49,6 +49,36 @@ pub struct ModelFile {
     pub connections: Option<Vec<ConnectionFile>>,
     /// The model's hooks around crabsim's own Init and Reset, each running user code (ADR 0029).
     pub hooks: Option<ModelHooksFile>,
+    /// What the model must achieve: checks crabsim judges on its own after a run (ADR 0030).
+    pub expectations: Option<Vec<ExpectationFile>>,
+}
+
+/// An expectation: a check of the model crabsim judges on its own.
+#[derive(JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ExpectationFile {
+    /// Unique among the model's expectations, with no spaces, such as `presses-busy`.
+    #[schemars(extend("pattern" = r"^\S+$"))]
+    pub id: String,
+    /// The check as one line: `[every|mean] <instance, class or model>.<figure> <now|since start|
+    /// last <time>|always> <comparison> <value>`, such as `every Press.working_share since start
+    /// >= 60%`, `Buffer X.mus always <= 20` or `model.throughput_per_hour last 8h >= 400/h`. The
+    /// figures are the results store's, which list_figures gives with their units and scopes.
+    pub text: String,
+    /// The stage it belongs to: `verification`, the default, checked in a deterministic run, or
+    /// `validation`, checked in runs with randomness.
+    pub stage: Option<StageFile>,
+    /// What it takes for granted, such as "two shifts a day".
+    pub assumptions: Option<String>,
+    /// Where it comes from: a SysML element, a document or a person.
+    pub source: Option<String>,
+}
+
+#[derive(JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum StageFile {
+    Verification,
+    Validation,
 }
 
 /// The model's hooks: before Init, with objects in their default state and nothing queued; after

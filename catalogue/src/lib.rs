@@ -25,6 +25,7 @@ mod compare;
 mod edit;
 mod editing;
 mod error;
+mod expectations;
 mod export;
 mod folder;
 mod graph;
@@ -40,6 +41,7 @@ pub use crate::error::{ErrorKind, ModelProblem, OperationError};
 pub use crate::history::{HISTORY_BYTES, HISTORY_CHANGES, HISTORY_FILE};
 pub use crate::folder::{ModelsFolder, CRABSIM_FOLDER, EXPORTS_FOLDER};
 pub use crate::jobs::{observation_seed, RunState, MAX_OBSERVATIONS};
+pub use crate::expectations::{expectation_results, ExpectationResults};
 pub use crate::results::STATISTICS;
 pub use crate::store::{Store, QUERY_ROW_LIMIT, STORE_FILE};
 

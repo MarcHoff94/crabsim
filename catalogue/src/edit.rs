@@ -153,6 +153,24 @@ pub enum Change {
     /// For the user only: gives an instance another stream, which ends pairing with every earlier
     /// run of it. Not advised: crabsim gives each instance its stream when it's placed.
     SetStream { name: String, stream: u64 },
+    /// Adds an expectation (ADR 0030) after the others: one line crabsim judges on its own after
+    /// every run, such as `every Press.working_share since start >= 60%` or `Buffer.mus always <=
+    /// 20`. list_figures gives the figures with their units and scopes. `id` is left out for the
+    /// first free of `e1`, `e2` and so on. `stage` is `verification`, the default, or `validation`.
+    AddExpectation {
+        id: Option<String>,
+        text: String,
+        stage: Option<String>,
+        /// What it takes for granted, such as "two shifts a day".
+        assumptions: Option<String>,
+        /// Where it comes from: a SysML element, a document or a person.
+        source: Option<String>,
+    },
+    /// Changes what is given of an expectation: its text, stage, assumptions or source, `""`
+    /// removing assumptions or source.
+    SetExpectation { id: String, text: Option<String>, stage: Option<String>, assumptions: Option<String>, source: Option<String> },
+    /// Removes an expectation.
+    RemoveExpectation { id: String },
 }
 
 impl Change {
@@ -176,6 +194,9 @@ impl Change {
             Change::RestoreInheritance { .. } => "restore_inheritance",
             Change::SetModelDescription { .. } => "set_model_description",
             Change::SetStream { .. } => "set_stream",
+            Change::AddExpectation { .. } => "add_expectation",
+            Change::SetExpectation { .. } => "set_expectation",
+            Change::RemoveExpectation { .. } => "remove_expectation",
         }
     }
 }
@@ -231,6 +252,11 @@ impl Change {
             Change::SetModelDescription { description: Some(description) } => format!("describe the model as {description}"),
             Change::SetModelDescription { description: None } => "remove the model's description".to_string(),
             Change::SetStream { name, stream } => format!("set the stream of {name} to {stream}"),
+            Change::AddExpectation { id: Some(id), text, .. } => format!("expect {id}: {text}"),
+            Change::AddExpectation { id: None, text, .. } => format!("expect {text}"),
+            Change::SetExpectation { id, text: Some(text), .. } => format!("set the expectation {id}: {text}"),
+            Change::SetExpectation { id, .. } => format!("set the expectation {id}"),
+            Change::RemoveExpectation { id } => format!("remove the expectation {id}"),
         }
     }
 }
@@ -299,6 +325,33 @@ impl Draft {
         };
         self.instances().iter_mut().for_each(rename);
         self.classes().iter_mut().for_each(rename);
+    }
+
+    fn expectations(&mut self) -> &mut Vec<Value> {
+        let fields = self.model.as_object_mut().expect("a model is an object");
+        fields.entry("expectations").or_insert_with(|| json!([])).as_array_mut().expect("expectations are a list")
+    }
+
+    /// The expectation `id`, by its place in the list.
+    fn expectation(&mut self, id: &str) -> Result<usize, Refusal> {
+        let ids: Vec<String> = self.expectations().iter().filter_map(|expectation| expectation["id"].as_str().map(str::to_owned)).collect();
+        ids.iter().position(|found| found == id).ok_or_else(|| {
+            if ids.is_empty() { format!("there is no expectation `{id}`: the model has none") } else { format!("there is no expectation `{id}`: there are {}", ids.join(", ")) }
+        })
+    }
+
+    /// Renames an instance, or with `class` a class, in the expectations naming it, so a rename
+    /// never breaks one. A line that doesn't read is left for the model's own check.
+    fn rename_in_expectations(&mut self, name: &str, to: &str, class: bool) {
+        for expectation in self.expectations().iter_mut() {
+            let Some(check) = expectation["text"].as_str().and_then(|text| crabsim_model::expect::Check::parse(text).ok()) else { continue };
+            if (check.aggregate != crabsim_model::expect::Aggregate::One) != class {
+                continue;
+            }
+            if let Some(renamed) = check.renamed(name, to) {
+                expectation["text"] = json!(renamed.text());
+            }
+        }
     }
 
     fn classes(&mut self) -> &mut Vec<Value> {
@@ -559,6 +612,7 @@ impl Draft {
                     }
                 }
                 self.rename_destination(&name, &to);
+                self.rename_in_expectations(&name, &to, false);
             }
             Change::MoveInstance { name, position } => {
                 let index = self.instance(&name)?;
@@ -707,6 +761,7 @@ impl Draft {
                 self.instances().iter_mut().for_each(rename);
                 self.classes().iter_mut().for_each(rename);
                 self.rename_destination(&name, &to);
+                self.rename_in_expectations(&name, &to, true);
             }
             Change::SetParent { name, parent } => {
                 let index = self.class(&name)?;
@@ -759,6 +814,43 @@ impl Draft {
                     None => fields.remove("description"),
                 };
             }
+            Change::AddExpectation { id, text, stage, assumptions, source } => {
+                let id = match id {
+                    Some(id) => {
+                        if self.expectation(&id).is_ok() {
+                            return Err(format!("there is already an expectation `{id}`"));
+                        }
+                        id
+                    }
+                    None => (1..).map(|n| format!("e{n}")).find(|id| self.expectation(id).is_err()).expect("a free id"),
+                };
+                let mut expectation = json!({ "id": id, "text": text });
+                for (key, value) in [("stage", stage), ("assumptions", assumptions), ("source", source)] {
+                    if let Some(value) = value {
+                        expectation[key] = json!(value);
+                    }
+                }
+                self.expectations().push(expectation);
+            }
+            Change::SetExpectation { id, text, stage, assumptions, source } => {
+                let index = self.expectation(&id)?;
+                let fields = self.expectations()[index].as_object_mut().expect("an expectation is an object");
+                for (key, value) in [("text", text), ("stage", stage), ("assumptions", assumptions), ("source", source)] {
+                    match value {
+                        Some(value) if value.is_empty() && key != "text" => {
+                            fields.remove(key);
+                        }
+                        Some(value) => {
+                            fields.insert(key.into(), json!(value));
+                        }
+                        None => {}
+                    }
+                }
+            }
+            Change::RemoveExpectation { id } => {
+                let index = self.expectation(&id)?;
+                self.expectations().remove(index);
+            }
         }
         Ok(())
     }
@@ -798,7 +890,7 @@ pub struct EditModelOutput {
 
 impl Operation for EditModel {
     const NAME: &'static str = "edit_model";
-    const DESCRIPTION: &'static str = "Changes a valid model file in the models folder with a batch of changes, applied in order, all or nothing, then saves it in canonical form. Each change is an object naming its kind in `change`: add_instance, remove_instance, rename_instance, move_instance, set_class, duplicate_instance, connect, disconnect, set_connection, add_class, remove_class, rename_class, set_parent, duplicate_class, set_attribute, restore_inheritance or set_model_description, and for the user set_stream. Values are written as in a model file, such as \"0:45\" for a time (model_file_format gives the format). Only the result is checked, so a batch may pass through invalid states, such as adding a Source and then setting its interval. A change that can't apply, such as one naming an unknown instance, refuses the batch with invalid_input naming its place, such as changes/2, along with every other that can't and the problems of the model the rest would make, so one round fixes them all. A result with problems refuses it with invalid_model and every problem, each pointing into the file the batch would have produced. Either way the file is unchanged. Connections have an exit, their place in the order their object offers MUs on, and an entrance, their place among those into the object they lead to: connect, disconnect, set_connection and removing an instance number them again at both ends, so give a place only to choose one. Give `expected_hash`, the file_hash read_model or get_attributes gave, to have the batch refused as a conflict if the file changed since you read it. An agent needs its claim on the file first (claim_model), and no file changed outside crabsim is changed until adopt_model. On success it gives the file's new file_hash, and what else was removed, such as the connections of a removed instance. Every instance keeps its stream, which gives its random numbers, whatever else changes, so runs of the model before and after an edit stay paired for every instance they share. New and duplicated instances get a stream of their own and go at the end.";
+    const DESCRIPTION: &'static str = "Changes a valid model file in the models folder with a batch of changes, applied in order, all or nothing, then saves it in canonical form. Each change is an object naming its kind in `change`: add_instance, remove_instance, rename_instance, move_instance, set_class, duplicate_instance, connect, disconnect, set_connection, add_class, remove_class, rename_class, set_parent, duplicate_class, set_attribute, restore_inheritance, set_model_description, add_expectation, set_expectation or remove_expectation, and for the user set_stream. An expectation is one line crabsim judges after every run, such as `every Press.working_share since start >= 60%`, with the figures list_figures gives: renaming an instance or class renames it in the expectations too. Values are written as in a model file, such as \"0:45\" for a time (model_file_format gives the format). Only the result is checked, so a batch may pass through invalid states, such as adding a Source and then setting its interval. A change that can't apply, such as one naming an unknown instance, refuses the batch with invalid_input naming its place, such as changes/2, along with every other that can't and the problems of the model the rest would make, so one round fixes them all. A result with problems refuses it with invalid_model and every problem, each pointing into the file the batch would have produced. Either way the file is unchanged. Connections have an exit, their place in the order their object offers MUs on, and an entrance, their place among those into the object they lead to: connect, disconnect, set_connection and removing an instance number them again at both ends, so give a place only to choose one. Give `expected_hash`, the file_hash read_model or get_attributes gave, to have the batch refused as a conflict if the file changed since you read it. An agent needs its claim on the file first (claim_model), and no file changed outside crabsim is changed until adopt_model. On success it gives the file's new file_hash, and what else was removed, such as the connections of a removed instance. Every instance keeps its stream, which gives its random numbers, whatever else changes, so runs of the model before and after an edit stay paired for every instance they share. New and duplicated instances get a stream of their own and go at the end.";
     const EFFECT: Effect = Effect::Destructive;
     const CHANGES_MODELS: bool = true;
     type Input = EditModelInput;

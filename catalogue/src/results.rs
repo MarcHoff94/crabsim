@@ -6,7 +6,7 @@ use crate::error::OperationError;
 use crate::jobs::{run_number, RunState};
 use crate::{entry, Catalogue, Effect, Entry, Operation};
 use crabsim::time::format_time_exact;
-use crabsim::{ObjectKind, ObjectState, SimTime};
+use crabsim::{ObjectState, SimTime};
 use rusqlite::{params, OptionalExtension};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -61,91 +61,11 @@ const SMALL_MODEL: usize = 20;
 /// The blocked share below which an object isn't worth showing as most blocked.
 const BLOCKED_FLOOR: f64 = 0.01;
 
-/// An object's figures at the end of an observation, by their names in the store. A figure that
-/// doesn't exist, such as a share before any time was measured, is left out, and so are the three
-/// parts of working but for a Station with a capacity above 1: for any other object working is
-/// all full. A Conveyor has the three parts of working, as a Station with a capacity does. Only a
-/// Buffer or a Conveyor has how full it was, and only a Conveyor how much of its length its MUs took
-/// and how long they took to cross it.
+/// An object's figures at the end of an observation, by their names in the store: the figures of
+/// the vocabulary (`crabsim::figures`) the store keeps, as `crabsim::figures::Figure::stored` says. A figure that
+/// doesn't exist, such as a share before any time was measured, is left out.
 pub(crate) fn figures(object: &ObjectState, now: SimTime) -> Vec<(&'static str, f64)> {
-    let statistics = &object.statistics;
-    let with_capacity = (object.kind == ObjectKind::Station && object.capacity.limit() > 1) || object.kind == ObjectKind::Conveyor;
-    let mut figures = vec![("mus_in", statistics.mus_in as f64), ("mus_out", statistics.mus_out as f64)];
-    let measured = statistics.measured_time().as_millis() as f64;
-    if measured > 0.0 {
-        for (name, time) in [
-            ("working_share", statistics.time_busy),
-            ("blocked_share", statistics.time_blocked),
-            ("idle_share", statistics.time_idle),
-            ("receiving_share", statistics.time_receiving),
-            ("failed_share", statistics.time_failed),
-            ("paused_share", statistics.time_paused),
-        ] {
-            figures.push((name, time.as_millis() as f64 / measured));
-        }
-        if with_capacity {
-            for (name, time) in [
-                ("working_full_share", statistics.time_busy_full()),
-                ("working_not_full_share", statistics.time_busy_not_full),
-                ("working_partly_blocked_share", statistics.time_busy_partly_blocked),
-            ] {
-                figures.push((name, time.as_millis() as f64 / measured));
-            }
-        }
-    }
-    figures.push(("failures", statistics.failures as f64));
-    if let Some(availability) = statistics.achieved_availability() {
-        figures.push(("availability", availability));
-    }
-    if let Some(per_hour) = statistics.mus_per_hour(now) {
-        figures.push(("throughput_per_hour", per_hour));
-    }
-    if let Some(lead_time) = statistics.lead_time_mean() {
-        figures.push(("mean_lead_time_s", lead_time.as_secs_f64()));
-    }
-    if let Some(fill) = &object.fill {
-        if let Some(mean) = statistics.average_contents() {
-            figures.push(("mean_mus", mean));
-        }
-        figures.push(("min_mus", fill.lowest as f64));
-        figures.push(("max_mus", statistics.max_contents as f64));
-        // The fewest MUs of the bar holding the median: exact while bars are 1 MU wide.
-        if let Some((from, _)) = fill.median() {
-            figures.push(("median_mus", from as f64));
-        }
-        if object.kind == ObjectKind::Buffer && object.capacity != crabsim::Capacity::Unlimited && measured > 0.0 {
-            figures.push(("full_share", statistics.time_full.as_millis() as f64 / measured));
-        }
-    }
-    // Only a Station that worked on MUs going somewhere (spec issue 148), so a model without work
-    // plans or detours stores nothing more.
-    if let Some(plan) = object.plan.filter(|plan| plan.on_plan + plan.off_plan > 0) {
-        figures.push(("mus_on_plan", plan.on_plan as f64));
-        figures.push(("mus_off_plan", plan.off_plan as f64));
-    }
-    if let Some(belt) = &object.belt {
-        if let Some(share) = belt.mean_share_taken(statistics.measured_time()) {
-            figures.push(("mean_length_taken_share", share));
-        }
-        figures.push(("max_length_taken_share", belt.max_share_taken()));
-        if let Some(mean) = belt.crossing_mean() {
-            figures.push(("mean_crossing_time_s", mean.as_secs_f64()));
-        }
-        figures.push(("max_crossing_time_s", belt.crossing_max.as_secs_f64()));
-    }
-    // A cross conveyor's switching, part of its working, and the MUs out of each side that had any.
-    if let Some(cross) = &object.cross {
-        if measured > 0.0 {
-            figures.push(("switching_share", cross.time_switching.as_millis() as f64 / measured));
-        }
-        for (side, name) in [(crabsim::Side::Front, "mus_out_front"), (crabsim::Side::Back, "mus_out_back"), (crabsim::Side::Left, "mus_out_left"), (crabsim::Side::Right, "mus_out_right")] {
-            let out = cross.mus_out[side.index()];
-            if out > 0 {
-                figures.push((name, out as f64));
-            }
-        }
-    }
-    figures
+    crabsim::figures::Figure::ALL.into_iter().filter_map(|figure| figure.stored(object, now).map(|value| (figure.name(), value))).collect()
 }
 
 pub(crate) use crabsim::statistics::t_quantile;
@@ -310,6 +230,8 @@ pub struct RunResultsOutput {
     pub length: String,
     pub warm_up: String,
     pub observations: u32,
+    /// A run without randomness, no object failing (ADR 0030).
+    pub deterministic: bool,
     /// Who started it: mcp or cli.
     pub source: String,
     pub crabsim_version: String,
@@ -332,6 +254,10 @@ pub struct RunResultsOutput {
     /// The objects asked for, or by default every Drain and the most blocked and most failed
     /// objects, in model order.
     pub objects: Vec<ObjectResults>,
+    /// The verdict on each of the model's expectations, judged on the observations that ran to
+    /// their end, in the model's order. Left out for a model without any.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub expectations: Vec<crate::expectations::ExpectationResults>,
 }
 
 // --- run_results ---
@@ -357,7 +283,7 @@ pub struct RunResultsInput {
 
 impl Operation for RunResults {
     const NAME: &'static str = "run_results";
-    const DESCRIPTION: &'static str = "Reads a run's results from the results store: its settings, `events` and `wall_time_s` (every observation's, added up: they run in parallel, so the run took less), any observation that failed with its error, and per object every figure's mean over the observations, 95% confidence interval, minimum and maximum, to 4 significant digits. Figures are named as in the store, such as blocked_share (0 to 1) and mean_lead_time_s (seconds), and those that are 0 in every observation are left out. By default a short summary whatever the model's size or number of observations: a model of 20 or fewer instances whole, and otherwise every Drain, the 10 busiest (highest working share, where a bottleneck is), the 10 most blocked above 1%, and the objects whose failed share is clearly above the rest. Each object's `why` says which of these put it there: all, drain, busiest, most_blocked, most_failed, or chosen. Give `objects` or `classes` to read exactly those instead, and `values` for each observation's own figures and seed. For full precision, comparing runs, or anything else, use query_results.";
+    const DESCRIPTION: &'static str = "Reads a run's results from the results store: its settings, `events` and `wall_time_s` (every observation's, added up: they run in parallel, so the run took less), any observation that failed with its error, and per object every figure's mean over the observations, 95% confidence interval, minimum and maximum, to 4 significant digits. Figures are named as in the store, such as blocked_share (0 to 1) and mean_lead_time_s (seconds), and those that are 0 in every observation are left out. By default a short summary whatever the model's size or number of observations: a model of 20 or fewer instances whole, and otherwise every Drain, the 10 busiest (highest working share, where a bottleneck is), the 10 most blocked above 1%, and the objects whose failed share is clearly above the rest. Each object's `why` says which of these put it there: all, drain, busiest, most_blocked, most_failed, or chosen. Give `objects` or `classes` to read exactly those instead, and `values` for each observation's own figures and seed. `expectations` gives the verdict on each of the model's expectations (ADR 0030): met, not_met, undecided when the 95% interval straddles its value, with how many observations would decide it, or error, with the mean and interval in the line's own unit, and for a limit with `always` where and by which MU it was first broken. For full precision, comparing runs, or anything else, use query_results.";
     const EFFECT: Effect = Effect::ReadOnly;
     type Input = RunResultsInput;
     type Output = RunResultsOutput;
@@ -369,7 +295,7 @@ impl Operation for RunResults {
         let connection = store.connection();
         let run = connection
             .query_row(
-                "SELECT label, state, model_path, model_text, model_hash, seed, length_s, warm_up_s, observations, source, crabsim_version, started, finished, coalesce(crabsim_build, 'unknown'), coalesce(agent, 'unknown') FROM runs WHERE number = ?1",
+                "SELECT label, state, model_path, model_text, model_hash, seed, length_s, warm_up_s, observations, source, crabsim_version, started, finished, coalesce(crabsim_build, 'unknown'), coalesce(agent, 'unknown'), deterministic FROM runs WHERE number = ?1",
                 [number],
                 |row| {
                     Ok((
@@ -388,12 +314,13 @@ impl Operation for RunResults {
                         row.get::<_, Option<String>>(12)?,
                         row.get::<_, String>(13)?,
                         row.get::<_, String>(14)?,
+                        row.get::<_, bool>(15)?,
                     ))
                 },
             )
             .optional()?
             .ok_or_else(|| OperationError::not_found(format!("there is no run `{id}` in the results store")))?;
-        let (label, state, model_path, model_text, model_hash, seed, length, warm_up, observations, source, version, started, finished, build, agent) = run;
+        let (label, state, model_path, model_text, model_hash, seed, length, warm_up, observations, source, version, started, finished, build, agent, deterministic) = run;
         let state = catalogue.jobs_status(&id).unwrap_or(RunState::from_name(&state));
 
         let mut statement =
@@ -477,6 +404,7 @@ impl Operation for RunResults {
             objects.push(ObjectResults { name: name.clone(), class, built_in_class: built_in, why: why[name].clone(), figures, histogram });
         }
 
+        let expectations = crate::expectations::verdicts(connection, &id, &model_text, deterministic, SimTime::from_secs_f64(length))?;
         Ok(RunResultsOutput {
             run: id,
             label,
@@ -487,6 +415,7 @@ impl Operation for RunResults {
             length: format_time_exact(SimTime::from_secs_f64(length)),
             warm_up: format_time_exact(SimTime::from_secs_f64(warm_up)),
             observations,
+            deterministic,
             source,
             crabsim_version: version,
             crabsim_build: build,
@@ -497,6 +426,7 @@ impl Operation for RunResults {
             wall_time_s,
             failed_observations,
             observation_runs,
+            expectations,
             objects,
         })
     }

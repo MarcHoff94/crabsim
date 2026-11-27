@@ -662,3 +662,45 @@ fn a_model_whose_module_is_missing_says_so_and_runs_nothing() {
     let errors = String::from_utf8(output.stderr).unwrap();
     assert!(errors.contains("/instances/1/attributes/distribution/code/function \"Fork\": there is no code module `routing`: no file code/routing.wasm"), "{errors}");
 }
+
+/// The demo model with expectations, in a models folder.
+fn demo_with_expectations(models: &Models) -> std::path::PathBuf {
+    let mut model: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(demo_file()).unwrap()).unwrap();
+    model["expectations"] = serde_json::json!([
+        { "id": "rate", "text": "model.throughput_per_hour last 1h >= 200/h" },
+        { "id": "failed", "text": "Station 2.failed_share since start = 0%" },
+        { "id": "lead", "text": "Drain.lead_time_s always <= 1min" }
+    ]);
+    let path = models.0.join("expected.json");
+    std::fs::write(&path, model.to_string()).unwrap();
+    path
+}
+
+#[test]
+fn a_deterministic_single_run_prints_each_expectations_verdict() {
+    let models = Models::new("expectations-single");
+    let path = demo_with_expectations(&models);
+    let output = crabsim(&["--model", path.to_str().unwrap(), "--length", "4:00:00", "--deterministic"]);
+    assert!(output.status.success(), "a verdict isn't a failure: {output:?}");
+    let printed = stdout(&output);
+    assert!(printed.contains("seed 0, deterministic"), "{printed}");
+    let verdict = |id: &str| printed.lines().find(|line| line.starts_with(&format!("{id} "))).unwrap_or_else(|| panic!("no {id}: {printed}")).to_string();
+    assert!(verdict("rate").contains(" met "), "{printed}");
+    assert!(verdict("failed").contains(" met "), "no failures in a deterministic run: {printed}");
+    assert!(verdict("lead").contains("not met") && verdict("lead").contains("first broken at"), "{printed}");
+}
+
+#[test]
+fn run_takes_a_deterministic_experiment_and_figures_lists_the_vocabulary() {
+    let models = Models::new("expectations-run");
+    demo_with_expectations(&models);
+    let output = crabsim(&["run", "--models", models.arg(), "--model", "expected.json", "--length", "4:00:00", "--deterministic"]);
+    assert!(output.status.success(), "{output:?}");
+    let printed = stdout(&output);
+    assert!(printed.contains("1 observation of 04:00:00"), "one observation for a deterministic run: {printed}");
+    assert!(printed.contains("Expectations\n"), "{printed}");
+    assert!(printed.lines().any(|line| line.starts_with("failed ") && line.contains(" met ")), "{printed}");
+    let figures = stdout(&crabsim(&["figures", "--models", models.arg(), "--of", "Drain"]));
+    assert!(figures.lines().any(|line| line.starts_with("throughput_per_hour") && line.contains("per hour")), "{figures}");
+    assert!(!figures.contains("switching_share"), "only a Drain's: {figures}");
+}

@@ -103,6 +103,12 @@ struct Plan {
     length: SimTime,
     warm_up: SimTime,
     observations: u32,
+    /// Without randomness: no object fails (ADR 0030).
+    deterministic: bool,
+    /// The model's expectations, which every observation reads its values for.
+    expectations: Vec<crabsim_model::expect::Bound>,
+    /// Every expectation's id, by its place in the model.
+    expectation_ids: Vec<String>,
 }
 
 /// A job as this process knows it.
@@ -344,6 +350,8 @@ pub(crate) struct Outcome {
     /// The run error and the simulated time it happened.
     pub error: Option<(String, SimTime)>,
     pub state: crabsim::RunState,
+    /// Each expectation's values, in the order of the plan's.
+    pub observed: Vec<crabsim_model::expect::Observed>,
 }
 
 /// Runs observation `k` of `plan` from Init to its end, in chunks, reporting progress and
@@ -351,7 +359,9 @@ pub(crate) struct Outcome {
 fn observe(shared: &Shared, plan: &Plan, k: u32) -> Option<Outcome> {
     let seed = observation_seed(plan.seed, k);
     let started = Instant::now();
-    let mut run = plan.model.build(seed);
+    let mut run = if plan.deterministic { plan.model.build_deterministic(seed) } else { plan.model.build(seed) };
+    // The states a `last` stretch starts from, taken on the way: stopping changes nothing.
+    let mut snapshots = std::collections::BTreeMap::new();
     let error = match run.init() {
         Err(error) => Some((error.to_string(), run.time())),
         Ok(_) => {
@@ -366,18 +376,43 @@ fn observe(shared: &Shared, plan: &Plan, k: u32) -> Option<Outcome> {
                     if plan.warm_up > SimTime::ZERO {
                         run.clear_statistics();
                     }
-                    match advance(&mut run, plan.warm_up + plan.length, &mut reached) {
-                        Ok(true) => None,
-                        Ok(false) => return None,
-                        Err(error) => Some(error),
+                    let end = plan.warm_up + plan.length;
+                    let mut stops = crabsim_model::expect::snapshot_times(&plan.expectations, plan.warm_up, plan.length);
+                    stops.push(end);
+                    let mut ended = None;
+                    for stop in stops {
+                        match advance(&mut run, stop, &mut reached) {
+                            Ok(true) if stop < end => {
+                                snapshots.insert(stop, run.state());
+                            }
+                            Ok(true) => {}
+                            Ok(false) => return None,
+                            Err(error) => {
+                                ended = Some(error);
+                                break;
+                            }
+                        }
                     }
+                    ended
                 }
                 Ok(false) => return None,
                 Err(error) => Some(error),
             }
         }
     };
-    Some(Outcome { seed, events: run.events_processed(), wall: started.elapsed(), error, state: run.state() })
+    let state = run.state();
+    let mut observed = Vec::new();
+    if error.is_none() && !plan.expectations.is_empty() {
+        observed = crabsim_model::expect::observe(&plan.expectations, &state, &snapshots, plan.warm_up, plan.length);
+        // Only an observation that broke a limit runs again, to find where.
+        let broken = crabsim_model::expect::broken_limits(&plan.expectations, &observed);
+        let limits: Vec<&crabsim_model::expect::Bound> = broken.iter().map(|&at| &plan.expectations[at]).collect();
+        let found = crabsim_model::expect::first_violations(&plan.model, seed, plan.deterministic, plan.warm_up, plan.length, &limits);
+        for (&at, violation) in broken.iter().zip(found) {
+            observed[at].violation = violation;
+        }
+    }
+    Some(Outcome { seed, events: run.events_processed(), wall: started.elapsed(), error, state, observed })
 }
 
 /// Advances `run` to `until` in chunks, asking `reached` after each whether to go on. `Ok(false)`
@@ -431,6 +466,18 @@ fn record(store: &mut Store, plan: &Plan, k: u32, outcome: &Outcome) -> rusqlite
                 for (_, (from, to), time) in fill.histogram.used() {
                     insert_bar.execute(params![plan.id, k, info.name, from as i64, to.map(|to| to as i64), time.as_secs_f64()])?;
                 }
+            }
+        }
+        let mut insert_value = transaction.prepare("INSERT INTO expectation_values (run, observation, expectation, object, value) VALUES (?1, ?2, ?3, ?4, ?5)")?;
+        let mut insert_violation =
+            transaction.prepare("INSERT INTO violations (run, observation, expectation, time_s, object, mu, value) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)")?;
+        for (bound, observed) in plan.expectations.iter().zip(&outcome.observed) {
+            let id = &plan.expectation_ids[bound.index];
+            for (subject, value) in &observed.values {
+                insert_value.execute(params![plan.id, k, id, subject.map(|subject| plan.objects[subject as usize].name.as_str()), value])?;
+            }
+            if let Some(violation) = observed.violation {
+                insert_violation.execute(params![plan.id, k, id, violation.time.as_secs_f64(), plan.objects[violation.object as usize].name, violation.mu, violation.value])?;
             }
         }
     }
@@ -496,10 +543,14 @@ pub struct StartRunInput {
     /// Simulated time at the start of each observation that its statistics leave out, such as
     /// "1d". None if left out.
     pub warm_up: Option<String>,
-    /// How many observations, from 1 to 10,000. They run in parallel, one per CPU core.
-    #[serde(default = "ten")]
-    #[schemars(range(min = 1, max = 10_000))]
-    pub observations: u32,
+    /// How many observations, from 1 to 10,000. They run in parallel, one per CPU core. Left
+    /// out, 10, or 1 for a deterministic run, whose observations would all be the same.
+    #[schemars(range(min = 1, max = 10_000), extend("default" = 10))]
+    pub observations: Option<u32>,
+    /// A run without randomness, for verification (ADR 0030): no object fails, and every random
+    /// time is its mean. Its expectations are judged on one observation.
+    #[serde(default)]
+    pub deterministic: bool,
     /// A name for the run, such as "baseline" or "two more mills".
     pub label: Option<String>,
     /// Seconds to wait, from 1 to 60, for the run to end before answering, as run_status would.
@@ -507,10 +558,6 @@ pub struct StartRunInput {
     pub wait: Option<u32>,
 }
 
-/// The observations of a run started without saying how many: enough for a confidence interval.
-fn ten() -> u32 {
-    10
-}
 
 #[derive(Serialize, JsonSchema)]
 pub struct StartRunOutput {
@@ -538,7 +585,8 @@ impl Operation for StartRun {
             return Err(OperationError::invalid_input("`length` must be longer than 0"));
         }
         let warm_up = input.warm_up.as_deref().map(|typed| time_input("warm_up", typed)).transpose()?.unwrap_or(SimTime::ZERO);
-        if !(1..=MAX_OBSERVATIONS).contains(&input.observations) {
+        let observations = input.observations.unwrap_or(if input.deterministic { 1 } else { 10 });
+        if !(1..=MAX_OBSERVATIONS).contains(&observations) {
             return Err(OperationError::invalid_input(format!("`observations` must be from 1 to {MAX_OBSERVATIONS}")));
         }
         let (_, text) = read_file(catalogue, &input.model)?;
@@ -564,8 +612,8 @@ impl Operation for StartRun {
         let who = catalogue.who()?;
         let store = catalogue.store()?;
         store.connection().execute(
-            "INSERT INTO runs (model_path, model_text, model_hash, seed, length_s, warm_up_s, observations, label, source, crabsim_version, started, state, process, crabsim_build, agent)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'queued', ?11, ?12, ?13)",
+            "INSERT INTO runs (model_path, model_text, model_hash, seed, length_s, warm_up_s, observations, label, source, crabsim_version, started, state, process, crabsim_build, agent, deterministic)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'queued', ?11, ?12, ?13, ?14)",
             params![
                 input.model,
                 canonical,
@@ -573,18 +621,30 @@ impl Operation for StartRun {
                 input.seed.to_string(),
                 length.as_secs_f64(),
                 warm_up.as_secs_f64(),
-                input.observations,
+                observations,
                 input.label,
                 catalogue.source().name(),
                 env!("CARGO_PKG_VERSION"),
                 catalogue.process_id(),
                 env!("CRABSIM_BUILD"),
                 who,
+                input.deterministic,
             ],
         )?;
         let id = format!("run-{}", store.connection().last_insert_rowid());
         drop(store);
-        let plan = Plan { id: id.clone(), model: description, objects, seed: input.seed, length, warm_up, observations: input.observations };
+        let plan = Plan {
+            id: id.clone(),
+            model: description,
+            objects,
+            seed: input.seed,
+            length,
+            warm_up,
+            observations,
+            deterministic: input.deterministic,
+            expectations: model.bound_expectations(),
+            expectation_ids: model.expectations.iter().map(|expectation| expectation.id.clone()).collect(),
+        };
         catalogue.jobs().submit(plan);
         let Some(wait) = input.wait else {
             return Ok(StartRunOutput { run: id, state: RunState::Queued, changed_outside, status: None });

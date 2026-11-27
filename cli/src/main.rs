@@ -54,6 +54,10 @@ struct SingleRun {
     /// function. Without it, they go nowhere.
     #[arg(long)]
     code_log: Option<PathBuf>,
+    /// Runs without randomness, for verification: no object fails, and every random time is its
+    /// mean (ADR 0030).
+    #[arg(long)]
+    deterministic: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -83,6 +87,19 @@ enum Command {
         /// A name for the run, such as `baseline`.
         #[arg(long)]
         label: Option<String>,
+        /// Runs without randomness, for verification: no object fails. One observation unless
+        /// --observations says otherwise.
+        #[arg(long)]
+        deterministic: bool,
+    },
+    /// Lists the vocabulary of figures, which expectations and the results store name, with
+    /// their meanings, units and scopes.
+    Figures {
+        #[arg(long)]
+        models: PathBuf,
+        /// Only one built-in class's figures, such as Station, or `model` or `MU`.
+        #[arg(long)]
+        of: Option<String>,
     },
     /// Lists the runs in a models folder's results store, newest first, by people and agents.
     Runs {
@@ -390,8 +407,8 @@ fn main() -> ExitCode {
     let opts = Opts::parse();
     let outcome = match opts.command {
         None => return single_run(&opts.single),
-        Some(Command::Run { models, model, seed, length, warm_up, observations, label }) => catalogue(&models).and_then(|catalogue| {
-            let mut input = json!({ "model": model, "seed": seed, "length": length });
+        Some(Command::Run { models, model, seed, length, warm_up, observations, label, deterministic }) => catalogue(&models).and_then(|catalogue| {
+            let mut input = json!({ "model": model, "seed": seed, "length": length, "deterministic": deterministic });
             if let Some(observations) = observations {
                 input["observations"] = json!(observations);
             }
@@ -404,6 +421,11 @@ fn main() -> ExitCode {
             run(&catalogue, input)
         }),
         Some(Command::Runs { models }) => catalogue(&models).and_then(|catalogue| runs(&catalogue)),
+        Some(Command::Figures { models, of }) => catalogue(&models).and_then(|catalogue| {
+            let figures = catalogue.call("list_figures", json!({ "of": of }))?;
+            print!("{}", tables::figures(&figures));
+            Ok(true)
+        }),
         Some(Command::Results { models, run, objects, classes, values }) => catalogue(&models).and_then(|catalogue| {
             let mut input = json!({ "run": run, "values": values });
             if !objects.is_empty() {
@@ -696,7 +718,7 @@ fn single_run(opts: &SingleRun) -> ExitCode {
             }
         },
     };
-    let (model, which) = match read_model(path, log.clone()) {
+    let ((file, model), which) = match read_model(path, log.clone()) {
         Ok(model) => (model, path.display().to_string()),
         Err(problems) => {
             eprintln!("{} can't be run:", path.display());
@@ -706,14 +728,24 @@ fn single_run(opts: &SingleRun) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let mut run = model.build(opts.seed);
-    println!("crabsim: {which}, seed {}, for {}", opts.seed, format_time_exact(opts.length));
+    let mut run = if opts.deterministic { model.build_deterministic(opts.seed) } else { model.build(opts.seed) };
+    let deterministic = if opts.deterministic { ", deterministic" } else { "" };
+    println!("crabsim: {which}, seed {}{deterministic}, for {}", opts.seed, format_time_exact(opts.length));
     for (module, hash) in model_code(path) {
         println!("code: {module}, SHA-256 {hash}");
     }
 
     let start = Instant::now();
-    let outcome = run.init().and_then(|_| run.advance_to(opts.length).map_err(|failure| failure.error));
+    // It stops where a `last` stretch of an expectation begins, which changes nothing.
+    let expectations = file.bound_expectations();
+    let mut snapshots = std::collections::BTreeMap::new();
+    let outcome = run.init().and_then(|_| {
+        for time in crabsim_model::expect::snapshot_times(&expectations, SimTime::ZERO, opts.length) {
+            run.advance_to(time).map_err(|failure| failure.error)?;
+            snapshots.insert(time, run.state());
+        }
+        run.advance_to(opts.length).map_err(|failure| failure.error)
+    });
     let wall = start.elapsed();
 
     // A run that fails still gives back what it did up to the error.
@@ -725,6 +757,24 @@ fn single_run(opts: &SingleRun) -> ExitCode {
         }
     }
     print!("{}", report(&model, &state));
+    if outcome.is_ok() && !expectations.is_empty() {
+        let mut observed = crabsim_model::expect::observe(&expectations, &state, &snapshots, SimTime::ZERO, opts.length);
+        let broken = crabsim_model::expect::broken_limits(&expectations, &observed);
+        let limits: Vec<&crabsim_model::expect::Bound> = broken.iter().map(|&at| &expectations[at]).collect();
+        let found = crabsim_model::expect::first_violations(&model, opts.seed, opts.deterministic, SimTime::ZERO, opts.length, &limits);
+        for (&at, violation) in broken.iter().zip(found) {
+            observed[at].violation = violation;
+        }
+        let results: Vec<Value> = expectations
+            .iter()
+            .zip(&observed)
+            .map(|(bound, observed)| {
+                let judgement = crabsim_model::expect::judge(bound, std::slice::from_ref(observed), opts.deterministic, opts.length);
+                serde_json::to_value(crabsim_catalogue::expectation_results(&file, bound, &judgement)).expect("results serialise")
+            })
+            .collect();
+        print!("\n{}\n", tables::expectations(&Value::Array(results)));
+    }
     let events = run.events_processed();
     println!(
         "Ran {events} events in {:.3} s, {:.2}M events per second",
@@ -749,7 +799,7 @@ fn folder_of(path: &std::path::Path) -> PathBuf {
 
 /// The model in the file at `path`, with its code from the `code/` folder beside it, or every
 /// problem with reading it.
-fn read_model(path: &PathBuf, log: Option<CodeLog>) -> Result<ModelDescription, Vec<String>> {
+fn read_model(path: &PathBuf, log: Option<CodeLog>) -> Result<(crabsim_model::Model, ModelDescription), Vec<String>> {
     let text = std::fs::read_to_string(path).map_err(|error| vec![format!("it can't be read: {error}")])?;
     let say = |problems: Vec<crabsim_model::Problem>| problems.iter().map(ToString::to_string).collect::<Vec<_>>();
     let model = crabsim_model::load(&text).map_err(say)?;
@@ -760,7 +810,8 @@ fn read_model(path: &PathBuf, log: Option<CodeLog>) -> Result<ModelDescription, 
             let _ = writeln!(log.lock().expect("the log isn't poisoned"), "{line}");
         }));
     }
-    model.to_description_in(&folder_of(path), options).map_err(say)
+    let description = model.to_description_in(&folder_of(path), options).map_err(say)?;
+    Ok((model, description))
 }
 
 /// The code modules the model at `path` names, with their hashes, for the record of what ran.

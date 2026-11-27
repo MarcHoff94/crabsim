@@ -454,6 +454,14 @@ _Avoid_: Requirement (SysML's word for an expectation), task, ticket
 A check of a model that crabsim judges on its own, agreed with the user: a figure at the end of a run, such as "Station A busy at least 70%", or a limit during it, such as "Buffer X never holds more than 20". It names an object, a class with `every` or `mean`, or the model, and belongs to a stage. An agent proposes it, the user accepts it, and only the user changes an accepted one; an agent may question it, with its reason.
 _Avoid_: Requirement, test, assertion, constraint
 
+**Figure**:
+Something crabsim measures, with its unit, such as a Station's working share, a Drain's throughput or the MUs a Buffer holds: since start, now, over the last stretch of a length, or as a limit at every moment. One vocabulary of figures, named as the results store names them, serves expectations, the results store, rules and code (ADR 0030).
+_Avoid_: Metric, KPI
+
+**Limit**:
+An expectation that holds at every moment of a run, such as "Buffer X never holds more than 20", written with `always`. crabsim says when and by which MU it was first broken.
+_Avoid_: Constraint, threshold
+
 **Reference figure**:
 An expectation from the real line, such as "Drain takes 4,100 parts a day, ± 3%", with where it came from, checked at the validation stage.
 

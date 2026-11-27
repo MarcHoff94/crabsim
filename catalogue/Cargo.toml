@@ -19,6 +19,8 @@ sha2 = "0.11"
 log = "0.4"
 
 [dev-dependencies]
+# Builds the example code module for the tests.
+crabsim-code = { path = "../code-host" }
 jsonschema = { version = "0.60", default-features = false }
 # Reading exports back in their tests.
 csv = "1"

@@ -47,6 +47,79 @@ pub struct ModelFile {
     /// The ways MUs pass from one instance to another, in any order: each says its own place in
     /// both orders it belongs to, so sorting the list changes nothing.
     pub connections: Option<Vec<ConnectionFile>>,
+    /// The model's hooks around crabsim's own Init and Reset, each running user code (ADR 0029).
+    pub hooks: Option<ModelHooksFile>,
+}
+
+/// The model's hooks: before Init, with objects in their default state and nothing queued; after
+/// Init, every object's Init done; before Reset, which may only read and log; and after Reset,
+/// objects back in their default state and the code's memory fresh.
+#[derive(JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ModelHooksFile {
+    pub before_init: Option<LifecycleHookFile>,
+    pub after_init: Option<LifecycleHookFile>,
+    pub before_reset: Option<LifecycleHookFile>,
+    pub after_reset: Option<LifecycleHookFile>,
+}
+
+#[derive(JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LifecycleHookFile {
+    pub code: CodeCallFile,
+}
+
+/// A call of user code: a module's function and its parameters' values.
+#[derive(JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CodeCallFile {
+    /// `<module>.<function>`, the module being `code/<module>.wasm` in the models folder.
+    #[schemars(regex(pattern = r"^[A-Za-z0-9_-]+\.[A-Za-z0-9_]+$"))]
+    pub function: String,
+    /// Each parameter's value by name, as the function declares them: a number, true or false, a
+    /// time as text such as "1:30", or an instance's name.
+    pub with: Option<serde_json::Map<String, serde_json::Value>>,
+}
+
+/// A hook on entry or on exit: user code run at each trigger point it names.
+#[derive(JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CodeHookFile {
+    pub code: CodeCallFile,
+    /// Where along the MU it runs, each once: its front, its booking point or its rear. The
+    /// booking point alone by default.
+    #[schemars(length(min = 1))]
+    pub at: Option<Vec<TriggerPointFile>>,
+}
+
+#[derive(JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TriggerPointFile {
+    Front,
+    BookingPoint,
+    Rear,
+}
+
+/// A distribution user code chooses: one successor, which the MU then waits for alone, hold, or
+/// its default strategy.
+#[derive(JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CodeDistributionFile {
+    pub code: CodeCallFile,
+    /// The strategy that chooses when the code answers default. Round robin when left out.
+    pub default: Option<CodeDefaultFile>,
+    /// Asks the code as the MU comes in, at this trigger point, rather than when it wants to
+    /// leave, at the user's own risk. Not for a CrossConveyor.
+    pub asked_on_entry: Option<TriggerPointFile>,
+}
+
+/// Round robin, weighted or by destination.
+#[derive(JsonSchema)]
+#[serde(untagged)]
+pub enum CodeDefaultFile {
+    RoundRobin(RoundRobinFile),
+    Weighted(WeightedFile),
+    ByDestination(ByDestinationFile),
 }
 
 /// A connection from one instance to another. Moving along it takes no time.
@@ -249,6 +322,12 @@ pub struct AttributesFile {
     /// stands for leaves by that side, turning at the centre, unless the side straight across
     /// takes it too; every other MU goes straight through. None by default. Inherited as a whole.
     pub exits: Option<ExitsFile>,
+    /// Any type: user code run as an MU comes in (ADR 0029). None by default. Inherited as a
+    /// whole.
+    pub on_entry: Option<CodeHookFile>,
+    /// Any type but Drain: user code run as an MU leaves, after it has moved on. None by
+    /// default. Inherited as a whole.
+    pub on_exit: Option<CodeHookFile>,
 }
 
 /// One step of a work plan.
@@ -443,6 +522,7 @@ pub enum DistributionFile {
     RoundRobin(RoundRobinFile),
     Weighted(WeightedFile),
     ByDestination(ByDestinationFile),
+    Code(CodeDistributionFile),
 }
 
 /// The strategy that chooses among the successors that reach the MU's destination.

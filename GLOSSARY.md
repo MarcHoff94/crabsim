@@ -420,7 +420,7 @@ Code a user, or an agent they ask, attaches to a model to decide and act where c
 _Avoid_: Script, plugin, macro (a list of commands that changes a model file)
 
 **Code module**:
-A compiled WebAssembly file in the models folder's `code/` folder, holding functions that hooks name. The user compiles it, from Rust or any language that compiles to WebAssembly, and crabsim reads it and never writes it. Its sources may sit beside it, so people and agents can read what ran.
+A compiled WebAssembly file in the models folder's `code/` folder, holding functions that hooks name. The user compiles it, from Rust with the `crabsim-guest` crate, or later any language that compiles to WebAssembly, and crabsim reads it and never writes it. It declares its functions and their parameters, and the version of crabsim's interface it was built against. Its sources may sit beside it, so people and agents can read what ran.
 _Avoid_: Library, plugin, DLL
 
 **Hook**:
@@ -438,7 +438,7 @@ A change user code asks crabsim to make to the run, such as moving an MU, settin
 _Avoid_: Command (a line in the command language), intervention (a change from outside the run)
 
 **Address**:
-How user code, the command line and `e` name a value, such as `Station 1.process_time`, `self.successors[2]` or `mu.destination`. In user code, reading by address gives a copy at that moment, and writing goes through an action.
+How user code, the command line and `e` name a value, such as `Station 1.process_time`, `self.successors[2]` or `mu.destination`. In user code, an object is given as a hook's parameter, an instance's name checked when the model is built, and its values are read through typed functions such as `process_time()`, each giving a copy at that moment; writing goes through an action.
 _Avoid_: Path (a conveyor's line)
 
 **Fuel**:

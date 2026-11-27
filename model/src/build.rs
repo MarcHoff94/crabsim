@@ -8,6 +8,12 @@ use crabsim::{DestinationId, FailureProfile, ModelDescription, PlanStep, SimTime
 use std::collections::HashMap;
 
 pub(crate) fn build(model: &Model) -> ModelDescription {
+    build_naming_mu_kinds(model).0
+}
+
+/// The description, and the MU class each MU kind stands for, by its id, for code to read.
+pub(crate) fn build_naming_mu_kinds(model: &Model) -> (ModelDescription, Vec<String>) {
+    let mut mu_classes = vec![crate::BUILT_IN_MU_CLASS.to_string()];
     let mut description = ModelDescription::new();
     // The model's own values for the built-in MU are those of starting MUs and default Sources.
     let built_in_mu = model.resolve_class(crate::BUILT_IN_MU_CLASS).expect("the built-in MU class always resolves");
@@ -105,6 +111,12 @@ pub(crate) fn build(model: &Model) -> ModelDescription {
                 let steps = model.work_plan_of(index).expect("checked: a Source's MU class is an MU class");
                 let kind = description.add_mu_kind_with_plan(kind, plan(&steps));
                 description.set_mu_kind(id, kind);
+                if mu_classes.len() <= kind as usize {
+                    mu_classes.resize(kind as usize + 1, String::new());
+                }
+                if mu_classes[kind as usize].is_empty() {
+                    mu_classes[kind as usize] = resolved.attributes.mu_class.clone().unwrap_or_else(|| crate::BUILT_IN_MU_CLASS.to_string());
+                }
             }
             "Station" => {
                 if let Some(detour) = &resolved.attributes.detour {
@@ -135,7 +147,7 @@ pub(crate) fn build(model: &Model) -> ModelDescription {
             description.connect_at(from as u32, connection.from_side, ids[connection.to.as_str()], connection.to_side);
         }
     }
-    description
+    (description, mu_classes)
 }
 
 /// A distribution strategy as the engine takes it.
@@ -153,6 +165,8 @@ fn distribution_rule(strategy: &crate::DistributionStrategy, ids: &HashMap<&str,
             DistributionRule::Weighted(WeightedRule { by, order: weighted.order, rank: weighted.rank, drains })
         }
         crate::DistributionStrategy::ByDestination(then) => DistributionRule::ByDestination(Box::new(distribution_rule(then, ids))),
+        // Code chooses on top of its default, which the hooks give it when built with code.
+        crate::DistributionStrategy::Code(code) => distribution_rule(&code.default, ids),
     }
 }
 

@@ -484,6 +484,21 @@ fn a_folder_holding_source_code_is_refused_as_a_models_folder() {
 }
 
 #[test]
+fn a_code_modules_sources_may_sit_in_the_code_folder() {
+    let folder = TempFolder::new("code-sources");
+    folder.write("model.json", SMALL);
+    folder.write("code/routing.wasm", "");
+    folder.write("code/routing/Cargo.toml", "");
+    folder.write("code/routing/src/lib.rs", "");
+    assert!(Catalogue::open(Settings::new(&folder.path, Source::Mcp)).is_ok());
+    // Only the models folder's own `code/`.
+    let folder = TempFolder::new("code-deeper");
+    folder.write("model.json", SMALL);
+    folder.write("lines/code/lib.rs", "");
+    assert!(Catalogue::open(Settings::new(&folder.path, Source::Mcp)).is_err());
+}
+
+#[test]
 fn the_repositorys_own_models_folder_opens_but_the_repository_doesnt() {
     let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
     assert!(Catalogue::open(Settings::new(repository.join("models"), Source::Cli)).is_ok());

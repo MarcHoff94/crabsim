@@ -22,8 +22,9 @@ harness = false
 # UI and the MCP server aren't default members, so `cargo test` and `cargo bench` here never build
 # Bevy or tokio. The engine depends on none of them (ADR 0009).
 [workspace]
-members = ["model", "catalogue", "cli", "mcp", "ui"]
-default-members = [".", "model", "catalogue", "cli"]
+exclude = ["code-examples", "code-host/tests/modules"]
+members = ["model", "catalogue", "cli", "mcp", "ui", "code-host", "guest"]
+default-members = [".", "model", "catalogue", "cli", "code-host", "guest"]
 
 # Measured with the reference benchmark: about 11% less time than the default on the demo model
 # and 7% on the large one. Fat LTO measured the same as thin and takes longer to build.

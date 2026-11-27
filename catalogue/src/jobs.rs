@@ -544,6 +544,10 @@ impl Operation for StartRun {
         let (_, text) = read_file(catalogue, &input.model)?;
         let changed_outside = crate::editing::changed_outside(catalogue, &input.model, &text)?;
         let model = crabsim_model::load(&text).map_err(|problems| OperationError::invalid_model(&format!("`{}`", input.model), &problems))?;
+        // Its code, from the folder's `code/`, is loaded and checked now too (ADR 0029).
+        let description = model
+            .to_description_in(catalogue.folder().root(), crabsim_model::crabsim_code::Options::default())
+            .map_err(|problems| OperationError::invalid_model(&format!("`{}`", input.model), &problems))?;
         let canonical = model.save();
         let hash: String = Sha256::digest(canonical.as_bytes()).iter().map(|byte| format!("{byte:02x}")).collect();
         let objects = (0..model.instances.len())
@@ -580,7 +584,7 @@ impl Operation for StartRun {
         )?;
         let id = format!("run-{}", store.connection().last_insert_rowid());
         drop(store);
-        let plan = Plan { id: id.clone(), model: model.to_description(), objects, seed: input.seed, length, warm_up, observations: input.observations };
+        let plan = Plan { id: id.clone(), model: description, objects, seed: input.seed, length, warm_up, observations: input.observations };
         catalogue.jobs().submit(plan);
         let Some(wait) = input.wait else {
             return Ok(StartRunOutput { run: id, state: RunState::Queued, changed_outside, status: None });

@@ -373,9 +373,12 @@ impl Workspace {
         };
         let text = read["text"].as_str().unwrap_or_default();
         let known = Read { stamp, hash: read["file_hash"].as_str().unwrap_or_default().to_string(), changed_outside: read["changed_outside"] == true };
-        match crabsim_model::load(text) {
-            Ok(model) => {
-                let mut description = model.to_description();
+        // A model runs with its code, from the folder's `code/` (ADR 0029): a module that can't be
+        // loaded, or a hook that doesn't fit its function, is a problem like any other.
+        let root = catalogue.folder().root().to_path_buf();
+        let built = crabsim_model::load(text).and_then(|model| model.to_description_in(&root, crabsim_model::crabsim_code::Options::default()).map(|description| (description, model)));
+        match built {
+            Ok((mut description, model)) => {
                 lay_out(&mut description);
                 Some((description, model, known))
             }

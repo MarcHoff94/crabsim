@@ -314,3 +314,21 @@ fn equal_hashes_mean_the_same_model() {
         setup.finished(run);
     }
 }
+
+#[test]
+fn a_model_with_code_runs_with_its_module_from_the_code_folder() {
+    let setup = Setup::new("code");
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    setup.folder.write("every-nth.json", &std::fs::read_to_string(repository.join("code-examples/routing/every-nth.json")).unwrap());
+    // Without its module the model is refused, saying which is missing.
+    let error = setup.err("start_run", json!({ "model": "every-nth.json", "length": "1:00:00", "observations": 1 }));
+    assert_eq!(error["kind"], "invalid_model");
+    assert_eq!(error["problems"][0]["pointer"], "/instances/1/attributes/distribution/code/function");
+    std::fs::create_dir_all(setup.folder.join("code")).unwrap();
+    std::fs::copy(crabsim_code::testing::routing(), setup.folder.join("code/routing.wasm")).unwrap();
+    let run = setup.start(json!({ "model": "every-nth.json", "length": "2:00:00", "observations": 2 }));
+    assert_eq!(setup.finished(&run)["state"], "done");
+    let rows = setup.ok("query_results", json!({ "sql": format!("SELECT object, value FROM statistics WHERE run = '{run}' AND observation = 1 AND statistic = 'mus_in' AND object IN ('Left', 'Right') ORDER BY object") }))["rows"].clone();
+    let (left, right) = (rows[0][1].as_f64().unwrap(), rows[1][1].as_f64().unwrap());
+    assert!(left > 100.0 && (right - 2.0 * left).abs() <= 2.0, "every third MU goes left: {rows}");
+}

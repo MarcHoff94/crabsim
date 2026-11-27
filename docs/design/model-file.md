@@ -17,7 +17,8 @@ A file holds the model only: classes, instances, their attributes, names, positi
   "description": "A line with two branches",
   "classes": [ ... ],
   "instances": [ ... ],
-  "connections": [ ... ]
+  "connections": [ ... ],
+  "hooks": { ... }
 }
 ```
 
@@ -27,6 +28,7 @@ A file holds the model only: classes, instances, their attributes, names, positi
 - `classes` is optional.
 - `instances` is in Init order: ids follow it.
 - `connections` is optional, and its order means nothing.
+- `hooks` is optional: the model's hooks around crabsim's own Init and Reset, `before_init`, `after_init`, `before_reset` and `after_reset`, each `{"code": {"function": "<module>.<function>", "with": {…}}}` (ADR 0029, see "User code" below).
 
 ## Instances
 
@@ -100,7 +102,9 @@ Which attributes an instance has depends on its built-in class at the root of it
 | `dimensions` | all | by type: Station 2 × 1.5 × 1.5 m, Buffer 2 × 1 × 1 m, Source and Drain 1 m each way | `length`, `width`, `height` above 0, `rotation_degrees` optional, 0 by default |
 | `description` | all | none | Free text |
 | `state_notes` | all | none | A note per state, see below |
-| `distribution` | Source, Station, Buffer, Conveyor, CrossConveyor | `"round_robin"` | `"round_robin"`, weighted or by destination, see below (ADR 0016, ADR 0025) |
+| `distribution` | Source, Station, Buffer, Conveyor, CrossConveyor | `"round_robin"` | `"round_robin"`, weighted, by destination or code, see below (ADR 0016, ADR 0025, ADR 0029) |
+| `on_entry` | any | none | User code run as an MU comes in, see "User code" below. Inherited as a whole |
+| `on_exit` | any but Drain | none | User code run as an MU leaves, after it has moved on. Inherited as a whole |
 | `mu_class` | Source | `"MU"` | An MU class: the MUs it makes are of it (ADR 0021) |
 | `mu_values` | Source | none | Any of `length`, `width`, `booking_point` and `work_plan`, changing its MU class's values for its MUs alone. Inherited as a whole |
 | `work_plan` | MU class | none | Steps its MUs follow, each `{"at": name}` with an optional `"process_time"`, see below (ADR 0026). Inherited as a whole |
@@ -153,11 +157,30 @@ Which attributes an instance has depends on its built-in class at the root of it
   "distribution": { "by_destination": { "then": "round_robin" } }
   ```
   `then` is round robin when left out, and saved written out. A way that reaches but is blocked is waited for. An MU with no destination left, or one none of the successors reaches, is offered to every successor by `then`, and `validate_model` warns where it follows a Source's MUs, plans and detours through the model to an object routing by destination none of whose successors leads to where they go next.
+- **Code** chooses the successor in user code (ADR 0029), answering one successor, hold or default, which hands the choice to `default`, round robin when left out:
+  ```json
+  "distribution": { "code": { "function": "routing.every_nth", "with": { "n": 3, "left": "Left", "right": "Right" } }, "default": "round_robin", "asked_on_entry": "booking_point" }
+  ```
+  `asked_on_entry`, optional, asks the code at that trigger point as the MU comes in rather than when it wants to leave; a cross conveyor's distribution always runs as it lets the MU in, so it can't have one.
 - **Starting MUs** are a count. MU ids belong to a run, and are handed out when a run is built, in file order. They are of the built-in MU class, with the model's own values for it.
 - **A conveyor's position** is where its path starts, and its rotation the way its path heads there (spec issue 141), so editing its segments never moves its start. A view draws it centred on its path's bounds (`Model::drawn_position`). In files from before increment 2 it was the centre of a straight conveyor, so those conveyors now start half their length back. A bend tighter than half its width or its `min_radius`, or a segment steeper than its `max_incline`, is a problem, and a transition that ends at the bend it starts at is one too. Nothing checks that its ends meet its neighbours: the engine treats every connection as touching. `Model::warnings` also warns about MUs that a Source sends to a conveyor whose corners stick out past its edge in its tightest bend, which only a view sees. The geometry worked out from a path is in `crabsim_model::path`, with the short form `4, arc 1.5 90, helix 1.2 2 rise 3` that the command language reads and the window shows.
 - **A conveyor's size** is its path's length in 3D and its width: its `dimensions` give only its height and rotation. A conveyor can lead straight into another. Its `accumulating` is true by default: MUs behind one that stops close up and stop while the rest move, and with false every MU on it stops as a whole when the first can't leave. `Model::warnings` warns about a Source whose MUs are too wide or too long for a conveyor it reaches through objects without geometry, which would refuse them for good.
 - **An MU's values** reach the engine as its MU kind: each different set of values a Source makes is one entry in the run's table of them, and every MU carries its entry's number. Only objects whose geometry counts read them, such as conveyors.
 - **Visual only:** `position`, `dimensions`, `description` and `state_notes` never reach a run, so they can't change a result. The 3D model path will be one more inheritable attribute when there is a 3D view, a path and never embedded.
+
+## User code
+
+A hook names a function of a code module with values for its parameters (ADR 0029, spec issue 156):
+
+```json
+"on_entry": { "code": { "function": "routing.report", "with": { "drain": "Drain", "every": "1:00:00" } }, "at": ["front", "rear"] }
+```
+
+- `function` is `<module>.<function>`, the module being `code/<module>.wasm` in the models folder, built from Rust with the `crabsim-guest` crate (`docs/design/code-interface.md`). Its sources may sit in `code/<module>/`, which the check for source code in a models folder leaves alone.
+- `with` gives each parameter the function declares, by name: a whole number, a number, true or false, a time as text such as `"1:30"`, an instance's name, or text. It is left out when empty.
+- `at`, for `on_entry` and `on_exit`, lists the trigger points the hook runs at, each once, front first: `"front"`, `"booking_point"` and `"rear"`. The booking point alone by default, and then left out.
+- **Checked in two steps.** Reading the file checks a hook's shape: `function`'s form, `with` an object, `at` and `asked_on_entry` trigger points, a Drain without `on_exit`. Building it with its code (`Model::to_description_in`, `load_code`, `code_problems`) checks the rest against the modules in `code/`: a module that's missing or isn't a crabsim module of this interface version, a function it doesn't have, a parameter it doesn't declare or one missing, and a value that doesn't fit its type, such as an instance's name that isn't in the model. Each is a problem where it is written, a class's on the class. The CLI, `start_run` and the window build every model this way, so a model with code never runs without it.
+- **A model without code** builds exactly as before. `to_description` builds a model's structure without its code, for what only reads it, such as `query_model`.
 
 ## Names
 

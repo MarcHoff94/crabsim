@@ -50,6 +50,10 @@ struct SingleRun {
     /// `30d 12:00:00`.
     #[arg(long, default_value = "1d", value_parser = length)]
     length: SimTime,
+    /// Writes the lines the model's code logs to this file, each with its time, object and
+    /// function. Without it, they go nowhere.
+    #[arg(long)]
+    code_log: Option<PathBuf>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -682,7 +686,17 @@ fn runs(catalogue: &Catalogue) -> Result<bool, OperationError> {
 /// The CLI as it always was: one run, printed, nothing saved.
 fn single_run(opts: &SingleRun) -> ExitCode {
     let Some(path) = &opts.model else { unreachable!("clap requires --model for a single run") };
-    let (model, which) = match read_model(path) {
+    let log = match &opts.code_log {
+        None => None,
+        Some(log_path) => match std::fs::File::create(log_path) {
+            Ok(file) => Some(std::sync::Arc::new(std::sync::Mutex::new(std::io::BufWriter::new(file)))),
+            Err(error) => {
+                eprintln!("the code's log {} can't be written: {error}", log_path.display());
+                return ExitCode::FAILURE;
+            }
+        },
+    };
+    let (model, which) = match read_model(path, log.clone()) {
         Ok(model) => (model, path.display().to_string()),
         Err(problems) => {
             eprintln!("{} can't be run:", path.display());
@@ -694,6 +708,9 @@ fn single_run(opts: &SingleRun) -> ExitCode {
     };
     let mut run = model.build(opts.seed);
     println!("crabsim: {which}, seed {}, for {}", opts.seed, format_time_exact(opts.length));
+    for (module, hash) in model_code(path) {
+        println!("code: {module}, SHA-256 {hash}");
+    }
 
     let start = Instant::now();
     let outcome = run.init().and_then(|_| run.advance_to(opts.length).map_err(|failure| failure.error));
@@ -701,6 +718,12 @@ fn single_run(opts: &SingleRun) -> ExitCode {
 
     // A run that fails still gives back what it did up to the error.
     let state = run.state();
+    if let Some(log) = &log {
+        use std::io::Write;
+        if let Err(error) = log.lock().expect("the log isn't poisoned").flush() {
+            eprintln!("the code's log can't be written: {error}");
+        }
+    }
     print!("{}", report(&model, &state));
     let events = run.events_processed();
     println!(
@@ -717,11 +740,34 @@ fn single_run(opts: &SingleRun) -> ExitCode {
     }
 }
 
-/// The model in the file at `path`, or every problem with reading it.
-fn read_model(path: &PathBuf) -> Result<ModelDescription, Vec<String>> {
+type CodeLog = std::sync::Arc<std::sync::Mutex<std::io::BufWriter<std::fs::File>>>;
+
+/// The folder a model file is in, whose `code/` holds the modules its hooks name.
+fn folder_of(path: &std::path::Path) -> PathBuf {
+    path.parent().filter(|parent| !parent.as_os_str().is_empty()).unwrap_or(std::path::Path::new(".")).to_path_buf()
+}
+
+/// The model in the file at `path`, with its code from the `code/` folder beside it, or every
+/// problem with reading it.
+fn read_model(path: &PathBuf, log: Option<CodeLog>) -> Result<ModelDescription, Vec<String>> {
     let text = std::fs::read_to_string(path).map_err(|error| vec![format!("it can't be read: {error}")])?;
-    let model = crabsim_model::load(&text).map_err(|problems| problems.iter().map(ToString::to_string).collect::<Vec<_>>())?;
-    Ok(model.to_description())
+    let say = |problems: Vec<crabsim_model::Problem>| problems.iter().map(ToString::to_string).collect::<Vec<_>>();
+    let model = crabsim_model::load(&text).map_err(say)?;
+    let mut options = crabsim_model::crabsim_code::Options::default();
+    if let Some(log) = log {
+        options.log = Some(std::sync::Arc::new(move |line: &crabsim_model::crabsim_code::LogLine| {
+            use std::io::Write;
+            let _ = writeln!(log.lock().expect("the log isn't poisoned"), "{line}");
+        }));
+    }
+    model.to_description_in(&folder_of(path), options).map_err(say)
+}
+
+/// The code modules the model at `path` names, with their hashes, for the record of what ran.
+fn model_code(path: &std::path::Path) -> Vec<(String, String)> {
+    let Some(model) = std::fs::read_to_string(path).ok().and_then(|text| crabsim_model::load(&text).ok()) else { return Vec::new() };
+    let (library, _) = model.load_code(&folder_of(path));
+    library.modules().iter().map(|module| (module.name().to_string(), module.hash().to_string())).collect()
 }
 
 /// Each object's statistics as a table, then what only Drains keep.

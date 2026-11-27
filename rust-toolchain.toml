@@ -3,3 +3,5 @@
 # baseline in docs/design/first-profile.md.
 [toolchain]
 channel = "1.99.1"
+# User code compiles to WebAssembly (ADR 0029), for the tests and the example modules.
+targets = ["wasm32-unknown-unknown"]

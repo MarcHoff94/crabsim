@@ -1,0 +1,23 @@
+{
+  "format_version": 2,
+  "classes": [],
+  "instances": [
+    { "name": "Source", "class": "Source", "attributes": { "interval": "0:10" } },
+    { "name": "Fork", "class": "Station", "attributes": {
+        "process_time": "0:05",
+        "distribution": { "code": { "function": "routing.every_nth", "with": { "n": 3, "left": "Left", "right": "Right" } } } } },
+    { "name": "Left", "class": "Station", "attributes": { "process_time": "0:20" } },
+    { "name": "Right", "class": "Station", "attributes": { "process_time": "0:12" } },
+    { "name": "Drain", "class": "Drain" }
+  ],
+  "connections": [
+    { "from": "Source", "to": "Fork", "exit": 1, "entrance": 1 },
+    { "from": "Fork", "to": "Left", "exit": 1, "entrance": 1 },
+    { "from": "Fork", "to": "Right", "exit": 2, "entrance": 1 },
+    { "from": "Left", "to": "Drain", "exit": 1, "entrance": 1 },
+    { "from": "Right", "to": "Drain", "exit": 1, "entrance": 2 }
+  ],
+  "hooks": {
+    "after_init": { "code": { "function": "routing.report", "with": { "drain": "Drain", "every": "1:00:00" } } }
+  }
+}

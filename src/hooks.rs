@@ -49,7 +49,7 @@ impl TriggerPoint {
         }
     }
 
-    pub(crate) const ALL: [TriggerPoint; 3] = [TriggerPoint::Front, TriggerPoint::BookingPoint, TriggerPoint::Rear];
+    pub const ALL: [TriggerPoint; 3] = [TriggerPoint::Front, TriggerPoint::BookingPoint, TriggerPoint::Rear];
 }
 
 /// A set of trigger points, a bit each: which of a move's moments are now.

@@ -1,0 +1,22 @@
+[package]
+name = "crabsim-code"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "crabsim's host for user code (ADR 0029): WebAssembly modules run by wasmtime, or Rust compiled natively, behind the engine's Hooks trait"
+
+[dependencies]
+crabsim = { path = ".." }
+wasmtime = { version = "=51.0.0", default-features = false, features = ["cranelift", "runtime", "std", "wat"] }
+wasmparser = "0.263"
+serde_json = "1"
+sha2 = "0.11"
+
+[dev-dependencies]
+wat = "1"
+crabsim-guest = { path = "../guest" }
+routing = { path = "../code-examples/routing" }
+
+[[bench]]
+name = "calls"
+harness = false

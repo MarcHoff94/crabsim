@@ -25,3 +25,9 @@ A user, or an agent they ask, can attach code to the model: hooks on every objec
 - **Debugging** is native for Rust: the same hook code compiled against the engine and debugged in the user's own `cargo test`. Stepping through WebAssembly inside crabsim isn't reliable on Windows yet, and works on Linux and probably WSL.
 - **User-defined attributes** come later, in a round of their own, as the way code keeps its own state in the model.
 - This settles "How the code gets in" under "User code (not built)" in the handoff, and its user phase at Init and Reset becomes the hooks after crabsim's own Init and Reset.
+
+## Amended on 2026-11-27, while building PR 2
+
+- **A plain WebAssembly module with a hand-written interface, not a component under a WIT world.** wasmtime gives no access to a component instance's core memories, so a component couldn't be copied into a checkpoint, which this ADR requires for going back to stay exact. A plain module's memory is copied in microseconds. The interface is versioned all the same (version 1, `docs/design/code-interface.md`), written for Rust in the `crabsim-guest` crate, and a module of another version is a model problem. Other languages need bindings written by hand until a component's memory can be read and a WIT world can wrap the same functions.
+- **Addresses** are an instance's name given as a parameter of type object, resolved to its id when the model is built, so a misspelled name is a problem before the run, and attributes read through typed functions (`Object::process_time`, `Object::mus_held`), so they can't be misspelled. A name looked up while the run goes (`find`) is the code's own risk.
+- **Randomness** comes from each object's own stream for code, from the run's seed and the object's stream, apart from the numbers the object draws itself, so code asking for random numbers changes none of the model's own.

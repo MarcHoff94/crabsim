@@ -28,6 +28,15 @@ pub(crate) fn write(model: &Model) -> String {
         connections.sort_by_key(|c| (place(&c.from), c.from.clone(), c.exit, place(&c.to), c.to.clone(), c.entrance));
         file.insert("connections".into(), Value::Array(connections.into_iter().map(connection).collect()));
     }
+    if !model.hooks.is_empty() {
+        let mut hooks = Map::new();
+        for (key, _, call) in model.hooks.each() {
+            if let Some(call) = call {
+                hooks.insert(key.into(), json!({ "code": code_call(call) }));
+            }
+        }
+        file.insert("hooks".into(), Value::Object(hooks));
+    }
     let mut text = serde_json::to_string_pretty(&Value::Object(file)).expect("a model always serialises");
     text.push('\n');
     text
@@ -185,6 +194,12 @@ pub(crate) fn attributes(attributes: &Attributes) -> Value {
     if let Some(exits) = &attributes.exits {
         fields.insert("exits".into(), crate::write::exits(exits));
     }
+    if let Some(hook) = &attributes.on_entry {
+        fields.insert("on_entry".into(), code_hook(hook));
+    }
+    if let Some(hook) = &attributes.on_exit {
+        fields.insert("on_exit".into(), code_hook(hook));
+    }
     Value::Object(fields)
 }
 
@@ -248,7 +263,38 @@ pub(crate) fn distribution(strategy: &crate::DistributionStrategy) -> Value {
             json!({ "weighted": fields })
         }
         crate::DistributionStrategy::ByDestination(then) => json!({ "by_destination": { "then": distribution(then) } }),
+        crate::DistributionStrategy::Code(code) => {
+            let mut fields = Map::new();
+            fields.insert("code".into(), code_call(&code.code));
+            if code.default != crate::DistributionStrategy::RoundRobin {
+                fields.insert("default".into(), distribution(&code.default));
+            }
+            if let Some(point) = code.asked_on_entry {
+                fields.insert("asked_on_entry".into(), json!(crate::trigger_point_name(point)));
+            }
+            Value::Object(fields)
+        }
     }
+}
+
+/// A call of code, with `with` left out when it is empty.
+pub(crate) fn code_call(call: &crate::CodeCall) -> Value {
+    let mut fields = Map::new();
+    fields.insert("function".into(), json!(call.function));
+    if !call.with.is_empty() {
+        fields.insert("with".into(), Value::Object(call.with.clone()));
+    }
+    Value::Object(fields)
+}
+
+/// A hook on entry or exit, with `at` left out when it is the booking point alone.
+pub(crate) fn code_hook(hook: &crate::CodeHook) -> Value {
+    let mut fields = Map::new();
+    fields.insert("code".into(), code_call(&hook.code));
+    if hook.at != [crabsim::TriggerPoint::BookingPoint] {
+        fields.insert("at".into(), json!(hook.at.iter().map(|&point| crate::trigger_point_name(point)).collect::<Vec<_>>()));
+    }
+    Value::Object(fields)
 }
 
 fn failures(failures: &Failures) -> Value {

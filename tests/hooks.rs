@@ -1054,3 +1054,155 @@ fn an_mu_moved_off_a_conveyor_by_code_leaves_it_whole_at_once() {
     assert_eq!(left_at(&occurrences, a), 0);
     assert!(run.state().objects[fork as usize].contents.is_empty(), "nothing of it stays on the conveyor");
 }
+
+/// A Buffer holding MU 1, a conveyor of 5 m at 1 m/s it isn't connected to, and a Drain after the
+/// conveyor. Code moves MU 1 onto the conveyor after Init, as `place` does it.
+fn placed_on_a_belt(place: impl Fn(&mut HookRun<'_>, u32, u32) -> Result<(), crabsim::Refusal> + Send + Sync + 'static) -> (SimulationRun, Arc<Mutex<Vec<Logged>>>, u32, u32, u32) {
+    let mut model = ModelDescription::new();
+    let buffer = model.add_buffer(Capacity::Unlimited);
+    let belt = model.add_conveyor(5.0, 0.6, 1.0);
+    let drain = model.add_drain();
+    model.connect(belt, drain);
+    model.set_starting_mus(buffer, &[1]);
+    let code = Code::new(move |call, run, _| {
+        if call.kind == CallKind::Lifecycle(Lifecycle::AfterInit) {
+            if let Err(refusal) = place(run, buffer, belt) {
+                return Err(HookError(refusal.0));
+            }
+        }
+        Ok(None)
+    });
+    let log = code.log();
+    model.set_hooks(Box::new(code));
+    model.set_lifecycle_hook(Lifecycle::AfterInit, Some(LIFECYCLE));
+    model.set_object_hooks(belt, ObjectHooks { on_entry: every_point(ON_ENTRY), ..ObjectHooks::default() });
+    (recorded(model.build(0)), log, buffer, belt, drain)
+}
+
+#[test]
+fn code_places_an_mu_on_a_conveyor_with_its_front_booking_point_or_rear_where_it_says() {
+    use TriggerPoint::{BookingPoint, Front, Rear};
+    // The built-in MU is 0.6 m long, its booking point in the middle.
+    for (point, front) in [(Front, 2.0), (BookingPoint, 2.3), (Rear, 2.6)] {
+        let (mut run, log, _, belt, drain) = placed_on_a_belt(move |run, buffer, belt| run.place_mu(1, buffer, belt, 2.0, point));
+        let mut occurrences = run.init().unwrap();
+        let state = run.state();
+        let position = &state.objects[belt as usize].positions[0];
+        assert!((position.front - front).abs() < 1e-9 && position.speed == 1.0, "{point:?}: {position:?}");
+        // Whole on the conveyor at once, so all three points of its entry run as it is placed.
+        let entries: Vec<(f64, Option<TriggerPoint>)> = calls_of(&log).iter().map(|call| (call.0, call.3)).collect();
+        assert_eq!(entries, [(0.0, Some(Front)), (0.0, Some(BookingPoint)), (0.0, Some(Rear))], "{point:?}");
+        occurrences.extend(run.advance_to(secs(10)).unwrap());
+        let left = occurrences.iter().find(|o| matches!(o.kind, OccurrenceKind::MuLeft { mu_id: 1, at, .. } if at == drain)).unwrap();
+        // Its booking point crosses the end, 0.3 m behind its front.
+        assert_eq!(left.time, SimTime::from_millis(((5.0 - front + 0.3) * 1000.0_f64).round() as u64), "{point:?}");
+    }
+}
+
+#[test]
+fn placing_an_mus_booking_point_at_the_start_is_moving_it_there() {
+    let run_for = |placed: bool| {
+        let (mut run, log, _, _, _) = placed_on_a_belt(move |run, buffer, belt| if placed { run.place_mu(1, buffer, belt, 0.0, TriggerPoint::BookingPoint) } else { run.move_mu(1, buffer, belt) });
+        let mut occurrences = run.init().unwrap();
+        occurrences.extend(run.advance_to(secs(10)).unwrap());
+        let calls = calls_of(&log);
+        (occurrences, run.state(), calls)
+    };
+    let placed = run_for(true);
+    assert_eq!(placed, run_for(false));
+    assert_eq!(placed.2.last().unwrap().0, 0.3, "its rear hung behind the start, crossing it 0.3 s later");
+}
+
+#[test]
+fn placing_an_mu_where_it_doesnt_fit_is_refused() {
+    use TriggerPoint::{BookingPoint, Front, Rear};
+    let refusal = |at: f64, point: TriggerPoint| {
+        let (mut run, _, buffer, _, _) = placed_on_a_belt(move |run, buffer, belt| run.place_mu(1, buffer, belt, at, point));
+        let message = match run.init() {
+            Err(RunError::Hook(failure)) => failure.message,
+            other => panic!("expected a refusal at {at} m by its {point:?}, got {other:?}"),
+        };
+        assert_eq!(run.state().objects[buffer as usize].contents, [1], "it stayed where it was");
+        message
+    };
+    assert_eq!(refusal(4.9, Rear), "its front would be 0.500 m past the end of object 1");
+    assert_eq!(refusal(0.1, Front), "its booking point would be 0.200 m before the start of object 1");
+    assert_eq!(refusal(6.0, BookingPoint), "6 m isn't on object 1, which is 5 m long");
+}
+
+#[test]
+fn a_placed_mu_keeps_the_gap_to_the_mus_on_the_conveyor() {
+    let mut model = ModelDescription::new();
+    let source = model.add_source(secs(100));
+    let belt = model.add_conveyor(10.0, 0.6, 1.0);
+    model.set_conveyor_gap(belt, 0.2);
+    let held = model.add_buffer(Capacity::Unlimited);
+    let drain = model.add_drain();
+    model.connect(source, belt);
+    model.connect(belt, drain);
+    model.set_starting_mus(held, &[1000]);
+    let refusals = Arc::new(Mutex::new(Vec::new()));
+    let seen = refusals.clone();
+    model.set_hooks(Box::new(Code::new(move |call, run, _| {
+        match call.kind {
+            CallKind::Lifecycle(Lifecycle::AfterInit) => run.call_at(secs(105), TIMER, 0).unwrap(),
+            CallKind::Timer { .. } => {
+                // The Source's first MU, 1001, entered at 100 s, its front 0.3 m on, and has its
+                // front at 5.3 m now, its rear at 4.7 m.
+                for (at, point) in [(4.6, TriggerPoint::Front), (5.4, TriggerPoint::Rear), (4.5, TriggerPoint::Front)] {
+                    if let Err(refusal) = run.place_mu(1000, held, belt, at, point) {
+                        seen.lock().unwrap().push(refusal.0);
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(None)
+    })));
+    model.set_lifecycle_hook(Lifecycle::AfterInit, Some(LIFECYCLE));
+    let mut run = recorded(model.build(0));
+    run.init().unwrap();
+    run.advance_to(secs(105)).unwrap();
+    // Its front 0.1 m short of the gap to MU 1001's rear, then its rear 0.1 m short of the gap to
+    // MU 1001's front, then just the gap behind it.
+    assert_eq!(*refusals.lock().unwrap(), [
+        format!("there's no room on object {belt} there: it would come within the gap of MU 1001, ahead of it"),
+        format!("there's no room on object {belt} there: it would come within the gap of MU 1001, behind it"),
+    ]);
+    let state = run.state();
+    let positions: Vec<(u32, f64)> = state.objects[belt as usize].positions.iter().map(|p| (p.mu_id, (p.front * 1000.0).round() / 1000.0)).collect();
+    assert_eq!(positions, [(1001, 5.3), (1000, 4.5)], "placed behind it, front first");
+    let occurrences = run.advance_to(secs(120)).unwrap();
+    let left: Vec<u32> = occurrences.iter().filter_map(|o| match o.kind { OccurrenceKind::MuLeft { mu_id, .. } => Some(mu_id), _ => None }).collect();
+    assert_eq!(left, [1001, 1000]);
+}
+
+#[test]
+fn only_a_conveyor_has_places_for_an_mu() {
+    use crabsim::Side;
+    let mut model = ModelDescription::new();
+    let held = model.add_buffer(Capacity::Unlimited);
+    let station = station(&mut model, 1);
+    let cross = model.add_cross_conveyor(0.6, 0.6, 1.0);
+    let drain = model.add_drain();
+    model.connect_at(held, None, cross, Some(Side::Back));
+    model.connect_at(cross, Some(Side::Front), drain, None);
+    model.set_starting_mus(held, &[1000]);
+    let refusals = Arc::new(Mutex::new(Vec::new()));
+    let seen = refusals.clone();
+    model.set_hooks(Box::new(Code::new(move |call, run, _| {
+        if call.kind == CallKind::Lifecycle(Lifecycle::AfterInit) {
+            for to in [station, cross] {
+                seen.lock().unwrap().push(run.place_mu(1000, held, to, 0.3, TriggerPoint::Front).unwrap_err().0);
+            }
+        }
+        Ok(None)
+    })));
+    model.set_lifecycle_hook(Lifecycle::AfterInit, Some(LIFECYCLE));
+    let mut run = model.build(0);
+    run.init().unwrap();
+    assert_eq!(*refusals.lock().unwrap(), [
+        format!("object {station} isn't a conveyor, so an MU has no place on it"),
+        format!("object {cross} is a cross conveyor, which takes an MU only at one of its sides: move it there with move_mu"),
+    ]);
+}

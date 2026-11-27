@@ -716,6 +716,51 @@ impl HookRun<'_> {
         Ok(())
     }
 
+    /// Moves the MU from the object holding it onto a conveyor, connected or not, with its `point`
+    /// (front, booking point or rear) `at` metres from the conveyor's start, whole at once, where
+    /// there is room for it: its front at most at the end, its booking point at or past the start,
+    /// and within the gap of no other MU. `move_mu` puts it on as an object without geometry would,
+    /// its booking point at the start. Its hooks run as for `move_mu`, the conveyor's on entry at
+    /// the rear once its rear is on if it hangs behind the start.
+    pub fn place_mu(&mut self, mu: u32, from: u32, to: u32, at: f64, point: crate::hooks::TriggerPoint) -> Result<(), Refusal> {
+        self.allow(true)?;
+        self.exists(from)?;
+        self.exists(to)?;
+        if from == to {
+            return Err(Refusal::new(format!("MU {mu} would move from object {from} into itself")));
+        }
+        let run = &mut *self.run;
+        let now = run.time;
+        let held = run.objects[from as usize].report(now);
+        let Some(kind) = held.contents.iter().position(|&held| held == mu).and_then(|at| held.content_kinds.get(at).copied()) else {
+            return Err(Refusal::new(format!("object {from} doesn't hold MU {mu}")));
+        };
+        let front = {
+            let (before, to_object) = run.objects.split_at_mut(to as usize);
+            let (object, after) = to_object.split_at_mut(1);
+            let Some(conveyor) = object[0].as_conveyor() else {
+                return Err(Refusal::new(format!("object {to} isn't a conveyor, so an MU has no place on it")));
+            };
+            conveyor.place_for(kind, at, point, &OtherObjects::new(before, after), now)?
+        };
+        let (before, from_object) = run.objects.split_at_mut(from as usize);
+        let (object, after) = from_object.split_at_mut(1);
+        let mut others = OtherObjects::new(before, after);
+        let taken = object[0].take_out(mu, &mut run.context, &mut others)?;
+        if let Some(Distributing::Code(coded)) = object[0].distribution_mut() {
+            coded.forget_mu(mu);
+        }
+        run.context.moved_by_code(&taken, from, to);
+        run.queue_scheduled();
+        let index = to as usize;
+        let (before, to_object) = run.objects.split_at_mut(index);
+        let (object, after) = to_object.split_at_mut(1);
+        let mut others = OtherObjects::new(before, after);
+        object[0].as_conveyor_mut().expect("checked above").place(taken, front, &mut run.context, &mut others);
+        run.queue_scheduled();
+        Ok(())
+    }
+
     /// Changes a Station's process time from its next MU on, as an intervention does.
     pub fn set_process_time(&mut self, object: u32, process_time: SimTime) -> Result<(), Refusal> {
         self.allow(false)?;

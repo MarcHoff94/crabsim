@@ -1139,6 +1139,100 @@ impl Conveyor {
 		Ok(on.mu)
 	}
 
+	/// Where user code may place an MU of this kind with its `point` at `at` metres from the start
+	/// (ADR 0029): the front it would have there, or why not. It must lie on the conveyor, its front
+	/// at most at the end and its booking point at or past the start, its rear behind the start only
+	/// as the last MU, and come within the gap of no other MU, nor of the one it hands over or takes
+	/// in. Only a conveyor that would take an MU now, and not a cross conveyor, which takes one only
+	/// at a side.
+	pub(crate) fn place_for(&self, kind: MuKindId, at: f64, point: crate::hooks::TriggerPoint, others: &OtherObjects<'_>, now: SimTime) -> Result<f64, crate::hooks::Refusal> {
+		use crate::hooks::{Refusal, TriggerPoint};
+		let id = self.base.object_id;
+		if self.cross.is_some() {
+			return Err(Refusal::new(format!("object {id} is a cross conveyor, which takes an MU only at one of its sides: move it there with move_mu")));
+		}
+		if self.interruptions.is_interrupted() {
+			return Err(Refusal::new(format!("object {id} doesn't take an MU now")));
+		}
+		if !(-EPSILON..=self.length + EPSILON).contains(&at) {
+			return Err(Refusal::new(format!("{at} m isn't on object {id}, which is {} m long", self.length)));
+		}
+		let (along, across) = self.extent(kind, false);
+		if across > self.width + EPSILON || along > self.length + EPSILON {
+			return Err(Refusal::new(format!("an MU of kind {kind} doesn't fit on object {id}")));
+		}
+		let offset = self.booking_offset(kind, false);
+		let front = match point {
+			TriggerPoint::Front => at,
+			TriggerPoint::BookingPoint => at + offset,
+			TriggerPoint::Rear => at + along,
+		};
+		let rear = front - along;
+		if front > self.length + EPSILON {
+			return Err(Refusal::new(format!("its front would be {:.3} m past the end of object {id}", front - self.length)));
+		}
+		if front - offset < -EPSILON {
+			return Err(Refusal::new(format!("its booking point would be {:.3} m before the start of object {id}", offset - front)));
+		}
+		// The MU it hands over to the next conveyor, or the last MU there it takes room under.
+		let next = self.handing_to.or(self.led_by);
+		let lead = next.and_then(|next| others.get(next).as_conveyor()).and_then(|next| next.tail_lead(id, now));
+		let mut ahead = lead.map(|lead| (format!("the last MU on object {}", next.unwrap_or(id)), self.length + lead.rear));
+		let mut behind = None;
+		for at in 0..self.belt.len() {
+			let other = self.front(at, now);
+			if other > front {
+				ahead = Some((format!("MU {}", self.belt[at].mu.id), self.rear(at, now)));
+			} else {
+				behind = Some((self.belt[at].mu.id, other));
+				break;
+			}
+		}
+		if let Some((other, _)) = ahead.filter(|&(_, ahead_rear)| front + self.gap > ahead_rear + EPSILON) {
+			return Err(Refusal::new(format!("there's no room on object {id} there: it would come within the gap of {other}, ahead of it")));
+		}
+		match behind {
+			Some((other, other_front)) if other_front + self.gap > rear + EPSILON => Err(Refusal::new(format!("there's no room on object {id} there: it would come within the gap of MU {other}, behind it"))),
+			None if self.reserved_by.is_some() || self.straddle_from.is_some() => Err(Refusal::new(format!("object {id} is taking in an MU at its start"))),
+			_ => Ok(front),
+		}
+	}
+
+	/// Places the MU user code moves onto it with its front at `front`, as `place_for` found, whole
+	/// at once but for a rear still behind the start, and works out its events again.
+	pub(crate) fn place(&mut self, mut mu: MoveableUnit, front: f64, context: &mut EventContext, others: &mut OtherObjects<'_>) {
+		let now = context.time;
+		if mu.is_routed() {
+			context.routing.arrive(&mut mu, self.base.object_id);
+		}
+		let at = (0..self.belt.len()).take_while(|&at| self.front(at, now) > front).count();
+		let along = self.extent(mu.kind(), false).0;
+		let speed = if self.interruptions.is_interrupted() { 0.0 } else { self.speed };
+		self.taken += along;
+		if context.has_hooks() {
+			self.placed_for_code(mu.id, front - along, context);
+		}
+		self.belt.insert(at, OnBelt { mu, front, since: now, speed, entered: now, crosswise: false, along });
+		self.plan_mu(at, front, speed, context);
+		self.statistics.count_mu_in();
+		self.retried = false;
+		self.replan(context, others);
+		self.update_state(context);
+	}
+
+	/// The calls at the rear of the MU placed now: made at once if all of it is on, otherwise kept
+	/// until its rear crosses the start.
+	#[cold]
+	#[inline(never)]
+	fn placed_for_code(&mut self, mu_id: u32, rear: f64, context: &mut EventContext) {
+		if rear >= -EPSILON {
+			let calls = context.take_rears();
+			context.note_calls(calls);
+		} else {
+			self.keep_rear_in(mu_id, context);
+		}
+	}
+
 	/// Sets where the MU at `at` is, exactly, without saying so: its movement doesn't change.
 	fn plan_mu_quietly(&mut self, at: usize, front: f64, now: SimTime) {
 		let on = &mut self.belt[at];

@@ -434,7 +434,7 @@ fn a_buffer_is_placed_from_the_classes_panel_with_no_limit_and_takes_its_values(
         (view.value.clone(), view.from.clone())
     };
     let names: Vec<String> = workspace.attributes("Buffer 1").unwrap().into_iter().map(|view| view.attribute).collect();
-    assert_eq!(names, ["failures", "starting_mus", "capacity", "dwelling_time", "exit_strategy", "histogram_bar_width", "stop_freezes_dwelling", "dimensions", "description", "state_notes", "distribution"]);
+    assert_eq!(names, ["failures", "starting_mus", "capacity", "dwelling_time", "exit_strategy", "histogram_bar_width", "stop_freezes_dwelling", "dimensions", "description", "state_notes", "distribution", "on_entry", "on_exit"]);
     assert_eq!(value(&workspace, "Buffer 1", "capacity"), (Some(json!("unlimited")), crabsim_ui::workspace::ValueFrom::BuiltIn));
     assert_eq!(value(&workspace, "Buffer 1", "exit_strategy"), (Some(json!("first_in_first_out")), crabsim_ui::workspace::ValueFrom::BuiltIn));
 

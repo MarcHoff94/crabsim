@@ -414,7 +414,7 @@ fn get_attributes_gives_every_attribute_with_its_value_and_origin() {
     let names: Vec<&str> = attributes.iter().map(|(name, _)| name.as_str()).collect();
     assert_eq!(
         names,
-        ["process_time", "failures", "starting_mus", "capacity", "start", "dimensions", "description", "state_notes", "distribution", "detour"],
+        ["process_time", "failures", "starting_mus", "capacity", "start", "dimensions", "description", "state_notes", "distribution", "detour", "on_entry", "on_exit"],
         "every attribute a Station has"
     );
     let of = |name: &str| attributes.iter().find(|(n, _)| n == name).unwrap().1.clone();

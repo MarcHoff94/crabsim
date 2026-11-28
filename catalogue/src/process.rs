@@ -51,6 +51,10 @@ impl Drop for ProcessLock {
 /// whose lock can be taken, has ended, and its lock file is removed. If the lock can't be tested,
 /// the process counts as alive, so a run is never marked interrupted by mistake.
 pub(crate) fn is_alive(crabsim_folder: &Path, id: &str) -> bool {
+    // An agent through the CLI is no one process: the edit state keeps how long it lasts.
+    if id.starts_with(crate::CLI_AGENT_PREFIX) {
+        return true;
+    }
     let path = crabsim_folder.join(PROCESSES_FOLDER).join(format!("{id}.lock"));
     let Ok(file) = File::options().read(true).write(true).open(&path) else {
         return path.exists();

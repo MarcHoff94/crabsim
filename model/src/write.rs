@@ -37,6 +37,21 @@ pub(crate) fn write(model: &Model) -> String {
         }
         file.insert("hooks".into(), Value::Object(hooks));
     }
+    if !model.stages.is_empty() {
+        let mut stages = Map::new();
+        for stage in [crate::CheckStage::Verification, crate::CheckStage::Validation] {
+            let settings = model.stages.of(stage);
+            if !settings.is_empty() {
+                let mut fields = Map::new();
+                run_settings(settings, &mut fields);
+                stages.insert(stage.name().into(), Value::Object(fields));
+            }
+        }
+        file.insert("stages".into(), Value::Object(stages));
+    }
+    if !model.requests.is_empty() {
+        file.insert("requests".into(), Value::Array(model.requests.iter().map(request).collect()));
+    }
     if !model.expectations.is_empty() {
         file.insert("expectations".into(), Value::Array(model.expectations.iter().map(expectation).collect()));
     }
@@ -58,6 +73,46 @@ fn expectation(expectation: &crate::Expectation) -> Value {
     }
     if let Some(source) = &expectation.source {
         fields.insert("source".into(), json!(source));
+    }
+    if expectation.state != crate::Agreement::default() {
+        fields.insert("state".into(), json!(expectation.state.name()));
+    }
+    if let Some(question) = &expectation.question {
+        fields.insert("question".into(), json!(question));
+    }
+    run_settings(&expectation.run, &mut fields);
+    Value::Object(fields)
+}
+
+/// A check's run settings, each only where given.
+fn run_settings(run: &crate::RunSettings, fields: &mut Map<String, Value>) {
+    if let Some(length) = run.length {
+        fields.insert("length".into(), time(length));
+    }
+    if let Some(warm_up) = run.warm_up {
+        fields.insert("warm_up".into(), time(warm_up));
+    }
+    if let Some(observations) = run.observations {
+        fields.insert("observations".into(), json!(observations));
+    }
+}
+
+/// A request, open and not accepted left out as the defaults.
+fn request(request: &crate::Request) -> Value {
+    let mut fields = Map::new();
+    fields.insert("id".into(), json!(request.id));
+    fields.insert("words".into(), json!(request.words));
+    if let Some(restatement) = &request.restatement {
+        fields.insert("restatement".into(), json!(restatement));
+    }
+    if !request.expectations.is_empty() {
+        fields.insert("expectations".into(), json!(request.expectations));
+    }
+    if request.accepted {
+        fields.insert("accepted".into(), json!(true));
+    }
+    if request.built {
+        fields.insert("state".into(), json!("built"));
     }
     Value::Object(fields)
 }

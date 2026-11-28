@@ -28,7 +28,7 @@ use std::time::{Duration, Instant};
     about = "Runs a crabsim model file headless and prints its statistics, or, with a models folder, runs experiments and reads their results",
     args_conflicts_with_subcommands = true,
     subcommand_negates_reqs = true,
-    after_help = "Example: crabsim --model models/demo.json --length 30d"
+    after_help = "Example: crabsim --model models/demo.json --length 30d\n\nAgents with a shell use every operation through `crabsim operations` and `crabsim call --agent <name>`. The process: agree expectations with the user, build without randomness, verify, add randomness, validate: see `crabsim call --help`."
 )]
 struct Opts {
     #[command(subcommand)]
@@ -62,6 +62,67 @@ struct SingleRun {
 
 #[derive(Subcommand, Debug)]
 enum Command {
+    /// Lists every operation of the catalogue, the same as agents get over MCP: its name, effect
+    /// and what it does. Give an operation's name for all of it as JSON, with its input and
+    /// output schemas, or --json for every one in full.
+    Operations {
+        /// One operation, such as edit_model.
+        name: Option<String>,
+        /// Every operation in full, as JSON.
+        #[arg(long)]
+        json: bool,
+        /// Leave out the user's own operations, as for an agent.
+        #[arg(long)]
+        agent: Option<String>,
+    },
+    /// Runs one operation on a models folder with a JSON input and prints its output as JSON,
+    /// or the error as JSON, failing. With --agent the call is that agent's, with its claims,
+    /// changes and refusals, as over MCP; without it, the user's. A run it starts runs to its
+    /// end before the command returns, since a run lives in the process that started it.
+    #[command(after_help = crabsim_catalogue::PROCESS)]
+    Call {
+        #[arg(long)]
+        models: PathBuf,
+        /// The agent making the call, such as `claude-code`: the same name is the same agent
+        /// from one command to the next.
+        #[arg(long)]
+        agent: Option<String>,
+        /// The operation, such as get_status. `crabsim operations` lists them.
+        operation: String,
+        /// The input as a JSON object, such as '{"path": "line.json"}', or `-` to read it from
+        /// stdin. `{}` if left out.
+        input: Option<String>,
+    },
+    /// Says where a model stands: its stage, its requests, each expectation's verdict, what's
+    /// questioned and what to do next.
+    Status {
+        #[arg(long)]
+        models: PathBuf,
+        /// The model file, such as `line.json`.
+        path: String,
+    },
+    /// Accepts requests, each with its restatement and expectations, or single expectations, by
+    /// id, as the user: what an agent proposed then holds, and only you change it.
+    Accept {
+        #[arg(long)]
+        models: PathBuf,
+        /// The model file, such as `line.json`.
+        path: String,
+        /// Requests' or expectations' ids, such as r1 or e3.
+        #[arg(required = true)]
+        ids: Vec<String>,
+    },
+    /// Checks a model's stage and waits for it: verification, deterministic, or validation, an
+    /// experiment with randomness. Then prints where the model stands.
+    Check {
+        #[arg(long)]
+        models: PathBuf,
+        /// The model file, such as `line.json`.
+        path: String,
+        /// `verification` or `validation`.
+        #[arg(long, default_value = "verification")]
+        stage: String,
+    },
     /// Runs an experiment on a model file in a models folder, waits for it, prints its results
     /// and keeps them in the folder's results store.
     Run {
@@ -407,6 +468,37 @@ fn main() -> ExitCode {
     let opts = Opts::parse();
     let outcome = match opts.command {
         None => return single_run(&opts.single),
+        Some(Command::Operations { name, json, agent }) => return operations(name.as_deref(), json, agent.is_some()),
+        Some(Command::Call { models, agent, operation, input }) => return call(&models, agent, &operation, input.as_deref()),
+        Some(Command::Status { models, path }) => catalogue(&models).and_then(|catalogue| {
+            let status = catalogue.call("get_status", json!({ "path": path }))?;
+            print!("{}", tables::status(&status));
+            Ok(true)
+        }),
+        Some(Command::Accept { models, path, ids }) => catalogue(&models).and_then(|catalogue| {
+            let status = catalogue.call("get_status", json!({ "path": path }))?;
+            let has = |list: &str, id: &str| status[list].as_array().into_iter().flatten().any(|item| item["id"] == id);
+            let changes: Vec<Value> = ids
+                .iter()
+                .map(|id| match (has("requests", id), has("expectations", id)) {
+                    (true, _) => Ok(json!({ "change": "accept_request", "id": id })),
+                    (false, true) => Ok(json!({ "change": "accept_expectation", "id": id })),
+                    (false, false) => Err(OperationError::not_found(format!("`{path}` has no request or expectation `{id}`"))),
+                })
+                .collect::<Result<_, _>>()?;
+            catalogue.call("edit_model", json!({ "path": path, "changes": changes }))?;
+            println!("Accepted {} in {path}", ids.join(", "));
+            Ok(true)
+        }),
+        Some(Command::Check { models, path, stage }) => catalogue(&models).and_then(|catalogue| {
+            let checked = catalogue.call("check_stage", json!({ "path": path, "stage": stage }))?;
+            let runs: Vec<&str> = checked["runs"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+            eprintln!("{} {stage} by {}", if checked["started"] == true { "Checking" } else { "Already checked" }, runs.join(", "));
+            catalogue.wait_for_runs();
+            let status = catalogue.call("get_status", json!({ "path": path }))?;
+            print!("{}", tables::status(&status));
+            Ok(status["stage"] != "draft")
+        }),
         Some(Command::Run { models, model, seed, length, warm_up, observations, label, deterministic }) => catalogue(&models).and_then(|catalogue| {
             let mut input = json!({ "model": model, "seed": seed, "length": length, "deterministic": deterministic });
             if let Some(observations) = observations {
@@ -647,6 +739,68 @@ fn graph(kind: GraphKind) -> Result<bool, OperationError> {
 
 fn catalogue(models: &std::path::Path) -> Result<Catalogue, OperationError> {
     Catalogue::open(Settings::new(models, Source::Cli))
+}
+
+/// The catalogue's operations: a line each, one in full as JSON, or every one in full.
+fn operations(name: Option<&str>, all: bool, agent: bool) -> ExitCode {
+    let listed: Vec<_> = Catalogue::all_operations().into_iter().filter(|operation| !(agent && operation.user_only)).collect();
+    let full = |operation: &crabsim_catalogue::OperationInfo| serde_json::to_value(operation).expect("an operation serialises");
+    match name {
+        Some(name) => match listed.iter().find(|operation| operation.name == name) {
+            Some(operation) => println!("{}", serde_json::to_string_pretty(&full(operation)).expect("JSON")),
+            None => {
+                let names: Vec<&str> = listed.iter().map(|operation| operation.name).collect();
+                eprintln!("no operation is called `{name}`. There are: {}", names.join(", "));
+                return ExitCode::FAILURE;
+            }
+        },
+        None if all => println!("{}", serde_json::to_string_pretty(&listed.iter().map(full).collect::<Vec<_>>()).expect("JSON")),
+        None => print!("{}", tables::operations(&listed)),
+    }
+    ExitCode::SUCCESS
+}
+
+/// One operation as JSON in and out, for agents with a shell, as the user or, with `agent`, as
+/// that agent. Waits for the runs it started, which would be cancelled when the process ends.
+fn call(models: &std::path::Path, agent: Option<String>, operation: &str, input: Option<&str>) -> ExitCode {
+    let fail = |error: OperationError| {
+        println!("{}", serde_json::to_string_pretty(&error.to_json()).expect("JSON"));
+        ExitCode::FAILURE
+    };
+    let text = match input {
+        None => "{}".to_string(),
+        Some("-") => {
+            let mut text = String::new();
+            if let Err(error) = std::io::Read::read_to_string(&mut std::io::stdin(), &mut text) {
+                return fail(OperationError::invalid_input(format!("the input can't be read from stdin: {error}")));
+            }
+            text
+        }
+        Some(text) => text.to_string(),
+    };
+    let input: Value = match serde_json::from_str(&text) {
+        Ok(input) => input,
+        Err(error) => return fail(OperationError::invalid_input(format!("the input isn't JSON: {error}. Give an object, such as '{{\"path\": \"line.json\"}}'"))),
+    };
+    let mut settings = Settings::new(models, if agent.is_some() { Source::CliAgent } else { Source::Cli });
+    settings.agent = agent;
+    let catalogue = match Catalogue::open(settings) {
+        Ok(catalogue) => catalogue,
+        Err(error) => return fail(error),
+    };
+    let outcome = catalogue.call(operation, input);
+    let code = match outcome {
+        Ok(output) => {
+            println!("{}", serde_json::to_string_pretty(&output).expect("JSON"));
+            ExitCode::SUCCESS
+        }
+        Err(error) => fail(error),
+    };
+    if catalogue.runs_going() {
+        eprintln!("waiting for the runs this call started to end: run_status and run_results read them afterwards");
+        catalogue.wait_for_runs();
+    }
+    code
 }
 
 /// Starts a run, shows its progress until it finishes, then prints its results. `Ok(false)` if

@@ -21,6 +21,7 @@
 pub mod bottleneck;
 pub mod commands;
 pub mod macros;
+mod agreeing;
 mod compare;
 mod edit;
 mod editing;
@@ -34,6 +35,7 @@ mod jobs;
 mod model_files;
 mod process;
 mod results;
+mod stages;
 mod store;
 
 pub use crate::editing::{EDITING_FILE, EDIT_TIMEOUT};
@@ -43,6 +45,7 @@ pub use crate::folder::{ModelsFolder, CRABSIM_FOLDER, EXPORTS_FOLDER};
 pub use crate::jobs::{observation_seed, RunState, MAX_OBSERVATIONS};
 pub use crate::expectations::{expectation_results, ExpectationResults};
 pub use crate::results::STATISTICS;
+pub use crate::stages::PROCESS;
 pub use crate::store::{Store, QUERY_ROW_LIMIT, STORE_FILE};
 
 /// The git commit this crabsim was built from, `-dirty` with uncommitted changes, or `unknown`
@@ -193,6 +196,9 @@ fn tidy(value: &mut Value, nulls: Nulls) {
 pub enum Source {
     /// An agent through the MCP server.
     Mcp,
+    /// An agent through the CLI's `call`, known by the name it gives with `--agent`, which is
+    /// the same agent from one command to the next.
+    CliAgent,
     /// A person through the command line.
     Cli,
     /// A person through the UI, which holds the models folder while it is open.
@@ -203,6 +209,7 @@ impl Source {
     pub fn name(self) -> &'static str {
         match self {
             Source::Mcp => "mcp",
+            Source::CliAgent => "cli-agent",
             Source::Cli => "cli",
             Source::Ui => "ui",
         }
@@ -210,9 +217,12 @@ impl Source {
 
     /// The user, through the UI or the CLI, rather than an agent.
     pub fn is_user(self) -> bool {
-        self != Source::Mcp
+        !matches!(self, Source::Mcp | Source::CliAgent)
     }
 }
+
+/// What an agent through the CLI's key starts with, where an agent over MCP has its process lock.
+pub(crate) const CLI_AGENT_PREFIX: &str = "cli:";
 
 /// The file in `.crabsim` a UI holds an OS lock on while it has the models folder open.
 pub const USER_LOCK_FILE: &str = "user.lock";
@@ -232,11 +242,14 @@ pub struct Settings {
     pub history_changes: usize,
     /// The most bytes of model text a model file's history keeps.
     pub history_bytes: u64,
+    /// For `Source::CliAgent`, the agent's name, such as `claude-code`: the same name is the same
+    /// agent in every command, with its claims, changes and macros.
+    pub agent: Option<String>,
 }
 
 impl Settings {
     pub fn new(models: impl Into<PathBuf>, source: Source) -> Settings {
-        Settings { models: models.into(), source, threads: None, edit_timeout: EDIT_TIMEOUT, history_changes: HISTORY_CHANGES, history_bytes: HISTORY_BYTES }
+        Settings { models: models.into(), source, threads: None, edit_timeout: EDIT_TIMEOUT, history_changes: HISTORY_CHANGES, history_bytes: HISTORY_BYTES, agent: None }
     }
 }
 
@@ -251,6 +264,8 @@ pub struct Catalogue {
     edit_timeout: std::time::Duration,
     /// The name an agent's harness gave, shown with its claims.
     client_name: Mutex<String>,
+    /// An agent through the CLI's name, which makes it the same agent from command to command.
+    agent_name: Option<String>,
     /// For the user: changes go through even while an agent holds the right, which keeps it.
     take_over: std::sync::atomic::AtomicBool,
     /// The change history, opened on first use.
@@ -272,6 +287,11 @@ impl Catalogue {
     /// code: see [`ModelsFolder::open`]. A UI's catalogue holds the folder, and is refused with
     /// `folder_in_use` if another UI already does.
     pub fn open(settings: Settings) -> Result<Catalogue, OperationError> {
+        let agent_name = match (settings.source, settings.agent.as_deref().map(str::trim)) {
+            (Source::CliAgent, Some(name)) if !name.is_empty() => Some(name.to_string()),
+            (Source::CliAgent, _) => return Err(OperationError::invalid_input("an agent through the CLI gives its name, such as `--agent claude-code`")),
+            _ => None,
+        };
         let folder = ModelsFolder::open(&settings.models)?;
         let user_lock = if settings.source == Source::Ui { Some(hold_folder(&folder)?) } else { None };
         let threads = settings.threads.unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |cores| cores.get()));
@@ -283,7 +303,8 @@ impl Catalogue {
             entries: model_files::entries(),
             jobs,
             edit_timeout: settings.edit_timeout,
-            client_name: Mutex::new("an agent".to_string()),
+            client_name: Mutex::new(agent_name.clone().unwrap_or_else(|| "an agent".to_string())),
+            agent_name,
             take_over: std::sync::atomic::AtomicBool::new(false),
             history: Mutex::new(None),
             history_limits: (settings.history_changes, settings.history_bytes),
@@ -291,6 +312,12 @@ impl Catalogue {
             _user_lock: user_lock,
             process: std::sync::OnceLock::new(),
         })
+    }
+
+    /// Every operation, with its description and schemas, without a models folder, as
+    /// `crabsim operations` lists them.
+    pub fn all_operations() -> Vec<OperationInfo> {
+        model_files::entries().into_iter().map(|entry| entry.info).collect()
     }
 
     /// Every operation, with its description and schemas.
@@ -304,7 +331,7 @@ impl Catalogue {
             let names: Vec<_> = self.operations().map(|operation| operation.name).collect();
             OperationError::invalid_input(format!("no operation is called `{name}`. There are: {}", names.join(", ")))
         })?;
-        if entry.info.user_only && self.source == Source::Mcp {
+        if entry.info.user_only && !self.source.is_user() {
             return Err(OperationError::invalid_input(format!("`{name}` is only for the user, through the UI or the CLI")));
         }
         if entry.changes_models && self.source == Source::Cli && ui_holds(&self.folder) {
@@ -341,6 +368,17 @@ impl Catalogue {
         self.edit_timeout
     }
 
+    /// Who this catalogue is as an agent, for claims, the change history and macros: its process
+    /// lock's id over MCP, where one process is one agent, or `cli:<name>` through the CLI, where
+    /// each command is a process of its own. `None` for the user.
+    pub(crate) fn agent_key(&self) -> Result<Option<String>, OperationError> {
+        Ok(match (self.source, &self.agent_name) {
+            (Source::CliAgent, Some(name)) => Some(format!("{CLI_AGENT_PREFIX}{name}")),
+            (Source::Mcp, _) => Some(self.process_lock()?.to_string()),
+            _ => None,
+        })
+    }
+
     /// This process's lock id, taking the lock on first use.
     pub(crate) fn process_lock(&self) -> Result<&str, OperationError> {
         if let Some(lock) = self.process.get() {
@@ -361,6 +399,17 @@ impl Catalogue {
 
     pub(crate) fn jobs(&self) -> &jobs::Jobs {
         &self.jobs
+    }
+
+    /// Waits until every run this catalogue started has ended: a run lives in the process that
+    /// started it, so a command that exits sooner would cancel it.
+    pub fn wait_for_runs(&self) {
+        self.jobs.wait_all();
+    }
+
+    /// Whether a run this catalogue started is still queued or running.
+    pub fn runs_going(&self) -> bool {
+        self.jobs.any_going()
     }
 
     /// The state of a run this process is running, if it is one.

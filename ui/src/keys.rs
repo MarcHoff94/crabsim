@@ -239,7 +239,7 @@ impl Keys {
                 ('g', Key::Char('W')) => vec![Command::CloseAllWindows],
                 ('z', Key::Char('z')) => vec![Command::Centre],
                 // A digit alone begins a count, so a tab is `t` and its place.
-                ('t', Key::Char(tab @ '1'..='4')) => vec![Command::Tab(tab.to_digit(10).expect("a digit") as usize)],
+                ('t', Key::Char(tab @ '1'..='5')) => vec![Command::Tab(tab.to_digit(10).expect("a digit") as usize)],
                 ('@', Key::Char(name)) if name.is_alphanumeric() => vec![Command::RunMacro(name.to_string(), count.unwrap_or(1).max(1))],
                 ('q', Key::Char(name)) if name.is_alphanumeric() => {
                     self.recording = true;

@@ -30,6 +30,7 @@ pub(crate) fn check(model: &Model, broken: &Broken) -> Vec<Problem> {
     checker.endless_sources();
     checker.routing_limits();
     checker.problems.extend(model.expectation_problems());
+    checker.problems.extend(model.agreement_problems());
     checker.problems
 }
 

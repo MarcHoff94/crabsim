@@ -447,7 +447,7 @@ How much work a call of user code may do, counted in WebAssembly instructions, t
 ### Agreeing and checking
 
 **Request**:
-What a user wants from the model, in their own words, with an agent's restatement in precise terms, the expectations that check it and its state: open, built, met or broken. The user accepts the restatement and its expectations together (ADR 0030).
+What a user wants from the model, in their own words, with an agent's restatement in precise terms, the expectations that check it and its state: open, built, met or broken. The user accepts the restatement and its expectations together (ADR 0030). Whoever builds it marks it built; whether it is met or broken is what crabsim's latest checks say, never written into the model.
 _Avoid_: Requirement (SysML's word for an expectation), task, ticket
 
 **Expectation**:
@@ -471,6 +471,13 @@ What crabsim says of an expectation: **met**, **not met**, **undecided**, when a
 **Stage**:
 How far a model is checked: **draft**; **verified**, when a deterministic run meets its own expectations; **validated**, when runs with randomness also meet its reference figures. crabsim sets it, and drops it back when a change breaks a check.
 _Avoid_: Phase, status
+
+**Check**:
+One run of a stage, verification or validation, for each set of settings its expectations are checked with, kept in the results store: what crabsim works out the stage from. A check never changes the model.
+_Avoid_: Test
+
+**Questioned**:
+An accepted expectation an agent doubts, with its reason, such as a throughput above what a Station can do. It stays in force until the user answers, by accepting it again, changing it or removing it.
 
 **Verification**:
 Checking that the model does what was specified, in a deterministic run: no failures, every random time at its mean.

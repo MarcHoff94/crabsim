@@ -704,3 +704,79 @@ fn run_takes_a_deterministic_experiment_and_figures_lists_the_vocabulary() {
     assert!(figures.lines().any(|line| line.starts_with("throughput_per_hour") && line.contains("per hour")), "{figures}");
     assert!(!figures.contains("switching_share"), "only a Drain's: {figures}");
 }
+
+fn json_out(output: &Output) -> serde_json::Value {
+    serde_json::from_str(&stdout(output)).unwrap_or_else(|error| panic!("not JSON ({error}): {output:?}"))
+}
+
+#[test]
+fn operations_lists_every_operation_and_gives_one_in_full() {
+    let listed = stdout(&crabsim(&["operations"]));
+    assert!(listed.lines().any(|line| line.starts_with("get_status") && line.contains("read only")), "{listed}");
+    assert!(listed.lines().any(|line| line.starts_with("take_model") && line.contains("user only")), "{listed}");
+    let for_agents = stdout(&crabsim(&["operations", "--agent", "tester"]));
+    assert!(!for_agents.contains("take_model"), "an agent isn't shown the user's own");
+    let one = json_out(&crabsim(&["operations", "check_stage"]));
+    assert_eq!(one["name"], "check_stage");
+    assert!(one["input_schema"]["properties"]["stage"].is_object(), "{one:#}");
+    assert!(!crabsim(&["operations", "no_such"]).status.success());
+}
+
+#[test]
+fn call_as_an_agent_keeps_its_identity_claims_and_refusals_from_one_command_to_the_next() {
+    let models = Models::new("call");
+    let call = |agent: Option<&str>, operation: &str, input: &str| {
+        let mut args = vec!["call", "--models", models.arg()];
+        if let Some(agent) = agent {
+            args.extend(["--agent", agent]);
+        }
+        args.extend([operation, input]);
+        crabsim(&args)
+    };
+    assert!(call(None, "adopt_model", r#"{"path": "demo.json"}"#).status.success());
+    // An agent through the CLI needs a claim, as over MCP.
+    let refused = call(Some("tester"), "edit_model", r#"{"path": "demo.json", "changes": [{"change": "add_expectation", "text": "model.throughput_per_hour since start >= 1/h"}]}"#);
+    assert!(!refused.status.success());
+    assert_eq!(json_out(&refused)["kind"], "not_editor");
+    let claimed = call(Some("tester"), "claim_model", r#"{"path": "demo.json", "goal": "try the CLI", "doing": "proposing"}"#);
+    let agent = json_out(&claimed)["file"]["claim"]["agent"].clone();
+    let edited = call(Some("tester"), "edit_model", r#"{"path": "demo.json", "changes": [{"change": "add_expectation", "text": "model.throughput_per_hour since start >= 1/h"}]}"#);
+    assert!(edited.status.success(), "the claim lasts from one command to the next: {edited:?}");
+    let editors = json_out(&call(Some("tester"), "get_editors", "{}"));
+    assert_eq!(editors["you"], agent, "the same agent");
+    // The user's own operations are refused to it, and accepting too.
+    assert!(!call(Some("tester"), "revoke_claim", r#"{"path": "demo.json"}"#).status.success());
+    let accept = call(Some("tester"), "edit_model", r#"{"path": "demo.json", "changes": [{"change": "accept_expectation", "id": "e1"}]}"#);
+    assert!(stdout(&accept).contains("only the user accepts"), "{accept:?}");
+    // Its own change it may undo, in another command.
+    let history = json_out(&call(Some("tester"), "get_history", r#"{"path": "demo.json"}"#));
+    assert_eq!(history["entries"][0]["yours"], true, "{history:#}");
+    // Releasing verifies the model, and the command waits for that run.
+    let released = json_out(&call(Some("tester"), "release_model", r#"{"path": "demo.json"}"#));
+    let run = released["verification"][0].as_str().expect("verifying").to_string();
+    let status = json_out(&call(Some("tester"), "run_status", &format!(r#"{{"run": "{run}"}}"#)));
+    assert_eq!(status["state"], "done", "{status:#}");
+}
+
+#[test]
+fn the_user_sees_the_status_accepts_and_checks() {
+    let models = Models::new("accept");
+    assert!(crabsim(&["adopt", "--models", models.arg(), "demo.json"]).status.success());
+    let agent = |operation: &str, input: &str| crabsim(&["call", "--models", models.arg(), "--agent", "tester", operation, input]);
+    agent("claim_model", r#"{"path": "demo.json", "goal": "agree", "doing": "proposing"}"#);
+    let proposed = agent(
+        "edit_model",
+        r#"{"path": "demo.json", "changes": [{"change": "add_expectation", "id": "out", "text": "model.throughput_per_hour since start >= 1/h"}, {"change": "add_request", "words": "ship something", "expectations": ["out"]}]}"#,
+    );
+    assert!(proposed.status.success(), "{proposed:?}");
+    let status = stdout(&crabsim(&["status", "--models", models.arg(), "demo.json"]));
+    assert!(status.starts_with("demo.json: draft"), "{status}");
+    assert!(status.contains("r1  open   not accepted"), "{status}");
+    let accepted = crabsim(&["accept", "--models", models.arg(), "demo.json", "r1"]);
+    assert!(accepted.status.success(), "the user accepts past the agent's claim: {accepted:?}");
+    let checked = crabsim(&["check", "--models", models.arg(), "demo.json"]);
+    assert!(checked.status.success(), "{checked:?}");
+    let printed = stdout(&checked);
+    assert!(printed.starts_with("demo.json: verified"), "{printed}");
+    assert!(printed.contains("out  verification  accepted  met"), "{printed}");
+}

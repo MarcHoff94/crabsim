@@ -10,5 +10,6 @@ pub mod inspector;
 pub mod keys;
 pub mod marks;
 pub mod paths;
+pub mod status;
 pub mod view;
 pub mod workspace;

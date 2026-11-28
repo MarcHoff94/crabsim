@@ -157,6 +157,8 @@ pub enum Change {
     /// every run, such as `every Press.working_share since start >= 60%` or `Buffer.mus always <=
     /// 20`. list_figures gives the figures with their units and scopes. `id` is left out for the
     /// first free of `e1`, `e2` and so on. `stage` is `verification`, the default, or `validation`.
+    /// An agent's is proposed until the user accepts it; the user's is accepted at once. `length`,
+    /// `warm_up` and `observations` are for a check that must run otherwise than its stage's.
     AddExpectation {
         id: Option<String>,
         text: String,
@@ -165,12 +167,54 @@ pub enum Change {
         assumptions: Option<String>,
         /// Where it comes from: a SysML element, a document or a person.
         source: Option<String>,
+        /// How long its check runs after the warm-up, such as "8:00:00".
+        length: Option<String>,
+        /// Its check's warm-up, such as "1d".
+        warm_up: Option<String>,
+        /// Its check's observations, from 1 to 10,000.
+        observations: Option<u32>,
     },
-    /// Changes what is given of an expectation: its text, stage, assumptions or source, `""`
-    /// removing assumptions or source.
-    SetExpectation { id: String, text: Option<String>, stage: Option<String>, assumptions: Option<String>, source: Option<String> },
-    /// Removes an expectation.
+    /// Changes what is given of an expectation: its text, stage, assumptions, source or check
+    /// settings, `""` removing any but the text. An agent may change only proposed ones: question
+    /// an accepted one instead. The user's change accepts it, answering a question.
+    SetExpectation {
+        id: String,
+        text: Option<String>,
+        stage: Option<String>,
+        assumptions: Option<String>,
+        source: Option<String>,
+        length: Option<String>,
+        warm_up: Option<String>,
+        /// `0` removes it.
+        observations: Option<u32>,
+    },
+    /// Removes an expectation, and its id from the requests listing it. An agent may remove only
+    /// proposed ones.
     RemoveExpectation { id: String },
+    /// For the user only: accepts an expectation, also one an agent questioned.
+    AcceptExpectation { id: String },
+    /// Questions an accepted expectation, saying why, such as a throughput above what a Station
+    /// can do. It stays in force until the user accepts it again, changes it or removes it.
+    QuestionExpectation { id: String, question: String },
+    /// Adds a request (ADR 0030): what the user wants, in `words`, exactly as the user said them,
+    /// with your precise `restatement` and the `expectations` that check it, by id. `id` is left
+    /// out for the first free of `r1`, `r2` and so on. It is open and not accepted: the user
+    /// accepts it with its expectations in one step.
+    AddRequest { id: Option<String>, words: String, restatement: Option<String>, expectations: Option<Vec<String>> },
+    /// Changes what is given of a request: `built` true once you have built it, so crabsim says
+    /// whether it is met, or false to open it again. An agent may change the words, restatement
+    /// and expectations of a request only before the user accepts it.
+    SetRequest { id: String, words: Option<String>, restatement: Option<String>, expectations: Option<Vec<String>>, built: Option<bool> },
+    /// Removes a request, not its expectations. An agent may remove only one not accepted yet.
+    RemoveRequest { id: String },
+    /// For the user only: accepts a request's restatement and every expectation it lists, in one
+    /// step.
+    AcceptRequest { id: String },
+    /// Sets how a stage's checks run: `stage` is `verification` or `validation`, and each of
+    /// `length`, `warm_up` and `observations` given replaces the stage's, `""` or `0` going back
+    /// to the default (a day, no warm-up, 1 observation for verification and 10 for validation).
+    /// An agent may not change how an accepted expectation is checked.
+    SetStageSettings { stage: String, length: Option<String>, warm_up: Option<String>, observations: Option<u32> },
 }
 
 impl Change {
@@ -197,6 +241,13 @@ impl Change {
             Change::AddExpectation { .. } => "add_expectation",
             Change::SetExpectation { .. } => "set_expectation",
             Change::RemoveExpectation { .. } => "remove_expectation",
+            Change::AcceptExpectation { .. } => "accept_expectation",
+            Change::QuestionExpectation { .. } => "question_expectation",
+            Change::AddRequest { .. } => "add_request",
+            Change::SetRequest { .. } => "set_request",
+            Change::RemoveRequest { .. } => "remove_request",
+            Change::AcceptRequest { .. } => "accept_request",
+            Change::SetStageSettings { .. } => "set_stage_settings",
         }
     }
 }
@@ -257,6 +308,15 @@ impl Change {
             Change::SetExpectation { id, text: Some(text), .. } => format!("set the expectation {id}: {text}"),
             Change::SetExpectation { id, .. } => format!("set the expectation {id}"),
             Change::RemoveExpectation { id } => format!("remove the expectation {id}"),
+            Change::AcceptExpectation { id } => format!("accept the expectation {id}"),
+            Change::QuestionExpectation { id, question } => format!("question the expectation {id}: {question}"),
+            Change::AddRequest { id: Some(id), words, .. } => format!("request {id}: {words}"),
+            Change::AddRequest { id: None, words, .. } => format!("request {words}"),
+            Change::SetRequest { id, built: Some(true), .. } => format!("mark the request {id} built"),
+            Change::SetRequest { id, .. } => format!("set the request {id}"),
+            Change::RemoveRequest { id } => format!("remove the request {id}"),
+            Change::AcceptRequest { id } => format!("accept the request {id}"),
+            Change::SetStageSettings { stage, .. } => format!("set the {stage} settings"),
         }
     }
 }
@@ -338,6 +398,26 @@ impl Draft {
         ids.iter().position(|found| found == id).ok_or_else(|| {
             if ids.is_empty() { format!("there is no expectation `{id}`: the model has none") } else { format!("there is no expectation `{id}`: there are {}", ids.join(", ")) }
         })
+    }
+
+    fn requests(&mut self) -> &mut Vec<Value> {
+        let fields = self.model.as_object_mut().expect("a model is an object");
+        fields.entry("requests").or_insert_with(|| json!([])).as_array_mut().expect("requests are a list")
+    }
+
+    /// The request `id`, by its place in the list.
+    fn request(&mut self, id: &str) -> Result<usize, Refusal> {
+        let ids: Vec<String> = self.requests().iter().filter_map(|request| request["id"].as_str().map(str::to_owned)).collect();
+        ids.iter().position(|found| found == id).ok_or_else(|| {
+            if ids.is_empty() { format!("there is no request `{id}`: the model has none") } else { format!("there is no request `{id}`: there are {}", ids.join(", ")) }
+        })
+    }
+
+    /// Accepts the expectation at `index`, answering any question.
+    fn accept_expectation_at(&mut self, index: usize) {
+        let fields = self.expectations()[index].as_object_mut().expect("an expectation is an object");
+        fields.insert("state".into(), json!("accepted"));
+        fields.remove("question");
     }
 
     /// Renames an instance, or with `class` a class, in the expectations naming it, so a rename
@@ -814,7 +894,7 @@ impl Draft {
                     None => fields.remove("description"),
                 };
             }
-            Change::AddExpectation { id, text, stage, assumptions, source } => {
+            Change::AddExpectation { id, text, stage, assumptions, source, length, warm_up, observations } => {
                 let id = match id {
                     Some(id) => {
                         if self.expectation(&id).is_ok() {
@@ -825,17 +905,24 @@ impl Draft {
                     None => (1..).map(|n| format!("e{n}")).find(|id| self.expectation(id).is_err()).expect("a free id"),
                 };
                 let mut expectation = json!({ "id": id, "text": text });
-                for (key, value) in [("stage", stage), ("assumptions", assumptions), ("source", source)] {
+                for (key, value) in [("stage", stage), ("assumptions", assumptions), ("source", source), ("length", length), ("warm_up", warm_up)] {
                     if let Some(value) = value {
                         expectation[key] = json!(value);
                     }
                 }
+                if let Some(observations) = observations {
+                    expectation["observations"] = json!(observations);
+                }
+                // The user agrees with what the user writes.
+                if self.user {
+                    expectation["state"] = json!("accepted");
+                }
                 self.expectations().push(expectation);
             }
-            Change::SetExpectation { id, text, stage, assumptions, source } => {
+            Change::SetExpectation { id, text, stage, assumptions, source, length, warm_up, observations } => {
                 let index = self.expectation(&id)?;
                 let fields = self.expectations()[index].as_object_mut().expect("an expectation is an object");
-                for (key, value) in [("text", text), ("stage", stage), ("assumptions", assumptions), ("source", source)] {
+                for (key, value) in [("text", text), ("stage", stage), ("assumptions", assumptions), ("source", source), ("length", length), ("warm_up", warm_up)] {
                     match value {
                         Some(value) if value.is_empty() && key != "text" => {
                             fields.remove(key);
@@ -846,10 +933,143 @@ impl Draft {
                         None => {}
                     }
                 }
+                match observations {
+                    Some(0) => {
+                        fields.remove("observations");
+                    }
+                    Some(observations) => {
+                        fields.insert("observations".into(), json!(observations));
+                    }
+                    None => {}
+                }
+                if self.user {
+                    self.accept_expectation_at(index);
+                }
             }
             Change::RemoveExpectation { id } => {
                 let index = self.expectation(&id)?;
                 self.expectations().remove(index);
+                for request in self.requests().iter_mut() {
+                    if let Some(listed) = request.get_mut("expectations").and_then(Value::as_array_mut) {
+                        listed.retain(|listed| listed != &json!(id));
+                    }
+                }
+            }
+            Change::AcceptExpectation { id } => {
+                if !self.user {
+                    return Err(format!("only the user accepts an expectation: ask the user to accept `{id}`, in the window or with `crabsim accept`"));
+                }
+                let index = self.expectation(&id)?;
+                self.accept_expectation_at(index);
+            }
+            Change::QuestionExpectation { id, question } => {
+                let index = self.expectation(&id)?;
+                if question.trim().is_empty() {
+                    return Err("say why you question it in `question`, such as a throughput above what a Station can do".to_string());
+                }
+                let fields = self.expectations()[index].as_object_mut().expect("an expectation is an object");
+                if fields.get("state").and_then(Value::as_str).is_none_or(|state| state == "proposed") {
+                    return Err(format!("`{id}` is only proposed, not accepted: change it with set_expectation instead"));
+                }
+                fields.insert("state".into(), json!("questioned"));
+                fields.insert("question".into(), json!(question.trim()));
+            }
+            Change::AddRequest { id, words, restatement, expectations } => {
+                let id = match id {
+                    Some(id) => {
+                        if self.request(&id).is_ok() {
+                            return Err(format!("there is already a request `{id}`"));
+                        }
+                        id
+                    }
+                    None => (1..).map(|n| format!("r{n}")).find(|id| self.request(id).is_err()).expect("a free id"),
+                };
+                let mut request = json!({ "id": id, "words": words });
+                if let Some(restatement) = restatement {
+                    request["restatement"] = json!(restatement);
+                }
+                if let Some(expectations) = expectations {
+                    request["expectations"] = json!(expectations);
+                }
+                self.requests().push(request);
+            }
+            Change::SetRequest { id, words, restatement, expectations, built } => {
+                let index = self.request(&id)?;
+                let fields = self.requests()[index].as_object_mut().expect("a request is an object");
+                if let Some(words) = words {
+                    fields.insert("words".into(), json!(words));
+                }
+                match restatement {
+                    Some(restatement) if restatement.is_empty() => {
+                        fields.remove("restatement");
+                    }
+                    Some(restatement) => {
+                        fields.insert("restatement".into(), json!(restatement));
+                    }
+                    None => {}
+                }
+                if let Some(expectations) = expectations {
+                    fields.insert("expectations".into(), json!(expectations));
+                }
+                match built {
+                    Some(true) => {
+                        fields.insert("state".into(), json!("built"));
+                    }
+                    Some(false) => {
+                        fields.remove("state");
+                    }
+                    None => {}
+                }
+            }
+            Change::RemoveRequest { id } => {
+                let index = self.request(&id)?;
+                self.requests().remove(index);
+            }
+            Change::AcceptRequest { id } => {
+                if !self.user {
+                    return Err(format!("only the user accepts a request: ask the user to accept `{id}`, in the window or with `crabsim accept`"));
+                }
+                let index = self.request(&id)?;
+                let listed: Vec<String> = self.requests()[index]["expectations"].as_array().into_iter().flatten().filter_map(|id| id.as_str().map(str::to_owned)).collect();
+                self.requests()[index]["accepted"] = json!(true);
+                for expectation in listed {
+                    let at = self.expectation(&expectation).map_err(|why| format!("request `{id}` lists `{expectation}`, but {why}"))?;
+                    self.accept_expectation_at(at);
+                }
+            }
+            Change::SetStageSettings { stage, length, warm_up, observations } => {
+                if crabsim_model::CheckStage::named(&stage).is_none() {
+                    return Err(format!("`stage` is `verification` or `validation`, not `{stage}`"));
+                }
+                let fields = self.model.as_object_mut().expect("a model is an object");
+                let stages = fields.entry("stages").or_insert_with(|| json!({})).as_object_mut().ok_or("`stages` isn't an object")?;
+                let settings = stages.entry(stage.clone()).or_insert_with(|| json!({})).as_object_mut().ok_or("the stage's settings aren't an object")?;
+                for (key, value) in [("length", length), ("warm_up", warm_up)] {
+                    match value {
+                        Some(value) if value.is_empty() => {
+                            settings.remove(key);
+                        }
+                        Some(value) => {
+                            settings.insert(key.into(), json!(value));
+                        }
+                        None => {}
+                    }
+                }
+                match observations {
+                    Some(0) => {
+                        settings.remove("observations");
+                    }
+                    Some(observations) => {
+                        settings.insert("observations".into(), json!(observations));
+                    }
+                    None => {}
+                }
+                if settings.is_empty() {
+                    stages.remove(&stage);
+                }
+                if stages.is_empty() {
+                    fields.remove("stages");
+                }
             }
         }
         Ok(())
@@ -890,7 +1110,7 @@ pub struct EditModelOutput {
 
 impl Operation for EditModel {
     const NAME: &'static str = "edit_model";
-    const DESCRIPTION: &'static str = "Changes a valid model file in the models folder with a batch of changes, applied in order, all or nothing, then saves it in canonical form. Each change is an object naming its kind in `change`: add_instance, remove_instance, rename_instance, move_instance, set_class, duplicate_instance, connect, disconnect, set_connection, add_class, remove_class, rename_class, set_parent, duplicate_class, set_attribute, restore_inheritance, set_model_description, add_expectation, set_expectation or remove_expectation, and for the user set_stream. An expectation is one line crabsim judges after every run, such as `every Press.working_share since start >= 60%`, with the figures list_figures gives: renaming an instance or class renames it in the expectations too. Values are written as in a model file, such as \"0:45\" for a time (model_file_format gives the format). Only the result is checked, so a batch may pass through invalid states, such as adding a Source and then setting its interval. A change that can't apply, such as one naming an unknown instance, refuses the batch with invalid_input naming its place, such as changes/2, along with every other that can't and the problems of the model the rest would make, so one round fixes them all. A result with problems refuses it with invalid_model and every problem, each pointing into the file the batch would have produced. Either way the file is unchanged. Connections have an exit, their place in the order their object offers MUs on, and an entrance, their place among those into the object they lead to: connect, disconnect, set_connection and removing an instance number them again at both ends, so give a place only to choose one. Give `expected_hash`, the file_hash read_model or get_attributes gave, to have the batch refused as a conflict if the file changed since you read it. An agent needs its claim on the file first (claim_model), and no file changed outside crabsim is changed until adopt_model. On success it gives the file's new file_hash, and what else was removed, such as the connections of a removed instance. Every instance keeps its stream, which gives its random numbers, whatever else changes, so runs of the model before and after an edit stay paired for every instance they share. New and duplicated instances get a stream of their own and go at the end.";
+    const DESCRIPTION: &'static str = "Changes a valid model file in the models folder with a batch of changes, applied in order, all or nothing, then saves it in canonical form. Each change is an object naming its kind in `change`: add_instance, remove_instance, rename_instance, move_instance, set_class, duplicate_instance, connect, disconnect, set_connection, add_class, remove_class, rename_class, set_parent, duplicate_class, set_attribute, restore_inheritance, set_model_description, add_expectation, set_expectation, remove_expectation, question_expectation, add_request, set_request, remove_request, set_stage_settings, and for the user set_stream, accept_expectation and accept_request. An expectation is one line crabsim judges after every run, such as `every Press.working_share since start >= 60%`, with the figures list_figures gives: renaming an instance or class renames it in the expectations too. A request holds the user's own words, your restatement and the expectations that check it. What you add is proposed, and the user accepts a request with its expectations in one step; you may then neither change nor remove what the user accepted, nor how it is checked, and are refused with agreed: question an expectation with its reason instead, and mark a request built once you have built it. Expectations and requests the user adds or changes are accepted at once. Values are written as in a model file, such as \"0:45\" for a time (model_file_format gives the format). Only the result is checked, so a batch may pass through invalid states, such as adding a Source and then setting its interval. A change that can't apply, such as one naming an unknown instance, refuses the batch with invalid_input naming its place, such as changes/2, along with every other that can't and the problems of the model the rest would make, so one round fixes them all. A result with problems refuses it with invalid_model and every problem, each pointing into the file the batch would have produced. Either way the file is unchanged. Connections have an exit, their place in the order their object offers MUs on, and an entrance, their place among those into the object they lead to: connect, disconnect, set_connection and removing an instance number them again at both ends, so give a place only to choose one. Give `expected_hash`, the file_hash read_model or get_attributes gave, to have the batch refused as a conflict if the file changed since you read it. An agent needs its claim on the file first (claim_model), and no file changed outside crabsim is changed until adopt_model. On success it gives the file's new file_hash, and what else was removed, such as the connections of a removed instance. Every instance keeps its stream, which gives its random numbers, whatever else changes, so runs of the model before and after an edit stay paired for every instance they share. New and duplicated instances get a stream of their own and go at the end.";
     const EFFECT: Effect = Effect::Destructive;
     const CHANGES_MODELS: bool = true;
     type Input = EditModelInput;
@@ -905,7 +1125,9 @@ impl Operation for EditModel {
 /// it came from, or else its changes in the command language.
 pub(crate) fn edit(catalogue: &Catalogue, input: EditModelInput, wording: Option<String>) -> Result<EditModelOutput, OperationError> {
     let wording = wording.unwrap_or_else(|| worded(&input.changes));
-    let mut editing = crate::editing::before_change(catalogue, &input.path, input.expected_hash.as_deref())?;
+    // The user accepting what an agent proposed needn't take the file from it first.
+    let accepting = !input.changes.is_empty() && input.changes.iter().all(|change| matches!(change, Change::AcceptExpectation { .. } | Change::AcceptRequest { .. }));
+    let mut editing = crate::editing::before_change_with(catalogue, &input.path, input.expected_hash.as_deref(), accepting)?;
     let (file, text) = read_file(catalogue, &input.path)?;
     let model = crabsim_model::load(&text).map_err(|problems| {
         let mut error = OperationError::invalid_model(&format!("`{}`", input.path), &problems);
@@ -938,6 +1160,7 @@ pub(crate) fn edit(catalogue: &Catalogue, input: EditModelInput, wording: Option
     let edited = crabsim_model::load(&draft.model.to_string())
         .map_err(|problems| OperationError::invalid_model("the model these changes would make", &problems))?
         .save();
+    crate::agreeing::guard(catalogue, &input.path, Some(&text), Some(&edited))?;
     std::fs::write(&file, &edited).map_err(|error| OperationError::run_error(format!("`{}` can't be written: {error}", input.path)))?;
     editing.record(&edited);
     let change = crate::history::Change { before: crate::history::Before::Text(&text), after: &edited, kind: crate::history::Kind::Change, wording };

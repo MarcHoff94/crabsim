@@ -8,7 +8,7 @@ use crabsim::time::format_time_exact;
 use crabsim::{ObjectKind, SimTime};
 use crabsim_model::expect::{self, Aggregate, CheckSubject, Observed, Verdict, Violation};
 use crabsim_model::{CheckStage, Model};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -142,6 +142,8 @@ pub struct ExpectationResults {
     /// The line, as the model the run used holds it.
     pub text: String,
     pub stage: CheckStage,
+    /// proposed by an agent, accepted by the user, or questioned, as the run's model held it.
+    pub state: crabsim_model::Agreement,
     /// Its subject: an instance's or class's name, or `model`.
     pub subject: String,
     pub aggregate: Aggregate,
@@ -189,6 +191,9 @@ pub(crate) fn verdicts(connection: &Connection, run: &str, model_text: &str, det
     if model.expectations.is_empty() {
         return Ok(Vec::new());
     }
+    // A stage's check judges only the expectations of its settings.
+    let judged: Option<String> = connection.query_row("SELECT expectations FROM runs WHERE id = ?1", [run], |row| row.get(0)).optional()?.flatten();
+    let judged: Option<Vec<String>> = judged.and_then(|ids| serde_json::from_str(&ids).ok());
     let names: HashMap<&str, u32> = model.instances.iter().enumerate().map(|(index, instance)| (instance.name.as_str(), index as u32)).collect();
     let ended: Vec<u32> = connection
         .prepare("SELECT number FROM observations WHERE run = ?1 AND error IS NULL ORDER BY number")?
@@ -199,6 +204,9 @@ pub(crate) fn verdicts(connection: &Connection, run: &str, model_text: &str, det
     let mut results = Vec::new();
     for bound in model.bound_expectations() {
         let expectation = &model.expectations[bound.index];
+        if judged.as_ref().is_some_and(|judged| !judged.contains(&expectation.id)) {
+            continue;
+        }
         let mut by_observation: HashMap<u32, Observed> = HashMap::new();
         for row in values.query_map(params![run, expectation.id], |row| Ok((row.get::<_, u32>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, Option<f64>>(2)?)))? {
             let (observation, object, value) = row?;
@@ -239,6 +247,7 @@ pub fn expectation_results(model: &Model, bound: &expect::Bound, judgement: &exp
         id: expectation.id.clone(),
         text: expectation.text.clone(),
         stage: expectation.stage,
+        state: expectation.state,
         subject: match &check.subject {
             CheckSubject::Named(name) => name.clone(),
             CheckSubject::Model => "model".into(),

@@ -37,6 +37,7 @@ use crabsim_ui::editing::{ActRefusal, Claim, EditAction, Editors};
 use crabsim_ui::help;
 use crabsim_ui::inspector::{AttributeChange, Inspector, Inspectors, Section};
 use crabsim_ui::history::{Entry, History, Jump};
+use crabsim_ui::status::{ExpectationLine, Status};
 use crabsim_ui::workspace::{AttributeView, ClassEntry, ConnectionView, End, ModelChange, Refusal, ValueFrom, Workspace};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -194,6 +195,8 @@ fn main() {
             confirm_macro: None,
             pending_lines: std::collections::VecDeque::new(),
             history: None,
+            status: None,
+            status_note: None,
             confirm_undo: None,
             select_names: None,
             grouping: false,
@@ -376,6 +379,11 @@ struct Ui {
     /// The open model's change history, as last read, while the Agents tab shows it. `None` reads
     /// it again.
     history: Option<Result<History, String>>,
+    /// Where the open model stands, as last read while the Status tab shows it, and when, in wall
+    /// time. `None` reads it again.
+    status: Option<(Result<Status, String>, Duration)>,
+    /// What the last action in the Status tab did, or why it was refused.
+    status_note: Option<String>,
     /// An undo or redo waiting for the user to confirm it.
     confirm_undo: Option<StepAsk>,
     /// The instances to select once the model an undo or redo just saved is drawn, by name,
@@ -620,7 +628,20 @@ enum Tab {
     Inspector,
     Paths,
     Agents,
+    Status,
 }
+
+/// What the Status tab asks for.
+enum StatusAsk {
+    /// Accepts these requests and expectations, by id.
+    Accept(Vec<String>),
+    /// Checks a stage: verification or validation.
+    Check(&'static str),
+}
+
+/// How often the Status tab reads the status again while it shows it, quicker while a check runs.
+const STATUS_READ_AGAIN: Duration = Duration::from_secs(3);
+const STATUS_READ_CHECKING: Duration = Duration::from_millis(500);
 
 /// What the statistics window's Stations are sorted by, most first, or model order.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1354,6 +1375,18 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
     if ui.tab == Tab::Agents && ui.history.is_none() && ui.workspace.opened().is_some() {
         ui.history = Some(ui.workspace.history());
     }
+    // Where the open model stands, for the Status tab, read again every few seconds while it
+    // shows it, on frames drawn anyway, and quickly while a check runs, which wakes the window.
+    if ui.tab == Tab::Status && ui.workspace.opened().is_some() {
+        let checking = matches!(&ui.status, Some((Ok(status), _)) if status.checking());
+        let again = if checking { STATUS_READ_CHECKING } else { STATUS_READ_AGAIN };
+        if ui.status.as_ref().is_none_or(|(_, read)| wall.saturating_sub(*read) >= again) {
+            ui.status = Some((ui.workspace.status(), wall));
+        }
+        if matches!(&ui.status, Some((Ok(status), _)) if status.checking()) {
+            ctx.request_repaint_after(STATUS_READ_CHECKING);
+        }
+    }
     // The macros, read again when their file changes.
     if let Some(file) = ui.workspace.macros_file() {
         let stamp = stamp_of(&file);
@@ -1430,6 +1463,7 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
     let mut dock_asked = None;
     let mut editors_action = None;
     let mut history_clicked = None;
+    let mut status_asked = None;
     let mut several_asked = None;
     // The values shared by several selected objects, read again when the selection changes.
     let several: Vec<u32> = ui.view.selection().to_vec();
@@ -1475,11 +1509,14 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
                 (Tab::Inspector, "Inspector", "A summary of the object clicked on the canvas. Double-click it for a window with everything about it (t1)"),
                 (Tab::Paths, "Paths", "See the model's routes, weights and distribution strategies on the canvas. Values change in the inspector (t3)"),
                 (Tab::Agents, "Agents", "The AI agents changing this folder's models, what they're doing, and your control of them (t4)"),
+                (Tab::Status, "Status", "Where the model stands: what you asked for, the expectations that check it, their verdicts, its stage, and what to do next (t5)"),
             ] {
                 if row.selectable_label(ui.tab == tab, label).on_hover_text(hint).clicked() && ui.tab != tab {
                     ui.tab = tab;
                     ui.editors = None;
                     ui.history = None;
+                    ui.status = None;
+                    ui.status_note = None;
                     ui.editors_note = None;
                 }
             }
@@ -1511,6 +1548,7 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
                 editors_action = agents_tab(panel, ui.workspace.opened(), ui.editors.as_ref(), ui.editors_note.as_deref());
                 history_clicked = history_section(panel, ui.history.as_ref(), ui.view.allows_building());
             }
+            Tab::Status => status_asked = status_tab(panel, ui.workspace.opened().is_some(), ui.status.as_ref().map(|(status, _)| status), ui.status_note.as_deref()),
         });
     }).1;
     // Full states are asked for while the statistics window is open, or the Paths tab weighs the
@@ -1539,6 +1577,24 @@ fn panels(mut contexts: EguiContexts, mut ui: ResMut<Ui>, session: Res<Session>,
             open_window(ui, id);
         }
         None => {}
+    }
+    // The user accepts what an agent proposed, or checks a stage.
+    if let Some(asked) = status_asked {
+        ui.status_note = Some(match asked {
+            StatusAsk::Accept(ids) => match ui.workspace.accept(&ids) {
+                Ok(()) => {
+                    ui.history = None;
+                    format!("Accepted {}: only you change {} now", ids.join(", "), if ids.len() == 1 { "it" } else { "them" })
+                }
+                Err(refusal) => refused_text(&refusal),
+            },
+            StatusAsk::Check(stage) => match ui.workspace.check_stage(stage) {
+                Ok(runs) => format!("Checking {stage} with {}", runs.join(", ")),
+                Err(why) => why,
+            },
+        });
+        ui.status = None;
+        ui.view.commanded(wall);
     }
     // A click on a change goes back, or on, to the model as it was after it, asking first.
     if let Some(number) = history_clicked {
@@ -2024,6 +2080,7 @@ fn replace_session(ui: &mut Ui, session: &Session, new_model: bool, wall: Durati
         ui.paths = ui.paths.for_another_model();
     }
     ui.history = None;
+    ui.status = None;
     let mut view = ViewState::with_settings_of(ui.workspace.description(), &ui.view);
     view.set_shapes(ui.workspace.shapes());
     view.set_exit_lists(ui.workspace.exit_lists());
@@ -4424,6 +4481,127 @@ fn step_asked(ui: &mut Ui, redo: bool, steps: usize, always: bool) {
     }
 }
 
+/// A building refusal in words.
+fn refused_text(refusal: &Refusal) -> String {
+    match refusal {
+        Refusal::NotEditor(why) | Refusal::ChangedOutside(why) | Refusal::Invalid(why) | Refusal::Nothing(why) => why.clone(),
+        Refusal::NoModel => "No model is open.".to_string(),
+    }
+}
+
+/// The Status tab: where the open model stands, what the user asked for and the expectations
+/// that check it, each with its verdict, Accept for what an agent proposed, and Verify and
+/// Validate.
+fn status_tab(ui: &mut egui::Ui, opened: bool, status: Option<&Result<Status, String>>, note: Option<&str>) -> Option<StatusAsk> {
+    ui.heading("Status");
+    let mut asked = None;
+    let status = match (opened, status) {
+        (false, _) => {
+            ui.label(egui::RichText::new("Open a model to see where it stands.").weak());
+            return None;
+        }
+        (true, Some(Ok(status))) => status,
+        (true, Some(Err(error))) => {
+            ui.label(egui::RichText::new(error).weak());
+            return None;
+        }
+        (true, None) => return None,
+    };
+    let stage_colour = match status.stage.as_str() {
+        "validated" => egui::Color32::from_rgb(80, 200, 120),
+        "verified" => egui::Color32::from_rgb(120, 180, 240),
+        _ => egui::Color32::from_rgb(200, 200, 200),
+    };
+    ui.horizontal(|row| {
+        row.label("Stage:");
+        row.colored_label(stage_colour, egui::RichText::new(&status.stage).strong())
+            .on_hover_text("Draft until a deterministic run meets every verification expectation you accepted; verified then; validated once runs with randomness also meet the validation expectations you accepted. crabsim sets it from its checks.");
+    });
+    for (name, check) in [("Verification", &status.verification), ("Validation", &status.validation)] {
+        ui.label(egui::RichText::new(format!("{name}: {}", check.summary)).small());
+    }
+    ui.horizontal(|row| {
+        let verify = row
+            .add_enabled(status.has_stage("verification") && status.verification.running.is_empty(), egui::Button::new("Verify"))
+            .on_hover_text("Runs the model without randomness, no failures, and judges the verification expectations. Also done by itself when the model opens and when an agent releases it");
+        if verify.clicked() {
+            asked = Some(StatusAsk::Check("verification"));
+        }
+        let validate = row
+            .add_enabled(status.has_stage("validation") && status.validation.running.is_empty(), egui::Button::new("Validate"))
+            .on_hover_text("Runs an experiment with randomness and judges the validation expectations by their 95% intervals");
+        if validate.clicked() {
+            asked = Some(StatusAsk::Check("validation"));
+        }
+        let waiting = status.to_accept();
+        if !waiting.is_empty() {
+            let accept = row.button(format!("Accept all ({})", waiting.len())).on_hover_text(format!("Accepts {}: then only you change them", waiting.join(", ")));
+            if accept.clicked() {
+                asked = Some(StatusAsk::Accept(waiting));
+            }
+        }
+    });
+    if let Some(note) = note {
+        ui.colored_label(egui::Color32::from_rgb(240, 200, 80), note);
+    }
+    ui.add_space(4.0);
+    ui.label(egui::RichText::new(format!("Next: {}", status.next)).italics());
+    let expectation_line = |ui: &mut egui::Ui, expectation: &ExpectationLine, asked: &mut Option<StatusAsk>| {
+        let colour = match (expectation.verdict.as_deref(), expectation.current) {
+            (Some("met"), true) => egui::Color32::from_rgb(80, 200, 120),
+            (Some("not_met" | "error"), true) => egui::Color32::from_rgb(230, 90, 80),
+            (Some("undecided"), true) => egui::Color32::from_rgb(240, 200, 80),
+            _ => egui::Color32::GRAY,
+        };
+        ui.horizontal_wrapped(|row| {
+            row.colored_label(colour, expectation.verdict_text());
+            row.label(format!("{}: {}", expectation.id, expectation.text));
+        });
+        let mut said = vec![format!("{}, {}", expectation.state, expectation.stage)];
+        said.extend(expectation.found.iter().map(|found| format!("found {found}")));
+        said.extend(expectation.note.iter().cloned());
+        ui.label(egui::RichText::new(said.join("; ")).small().weak());
+        if let Some(question) = &expectation.question {
+            ui.colored_label(egui::Color32::from_rgb(240, 200, 80), format!("Questioned: {question}"));
+        }
+        if expectation.awaits_user() {
+            let label = if expectation.state == "questioned" { "Accept again" } else { "Accept" };
+            if ui.small_button(label).on_hover_text("You agree with it: then only you change it, and an agent may question it").clicked() {
+                *asked = Some(StatusAsk::Accept(vec![expectation.id.clone()]));
+            }
+        }
+    };
+    for request in &status.requests {
+        ui.add_space(6.0);
+        ui.separator();
+        let agreed = if request.accepted { "accepted" } else { "not accepted yet" };
+        ui.label(egui::RichText::new(format!("{}: \"{}\"", request.id, request.words)).strong());
+        ui.label(egui::RichText::new(format!("{}, {agreed}", request.state)).small());
+        if let Some(restatement) = &request.restatement {
+            ui.label(format!("Restated: {restatement}"));
+        }
+        if !request.accepted && ui.button("Accept the request").on_hover_text("Accepts its restatement and every expectation it lists, in one step").clicked() {
+            asked = Some(StatusAsk::Accept(vec![request.id.clone()]));
+        }
+        for expectation in status.expectations_of(request) {
+            ui.indent(("expectation", &request.id, &expectation.id), |ui| expectation_line(ui, expectation, &mut asked));
+        }
+    }
+    let unrequested = status.unrequested();
+    if !unrequested.is_empty() {
+        ui.add_space(6.0);
+        ui.separator();
+        ui.label(egui::RichText::new(if status.requests.is_empty() { "Expectations" } else { "Other expectations" }).strong());
+        for expectation in unrequested {
+            expectation_line(ui, expectation, &mut asked);
+        }
+    }
+    if status.expectations.is_empty() {
+        ui.label(egui::RichText::new("No expectations yet: tell an agent what you want from the model, and it proposes expectations crabsim can check for you to accept.").weak());
+    }
+    asked
+}
+
 /// Undoes or redoes, saying what it did on the line at the foot of the canvas. What it touched is
 /// selected once the window has picked up the file.
 fn step_history(ui: &mut Ui, redo: bool, steps: usize, take_over: bool) {
@@ -5411,14 +5589,18 @@ fn run_key(ctx: &egui::Context, ui: &mut Ui, session: &Session, command: Command
         Command::CloseAllWindows => ui.windows.close_all(),
         Command::Tab(place) => {
             // t2 opens the statistics window, which took the place of the Results tab, so t3 and t4 stay put.
-            match place.clamp(1, 4) {
+            match place.clamp(1, 5) {
                 1 => ui.tab = Tab::Inspector,
                 2 => {
                     ui.statistics_open = true;
                     want_focus(ctx, "statistics");
                 }
                 3 => ui.tab = Tab::Paths,
-                _ => ui.tab = Tab::Agents,
+                4 => ui.tab = Tab::Agents,
+                _ => {
+                    ui.tab = Tab::Status;
+                    ui.status = None;
+                }
             }
         }
         // With an instance selected, Enter opens its window at its first field.
@@ -5841,7 +6023,7 @@ fn keys_help(ctx: &egui::Context, ui: &mut Ui) {
                 ("u  Ctrl+R", "undo the last change to the model, redo it: 3u undoes three. The Agents tab lists the changes"),
             ],
         ),
-        ("Panels", &[("t1 t3 t4", "the Inspector, Paths and Agents tabs"), ("t2", "the statistics window"), ("Enter", "into the selection's first field, in its window, or else the open tab's first control, then Tab on"), ("o", "open a model file")]),
+        ("Panels", &[("t1 t3 t4 t5", "the Inspector, Paths, Agents and Status tabs"), ("t2", "the statistics window"), ("Enter", "into the selection's first field, in its window, or else the open tab's first control, then Tab on"), ("o", "open a model file")]),
         ("Find", &[("/", "search by name, then n and N for the next and previous"), ("e", "go to a value, such as proc or Station 3.proc")]),
         ("Help", &[("?", "this list")]),
     ];

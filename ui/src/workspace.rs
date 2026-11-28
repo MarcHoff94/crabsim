@@ -352,9 +352,53 @@ impl Workspace {
                 self.read = Some(read);
                 self.pending = None;
                 self.problems = None;
+                // Opening a model verifies it, if it wasn't verified as it is (ADR 0030).
+                if !self.model.checks_of(crabsim_model::CheckStage::Verification).is_empty() {
+                    let _ = self.check_stage("verification");
+                }
                 true
             }
             None => false,
+        }
+    }
+
+    // ---------- Stages and agreeing (ADR 0030) ----------
+
+    /// Where the open model stands: its stage, requests, expectations and next step.
+    pub fn status(&self) -> Result<crate::status::Status, String> {
+        let path = self.opened.as_deref().ok_or("no model file is open")?;
+        let catalogue = self.catalogue.as_ref().ok_or("no models folder is open")?;
+        let read = catalogue.call("get_status", json!({ "path": path })).map_err(|error| error.to_string())?;
+        Ok(crate::status::Status::from_json(&read))
+    }
+
+    /// Checks a stage of the open model, `verification` or `validation`, in the background,
+    /// giving its runs: an existing check of the model as it is comes back rather than a new one.
+    pub fn check_stage(&self, stage: &str) -> Result<Vec<String>, String> {
+        let path = self.opened.as_deref().ok_or("no model file is open")?;
+        let catalogue = self.catalogue.as_ref().ok_or("no models folder is open")?;
+        let checked = catalogue.call("check_stage", json!({ "path": path, "stage": stage })).map_err(|error| error.to_string())?;
+        Ok(checked["runs"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect())
+    }
+
+    /// Accepts requests, with their expectations, and expectations, by id, in one change: what
+    /// an agent proposed then holds. It goes through an agent's claim, which the agent keeps.
+    pub fn accept(&mut self, ids: &[String]) -> Result<(), Refusal> {
+        let status = self.status().map_err(Refusal::Invalid)?;
+        let changes = ids
+            .iter()
+            .map(|id| match status.requests.iter().any(|request| &request.id == id) {
+                true => json!({ "change": "accept_request", "id": id }),
+                false => json!({ "change": "accept_expectation", "id": id }),
+            })
+            .collect();
+        self.edit(changes, None, false)
+    }
+
+    /// Waits for the checks and runs this window started, for tests.
+    pub fn wait_for_runs(&self) {
+        if let Some(catalogue) = &self.catalogue {
+            catalogue.wait_for_runs();
         }
     }
 

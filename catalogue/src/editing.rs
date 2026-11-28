@@ -90,6 +90,10 @@ struct Agent {
     client: String,
     started: u64,
     blocked: bool,
+    /// For an agent through the CLI, which is no one process: when it last asked anything. It
+    /// lasts as long as an unused claim would, or while blocked.
+    #[serde(default)]
+    last_seen: u64,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -241,22 +245,28 @@ impl Catalogue {
         let crabsim_folder = self.folder().crabsim_folder();
         let mut held = Held::open(&crabsim_folder)?;
         let now = now_ms();
-        let asker = match self.source() {
-            Source::Mcp => {
+        let asker = match self.agent_key()? {
+            Some(key) => {
                 let client = self.client_name();
                 let state = &mut held.state;
-                if !state.agents.contains_key(&process) {
+                if !state.agents.contains_key(&key) {
                     state.next_agent += 1;
                     let id = format!("agent-{}", state.next_agent);
-                    state.agents.insert(process.clone(), Agent { id, client, started: now, blocked: false });
+                    state.agents.insert(key.clone(), Agent { id, client, started: now, blocked: false, last_seen: now });
                     held.changed = true;
-                } else if let Some(agent) = state.agents.get_mut(&process).filter(|agent| agent.client != client) {
-                    agent.client = client;
-                    held.changed = true;
+                } else if let Some(agent) = state.agents.get_mut(&key) {
+                    if agent.client != client {
+                        agent.client = client;
+                        held.changed = true;
+                    }
+                    if self.source() == Source::CliAgent {
+                        agent.last_seen = now;
+                        held.changed = true;
+                    }
                 }
-                Asker::Agent(process)
+                Asker::Agent(key)
             }
-            Source::Cli | Source::Ui => Asker::User(process),
+            None => Asker::User(process),
         };
         let mut editing = Editing { held, asker, now, key: None, take_over: self.take_over() };
         editing.sweep(&crabsim_folder, self.edit_timeout());
@@ -275,10 +285,21 @@ impl Editing {
     /// than `timeout`, unless paused.
     fn sweep(&mut self, crabsim_folder: &Path, timeout: Duration) {
         let own = self.asker.process().to_string();
-        let alive = |process: &str| process == own || process::is_alive(crabsim_folder, process);
-        let ended: Vec<String> = self.held.state.agents.keys().filter(|process| !alive(process)).cloned().collect();
         let now = self.now;
         let timeout = timeout.as_millis() as u64;
+        // An agent through the CLI lasts while it keeps asking, or while it is blocked.
+        let cli_agents: Vec<String> = self
+            .held
+            .state
+            .agents
+            .iter()
+            .filter(|(key, agent)| key.starts_with(crate::CLI_AGENT_PREFIX) && (agent.blocked || now.saturating_sub(agent.last_seen) <= timeout))
+            .map(|(key, _)| key.clone())
+            .collect();
+        let alive = |process: &str| {
+            process == own || if process.starts_with(crate::CLI_AGENT_PREFIX) { cli_agents.iter().any(|key| key == process) } else { process::is_alive(crabsim_folder, process) }
+        };
+        let ended: Vec<String> = self.held.state.agents.keys().filter(|process| !alive(process)).cloned().collect();
         let before = serde_json::to_string(&self.held.state.files).unwrap_or_default();
         let state = &mut self.held.state;
         for process in &ended {
@@ -485,8 +506,15 @@ fn current_hash(catalogue: &Catalogue, path: &str) -> Result<Option<String>, Ope
 /// now. The returned state is held until the change is written, so two changes can't both go
 /// through.
 pub(crate) fn before_change(catalogue: &Catalogue, path: &str, expected_hash: Option<&str>) -> Result<Editing, OperationError> {
+    before_change_with(catalogue, path, expected_hash, false)
+}
+
+/// As `before_change`, `past_claims` letting the user's change through an agent's claim, which
+/// the agent keeps, as a take-over does: for the user accepting what the agent waits for.
+pub(crate) fn before_change_with(catalogue: &Catalogue, path: &str, expected_hash: Option<&str>, past_claims: bool) -> Result<Editing, OperationError> {
     let key = key(catalogue, path)?;
     let mut editing = catalogue.editing()?;
+    editing.take_over |= past_claims && catalogue.source().is_user();
     editing.may_change(&key)?;
     let current = std::fs::read_to_string(catalogue.folder().model_file(path)?).ok();
     if let Some(text) = &current
@@ -592,7 +620,7 @@ pub(crate) fn key_of(catalogue: &Catalogue, path: &str) -> Result<String, Operat
 }
 
 fn user_only(catalogue: &Catalogue, operation: &str) -> Result<(), OperationError> {
-    if catalogue.source() == Source::Mcp {
+    if !catalogue.source().is_user() {
         return Err(OperationError::invalid_input(format!("`{operation}` is only for the user, through the UI or the CLI")));
     }
     Ok(())
@@ -680,6 +708,12 @@ impl Operation for AdoptModel {
         let (_, text) = crate::model_files::read_file(catalogue, &input.path)?;
         // What crabsim last saved, which the history ends at, is what an undo goes back to.
         let saved = editing.recorded_hash(&key(catalogue, &input.path)?);
+        // An agent adopting a file holds it to what crabsim last saved of it: what the user agreed
+        // there can't come in, or go, from outside.
+        if !catalogue.source().is_user() {
+            let before = saved.as_deref().and_then(|hash| crate::history::text_with(catalogue, &input.path, hash));
+            crate::agreeing::guard(catalogue, &input.path, before.as_deref(), Some(&text))?;
+        }
         editing.record(&text);
         match &saved {
             Some(saved) => {
@@ -727,7 +761,7 @@ impl Operation for ClaimModel {
     type Output = ClaimModelOutput;
 
     fn run(catalogue: &Catalogue, input: ClaimModelInput) -> Result<ClaimModelOutput, OperationError> {
-        if catalogue.source() != Source::Mcp {
+        if catalogue.source().is_user() {
             return Err(OperationError::invalid_input("the user doesn't claim: take the file with take_model"));
         }
         let (goal, doing) = (input.goal.trim().to_string(), input.doing.trim().to_string());
@@ -740,7 +774,7 @@ impl Operation for ClaimModel {
         let hash = current_hash(catalogue, &input.path)?;
         let mut editing = catalogue.editing()?;
         editing.refuse_if_blocked()?;
-        let Asker::Agent(me) = editing.asker.clone() else { unreachable!("an MCP catalogue is an agent") };
+        let Asker::Agent(me) = editing.asker.clone() else { unreachable!("an agent's catalogue is an agent") };
         let now = editing.now;
         if let Some(file) = editing.held.state.files.get(&path)
             && (file.claim.as_ref().is_some_and(|claim| claim.process != me) || (file.user.is_some() && file.claim.is_none()))
@@ -788,11 +822,15 @@ pub struct ReleaseModelOutput {
     /// user's release gave back.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub file: Option<FileView>,
+    /// The runs verifying the model as you leave it, started since it has verification
+    /// expectations and wasn't verified as it is now: get_status gives its stage once they end.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub verification: Vec<String>,
 }
 
 impl Operation for ReleaseModel {
     const NAME: &'static str = "release_model";
-    const DESCRIPTION: &'static str = "Ends your claim on a model file, so others may claim it. Call it when you're done changing a file you claimed. For the user, it gives the file back to the agent whose claim it paused, if any.";
+    const DESCRIPTION: &'static str = "Ends your claim on a model file, so others may claim it. Call it when you're done changing a file you claimed. If the model has verification expectations and wasn't verified as it is now, crabsim verifies it then, deterministically, and gives the runs in `verification`: get_status says its stage once they end. For the user, it gives the file back to the agent whose claim it paused, if any.";
     const EFFECT: Effect = Effect::Additive;
     const CHANGES_MODELS: bool = true;
     type Input = PathInput;
@@ -825,7 +863,12 @@ impl Operation for ReleaseModel {
                 editing.state().files.remove(&path);
             }
         }
-        Ok(ReleaseModelOutput { released, file: editing.view(&path) })
+        let file = editing.view(&path);
+        drop(editing);
+        // An agent done with a model has it verified as it is now, so the user never sees a
+        // stale stage (ADR 0030).
+        let verification = if released && matches!(asker, Asker::Agent(_)) { crate::stages::verify_at_milestone(catalogue, &input.path) } else { Vec::new() };
+        Ok(ReleaseModelOutput { released, file, verification })
     }
 }
 

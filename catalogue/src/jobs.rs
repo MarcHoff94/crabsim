@@ -207,6 +207,19 @@ impl Jobs {
         self.shared.work.notify_all();
     }
 
+    /// Waits until every job of this process has finished.
+    pub fn wait_all(&self) {
+        let mut pool = self.shared.lock();
+        while pool.jobs.values().any(|job| !job.state.is_finished()) {
+            pool = self.shared.changed.wait_timeout(pool, Duration::from_millis(100)).unwrap_or_else(|poisoned| poisoned.into_inner()).0;
+        }
+    }
+
+    /// Whether any job of this process is still queued or running.
+    pub fn any_going(&self) -> bool {
+        self.shared.lock().jobs.values().any(|job| !job.state.is_finished())
+    }
+
     /// The state of a job of this process.
     pub fn state(&self, id: &str) -> Option<RunState> {
         self.shared.lock().jobs.get(id).map(|job| job.state)
@@ -570,6 +583,125 @@ pub struct StartRunOutput {
     /// With `wait`, how the run stands when it ended or the wait was up, as run_status says.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<RunStatusOutput>,
+    /// The runs verifying the model first, deterministically, since it has verification
+    /// expectations and wasn't verified as it is now: get_status gives its stage once they end.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub verification: Vec<String>,
+}
+
+/// A model file read and checked for running.
+pub(crate) struct Prepared {
+    pub model: crabsim_model::Model,
+    pub description: ModelDescription,
+    /// Its canonical text and that text's hash, as runs record them.
+    pub canonical: String,
+    pub hash: String,
+    pub changed_outside: bool,
+}
+
+/// Reads and checks the model file at `path`, whose text is `text`, with its code.
+pub(crate) fn prepare(catalogue: &Catalogue, path: &str, text: &str) -> Result<Prepared, OperationError> {
+    let changed_outside = crate::editing::changed_outside(catalogue, path, text)?;
+    let model = crabsim_model::load(text).map_err(|problems| OperationError::invalid_model(&format!("`{path}`"), &problems))?;
+    // Its code, from the folder's `code/`, is loaded and checked now too (ADR 0029).
+    let description = model
+        .to_description_in(catalogue.folder().root(), crabsim_model::crabsim_code::Options::default())
+        .map_err(|problems| OperationError::invalid_model(&format!("`{path}`"), &problems))?;
+    let canonical = model.save();
+    let hash: String = Sha256::digest(canonical.as_bytes()).iter().map(|byte| format!("{byte:02x}")).collect();
+    Ok(Prepared { model, description, canonical, hash, changed_outside })
+}
+
+/// A stage's check that a run is part of.
+pub(crate) struct CheckPart {
+    pub stage: crabsim_model::CheckStage,
+    /// The number of the check's first run, `None` for that run itself.
+    pub number: Option<i64>,
+    /// The newest change in the file's history it checks.
+    pub change: Option<i64>,
+    /// The expectations it judges, by their place in the model.
+    pub judged: Vec<usize>,
+}
+
+/// How to run a prepared model.
+pub(crate) struct Launch {
+    pub seed: u64,
+    pub length: SimTime,
+    pub warm_up: SimTime,
+    pub observations: u32,
+    pub deterministic: bool,
+    pub label: Option<String>,
+    pub check: Option<CheckPart>,
+}
+
+/// Records a run of a prepared model in the store and queues its observations, giving its id.
+pub(crate) fn launch_run(catalogue: &Catalogue, path: &str, prepared: &Prepared, launch: Launch) -> Result<String, OperationError> {
+    let model = &prepared.model;
+    let objects = (0..model.instances.len())
+        .map(|index| ObjectInfo {
+            name: model.instances[index].name.clone(),
+            class: model.instances[index].class.clone(),
+            built_in: model.resolve(index).expect("a valid model resolves").built_in,
+        })
+        .collect();
+    let who = catalogue.who()?;
+    let store = catalogue.store()?;
+    let (stage, check_number, change, judged) = match &launch.check {
+        None => (None, None, None, None),
+        Some(check) => {
+            let ids: Vec<&str> = check.judged.iter().map(|&index| model.expectations[index].id.as_str()).collect();
+            (Some(check.stage.name()), check.number, check.change, Some(serde_json::to_string(&ids).expect("ids serialise")))
+        }
+    };
+    store.connection().execute(
+        "INSERT INTO runs (model_path, model_text, model_hash, seed, length_s, warm_up_s, observations, label, source, crabsim_version, started, state, process, crabsim_build, agent, deterministic, stage, check_number, checked_change, expectations)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'queued', ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+        params![
+            path,
+            prepared.canonical,
+            prepared.hash,
+            launch.seed.to_string(),
+            launch.length.as_secs_f64(),
+            launch.warm_up.as_secs_f64(),
+            launch.observations,
+            launch.label,
+            catalogue.source().name(),
+            env!("CARGO_PKG_VERSION"),
+            catalogue.process_id(),
+            env!("CRABSIM_BUILD"),
+            who,
+            launch.deterministic,
+            stage,
+            check_number,
+            change,
+            judged,
+        ],
+    )?;
+    let number = store.connection().last_insert_rowid();
+    // The check's first run gives the check its number.
+    if launch.check.as_ref().is_some_and(|check| check.number.is_none()) {
+        store.connection().execute("UPDATE runs SET check_number = ?1 WHERE number = ?1", [number])?;
+    }
+    drop(store);
+    let id = format!("run-{number}");
+    let mut expectations = model.bound_expectations();
+    if let Some(check) = &launch.check {
+        expectations.retain(|bound| check.judged.contains(&bound.index));
+    }
+    let plan = Plan {
+        id: id.clone(),
+        model: prepared.description.clone(),
+        objects,
+        seed: launch.seed,
+        length: launch.length,
+        warm_up: launch.warm_up,
+        observations: launch.observations,
+        deterministic: launch.deterministic,
+        expectations,
+        expectation_ids: model.expectations.iter().map(|expectation| expectation.id.clone()).collect(),
+    };
+    catalogue.jobs().submit(plan);
+    Ok(id)
 }
 
 impl Operation for StartRun {
@@ -589,72 +721,33 @@ impl Operation for StartRun {
         if !(1..=MAX_OBSERVATIONS).contains(&observations) {
             return Err(OperationError::invalid_input(format!("`observations` must be from 1 to {MAX_OBSERVATIONS}")));
         }
-        let (_, text) = read_file(catalogue, &input.model)?;
-        let changed_outside = crate::editing::changed_outside(catalogue, &input.model, &text)?;
-        let model = crabsim_model::load(&text).map_err(|problems| OperationError::invalid_model(&format!("`{}`", input.model), &problems))?;
-        // Its code, from the folder's `code/`, is loaded and checked now too (ADR 0029).
-        let description = model
-            .to_description_in(catalogue.folder().root(), crabsim_model::crabsim_code::Options::default())
-            .map_err(|problems| OperationError::invalid_model(&format!("`{}`", input.model), &problems))?;
-        let canonical = model.save();
-        let hash: String = Sha256::digest(canonical.as_bytes()).iter().map(|byte| format!("{byte:02x}")).collect();
-        let objects = (0..model.instances.len())
-            .map(|index| ObjectInfo {
-                name: model.instances[index].name.clone(),
-                class: model.instances[index].class.clone(),
-                built_in: model.resolve(index).expect("a valid model resolves").built_in,
-            })
-            .collect();
-
         if input.wait.is_some_and(|wait| !(1..=60).contains(&wait)) {
             return Err(OperationError::invalid_input("`wait` must be from 1 to 60 seconds"));
         }
-        let who = catalogue.who()?;
-        let store = catalogue.store()?;
-        store.connection().execute(
-            "INSERT INTO runs (model_path, model_text, model_hash, seed, length_s, warm_up_s, observations, label, source, crabsim_version, started, state, process, crabsim_build, agent, deterministic)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'queued', ?11, ?12, ?13, ?14)",
-            params![
-                input.model,
-                canonical,
-                hash,
-                input.seed.to_string(),
-                length.as_secs_f64(),
-                warm_up.as_secs_f64(),
-                observations,
-                input.label,
-                catalogue.source().name(),
-                env!("CARGO_PKG_VERSION"),
-                catalogue.process_id(),
-                env!("CRABSIM_BUILD"),
-                who,
-                input.deterministic,
-            ],
-        )?;
-        let id = format!("run-{}", store.connection().last_insert_rowid());
-        drop(store);
-        let plan = Plan {
-            id: id.clone(),
-            model: description,
-            objects,
+        let (_, text) = read_file(catalogue, &input.model)?;
+        let prepared = prepare(catalogue, &input.model, &text)?;
+        // An experiment is verified first, unless its model already is as it is now (ADR 0030).
+        let verification = if input.deterministic { Vec::new() } else { crate::stages::verify_if_unchecked(catalogue, &input.model, &prepared)? };
+        let launch = Launch {
             seed: input.seed,
             length,
             warm_up,
             observations,
             deterministic: input.deterministic,
-            expectations: model.bound_expectations(),
-            expectation_ids: model.expectations.iter().map(|expectation| expectation.id.clone()).collect(),
+            label: input.label.clone(),
+            check: None,
         };
-        catalogue.jobs().submit(plan);
+        let id = launch_run(catalogue, &input.model, &prepared, launch)?;
+        let changed_outside = prepared.changed_outside;
         let Some(wait) = input.wait else {
-            return Ok(StartRunOutput { run: id, state: RunState::Queued, changed_outside, status: None });
+            return Ok(StartRunOutput { run: id, state: RunState::Queued, changed_outside, status: None, verification });
         };
         // Waits for a short run, saving the agent a call to run_status.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(u64::from(wait));
         loop {
             let status = RunStatus::run(catalogue, RunInput { run: id.clone() })?;
             if !matches!(status.state, RunState::Queued | RunState::Running) || std::time::Instant::now() >= deadline {
-                return Ok(StartRunOutput { run: id, state: status.state, changed_outside, status: Some(status) });
+                return Ok(StartRunOutput { run: id, state: status.state, changed_outside, status: Some(status), verification });
             }
             std::thread::sleep(std::time::Duration::from_millis(20));
         }

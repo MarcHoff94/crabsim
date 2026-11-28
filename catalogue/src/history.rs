@@ -241,6 +241,26 @@ impl History {
         Ok(transaction.last_insert_rowid())
     }
 
+    /// The newest change in effect, by its number.
+    fn newest(&self, path: &str) -> rusqlite::Result<Option<i64>> {
+        self.connection.query_row("SELECT MAX(id) FROM entries WHERE path = ?1 AND undone = 0", [path], |row| row.get(0))
+    }
+
+    /// The changes in effect after the one numbered `after`, or all with none: the oldest of
+    /// them and how many.
+    fn since(&self, path: &str, after: Option<i64>) -> rusqlite::Result<(Option<i64>, u32)> {
+        self.connection.query_row(
+            "SELECT MIN(id), COUNT(*) FROM entries WHERE path = ?1 AND undone = 0 AND id > ?2",
+            (path, after.unwrap_or(0)),
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+    }
+
+    /// The text with this hash that the history keeps for `path`, if it does.
+    fn text_with(&self, path: &str, hash: &str) -> rusqlite::Result<Option<String>> {
+        self.connection.query_row("SELECT text FROM versions WHERE path = ?1 AND hash = ?2 ORDER BY id DESC LIMIT 1", (path, hash), |row| row.get(0)).optional()
+    }
+
     /// Forgets a file's history, such as when the file is deleted.
     pub(crate) fn forget(&mut self, path: &str) -> rusqlite::Result<()> {
         let transaction = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -418,6 +438,25 @@ pub(crate) fn keep(catalogue: &Catalogue, editing: &Editing, path: &str, change:
     }
 }
 
+/// The newest change to the model file at `path` still in effect, by its number.
+pub(crate) fn newest(catalogue: &Catalogue, path: &str) -> Option<i64> {
+    let key = crate::editing::key_of(catalogue, path).ok()?;
+    catalogue.with_history(|history| history.newest(&key).map_err(failed)).ok().flatten()
+}
+
+/// The changes to the model file at `path` in effect after the one numbered `after`: the oldest
+/// of them and how many.
+pub(crate) fn since(catalogue: &Catalogue, path: &str, after: Option<i64>) -> (Option<i64>, u32) {
+    let Ok(key) = crate::editing::key_of(catalogue, path) else { return (None, 0) };
+    catalogue.with_history(|history| history.since(&key, after).map_err(failed)).unwrap_or((None, 0))
+}
+
+/// The text of the model file at `path` with this hash, if its history keeps it.
+pub(crate) fn text_with(catalogue: &Catalogue, path: &str, hash: &str) -> Option<String> {
+    let key = crate::editing::key_of(catalogue, path).ok()?;
+    catalogue.with_history(|history| history.text_with(&key, hash).map_err(failed)).ok().flatten()
+}
+
 /// Forgets the history of the model file at `path`, which was deleted or is new.
 pub(crate) fn forget(catalogue: &Catalogue, path: &str) {
     let forgotten = crate::editing::key_of(catalogue, path).and_then(|key| catalogue.with_history(|history| history.forget(&key).map_err(failed)));
@@ -481,7 +520,7 @@ impl Operation for GetHistory {
     fn run(catalogue: &Catalogue, input: GetHistoryInput) -> Result<GetHistoryOutput, OperationError> {
         let key = crate::editing::key_of(catalogue, &input.path)?;
         let limit = input.limit.unwrap_or(50).clamp(1, HISTORY_LIST_LIMIT);
-        let agent = if catalogue.source().is_user() { None } else { Some(catalogue.process_lock()?.to_string()) };
+        let agent = catalogue.agent_key()?;
         let (rows, more) = catalogue.with_history(|history| history.list(&key, limit).map_err(failed))?;
         Ok(GetHistoryOutput { path: input.path, entries: rows.iter().map(|row| row.view(agent.as_deref())).collect(), more })
     }
@@ -536,7 +575,10 @@ fn step(catalogue: &Catalogue, way: Way, input: &StepInput) -> Result<(Vec<Entry
     let (_, current) = read_file(catalogue, &input.path)?;
     let key = crate::editing::key_of(catalogue, &input.path)?;
     let (_, agent) = editing.author();
-    let write = |text: &str| std::fs::write(&file, text).map_err(|error| OperationError::run_error(format!("`{}` can't be written: {error}", input.path)));
+    let write = |text: &str| {
+        crate::agreeing::guard(catalogue, &input.path, Some(&current), Some(text))?;
+        std::fs::write(&file, text).map_err(|error| OperationError::run_error(format!("`{}` can't be written: {error}", input.path)))
+    };
     let stepped = catalogue.with_history(|history| history.step(way, &key, steps, agent.as_deref(), &crate::edit::hash(&current), write))?;
     editing.record(&stepped.text);
     Ok((stepped.entries.iter().map(|row| row.view(agent.as_deref())).collect(), crate::edit::hash(&stepped.text), stepped.stopped))

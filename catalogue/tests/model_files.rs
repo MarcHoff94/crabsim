@@ -168,6 +168,8 @@ fn the_shortest_inputs_an_operation_accepts_pass_its_input_schema() {
         ("forget_run", json!({ "run": "run-1" })),
         ("query_results", json!({ "sql": "SELECT 1" })),
         ("list_figures", json!({})),
+        ("check_stage", json!({ "path": "line.json" })),
+        ("get_status", json!({ "path": "line.json" })),
     ];
     for operation in setup.catalogue.operations() {
         assert!(inputs.iter().any(|(name, _)| *name == operation.name), "add the shortest input of {} here", operation.name);
@@ -373,6 +375,8 @@ fn every_operation_on(path: &str) -> Vec<(&'static str, Value)> {
         ("copy_model", json!({ "from": path, "to": "copy.json" })),
         ("copy_model", json!({ "from": "small.json", "to": path })),
         ("delete_model", json!({ "path": path })),
+        ("check_stage", json!({ "path": path })),
+        ("get_status", json!({ "path": path })),
     ]
 }
 

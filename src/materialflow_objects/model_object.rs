@@ -141,6 +141,17 @@ impl ModelObject {
         self.process_mu_entrance(mu, arrival, context)
     }
 
+    /// The same as `enter`, a Station working on the MU for `decided`, its time rules' time, when
+    /// it has one and the MU's plan step none of its own.
+    pub(crate) fn enter_timed(&mut self, mut mu: MoveableUnit, decided: Option<SimTime>, context: &mut EventContext) -> Result<Option<EventTemplate>, MaterialflowError> {
+        let arrival = if mu.is_routed() { context.routing.arrive(&mut mu, *self.get_object_id()) } else { Arrival::Unrouted };
+        match self {
+            ModelObject::Station(station) => station.take_in(mu, arrival, decided, context),
+            ModelObject::MultiStation(station) => station.take_in(mu, arrival, decided, context),
+            other => other.process_mu_entrance(mu, arrival, context),
+        }
+    }
+
     /// Takes the MU out of the object for user code, whatever it is doing (ADR 0029), or says why
     /// it can't.
     pub(crate) fn take_out(&mut self, mu_id: u32, context: &mut EventContext, others: &mut OtherObjects<'_>) -> Result<MoveableUnit, crate::hooks::Refusal> {
@@ -322,6 +333,18 @@ impl MaterialFlow for ModelObject {
     fn notify_blocked_predecessors(&mut self, context: &mut EventContext) -> Result<(), MaterialflowError> {
         on_the_object!(self, object => object.notify_blocked_predecessors(context))
     }
+}
+
+/// Hands the MU to `to` as `ModelObject::enter` does, a Station with time rules working on it for
+/// the time they give (ADR 0030), worked out now, reading the other objects and `giver`, which hands
+/// it over: whoever hands an MU over enters it through here, since a Station can't reach the others
+/// as it takes it. Only a run whose Stations have time rules comes here
+/// (`EventContext::decides_times`), so the rest keep `enter` as it was.
+#[cold]
+#[inline(never)]
+pub(crate) fn enter_deciding_time(others: &mut OtherObjects<'_>, to: u32, giver: crate::rules::Peer<'_>, mu: MoveableUnit, context: &mut EventContext) -> Result<Option<EventTemplate>, MaterialflowError> {
+    let decided = context.time_rules(to).and_then(|times| times.decide(&mu, context.routing.next_destination(&mu), &crate::rules::Peers { others, giver }, context.time));
+    others.get_mut(to).enter_timed(mu, decided, context)
 }
 
 /// Every object in the model except the one handling the current event, by id. The run splits

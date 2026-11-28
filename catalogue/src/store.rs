@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 pub const STORE_FILE: &str = "results.sqlite";
 
 /// The tables' version, kept in SQLite's `user_version`. A change to the tables raises it.
-const TABLES_VERSION: i64 = 9;
+const TABLES_VERSION: i64 = 10;
 
 /// The most rows `query_results` returns.
 pub const QUERY_ROW_LIMIT: usize = 1_000;
@@ -107,7 +107,9 @@ CREATE TABLE IF NOT EXISTS violations (
     time_s REAL NOT NULL,
     object TEXT NOT NULL,
     mu INTEGER NOT NULL,
-    value REAL NOT NULL
+    value REAL NOT NULL,
+    class TEXT,
+    step TEXT
 );
 CREATE INDEX IF NOT EXISTS violations_by_run ON violations (run, expectation);
 ";
@@ -119,7 +121,7 @@ macro_rules! tables_description {
             "Tables: ",
             "runs(id TEXT such as 'run-3', model_path, model_text: the canonical model file the run used, model_hash: SHA-256 of model_text so equal hashes mean the same model, seed TEXT, length_s, warm_up_s, observations, label, source: 'mcp' or 'cli', crabsim_version, started and finished: UTC ISO 8601, state: queued|running|done|failed|cancelled|interrupted, process: the lock id of the crabsim process that ran it, crabsim_build: the git commit crabsim was built from, agent: such as 'agent-3 (claude-code)' or 'the user', deterministic: 1 for a run without randomness, no object failing, stage: 'verification' or 'validation' for a run checking a stage, NULL for an experiment, check_number: the number of the first run of the check it is part of, one run for each of the stage's settings, checked_change: the number of the newest change in the model file's history it checked, expectations: a JSON list of the ids of the expectations it judged, NULL for all). ",
             "expectation_values(run, observation, expectation: its id, object: the instance, NULL for the model or a class's mean, value REAL: in the figure's own unit, a share 0 to 1, times in seconds, a state 1 when in it and 0 otherwise, NULL where it had none), one row per expectation and subject of an observation that ran to its end, the model's expectations as model_text holds them. ",
-            "violations(run, observation, expectation, time_s: simulated seconds since Init, object, mu: the MU's id, value), the first moment each limit with `always` was broken in an observation. ",
+            "violations(run, observation, expectation, time_s: simulated seconds since Init, object, mu: the MU's id, value, class and step: for a limit on which MUs an object takes, the MU's class and its current step as it entered, 'none' without one, NULL otherwise), the first moment each limit with `always` was broken in an observation. ",
             "observations(run, number from 1, seed TEXT: the observation's own seed, events, wall_time_s, error, error_time_s: simulated seconds). ",
             "statistics(run, observation, object: instance name, class, built_in_class: Source|Station|Buffer|Drain|Conveyor|CrossConveyor, statistic, value REAL), one row per figure of an observation that ran to its end. ",
             "histograms(run, observation, object, from_mus, to_mus: NULL for a last bar that takes everything from from_mus, time_s), how long each Buffer or Conveyor held each number of MUs, one row per bar with any time, the bars 1 MU wide or, with more MUs, a wider power of 2 unless the model sets histogram_bar_width. ",
@@ -181,6 +183,15 @@ impl Store {
                 let has: bool = transaction.query_row("SELECT count(*) FROM pragma_table_info('runs') WHERE name = ?1", [column], |row| row.get(0))?;
                 if !has {
                     transaction.execute_batch(&format!("ALTER TABLE runs ADD COLUMN {column} {kind}"))?;
+                }
+            }
+        }
+        // Versions before 10 had no limits on which MUs an object takes (ADR 0030).
+        if (1..=9).contains(&version) {
+            for column in ["class", "step"] {
+                let has: bool = transaction.query_row("SELECT count(*) FROM pragma_table_info('violations') WHERE name = ?1", [column], |row| row.get(0))?;
+                if !has {
+                    transaction.execute_batch(&format!("ALTER TABLE violations ADD COLUMN {column} TEXT"))?;
                 }
             }
         }

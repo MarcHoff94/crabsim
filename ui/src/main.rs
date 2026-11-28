@@ -5039,6 +5039,10 @@ fn attributes_section(
                 choice_field(fields, form, &view.attribute);
                 return;
             }
+            // A Station's process time by MU, its own time below.
+            if view.attribute == "process_time" {
+                time_rules_field(fields, &mut form.time_rules);
+            }
             if let Some(kind) = form.repair {
                 egui::ComboBox::from_id_salt(("repair", &view.attribute)).selected_text(kind.name()).show_ui(fields, |menu| {
                     for choice in RepairKind::ALL {
@@ -6312,6 +6316,23 @@ fn validation_window(ctx: &egui::Context, ui: &mut Ui) -> Option<crabsim_ui::wor
         ui.validation = None;
     }
     clicked
+}
+
+/// A Station's process time by MU (ADR 0030): a Rules box, ticked for a text area of when/then
+/// lines, one a line, the field below being the Station's own time.
+fn time_rules_field(ui: &mut egui::Ui, rules: &mut Option<String>) {
+    let mut ruled = rules.is_some();
+    if ui
+        .checkbox(&mut ruled, "Rules")
+        .on_hover_text("When/then lines read in order as an MU enters, the first that holds giving its time, such as `when class = Frame then 30s` or `when step = Deburr then 1:20`, and `otherwise default`. A work plan step's own time wins for an MU on plan. Below is the Station's own time, for MUs no line gives one")
+        .changed()
+    {
+        *rules = ruled.then(|| "otherwise default".to_string());
+    }
+    if let Some(rules) = rules.as_mut() {
+        ui.add(egui::TextEdit::multiline(rules).desired_rows(3).desired_width(f32::INFINITY).font(egui::TextStyle::Monospace));
+        ui.label(egui::RichText::new("else its own time").weak().small());
+    }
 }
 
 /// A distribution strategy's choices: Round robin or Weighted, and for Weighted what it weighs,

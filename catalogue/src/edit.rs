@@ -420,30 +420,39 @@ impl Draft {
         fields.remove("question");
     }
 
-    /// Renames an instance, or with `class` a class, in the expectations naming it, so a rename
-    /// never breaks one. A line that doesn't read is left for the model's own check.
+    /// Renames an instance, or with `class` a class, in the expectations naming it, as their
+    /// subject or among the classes or steps they list, so a rename never breaks one. A line that
+    /// doesn't read is left for the model's own check.
     fn rename_in_expectations(&mut self, name: &str, to: &str, class: bool) {
         for expectation in self.expectations().iter_mut() {
             let Some(check) = expectation["text"].as_str().and_then(|text| crabsim_model::expect::Check::parse(text).ok()) else { continue };
-            if (check.aggregate != crabsim_model::expect::Aggregate::One) != class {
-                continue;
-            }
-            if let Some(renamed) = check.renamed(name, to) {
+            if let Some(renamed) = check.renamed(name, to, class) {
                 expectation["text"] = json!(renamed.text());
             }
         }
     }
 
-    /// Renames an instance, or with `class` a class, in every rule line naming it (ADR 0030): a
-    /// destination is either, so it is renamed both ways. A line that doesn't read is left for
+    /// Renames an instance, or with `class` a class, in every rule line naming it (ADR 0030),
+    /// distributions' and process times': a destination or a step is either, so it is renamed
+    /// both ways. A line that doesn't read is left for
     /// the model's own check.
     fn rename_in_rules(&mut self, name: &str, to: &str, class: bool) {
         let rename = |owner: &mut Value| {
-            let Some(lines) = owner.pointer_mut("/attributes/distribution/rules").and_then(Value::as_array_mut) else { return };
-            for line in lines.iter_mut() {
-                let Some(read) = line.as_str().and_then(|text| crabsim_model::rules::Line::parse(text).ok()) else { continue };
-                if let Some(renamed) = read.renamed(name, to, class) {
-                    *line = json!(renamed.text());
+            if let Some(lines) = owner.pointer_mut("/attributes/distribution/rules").and_then(Value::as_array_mut) {
+                for line in lines.iter_mut() {
+                    let Some(read) = line.as_str().and_then(|text| crabsim_model::rules::Line::parse(text).ok()) else { continue };
+                    if let Some(renamed) = read.renamed(name, to, class) {
+                        *line = json!(renamed.text());
+                    }
+                }
+            }
+            // A Station's process time by MU, the same way.
+            if let Some(lines) = owner.pointer_mut("/attributes/process_time/rules").and_then(Value::as_array_mut) {
+                for line in lines.iter_mut() {
+                    let Some(read) = line.as_str().and_then(|text| crabsim_model::rules::TimeLine::parse(text).ok()) else { continue };
+                    if let Some(renamed) = read.renamed(name, to, class) {
+                        *line = json!(renamed.text());
+                    }
                 }
             }
         };

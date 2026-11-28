@@ -550,12 +550,17 @@ impl Workspace {
         let batch = changes
             .iter()
             .map(|change| {
-                json!({
-                    "change": "set_attribute",
-                    "target": { "instance": change.name },
-                    "attribute": change.attribute,
-                    "value": crabsim::time::format_time_exact(change.value),
-                })
+                let time = json!(crabsim::time::format_time_exact(change.value));
+                // A Station's process time by MU keeps its lines: the run changed its own time.
+                let lines = (change.attribute == "process_time")
+                    .then(|| self.model.instances.iter().position(|instance| instance.name == change.name).and_then(|index| self.model.resolve(index)))
+                    .flatten()
+                    .and_then(|resolved| resolved.attributes.process_time_rules);
+                let value = match lines {
+                    Some(lines) => json!({ "rules": lines, "default": time }),
+                    None => time,
+                };
+                json!({ "change": "set_attribute", "target": { "instance": change.name }, "attribute": change.attribute, "value": value })
             })
             .collect();
         self.edit(batch, None, take_over)

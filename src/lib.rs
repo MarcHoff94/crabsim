@@ -18,6 +18,7 @@ pub mod random_numbers;
 pub mod simulation_run;
 pub mod statistics;
 pub mod time;
+pub mod watch;
 
 pub use crate::materialflow_objects::flows; // keep single module re-export
 pub use crate::materialflow_objects::flows::{BaseObject, DestinationId, FailureProfile, MoveableUnit, MuKindId, ProcessState, TimeBasis, NO_DESTINATION};

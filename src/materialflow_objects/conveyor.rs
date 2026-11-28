@@ -751,10 +751,21 @@ impl Conveyor {
 			}
 		}
 		others.get_mut(to).arriving(from, on.crosswise);
-		if let Some(entered) = others.get_mut(to).enter(on.mu, context).map_err(|_| RunTimeError {})? {
+		let entered = if context.decides_times() { self.enter_deciding_time(others, to, on.mu, context) } else { others.get_mut(to).enter(on.mu, context) };
+		if let Some(entered) = entered.map_err(|_| RunTimeError {})? {
 			context.schedule(entered);
 		}
 		Ok(())
+	}
+
+	/// Hands the MU over to a successor that may be a Station with time rules (ADR 0030), this
+	/// conveyor read as the giver.
+	#[cold]
+	#[inline(never)]
+	fn enter_deciding_time(&self, others: &mut OtherObjects<'_>, to: u32, mu: MoveableUnit, context: &mut EventContext) -> Result<Option<EventTemplate>, MaterialflowError> {
+		let (keeper, kind) = self.statistics_and_kind();
+		let giver = crate::rules::Peer { id: self.base.object_id, keeper, kind };
+		crate::materialflow_objects::model_object::enter_deciding_time(others, to, giver, mu, context)
 	}
 
 	/// What user code needs as the MU is handed over: its answer goes with it, and into an object
@@ -1681,5 +1692,8 @@ impl SuccessorContainer for Conveyor {
 	#[inline(never)]
 	fn statistics_mut(&mut self) -> &mut StatisticsKeeper {
 		&mut self.statistics
+	}
+	fn statistics_and_kind(&self) -> (&StatisticsKeeper, crate::ObjectKind) {
+		(&self.statistics, if self.cross.is_some() { crate::ObjectKind::CrossConveyor } else { crate::ObjectKind::Conveyor })
 	}
 }

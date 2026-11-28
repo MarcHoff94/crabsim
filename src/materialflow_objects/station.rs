@@ -292,6 +292,26 @@ impl SingleStation {
 	pub fn is_paused(&self) -> bool {
 		self.interruptions.is_active(Interruption::Paused)
 	}
+	/// Takes the MU in and starts work on it: for its plan step's own time, or else `decided`, the
+	/// time its time rules gave it (ADR 0030), or else its own.
+	pub(crate) fn take_in(&mut self, mut mu: MoveableUnit, arrival: Arrival, decided: Option<SimTime>, context: &mut EventContext) -> Result<Option<EventTemplate>, MaterialflowError> {
+		log::info!("MU {} entered SingleStation {}", mu.id, self.base.object_id);
+		let mu_id = mu.id;
+		self.plan.count(arrival);
+		if self.detour != NO_DESTINATION {
+			mu.detour = self.detour;
+		}
+		self.content = Some(mu);
+		self.statistics.count_mu_in();
+		let exit = self.start_work(mu_id, arrival.process_time(decided.unwrap_or(self.proc_time)), context);
+		// An MU it was receiving arrives even while it is interrupted, and waits with its work
+		// frozen until the interruption ends. The exit just scheduled is then stale.
+		if self.is_interrupted() {
+			self.freeze_work(context);
+		}
+		self.update_statistics(context.time);
+		Ok(Some(exit))
+	}
 	/// Tells the statistics what the station ended up doing.
 	fn update_statistics(&mut self, now: SimTime) {
 		let state = MachineState::of(self.interruptions.most_serious(), &self.state);
@@ -334,28 +354,9 @@ impl MaterialFlow for SingleStation {
 			ProcessState::Receiving => false,
 		}
 	}
-	fn process_mu_entrance(
-		&mut self,
-		mut mu: MoveableUnit,
-		arrival: Arrival,
-		context: &mut EventContext,
-	) -> Result<Option<EventTemplate>, MaterialflowError> {
-		log::info!("MU {} entered SingleStation {}", mu.id, self.base.object_id);
-		let mu_id = mu.id;
-		self.plan.count(arrival);
-		if self.detour != NO_DESTINATION {
-			mu.detour = self.detour;
-		}
-		self.content = Some(mu);
-		self.statistics.count_mu_in();
-		let exit = self.start_work(mu_id, arrival.process_time(self.proc_time), context);
-		// An MU it was receiving arrives even while it is interrupted, and waits with its work
-		// frozen until the interruption ends. The exit just scheduled is then stale.
-		if self.is_interrupted() {
-			self.freeze_work(context);
-		}
-		self.update_statistics(context.time);
-		Ok(Some(exit))
+	#[inline]
+	fn process_mu_entrance(&mut self, mu: MoveableUnit, arrival: Arrival, context: &mut EventContext) -> Result<Option<EventTemplate>, MaterialflowError> {
+		self.take_in(mu, arrival, None, context)
 	}
 	fn reserve(&mut self, mu_id: u32, context: &mut EventContext) {
 		self.entrancelocked = true;
@@ -502,5 +503,8 @@ impl SuccessorContainer for SingleStation {
 	}
 	fn statistics_mut(&mut self) -> &mut StatisticsKeeper {
 		&mut self.statistics
+	}
+	fn statistics_and_kind(&self) -> (&StatisticsKeeper, crate::ObjectKind) {
+		(&self.statistics, crate::ObjectKind::Station)
 	}
 }

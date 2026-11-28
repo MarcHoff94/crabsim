@@ -204,8 +204,11 @@ impl<'a> Analysis<'a> {
                     "Station" => {
                         let own = has.process_time.unwrap_or(SimTime::ZERO);
                         let capacity = has.capacity.map_or(1, crabsim::Capacity::limit);
-                        let shortest = step_times[i].iter().copied().chain([own]).min().expect("one at least");
-                        let longest = step_times[i].iter().copied().chain([own]).max().expect("one at least");
+                        // Its time by MU can give any of its lines' times (ADR 0030).
+                        let lines = has.process_time_rules.iter().flatten().filter_map(|text| crate::rules::TimeLine::parse(text).ok()?.time());
+                        let times = || step_times[i].iter().copied().chain([own]).chain(lines.clone());
+                        let shortest = times().min().expect("one at least");
+                        let longest = times().max().expect("one at least");
                         object.holds = Some(capacity);
                         object.least = shortest.as_secs_f64();
                         object.work_most = Some(longest);

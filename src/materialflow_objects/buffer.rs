@@ -315,6 +315,9 @@ impl SuccessorContainer for Buffer {
     fn statistics_mut(&mut self) -> &mut StatisticsKeeper {
         &mut self.statistics
     }
+    fn statistics_and_kind(&self) -> (&StatisticsKeeper, crate::ObjectKind) {
+        (&self.statistics, crate::ObjectKind::Buffer)
+    }
     fn take_content(&mut self, now: SimTime) -> Option<MoveableUnit> {
         let at = self.offered(now)?;
         self.content.remove(at).map(|held| held.mu)

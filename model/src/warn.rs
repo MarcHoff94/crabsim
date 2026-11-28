@@ -69,7 +69,9 @@ impl Model {
                         let has = self.resolve(other).expect("checked").attributes;
                         let (time, at_once) = match built_in[other] {
                             "Source" => (has.interval, 1),
-                            // A Station with capacity works on that many at once.
+                            // A Station with capacity works on that many at once. Its time by
+                            // MU depends on which come.
+                            "Station" if has.process_time_rules.is_some() => (None, 1),
                             "Station" => (has.process_time, has.capacity.map_or(1, crate::Capacity::limit)),
                             _ => (None, 1),
                         };

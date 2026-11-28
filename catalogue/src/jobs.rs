@@ -109,6 +109,8 @@ struct Plan {
     expectations: Vec<crabsim_model::expect::Bound>,
     /// Every expectation's id, by its place in the model.
     expectation_ids: Vec<String>,
+    /// What every observation watches for the expectations' limits on which MUs an object takes.
+    watches: crabsim_model::expect::EntryWatches,
 }
 
 /// A job as this process knows it.
@@ -373,6 +375,9 @@ fn observe(shared: &Shared, plan: &Plan, k: u32) -> Option<Outcome> {
     let seed = observation_seed(plan.seed, k);
     let started = Instant::now();
     let mut run = if plan.deterministic { plan.model.build_deterministic(seed) } else { plan.model.build(seed) };
+    if !plan.watches.list.is_empty() {
+        run.watch(plan.watches.list.clone());
+    }
     // The states a `last` stretch starts from, taken on the way: stopping changes nothing.
     let mut snapshots = std::collections::BTreeMap::new();
     let error = match run.init() {
@@ -416,7 +421,7 @@ fn observe(shared: &Shared, plan: &Plan, k: u32) -> Option<Outcome> {
     let state = run.state();
     let mut observed = Vec::new();
     if error.is_none() && !plan.expectations.is_empty() {
-        observed = crabsim_model::expect::observe(&plan.expectations, &state, &snapshots, plan.warm_up, plan.length);
+        observed = crabsim_model::expect::observe(&plan.expectations, &state, &snapshots, plan.warm_up, plan.length, &plan.watches);
         // Only an observation that broke a limit runs again, to find where.
         let broken = crabsim_model::expect::broken_limits(&plan.expectations, &observed);
         let limits: Vec<&crabsim_model::expect::Bound> = broken.iter().map(|&at| &plan.expectations[at]).collect();
@@ -482,15 +487,25 @@ fn record(store: &mut Store, plan: &Plan, k: u32, outcome: &Outcome) -> rusqlite
             }
         }
         let mut insert_value = transaction.prepare("INSERT INTO expectation_values (run, observation, expectation, object, value) VALUES (?1, ?2, ?3, ?4, ?5)")?;
-        let mut insert_violation =
-            transaction.prepare("INSERT INTO violations (run, observation, expectation, time_s, object, mu, value) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)")?;
+        let mut insert_violation = transaction
+            .prepare("INSERT INTO violations (run, observation, expectation, time_s, object, mu, value, class, step) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)")?;
         for (bound, observed) in plan.expectations.iter().zip(&outcome.observed) {
             let id = &plan.expectation_ids[bound.index];
             for (subject, value) in &observed.values {
                 insert_value.execute(params![plan.id, k, id, subject.map(|subject| plan.objects[subject as usize].name.as_str()), value])?;
             }
-            if let Some(violation) = observed.violation {
-                insert_violation.execute(params![plan.id, k, id, violation.time.as_secs_f64(), plan.objects[violation.object as usize].name, violation.mu, violation.value])?;
+            if let Some(violation) = &observed.violation {
+                insert_violation.execute(params![
+                    plan.id,
+                    k,
+                    id,
+                    violation.time.as_secs_f64(),
+                    plan.objects[violation.object as usize].name,
+                    violation.mu,
+                    violation.value,
+                    violation.class,
+                    violation.step
+                ])?;
             }
         }
     }
@@ -697,6 +712,7 @@ pub(crate) fn launch_run(catalogue: &Catalogue, path: &str, prepared: &Prepared,
         warm_up: launch.warm_up,
         observations: launch.observations,
         deterministic: launch.deterministic,
+        watches: model.entry_watches(&expectations),
         expectations,
         expectation_ids: model.expectations.iter().map(|expectation| expectation.id.clone()).collect(),
     };

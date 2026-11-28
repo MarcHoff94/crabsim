@@ -106,6 +106,8 @@ pub struct ModelDescription {
     hook_table: crate::hooks::HookTable,
     /// Each object's rules, by id (ADR 0030): only objects with rules have any.
     rules: Vec<(u32, std::sync::Arc<crate::rules::Rules>)>,
+    /// Each Station's process time by MU, by id (ADR 0030): only Stations with time rules.
+    times: Vec<(u32, std::sync::Arc<crate::rules::TimeRules>)>,
 }
 
 impl Default for ModelDescription {
@@ -121,6 +123,7 @@ impl Default for ModelDescription {
             hooks: None,
             hook_table: crate::hooks::HookTable::default(),
             rules: Vec::new(),
+            times: Vec::new(),
         }
     }
 }
@@ -133,6 +136,11 @@ impl ModelDescription {
     /// The model's kinds of MU, by `MuKindId`: the built-in MU's first.
     pub fn mu_kinds(&self) -> &[MuKind] {
         &self.mu_kinds
+    }
+
+    /// The work plan of an MU kind, empty without one.
+    pub fn plan(&self, kind: MuKindId) -> &[PlanStep] {
+        self.plans.get(usize::from(kind)).map_or(&[], Vec::as_slice)
     }
 
     /// Adds a kind of MU without a work plan, or finds the same one already there, and returns
@@ -154,6 +162,17 @@ impl ModelDescription {
         if let Some(found) = self.mu_kinds.iter().zip(&self.plans).position(|(known, known_plan)| *known == kind && *known_plan == plan) {
             return found as MuKindId;
         }
+        self.add_separate_mu_kind(kind, plan)
+    }
+
+    /// Adds a kind of MU whose MUs follow this work plan even if the same one is already there,
+    /// and returns its id: for MUs a rule or an expectation must tell apart from those of the
+    /// kind alike, such as two MU classes of the same size (ADR 0030).
+    ///
+    /// # Panics
+    /// Past 65,536 kinds, or if a step names a destination the model doesn't have.
+    pub fn add_separate_mu_kind(&mut self, kind: MuKind, plan: Vec<PlanStep>) -> MuKindId {
+        assert!(plan.iter().all(|step| usize::from(step.at) < self.destinations.len()), "a work plan step names a destination the model doesn't have");
         assert!(self.mu_kinds.len() <= usize::from(MuKindId::MAX), "a model can have at most 65,536 kinds of MU");
         self.mu_kinds.push(kind);
         self.plans.push(plan);
@@ -521,7 +540,28 @@ impl ModelDescription {
         if !self.rules.is_empty() {
             run.attach_rules(&self.rules);
         }
+        if !self.times.is_empty() {
+            run.attach_times(&self.times);
+        }
         run
+    }
+
+    /// Gives a Station its process time by MU (ADR 0030), replacing any it had: when/then lines
+    /// read in order as an MU enters, the first that holds giving its time, or the Station's own
+    /// with `default`; with none holding, its own. A work plan step's own time wins over them for
+    /// an MU on plan there. The Station's own time is still what an intervention changes and a
+    /// weighted object weighs.
+    pub fn set_time_rules(&mut self, id: u32, rules: crate::rules::TimeRules) {
+        assert!(self.objects.get(id as usize).is_some_and(ModelObject::is_station), "object {id} isn't a Station, so it has no process time");
+        self.times.retain(|(object, _)| *object != id);
+        if !rules.lines.is_empty() {
+            self.times.push((id, std::sync::Arc::new(rules)));
+        }
+    }
+
+    /// A Station's process time by MU, if it has one.
+    pub fn time_rules(&self, id: u32) -> Option<&crate::rules::TimeRules> {
+        self.times.iter().find(|(object, _)| *object == id).map(|(_, rules)| &**rules)
     }
 
     /// Gives an object rules (ADR 0030), replacing any it had: when/then lines it reads in

@@ -166,6 +166,19 @@ fn changes_kept_on_reset_are_saved_to_the_file_together() {
 }
 
 #[test]
+fn a_kept_change_of_a_process_time_by_mu_is_its_own_time_and_keeps_its_lines() {
+    let folder = Folder::new("keep-lines");
+    let mut workspace = open(&folder);
+    workspace.set_attribute("P1", "process_time", json!({ "rules": ["when class = MU then 3s"], "default": "0:05" }), false).unwrap();
+    assert_eq!(workspace.check(), Some(ModelChange::Changed));
+    workspace.apply_pending();
+    workspace.keep_changes(&[change("P1", 30)], false).unwrap();
+    assert_eq!(workspace.check(), Some(ModelChange::Changed));
+    workspace.apply_pending();
+    assert_eq!(of(&workspace, "P1", "process_time"), (Some(json!({ "rules": ["when class = MU then 3s"], "default": "00:00:30" })), ValueFrom::Instance));
+}
+
+#[test]
 fn changes_kept_on_reset_are_all_refused_while_an_agent_holds_the_file_unless_taken_over() {
     let folder = Folder::new("keep-agent");
     let mut workspace = open(&folder);
@@ -697,4 +710,32 @@ fn rules_read_back_as_one_line_each_with_their_default_and_none_written_is_refus
     form.distribution.as_mut().unwrap().rules = Some("  ".into());
     assert!(form.value().is_err());
     assert_eq!(summary(&given), "rules: when class = Frame then to A and 1 more; else weighted: route by process time, smallest first");
+}
+
+#[test]
+fn a_process_time_by_mu_reads_back_as_its_lines_and_its_own_time_and_is_saved_and_shown() {
+    let given = json!({ "rules": ["when class = Frame then 30s", "otherwise default"], "default": "00:00:20" });
+    let mut form = Form::for_attribute("process_time", Some(&given), &[], &with_drains(&[]));
+    assert_eq!(form.time_rules.as_deref(), Some("when class = Frame then 30s\notherwise default"));
+    assert_eq!(form.parts[0].text, "00:00:20", "the field is its own time");
+    assert_eq!(form.value(), Ok(given.clone()));
+    assert!(form.matches(Some(&given)));
+    // Unticked, one time for every MU; no line written is refused.
+    form.time_rules = None;
+    assert_eq!(form.value(), Ok(json!("00:00:20")));
+    form.time_rules = Some(" \n".into());
+    assert!(form.value().is_err());
+    let plain = Form::for_attribute("process_time", Some(&json!("00:00:20")), &[], &with_drains(&[]));
+    assert_eq!(plain.time_rules, None);
+    assert_eq!(summary(&given), "rules: when class = Frame then 30s and 1 more; else its own 00:00:20");
+
+    // Saved through the workspace, and read back with where it comes from.
+    let folder = Folder::new("time-rules");
+    let mut workspace = open(&folder);
+    workspace.set_attribute("P1", "process_time", json!({ "rules": ["otherwise 9s"], "default": "0:30" }), false).unwrap();
+    assert_eq!(workspace.check(), Some(ModelChange::Changed));
+    workspace.apply_pending();
+    assert_eq!(of(&workspace, "P1", "process_time"), (Some(json!({ "rules": ["otherwise 9s"], "default": "00:00:30" })), ValueFrom::Instance));
+    let refused = workspace.set_attribute("P1", "process_time", json!({ "rules": ["otherwise soon"], "default": "0:30" }), false).unwrap_err();
+    assert!(matches!(&refused, Refusal::Invalid(message) if message.contains("isn't a time")), "{refused:?}");
 }

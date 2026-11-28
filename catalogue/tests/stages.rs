@@ -239,7 +239,7 @@ fn a_store_of_the_eighth_version_gains_the_columns_of_stages_checks() {
     }
     let user = Catalogue::open(Settings::new(&folder.folder.path, Source::Cli)).unwrap();
     let version = user.call("query_results", json!({ "sql": "SELECT user_version FROM pragma_user_version" })).unwrap();
-    assert_eq!(version["rows"][0][0], 9);
+    assert_eq!(version["rows"][0][0], 10);
     // The old run was an experiment, so the model is unchecked until checked again.
     let status = user.call("get_status", json!({ "path": "line.json" })).unwrap();
     assert_eq!(status["verification"]["summary"], "never checked");

@@ -52,7 +52,7 @@ fn observe(model: &Model, seed: u64, deterministic: bool, warm_up: SimTime, leng
         snapshots.insert(time, run.state());
     }
     run.advance_to(warm_up + length).unwrap();
-    let mut observed = expect::observe(&bound, &run.state(), &snapshots, warm_up, length);
+    let mut observed = expect::observe(&bound, &run.state(), &snapshots, warm_up, length, &model.entry_watches(&bound));
     let broken: Vec<usize> = expect::broken_limits(&bound, &observed);
     let limits: Vec<&expect::Bound> = broken.iter().map(|&at| &bound[at]).collect();
     for (at, violation) in broken.iter().zip(expect::first_violations(&description, seed, deterministic, warm_up, length, &limits)) {
@@ -149,7 +149,7 @@ fn a_deterministic_run_judges_each_kind_of_check() {
 fn a_limits_first_violation_is_the_moment_and_mu_that_broke_it() {
     let model = load(&line(json!([{ "id": "full", "text": "Buffer.mus always <= 20" }]))).unwrap();
     let observed = observe(&model, 1, true, SimTime::ZERO, hours(4));
-    let violation = observed[0].violation.expect("the Buffer went past 20");
+    let violation = observed[0].violation.clone().expect("the Buffer went past 20");
     assert_eq!(violation.value, 21.0);
     // Worked out again from every move of a recorded run: the first time the Buffer held 21.
     let mut run = model.to_description().build_deterministic(1);
@@ -180,7 +180,7 @@ fn a_limit_is_judged_from_the_end_of_the_warm_up() {
     // starts the count there, and the limit is broken at once.
     let model = load(&line(json!([{ "id": "full", "text": "Buffer.mus always <= 80" }]))).unwrap();
     let after_warm_up = observe(&model, 1, true, HOUR, HOUR);
-    let violation = after_warm_up[0].violation.expect("broken in the second hour");
+    let violation = after_warm_up[0].violation.clone().expect("broken in the second hour");
     assert!(violation.time > HOUR && violation.time < hours(2), "{violation:?}");
     assert_eq!(observe(&model, 1, true, SimTime::ZERO, HOUR)[0].violation, None, "not broken in the first hour");
 }

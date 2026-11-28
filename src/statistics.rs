@@ -143,56 +143,14 @@ pub struct StatisticsKeeper {
     totals: ObjectStatistics,
     state: MachineState,
     contents: u64,
-    /// 0 for an object that has no MU-level statistics, and `u32::MAX` for no limit: 32 bits, so
-    /// a rule's stretches fit beside it with no object growing (see `capacity`).
-    capacity: u32,
+    /// 0 for an object that has no MU-level statistics.
+    capacity: u64,
     since: SimTime,
-    /// The stretches a rule reads, such as its last 30 minutes (ADR 0030), each kept in buckets.
-    /// Only objects a rule names over a stretch have them, so others pay one check on a change
-    /// of state.
-    stretches: Option<Box<Vec<Stretch>>>,
-}
-
-/// How many buckets a stretch is kept in: its value is read over the stretch's length and up to
-/// one bucket more.
-pub const STRETCH_BUCKETS: u64 = 60;
-
-/// One stretch's buckets: the statistics as they were at each of its last boundaries, a bucket's
-/// width apart from time 0, oldest first.
-#[derive(Debug, Clone)]
-struct Stretch {
-    length: SimTime,
-    width: SimTime,
-    /// Up to `STRETCH_BUCKETS + 1` boundaries with the statistics then, kept up to `since`.
-    kept: std::collections::VecDeque<(SimTime, ObjectStatistics)>,
-}
-
-impl Stretch {
-    fn new(length: SimTime) -> Stretch {
-        let width = SimTime::from_millis((length.as_millis() / STRETCH_BUCKETS).max(1));
-        Stretch { length, width, kept: std::collections::VecDeque::new() }
-    }
-
-    /// The boundaries after the last one kept up to `until`, at most as many as are kept.
-    fn boundaries(&self, until: SimTime) -> impl Iterator<Item = SimTime> + use<> {
-        let width = self.width.as_millis();
-        let last = self.kept.back().map_or(0, |(at, _)| at.as_millis() / width + 1);
-        let end = until.as_millis() / width;
-        let first = last.max(end.saturating_sub(STRETCH_BUCKETS));
-        (first..=end).filter(move |_| end >= first).map(move |bucket| SimTime::from_millis(bucket * width))
-    }
-
-    fn keep(&mut self, at: SimTime, statistics: ObjectStatistics) {
-        self.kept.push_back((at, statistics));
-        while self.kept.len() as u64 > STRETCH_BUCKETS + 1 {
-            self.kept.pop_front();
-        }
-    }
 }
 
 impl StatisticsKeeper {
     pub fn new(capacity: u64) -> StatisticsKeeper {
-        StatisticsKeeper { totals: ObjectStatistics::default(), state: MachineState::Idle, contents: 0, capacity: u32::try_from(capacity).unwrap_or(u32::MAX), since: SimTime::ZERO, stretches: None }
+        StatisticsKeeper { totals: ObjectStatistics::default(), state: MachineState::Idle, contents: 0, capacity, since: SimTime::ZERO }
     }
 
     pub fn for_drain() -> StatisticsKeeper {
@@ -202,7 +160,22 @@ impl StatisticsKeeper {
     }
 
     pub fn capacity(&self) -> u64 {
-        if self.capacity == u32::MAX { u64::MAX } else { u64::from(self.capacity) }
+        self.capacity
+    }
+
+    /// The state it is in now, as last told: what a rule reads (ADR 0030).
+    pub fn state(&self) -> MachineState {
+        self.state
+    }
+
+    /// The MUs it holds now, as last told.
+    pub fn contents(&self) -> u64 {
+        self.contents
+    }
+
+    /// When it was last told of a change, from which the state has stayed as it is.
+    pub fn since(&self) -> SimTime {
+        self.since
     }
 
     /// Takes note of what the object is doing as of `now`. Costs one comparison if nothing changed.
@@ -287,7 +260,7 @@ impl StatisticsKeeper {
     /// they are the same however an advance was split up.
     pub fn read(&self, now: SimTime) -> ObjectStatistics {
         let mut statistics = self.totals;
-        add_time(&mut statistics, self.state, self.contents, u64::from(self.capacity), now.saturating_sub(self.since));
+        add_time(&mut statistics, self.state, self.contents, self.capacity, now.saturating_sub(self.since));
         if let Some(drain) = &mut statistics.drain {
             if let Some(last_exit) = drain.last_exit {
                 let in_progress = now.saturating_sub(last_exit);
@@ -306,12 +279,6 @@ impl StatisticsKeeper {
             ..ObjectStatistics::default()
         };
         self.since = now;
-        // What was kept counted from before; a stretch reaching back past now reads since now.
-        if let Some(stretches) = &mut self.stretches {
-            for stretch in stretches.iter_mut() {
-                stretch.kept.clear();
-            }
-        }
     }
 
     /// Back to how it was before Init.
@@ -322,69 +289,8 @@ impl StatisticsKeeper {
     }
 
     fn add_time_up_to(&mut self, now: SimTime) {
-        // Widened as it is: no limit, `u32::MAX`, is more MUs than any object holds.
-        let capacity = u64::from(self.capacity);
-        add_time(&mut self.totals, self.state, self.contents, capacity, now.saturating_sub(self.since));
+        add_time(&mut self.totals, self.state, self.contents, self.capacity, now.saturating_sub(self.since));
         self.since = now;
-    }
-
-    /// Keeps the statistics at every boundary of its stretches up to `now`, giving the next
-    /// boundary. The run calls it before an event that reaches one, so the state hasn't changed
-    /// since `since`, and each is exact. The keeper itself never checks, so objects no rule reads
-    /// over a stretch pay nothing.
-    #[cold]
-    #[inline(never)]
-    pub fn roll_stretches(&mut self, now: SimTime) -> SimTime {
-        let Some(mut stretches) = self.stretches.take() else { return SimTime::MAX };
-        let mut next = SimTime::MAX;
-        for stretch in stretches.iter_mut() {
-            for at in stretch.boundaries(now).collect::<Vec<_>>() {
-                if at >= self.since {
-                    stretch.keep(at, self.read(at));
-                }
-            }
-            let width = stretch.width.as_millis();
-            next = next.min(SimTime::from_millis((now.as_millis() / width + 1) * width));
-        }
-        self.stretches = Some(stretches);
-        next
-    }
-
-    /// Keeps the stretch of this length from now on, for a rule reading it (ADR 0030).
-    pub fn watch(&mut self, length: SimTime) {
-        let stretches = self.stretches.get_or_insert_with(Default::default);
-        if !stretches.iter().any(|stretch| stretch.length == length) {
-            stretches.push(Stretch::new(length));
-        }
-    }
-
-    /// The statistics at the start of the stretch of `length` before `now`, which it must watch:
-    /// at the last boundary at or before it, so the stretch is up to one bucket longer, or since
-    /// statistics began when that is later.
-    pub fn at_stretch_start(&self, length: SimTime, now: SimTime) -> ObjectStatistics {
-        let Some(stretch) = self.stretches.as_deref().and_then(|stretches| stretches.iter().find(|stretch| stretch.length == length)) else {
-            return ObjectStatistics { drain: self.totals.drain.map(|_| DrainStatistics::default()), ..ObjectStatistics::default() };
-        };
-        let width = stretch.width.as_millis();
-        let start = SimTime::from_millis(now.saturating_sub(length).as_millis() / width * width);
-        if start >= self.since {
-            return self.read(start);
-        }
-        match stretch.kept.iter().rev().find(|(at, _)| *at <= start).or(stretch.kept.front()) {
-            Some((at, statistics)) if *at <= start || stretch.kept.len() as u64 > STRETCH_BUCKETS => *statistics,
-            // Statistics began after the stretch's start.
-            _ => ObjectStatistics { drain: self.totals.drain.map(|_| DrainStatistics::default()), ..ObjectStatistics::default() },
-        }
-    }
-
-    /// The state it is in now, as last told.
-    pub fn state(&self) -> MachineState {
-        self.state
-    }
-
-    /// The MUs it holds now, as last told.
-    pub fn contents(&self) -> u64 {
-        self.contents
     }
 }
 

@@ -64,7 +64,7 @@ pub struct SimulationRun {
     /// The end of the measuring period in progress, or the end of time without periods, so
     /// checking for one costs the per-event path a single comparison.
     period_end: SimTime,
-    /// The objects a rule reads over a stretch (ADR 0030), whose buckets the run keeps.
+    /// The objects whose rules read over a stretch (ADR 0030), whose buckets the run keeps.
     watched: Vec<u32>,
     /// When the next of their buckets begins: `SimTime::MAX` without any, so other models pay
     /// one comparison an event.
@@ -119,16 +119,12 @@ impl SimulationRun {
             let successors: Vec<u32> = object.successor_ids().to_vec();
             if let Some(distribution) = object.distribution_mut() {
                 let builtin = std::mem::take(distribution);
-                *distribution = Distributing::Rules(Box::new(crate::rules::Ruled::new(Arc::clone(rules), builtin, successors.len())));
-            }
-            for (watched, length) in rules.stretches(&successors) {
-                if let Some(object) = self.objects.get_mut(watched as usize) {
-                    object.statistics_keeper_mut().watch(length);
-                    if !self.watched.contains(&watched) {
-                        self.watched.push(watched);
-                    }
+                let ruled = crate::rules::Ruled::new(Arc::clone(rules), builtin, &successors);
+                if !ruled.stretches.is_empty() {
+                    self.watched.push(*id);
                     self.stretch_next = SimTime::ZERO;
                 }
+                *distribution = Distributing::Rules(Box::new(ruled));
             }
         }
     }
@@ -205,6 +201,16 @@ impl SimulationRun {
 
     /// Starts every object's statistics afresh from the current time, such as at the end of a
     /// warm-up. It changes nothing else, so random numbers and event order stay the same.
+    /// Forgets what every rule's stretches kept, so they start afresh with the statistics.
+    fn clear_stretches(&mut self) {
+        for &id in &self.watched {
+            if let Some(Distributing::Rules(ruled)) = self.objects[id as usize].distribution_mut() {
+                ruled.clear_stretches();
+            }
+        }
+        self.stretch_next = if self.watched.is_empty() { SimTime::MAX } else { SimTime::ZERO };
+    }
+
     /// Keeps the buckets of every stretch a rule reads up to `now`, before the event at `now`
     /// changes anything (ADR 0030).
     #[cold]
@@ -212,7 +218,12 @@ impl SimulationRun {
     fn roll_stretches(&mut self, now: SimTime) {
         let mut next = SimTime::MAX;
         for &id in &self.watched {
-            next = next.min(self.objects[id as usize].statistics_keeper_mut().roll_stretches(now));
+            let Some(distribution) = self.objects[id as usize].distribution_mut() else { continue };
+            let mut taken = std::mem::take(distribution);
+            if let Distributing::Rules(ruled) = &mut taken {
+                next = next.min(ruled.roll(&self.objects, now));
+            }
+            *self.objects[id as usize].distribution_mut().expect("it has one") = taken;
         }
         self.stretch_next = next;
     }
@@ -221,9 +232,7 @@ impl SimulationRun {
         for object in &mut self.objects {
             object.clear_statistics(self.time);
         }
-        if !self.watched.is_empty() {
-            self.stretch_next = SimTime::ZERO;
-        }
+        self.clear_stretches();
         self.statistics_since = self.time;
         self.start_periods();
     }
@@ -522,7 +531,7 @@ impl SimulationRun {
         self.statistics_since = SimTime::ZERO;
         self.periods = None;
         self.period_end = SimTime::MAX;
-        self.stretch_next = if self.watched.is_empty() { SimTime::MAX } else { SimTime::ZERO };
+        self.clear_stretches();
         self.context = self.default_context();
         self.rank_successors();
         if let Some(hooks) = &mut self.hooks {

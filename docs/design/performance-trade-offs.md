@@ -16,6 +16,13 @@ An idea for something faster goes under "Ideas", with what it would gain and wha
 
 ## Trade-offs made
 
+### Rules, spec issue 162's PR 3 (2026-11-28)
+- **Chosen:** rules as one more `Distributing` kind on code's cold path, deciding without allocating (`Ruled::order` and `values` reused), and a stretch's 60 buckets kept by the rules that read it, rolled by the run before an event that reaches the next boundary. The statistics keeper is as it was.
+- **Cost on models without rules: one comparison an event** (`stretch_next`, `SimTime::MAX`), and the new match arms. Every occurrence and the final state of the demo, the buffered, conveyor and cross lines over 2 days hash the same as `master`. Instructions (cachegrind, 10 simulated days): about +0.7% on the demo and +0.4% on the buffered line with the buckets in the keeper and the check in the run loop. Wall time with the buckets in the rules, the benchmark's own binaries alternating with `master`'s in the container, medians of 9 repetitions (3 for the cross line), means of the pairs: demo headless -0.6% (5 pairs), buffered line +1.6% (5), demo kept +1.0% (3), 6,006 objects -1.0% (3), cross line -1.8% (3). The container's noise is a few percent between runs of one build, so these are within it, the cross line nearest the ±2% the spec allows.
+- **Tried first, and dropped:** the buckets in `StatisticsKeeper`, behind a pointer, with its capacity narrowed to 32 bits so no object grew. A check on each change of state cost 2.2 to 2.5% of instructions (callgrind put it all in `update_statistics`); moved to the run loop, instructions came to +0.4 to +0.7%, but the demo still ran about 4% slower in five alternating pairs, which only the keeper's changed layout explains. Putting the keeper back as it was brought it within ±2%.
+- **Cost of a rule:** its lines per decision, each condition reading statistics as they stand (a `read` of the keeper, a copy of its totals), and `smallest`/`largest` one read per successor and a sort. Not measured: no scenario has rules.
+- **Decided by** Claude while building, against the spec's ±2%.
+
 ### WebAssembly hooks, PR 2 (2026-11-27, spec issue 156)
 - **Chosen:** a plain WebAssembly module with a hand-written interface, run by wasmtime, rather than a component under a WIT world (`code-interface.md`). The reason was checkpoints, not speed: a component's memory can't be read through wasmtime's API, so it couldn't be copied.
 - **Cost on models without code: none.** The engine's per-event path is unchanged: PR 2 added only `HookRun::seed` and `stream` and made `TriggerPoint::ALL` public. A model without code builds exactly as before (a test compares every occurrence and the final state), and the host crate is never on its path.

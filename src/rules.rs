@@ -188,10 +188,71 @@ pub struct Ruled {
     pub(crate) order: Vec<usize>,
     /// Each exit's value while a decision sorts them, reused likewise.
     values: Vec<(usize, Option<f64>)>,
+    /// The stretches its lines read, each the statistics of its object at its last boundaries,
+    /// which the run keeps (`roll`). Kept here, not by the objects read, so no other object or
+    /// model pays for them.
+    pub(crate) stretches: Vec<Stretch>,
+}
+
+/// How many buckets a stretch is kept in: its value is read over the stretch's length and up to
+/// one bucket more.
+pub const STRETCH_BUCKETS: u64 = 60;
+
+/// One object's statistics at the last boundaries of a stretch, a bucket's width apart from time
+/// 0, oldest first.
+#[derive(Debug, Clone)]
+pub(crate) struct Stretch {
+    object: u32,
+    length: SimTime,
+    width: SimTime,
+    /// Up to `STRETCH_BUCKETS + 1` boundaries with the statistics then.
+    kept: std::collections::VecDeque<(SimTime, ObjectStatistics)>,
+}
+
+impl Stretch {
+    fn new(object: u32, length: SimTime) -> Stretch {
+        let width = SimTime::from_millis((length.as_millis() / STRETCH_BUCKETS).max(1));
+        Stretch { object, length, width, kept: std::collections::VecDeque::new() }
+    }
+
+    /// Keeps the statistics of its object at each boundary after the last kept, up to `now`,
+    /// giving the next. Exact while the object's state hasn't changed since the boundary, as it
+    /// hasn't before the event that reaches it.
+    fn roll(&mut self, keeper: &crate::statistics::StatisticsKeeper, now: SimTime) -> SimTime {
+        let width = self.width.as_millis();
+        let first = self.kept.back().map_or(0, |(at, _)| at.as_millis() / width + 1);
+        let end = now.as_millis() / width;
+        for bucket in first.max(end.saturating_sub(STRETCH_BUCKETS))..=end {
+            let at = SimTime::from_millis(bucket * width);
+            if at >= keeper.since() && first <= end {
+                self.kept.push_back((at, keeper.read(at)));
+                while self.kept.len() as u64 > STRETCH_BUCKETS + 1 {
+                    self.kept.pop_front();
+                }
+            }
+        }
+        SimTime::from_millis((end + 1) * width)
+    }
+
+    /// The statistics at the start of the stretch before `now`: at the last boundary at or before
+    /// it, or since statistics began when that is later.
+    fn at_start(&self, keeper: &crate::statistics::StatisticsKeeper, now: SimTime) -> ObjectStatistics {
+        let width = self.width.as_millis();
+        let start = SimTime::from_millis(now.saturating_sub(self.length).as_millis() / width * width);
+        if start >= keeper.since() {
+            return keeper.read(start);
+        }
+        let zero = || ObjectStatistics { drain: keeper.read(now).drain.map(|_| Default::default()), ..ObjectStatistics::default() };
+        match self.kept.iter().rev().find(|(at, _)| *at <= start) {
+            Some((_, statistics)) => *statistics,
+            None => zero(),
+        }
+    }
 }
 
 impl Ruled {
-    pub fn new(rules: Arc<Rules>, builtin: crate::materialflow_objects::flows::Distributing, exits: usize) -> Ruled {
+    pub fn new(rules: Arc<Rules>, builtin: crate::materialflow_objects::flows::Distributing, successors: &[u32]) -> Ruled {
+        let exits = successors.len();
         let masks = rules
             .lines
             .iter()
@@ -200,7 +261,25 @@ impl Ruled {
                 _ => Vec::new(),
             })
             .collect();
-        Ruled { rules, builtin, masks, order: Vec::new(), values: Vec::new() }
+        let stretches = rules.stretches(successors).into_iter().map(|(object, length)| Stretch::new(object, length)).collect();
+        Ruled { rules, builtin, masks, order: Vec::new(), values: Vec::new(), stretches }
+    }
+
+    /// Keeps every stretch's buckets up to `now`, before the event at `now` changes anything,
+    /// giving when the next boundary is.
+    pub(crate) fn roll(&mut self, objects: &[ModelObject], now: SimTime) -> SimTime {
+        let mut next = SimTime::MAX;
+        for stretch in &mut self.stretches {
+            next = next.min(stretch.roll(objects[stretch.object as usize].statistics_keeper(), now));
+        }
+        next
+    }
+
+    /// Forgets what the stretches kept, at Reset or when statistics start afresh.
+    pub(crate) fn clear_stretches(&mut self) {
+        for stretch in &mut self.stretches {
+            stretch.kept.clear();
+        }
     }
 }
 
@@ -233,7 +312,8 @@ impl Ruled {
     /// Decides where the MU goes: reads the lines in order, the first that holds deciding, at
     /// `now`, reading the objects in `others` and the deciding object's successors.
     pub(crate) fn decide(&mut self, mu: &MoveableUnit, destination: DestinationId, successors: &[u32], others: &OtherObjects<'_>, now: SimTime) -> Decided {
-        let reading = |reading: &Reading| read(others.get(reading.object), reading.figure, reading.scope, now);
+        let stretches = &self.stretches;
+        let reading = |reading: &Reading| read(others.get(reading.object), reading.object, reading.figure, reading.scope, now, stretches);
         let holds = |condition: &Condition| match condition {
             Condition::Class { kinds, equal } => kinds.contains(&mu.kind()) == *equal,
             Condition::Destination { destination: wanted, equal } => (destination == *wanted) == *equal,
@@ -264,7 +344,7 @@ impl Ruled {
                     self.order.extend(among.iter().copied().filter(|&exit| exit < successors.len()));
                 }
                 // Each exit's value, read once; those with none go last, ties keep exit order.
-                let value = |exit: usize| read(others.get(successors[exit]), *figure, *scope, now);
+                let value = |exit: usize| read(others.get(successors[exit]), successors[exit], *figure, *scope, now, &self.stretches);
                 self.values.clear();
                 self.values.extend(self.order.iter().map(|&exit| (exit, value(exit))));
                 self.values.sort_by(|(a, x), (b, y)| match (x, y) {
@@ -290,14 +370,17 @@ impl Ruled {
 const DAY: u64 = 86_400_000;
 
 /// A figure of `object` at `now`, over `scope`, or `None` where it has no value.
-pub fn read(object: &ModelObject, figure: Figure, scope: RuleScope, now: SimTime) -> Option<f64> {
+fn read(object: &ModelObject, id: u32, figure: Figure, scope: RuleScope, now: SimTime, stretches: &[Stretch]) -> Option<f64> {
     let keeper = object.statistics_keeper();
     let kind = object.kind();
     match (figure, scope) {
         (Figure::Mus, _) => Some(keeper.contents() as f64),
         (_, RuleScope::Now) => None,
         (_, RuleScope::SinceStart) => of_statistics(figure, kind, None, &keeper.read(now), now),
-        (_, RuleScope::Last(length)) => of_statistics(figure, kind, Some(&keeper.at_stretch_start(length, now)), &keeper.read(now), now),
+        (_, RuleScope::Last(length)) => {
+            let start = stretches.iter().find(|stretch| stretch.object == id && stretch.length == length).map(|stretch| stretch.at_start(keeper, now));
+            of_statistics(figure, kind, start.as_ref(), &keeper.read(now), now)
+        }
     }
 }
 

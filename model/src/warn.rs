@@ -120,6 +120,32 @@ impl Model {
                 );
             }
         }
+        warnings.extend(self.reference_warnings());
+        warnings.extend(self.expectation_bounds());
+        warnings
+    }
+
+    /// Warns about validation-stage expectations that a run with randomness would hardly meet as
+    /// written: `=` without a tolerance, which only that exact value meets in every observation,
+    /// and a reference figure, an `=` with a tolerance, that doesn't say where it came from.
+    fn reference_warnings(&self) -> Vec<Problem> {
+        let mut warnings = Vec::new();
+        for (index, expectation) in self.expectations.iter().enumerate() {
+            if expectation.stage != crate::CheckStage::Validation {
+                continue;
+            }
+            let Ok(check) = crate::expect::Check::parse(&expectation.text) else { continue };
+            let numeric = matches!(check.target, crate::expect::Target::Number { .. });
+            let warn = |at: &str, message: String| Problem { pointer: format!("/expectations/{index}{at}"), name: Some(expectation.id.clone()), message };
+            if numeric && check.comparison == crate::expect::Comparison::Equal && check.tolerance.is_none() && !check.is_limit() {
+                warnings.push(warn(
+                    "/text",
+                    "at the validation stage, `=` without a tolerance is met only by exactly that value in every observation: give the reference figure its tolerance, such as `± 3%`".into(),
+                ));
+            } else if check.tolerance.is_some() && expectation.source.as_deref().is_none_or(|source| source.trim().is_empty()) {
+                warnings.push(warn("", "a reference figure says where it came from in its `source`, such as the line's MES for October".into()));
+            }
+        }
         warnings
     }
 

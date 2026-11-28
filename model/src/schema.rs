@@ -125,15 +125,19 @@ pub struct ExpectationFile {
     pub id: String,
     /// The check as one line: `[every|mean] <instance, class or model>.<figure> <now|since start|
     /// last <time>|always> <comparison> <value>`, such as `every Press.working_share since start
-    /// >= 60%`, `Buffer X.mus always <= 20` or `model.throughput_per_hour last 8h >= 400/h`. The
-    /// figures are the results store's, which list_figures gives with their units and scopes.
+    /// >= 60%`, `Buffer X.mus always <= 20` or `model.throughput_per_hour last 8h >= 400/h`. A
+    /// reference figure, measured on the real line, is `=` with a tolerance after `±`: in the
+    /// figure's unit, or a percentage of the value for a figure not in shares, such as
+    /// `Drain.throughput_per_hour since start = 4100/d ± 3%`. The figures are the results
+    /// store's, which list_figures gives with their units and scopes.
     pub text: String,
     /// The stage it belongs to: `verification`, the default, checked in a deterministic run, or
     /// `validation`, checked in runs with randomness.
     pub stage: Option<StageFile>,
     /// What it takes for granted, such as "two shifts a day".
     pub assumptions: Option<String>,
-    /// Where it comes from: a SysML element, a document or a person.
+    /// Where it comes from: a SysML element, a document or a person; for a reference figure, where
+    /// it was measured, such as the line's MES for October.
     pub source: Option<String>,
     /// `proposed`, the default, by an agent and not accepted yet; `accepted` by the user, or
     /// written by the user, which only the user changes; or `questioned` by an agent, still in

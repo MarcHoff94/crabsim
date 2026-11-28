@@ -103,7 +103,9 @@ fn a_model_is_verified_and_drops_back_only_once_a_check_finds_a_change_broke_it(
     let change = status["verification"]["not_checked_since"].as_i64().expect("a change since");
     assert!(status["verification"]["summary"].as_str().unwrap().ends_with(&format!("not checked since change {change}")), "{status:#}");
     assert_eq!(expectation(&status, "busy")["current"], false);
-    assert!(status["next"].as_str().unwrap().contains("check_stage"), "{status:#}");
+    // At 5 s a Press fed every 10 s works at most half the time, which crabsim says before a
+    // check finds it.
+    assert!(status["next"].as_str().unwrap().starts_with("crabsim works out that busy can't be met as the model is"), "{status:#}");
     // Checked, it drops back.
     let checked = folder.check("verification");
     assert_eq!(checked["status"]["stage"], "draft");

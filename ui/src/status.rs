@@ -45,6 +45,10 @@ pub struct ExpectationLine {
     pub current: bool,
     pub found: Option<String>,
     pub note: Option<String>,
+    /// Why crabsim works out without a run that it can't be met, or contradicts another.
+    pub cannot_be_met: Option<String>,
+    /// Where it comes from; for a reference figure, where it was measured.
+    pub source: Option<String>,
 }
 
 impl ExpectationLine {
@@ -122,6 +126,8 @@ impl Status {
                     current: expectation["current"] == true,
                     found: optional(&expectation["found"]),
                     note: optional(&expectation["note"]),
+                    cannot_be_met: optional(&expectation["cannot_be_met"]),
+                    source: optional(&expectation["source"]),
                 })
                 .collect(),
             next: text(&status["next"]),

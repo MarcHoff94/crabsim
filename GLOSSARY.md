@@ -463,7 +463,14 @@ An expectation that holds at every moment of a run, such as "Buffer X never hold
 _Avoid_: Constraint, threshold
 
 **Reference figure**:
-An expectation from the real line, such as "Drain takes 4,100 parts a day, ± 3%", with where it came from, checked at the validation stage.
+An expectation from the real line, such as "Drain takes 4,100 parts a day, ± 3%", with where it came from, checked at the validation stage: written with `=` and a tolerance after `±`, such as `Drain.throughput_per_hour since start = 4100/d ± 3%`, and met once the 95% interval lies within it.
+
+**Tolerance**:
+How far from a reference figure's value the model's may lie: in the figure's own unit, such as `± 30s` or for a share `± 5%` in points, or a percentage of the value for any other figure, such as `± 3%` on a rate.
+
+**Bound**:
+What crabsim works out about an expectation from the model alone, without a run, such as the most MUs a Drain can get from Stations' process times: certain, never a guess. An expectation beyond its bound can't be met, which crabsim warns of before anything runs.
+_Avoid_: Estimate, limit (a Limit is an expectation)
 
 **Verdict**:
 What crabsim says of an expectation: **met**, **not met**, **undecided**, when an experiment's 95% interval straddles its limit and more observations would tell, or **error**, when it couldn't be judged. In a single run or a live session, met so far.

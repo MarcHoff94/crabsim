@@ -153,8 +153,15 @@ pub struct ExpectationResults {
     pub comparison: expect::Comparison,
     /// The value it compares with, as the line writes it.
     pub value: String,
-    /// met, not_met, undecided when an experiment's 95% interval straddles the value, or error
-    /// when it couldn't be judged. On one observation of a run with randomness, met so far.
+    /// A reference figure's tolerance, as the line writes it after `±`, such as `3%`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tolerance: Option<String>,
+    /// With a tolerance, the lowest and highest values that meet it, in the line's unit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub band: Option<[String; 2]>,
+    /// met, not_met, undecided when an experiment's 95% interval straddles the value, or for a
+    /// tolerance reaches past its band, or error when it couldn't be judged. On one observation of
+    /// a run with randomness, met so far.
     pub verdict: Verdict,
     /// For one instance, the model or a class's mean: the mean over the observations, in the
     /// line's unit.
@@ -257,6 +264,8 @@ pub fn expectation_results(model: &Model, bound: &expect::Bound, judgement: &exp
         scope: check.scope_text(),
         comparison: check.comparison,
         value: check.value_text().to_string(),
+        tolerance: check.tolerance.as_ref().map(|tolerance| tolerance.written().to_string()),
+        band: check.band().map(|(low, high)| [show(low), show(high)]),
         verdict: judgement.verdict,
         mean: None,
         ci95: None,

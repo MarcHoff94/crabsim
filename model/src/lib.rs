@@ -9,6 +9,7 @@
 //! let mut run = model.to_description().build(7);
 //! ```
 
+mod bounds;
 mod build;
 mod check;
 mod code;

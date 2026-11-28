@@ -26,7 +26,7 @@
 use crate::expect::{target, time_value, Comparison, Target};
 use crate::{DistributionStrategy, Model, Origin, Problem, State};
 use crabsim::figures::{Figure, Scope, Subject};
-use crabsim::rules::{Action, Compare, Condition, Operand, Reading, RuleLine, RuleScope, Rules, StateName};
+use crabsim::rules::{Action, Compare, Condition, Operand, Reading, RuleLine, RuleScope, Rules, StateName, TimeRules};
 use crabsim::{DestinationId, MuKindId, SimTime};
 use std::collections::HashMap;
 
@@ -68,6 +68,8 @@ pub enum Against {
 pub enum Cond {
     Class { names: Vec<String>, equal: bool },
     Destination { name: String, equal: bool },
+    /// The MU's current step names one of these classes or instances (ADR 0030).
+    Step { names: Vec<String>, equal: bool },
     TimeOfDay { comparison: Comparison, time: SimTime },
     Compare { left: Named, comparison: Comparison, right: Against },
 }
@@ -202,16 +204,20 @@ fn written(comparison: Comparison) -> &'static str {
 
 fn condition(text: &str) -> Result<Cond, String> {
     let text = text.trim();
-    for (word, is_class) in [("class", true), ("destination", false)] {
+    for (word, example) in [("class", "Frame"), ("destination", "Shipping"), ("step", "Welding")] {
         if let Some(rest) = text.strip_prefix(word).filter(|rest| rest.starts_with([' ', '=', '!'])) {
             let Some((comparison, value)) = comparison(rest).filter(|(comparison, _)| matches!(comparison, Comparison::Equal | Comparison::NotEqual)) else {
-                return Err(format!("`{word}` is compared with = or !=, such as `{word} = {}`", if is_class { "Frame" } else { "Shipping" }));
+                return Err(format!("`{word}` is compared with = or !=, such as `{word} = {example}`"));
             };
             let equal = comparison == Comparison::Equal;
             if value.is_empty() {
                 return Err(format!("`{word} {}` names nothing", written(comparison)));
             }
-            return Ok(if is_class { Cond::Class { names: list(value), equal } } else { Cond::Destination { name: value.to_string(), equal } });
+            return Ok(match word {
+                "class" => Cond::Class { names: list(value), equal },
+                "step" => Cond::Step { names: list(value), equal },
+                _ => Cond::Destination { name: value.to_string(), equal },
+            });
         }
     }
     if let Some(rest) = text.strip_prefix("time of day") {
@@ -308,20 +314,79 @@ fn action(text: &str) -> Result<Act, String> {
     Err(format!("`{text}` isn't an action: `to <successor>`, `smallest` or `largest <figure> <scope> [of <successors>] [among those free|and wait]`, `round robin [among <successors>]`, `weighted among <successors>` or `default`"))
 }
 
+/// A line's conditions and its action's text: `when <conditions> then <action>`, or
+/// `otherwise <action>` with no conditions. `form` says how to write one.
+fn when_then<'t>(text: &'t str, form: &str) -> Result<(Vec<Vec<Cond>>, &'t str), String> {
+    let text = text.trim();
+    if let Some(rest) = text.strip_prefix("otherwise ") {
+        return Ok((Vec::new(), rest));
+    }
+    let Some(rest) = text.strip_prefix("when ") else {
+        return Err(form.to_string());
+    };
+    let Some((conditions, then)) = rest.split_once(" then ") else {
+        return Err(format!("a rule's conditions are followed by ` then <action>`: {form}"));
+    };
+    let when = split_word(conditions, "or").into_iter().map(|group| split_word(group, "and").into_iter().map(condition).collect::<Result<Vec<_>, _>>()).collect::<Result<Vec<_>, _>>()?;
+    Ok((when, then))
+}
+
+/// A line as written from its conditions and its action's text.
+fn when_then_text(when: &[Vec<Cond>], then: &str) -> String {
+    if when.is_empty() {
+        return format!("otherwise {then}");
+    }
+    let condition = |condition: &Cond| match condition {
+        Cond::Class { names, equal } => format!("class {} {}", if *equal { "=" } else { "!=" }, names.join(", ")),
+        Cond::Destination { name, equal } => format!("destination {} {name}", if *equal { "=" } else { "!=" }),
+        Cond::Step { names, equal } => format!("step {} {}", if *equal { "=" } else { "!=" }, names.join(", ")),
+        Cond::TimeOfDay { comparison, time } => format!("time of day {} {}", written(*comparison), time_of_day_text(*time)),
+        Cond::Compare { left, comparison, right } => {
+            let right = match right {
+                Against::Value(Target::Number { written, .. }) => written.clone(),
+                Against::Value(Target::State(state)) => state.name().to_string(),
+                Against::Value(Target::Names(names)) => names.join(", "),
+                Against::Figure(named) => named.text(),
+            };
+            format!("{} {} {right}", left.text(), written(*comparison))
+        }
+    };
+    let when: Vec<String> = when.iter().map(|group| group.iter().map(condition).collect::<Vec<_>>().join(" and ")).collect();
+    format!("when {} then {then}", when.join(" or "))
+}
+
+/// Renames the instance `from`, or with `class` the class or MU class `from`, in conditions,
+/// saying whether any named it.
+fn rename_conditions(when: &mut [Vec<Cond>], from: &str, to: &str, class: bool) -> bool {
+    let mut changed = false;
+    let mut rename = |name: &mut String| {
+        if name == from {
+            *name = to.to_string();
+            changed = true;
+        }
+    };
+    for condition in when.iter_mut().flatten() {
+        match condition {
+            Cond::Class { names, .. } if class => names.iter_mut().for_each(&mut rename),
+            // A destination or a step names an instance or a class.
+            Cond::Destination { name, .. } => rename(name),
+            Cond::Step { names, .. } => names.iter_mut().for_each(&mut rename),
+            Cond::Compare { left, right, .. } if !class => {
+                rename(&mut left.name);
+                if let Against::Figure(named) = right {
+                    rename(&mut named.name);
+                }
+            }
+            _ => {}
+        }
+    }
+    changed
+}
+
 impl Line {
     /// Reads a line. Names aren't looked up: that's `Model::rule_problems`.
     pub fn parse(text: &str) -> Result<Line, String> {
-        let text = text.trim();
-        if let Some(rest) = text.strip_prefix("otherwise ") {
-            return Ok(Line { when: Vec::new(), then: action(rest)? });
-        }
-        let Some(rest) = text.strip_prefix("when ") else {
-            return Err(FORM.to_string());
-        };
-        let Some((conditions, then)) = rest.split_once(" then ") else {
-            return Err(format!("a rule's conditions are followed by ` then <action>`: {FORM}"));
-        };
-        let when = split_word(conditions, "or").into_iter().map(|group| split_word(group, "and").into_iter().map(condition).collect::<Result<Vec<_>, _>>()).collect::<Result<Vec<_>, _>>()?;
+        let (when, then) = when_then(text, FORM)?;
         Ok(Line { when, then: action(then)? })
     }
 
@@ -339,51 +404,20 @@ impl Line {
             Act::Weighted { among } => format!("weighted among {}", among.join(", ")),
             Act::Default => "default".into(),
         };
-        if self.when.is_empty() {
-            return format!("otherwise {then}");
-        }
-        let condition = |condition: &Cond| match condition {
-            Cond::Class { names, equal } => format!("class {} {}", if *equal { "=" } else { "!=" }, names.join(", ")),
-            Cond::Destination { name, equal } => format!("destination {} {name}", if *equal { "=" } else { "!=" }),
-            Cond::TimeOfDay { comparison, time } => format!("time of day {} {}", written(*comparison), time_of_day_text(*time)),
-            Cond::Compare { left, comparison, right } => {
-                let right = match right {
-                    Against::Value(Target::Number { written, .. }) => written.clone(),
-                    Against::Value(Target::State(state)) => state.name().to_string(),
-                    Against::Figure(named) => named.text(),
-                };
-                format!("{} {} {right}", left.text(), written(*comparison))
-            }
-        };
-        let when: Vec<String> = self.when.iter().map(|group| group.iter().map(condition).collect::<Vec<_>>().join(" and ")).collect();
-        format!("when {} then {then}", when.join(" or "))
+        when_then_text(&self.when, &then)
     }
 
     /// The same line naming `to` where it named the instance `from`, or with `class` the class or
     /// MU class `from`, for a rename. `None` if it doesn't name it.
     pub fn renamed(&self, from: &str, to: &str, class: bool) -> Option<Line> {
         let mut line = self.clone();
-        let mut changed = false;
+        let mut changed = rename_conditions(&mut line.when, from, to, class);
         let mut rename = |name: &mut String| {
             if name == from {
                 *name = to.to_string();
                 changed = true;
             }
         };
-        for condition in line.when.iter_mut().flatten() {
-            match condition {
-                Cond::Class { names, .. } if class => names.iter_mut().for_each(&mut rename),
-                // A destination is an instance or a class.
-                Cond::Destination { name, .. } => rename(name),
-                Cond::Compare { left, right, .. } if !class => {
-                    rename(&mut left.name);
-                    if let Against::Figure(named) = right {
-                        rename(&mut named.name);
-                    }
-                }
-                _ => {}
-            }
-        }
         if !class {
             match &mut line.then {
                 Act::To(name) => rename(name),
@@ -392,6 +426,52 @@ impl Line {
             }
         }
         changed.then_some(line)
+    }
+}
+
+// ---------- A Station's process time by MU ----------
+
+const TIME_FORM: &str = "write a line of a process time as `when <conditions> then <time>` or `otherwise <time>`, a time with its unit or `default` for the Station's own, such as `when class = Frame then 30s` or `when step = Deburr then 1:20`";
+
+/// A line of a Station's process time by MU (ADR 0030), read: the conditions a distribution
+/// rule has, without the next destination, and a time.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TimeLine {
+    /// Groups joined by `or`, conditions within one by `and`. Empty for `otherwise`.
+    pub when: Vec<Vec<Cond>>,
+    /// The time, and how the line writes it, such as `30s`; `None` for `default`, the Station's own.
+    pub then: Option<(SimTime, String)>,
+}
+
+impl TimeLine {
+    /// Reads a line. Names aren't looked up: that's `Model::rule_problems`.
+    pub fn parse(text: &str) -> Result<TimeLine, String> {
+        let (when, then) = when_then(text, TIME_FORM)?;
+        let then = then.trim();
+        if then == "default" {
+            return Ok(TimeLine { when, then: None });
+        }
+        match time_value(then) {
+            Some(time) => Ok(TimeLine { when, then: Some(time) }),
+            None if then.parse::<f64>().is_ok() => Err(format!("a line's time is written with its unit, such as `{then}s`, `1:30` or `2min`, not `{then}`")),
+            None => Err(format!("`{then}` isn't a time: {TIME_FORM}")),
+        }
+    }
+
+    /// The line in its canonical form.
+    pub fn text(&self) -> String {
+        when_then_text(&self.when, self.then.as_ref().map_or("default", |(_, written)| written.as_str()))
+    }
+
+    /// The same line naming `to` where it named `from`, as `Line::renamed` does.
+    pub fn renamed(&self, from: &str, to: &str, class: bool) -> Option<TimeLine> {
+        let mut line = self.clone();
+        rename_conditions(&mut line.when, from, to, class).then_some(line)
+    }
+
+    /// The time it gives, `None` for the Station's own.
+    pub fn time(&self) -> Option<SimTime> {
+        self.then.as_ref().map(|(time, _)| *time)
     }
 }
 
@@ -453,6 +533,7 @@ fn compare(comparison: Comparison) -> Compare {
         Comparison::Below => Compare::Below,
         Comparison::Equal => Compare::Equal,
         Comparison::NotEqual => Compare::NotEqual,
+        Comparison::In | Comparison::NotIn => unreachable!("a rule's line never compares with `in`"),
     }
 }
 
@@ -473,56 +554,74 @@ pub(crate) struct Ids<'a> {
     pub destinations: &'a HashMap<&'a str, DestinationId>,
 }
 
+/// A line's conditions for the instance `context` names, by id, or why they don't fit the model.
+/// With `ids`, ready to run; without, only checked. `times` for a process time's line, which
+/// reads the MU's step but not its destination.
+fn resolve_when(when: &[Vec<Cond>], context: &Context<'_>, ids: Option<&Ids<'_>>, times: bool) -> Result<Vec<Vec<Condition>>, String> {
+    let mut resolved = Vec::new();
+    for group in when {
+        let mut conditions = Vec::new();
+        for condition in group {
+            conditions.push(match condition {
+                Cond::Class { names, equal } => {
+                    for name in names {
+                        if !context.model.is_mu_class(name) {
+                            return Err(format!("`{name}` isn't an MU class"));
+                        }
+                    }
+                    let kinds = ids.map_or_else(Vec::new, |ids| names.iter().flat_map(|name| ids.kinds.get(name).cloned().unwrap_or_default()).collect());
+                    Condition::Class { kinds, equal: *equal }
+                }
+                Cond::Destination { .. } if times => {
+                    return Err("a process time reads where the MU is in its work plan as `step = …`, not its destination".into());
+                }
+                Cond::Destination { name, equal } => {
+                    if context.model.destination_members(name).is_none() || context.model.is_mu_class(name) {
+                        return Err(format!("`{name}` isn't a destination: an instance or a class of objects"));
+                    }
+                    // A destination no plan, detour or exit names is no MU's next one.
+                    match ids.and_then(|ids| ids.destinations.get(name.as_str()).copied()) {
+                        Some(destination) => Condition::Destination { destination, equal: *equal },
+                        None => Condition::Class { kinds: Vec::new(), equal: *equal },
+                    }
+                }
+                Cond::Step { names, equal } => {
+                    for name in names {
+                        context.model.step_name(name)?;
+                    }
+                    let destinations = ids.map_or_else(Vec::new, |ids| context.model.step_destinations(names, ids.destinations));
+                    Condition::Step { destinations, equal: *equal }
+                }
+                Cond::TimeOfDay { comparison, time } => Condition::TimeOfDay { compare: compare(*comparison), time: *time },
+                Cond::Compare { left, comparison, right: Against::Value(Target::State(state)) } => {
+                    let reading = context.reading(left)?;
+                    let built_in = context.model.resolve(reading.object as usize).map_or("Station", |resolved| resolved.built_in);
+                    if !State::of(built_in).contains(state) {
+                        return Err(format!("{} {built_in} is never {}", crate::article(built_in), state.never()));
+                    }
+                    Condition::State { object: reading.object, state: state_name(*state).expect("every state has a name"), equal: *comparison == Comparison::Equal }
+                }
+                Cond::Compare { left, comparison, right } => Condition::Compare {
+                    left: context.reading(left)?,
+                    compare: compare(*comparison),
+                    right: match right {
+                        Against::Value(Target::Number { value, .. }) => Operand::Number(*value),
+                        Against::Value(Target::State(_) | Target::Names(_)) => unreachable!("a state is handled above, and a rule compares no names"),
+                        Against::Figure(named) => Operand::Figure(context.reading(named)?),
+                    },
+                },
+            });
+        }
+        resolved.push(conditions);
+    }
+    Ok(resolved)
+}
+
 impl Line {
     /// The line for the instance `context` names, by id, or why it doesn't fit the model. With
     /// `ids`, ready to run; without, only checked.
     fn resolve(&self, context: &Context<'_>, default: &DistributionStrategy, ids: Option<&Ids<'_>>) -> Result<RuleLine, String> {
-        let mut when = Vec::new();
-        for group in &self.when {
-            let mut conditions = Vec::new();
-            for condition in group {
-                conditions.push(match condition {
-                    Cond::Class { names, equal } => {
-                        for name in names {
-                            if !context.model.is_mu_class(name) {
-                                return Err(format!("`{name}` isn't an MU class"));
-                            }
-                        }
-                        let kinds = ids.map_or_else(Vec::new, |ids| names.iter().flat_map(|name| ids.kinds.get(name).cloned().unwrap_or_default()).collect());
-                        Condition::Class { kinds, equal: *equal }
-                    }
-                    Cond::Destination { name, equal } => {
-                        if context.model.destination_members(name).is_none() || context.model.is_mu_class(name) {
-                            return Err(format!("`{name}` isn't a destination: an instance or a class of objects"));
-                        }
-                        // A destination no plan, detour or exit names is no MU's next one.
-                        match ids.and_then(|ids| ids.destinations.get(name.as_str()).copied()) {
-                            Some(destination) => Condition::Destination { destination, equal: *equal },
-                            None => Condition::Class { kinds: Vec::new(), equal: *equal },
-                        }
-                    }
-                    Cond::TimeOfDay { comparison, time } => Condition::TimeOfDay { compare: compare(*comparison), time: *time },
-                    Cond::Compare { left, comparison, right: Against::Value(Target::State(state)) } => {
-                        let reading = context.reading(left)?;
-                        let built_in = context.model.resolve(reading.object as usize).map_or("Station", |resolved| resolved.built_in);
-                        if !State::of(built_in).contains(state) {
-                            return Err(format!("{} {built_in} is never {}", crate::article(built_in), state.never()));
-                        }
-                        Condition::State { object: reading.object, state: state_name(*state).expect("every state has a name"), equal: *comparison == Comparison::Equal }
-                    }
-                    Cond::Compare { left, comparison, right } => Condition::Compare {
-                        left: context.reading(left)?,
-                        compare: compare(*comparison),
-                        right: match right {
-                            Against::Value(Target::Number { value, .. }) => Operand::Number(*value),
-                            Against::Value(Target::State(_)) => unreachable!("handled above"),
-                            Against::Figure(named) => Operand::Figure(context.reading(named)?),
-                        },
-                    },
-                });
-            }
-            when.push(conditions);
-        }
+        let when = resolve_when(&self.when, context, ids, false)?;
         let then = match &self.then {
             Act::To(name) => Action::To(context.exit(name)?),
             Act::Best { figure, scope, of, largest, wait, .. } => {
@@ -578,6 +677,76 @@ impl Model {
             }
         }
         problems
+    }
+
+    /// Every Station's process time by MU that doesn't fit the model, pointing at the line where it
+    /// is set, as `rule_problems` does.
+    pub(crate) fn time_rule_problems(&self) -> Vec<Problem> {
+        let mut problems = Vec::new();
+        for index in 0..self.instances.len() {
+            let Some(resolved) = self.resolve(index) else { continue };
+            let Some(lines) = &resolved.attributes.process_time_rules else { continue };
+            let name = &self.instances[index].name;
+            let at = match resolved.origin(crate::Attribute::ProcessTime) {
+                Origin::Class(class) => match self.classes.iter().position(|found| &found.name == class) {
+                    Some(place) => format!("/classes/{place}/attributes/process_time/rules"),
+                    None => continue,
+                },
+                _ => format!("/instances/{index}/attributes/process_time/rules"),
+            };
+            let context = Context { model: self, index, successors: Vec::new() };
+            for (place, text) in lines.iter().enumerate() {
+                let Ok(line) = TimeLine::parse(text) else { continue };
+                if let Err(message) = resolve_when(&line.when, &context, None, true) {
+                    let message = if at.starts_with("/classes") { format!("for its instance `{name}`: {message}") } else { message };
+                    problems.push(Problem { pointer: format!("{at}/{place}"), name: Some(name.clone()), message });
+                }
+            }
+        }
+        problems
+    }
+
+    /// A Station's process time by MU ready to run, for a valid model.
+    pub(crate) fn time_rules_of(&self, index: usize, lines: &[String], ids: &Ids<'_>) -> TimeRules {
+        let context = Context { model: self, index, successors: Vec::new() };
+        let lines = lines
+            .iter()
+            .filter_map(|text| TimeLine::parse(text).ok())
+            .filter_map(|line| Some(crabsim::rules::TimeLine { when: resolve_when(&line.when, &context, Some(ids), true).ok()?, then: line.time() }))
+            .collect();
+        TimeRules { lines }
+    }
+
+    /// Whether `name` is something a step can name: an instance or a class of objects.
+    pub(crate) fn step_name(&self, name: &str) -> Result<(), String> {
+        if self.destination_members(name).is_none() || self.is_mu_class(name) {
+            return Err(format!("`{name}` isn't a class of objects or an instance, which a step names"));
+        }
+        Ok(())
+    }
+
+    /// Every destination a step can be on that one of `names` stands for: the destination named
+    /// so, and for a class, every class derived from it and every instance of it or of them. A
+    /// listed instance stands for itself alone (ADR 0026).
+    pub(crate) fn step_destinations(&self, names: &[String], destinations: &HashMap<&str, DestinationId>) -> Vec<DestinationId> {
+        let mut found: Vec<DestinationId> = destinations.iter().filter(|(destination, _)| names.iter().any(|name| self.step_covers(name, destination))).map(|(_, id)| *id).collect();
+        found.sort_unstable();
+        found.dedup();
+        found
+    }
+
+    /// Whether a step naming `destination` is one `name` stands for.
+    pub fn step_covers(&self, name: &str, destination: &str) -> bool {
+        if name == destination {
+            return true;
+        }
+        if self.instances.iter().any(|instance| instance.name == name) {
+            return false;
+        }
+        match self.instances.iter().find(|instance| instance.name == destination) {
+            Some(instance) => instance.class == name || self.is_of_class(&instance.class, name),
+            None => self.is_of_class(destination, name),
+        }
     }
 
     /// An instance's rules ready to run, for a valid model.

@@ -21,7 +21,7 @@ pub fn summary(value: &Value) -> String {
         return format!("by destination, then {then}");
     }
     if let Some(lines) = value.get("rules").and_then(Value::as_array) {
-        let then = value.get("default").map_or_else(|| "round robin".to_string(), summary);
+        let then = value.get("default").map_or_else(|| "round robin".to_string(), |default| if default.is_string() { format!("its own {}", text(default)) } else { summary(default) });
         let first = lines.first().map(&text).unwrap_or_default();
         let more = if lines.len() > 1 { format!(" and {} more", lines.len() - 1) } else { String::new() };
         return format!("rules: {first}{more}; else {then}");
@@ -211,6 +211,9 @@ pub struct Form {
     pub plan: Option<PlanRows>,
     /// For a cross conveyor's exits: each side's destinations.
     pub exits: Option<ExitLists>,
+    /// For a Station's process time by MU (ADR 0030): its when/then lines, one a line, the first
+    /// part being its own time. `None` for one time for every MU.
+    pub time_rules: Option<String>,
 }
 
 /// The names of the open model that forms offer to choose from.
@@ -671,7 +674,7 @@ impl Form {
                 form: Form::new("failure", Some(profile)),
             })
             .collect();
-        Form { attribute: "failures".into(), parts: Vec::new(), repair: None, distribution: None, options: &[], profiles: Some(profiles), choices: Vec::new(), path: None, plan: None, exits: None }
+        Form { attribute: "failures".into(), parts: Vec::new(), repair: None, distribution: None, options: &[], profiles: Some(profiles), choices: Vec::new(), path: None, plan: None, exits: None, time_rules: None }
     }
 
     /// The profiles as a model file writes them, each with its stream. An empty list is none at
@@ -849,7 +852,12 @@ impl Form {
             _ => None,
         };
         let exits = (attribute == "exits").then(|| ExitLists::from_value(value));
-        Form { attribute: attribute.to_string(), parts, repair, distribution: None, options, profiles: None, choices: Vec::new(), path, plan, exits }
+        // A process time by MU: its lines, and its own time as the field.
+        let time_rules = (attribute == "process_time")
+            .then(|| value.and_then(|value| value.get("rules")).and_then(Value::as_array).map(|lines| lines.iter().filter_map(Value::as_str).collect::<Vec<_>>().join("\n")))
+            .flatten();
+        let parts = if time_rules.is_some() { vec![part("", text_of(value.and_then(|value| value.get("default"))))] } else { parts };
+        Form { attribute: attribute.to_string(), parts, repair, distribution: None, options, profiles: None, choices: Vec::new(), path, plan, exits, time_rules }
     }
 
     /// The fields for `attribute`, whatever it is: state notes need the `states` the object can be
@@ -897,7 +905,7 @@ impl Form {
             successor: field("rank") == Some("successor"),
             drains: ticks,
         };
-        Form { attribute: "distribution".into(), parts: Vec::new(), repair: None, distribution: Some(choice), options: &[], profiles: None, choices: Vec::new(), path: None, plan: None, exits: None }
+        Form { attribute: "distribution".into(), parts: Vec::new(), repair: None, distribution: Some(choice), options: &[], profiles: None, choices: Vec::new(), path: None, plan: None, exits: None, time_rules: None }
     }
 
     /// The fields for state notes: one per state the object can be in, labelled with the state and
@@ -907,7 +915,7 @@ impl Form {
             .iter()
             .map(|state| part(state.label(), value.and_then(|notes| notes.get(state.name())).and_then(Value::as_str).unwrap_or_default()))
             .collect();
-        Form { attribute: "state_notes".into(), parts, repair: None, distribution: None, options: &[], profiles: None, choices: Vec::new(), path: None, plan: None, exits: None }
+        Form { attribute: "state_notes".into(), parts, repair: None, distribution: None, options: &[], profiles: None, choices: Vec::new(), path: None, plan: None, exits: None, time_rules: None }
     }
 
     /// The states a state notes form has a field for.
@@ -937,6 +945,13 @@ impl Form {
         };
         let whole = |index: usize| -> Result<u64, String> { text(index).parse::<u64>().map_err(|_| format!("`{}` isn't a whole number of 0 or more", text(index))) };
         match self.attribute.as_str() {
+            "process_time" if self.time_rules.is_some() => {
+                let lines: Vec<String> = self.time_rules.as_deref().unwrap_or_default().lines().map(str::trim).filter(|line| !line.is_empty()).map(str::to_owned).collect();
+                if lines.is_empty() {
+                    return Err("write a line a row, such as `when class = Frame then 30s`, or untick Rules".to_string());
+                }
+                Ok(json!({ "rules": lines, "default": time(0)? }))
+            }
             "interval" | "process_time" | "dwelling_time" | "switch_time" | "release_time" => time(0),
             "starting_mus" => whole(0).map(|n| json!(n)),
             // Automatic is no value at all, which a model file says by leaving it out.

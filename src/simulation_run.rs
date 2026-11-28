@@ -17,6 +17,13 @@ use std::mem::size_of;
 /// loop. Far more than a legitimate model has happening at one instant, however large.
 pub const ZERO_TIME_EVENT_LIMIT: u64 = 1_000_000;
 
+/// What only runs judging expectations or with Stations' time rules carry (ADR 0030).
+#[derive(Clone, Default)]
+struct RunExtras {
+    watches: Option<crate::watch::Watching>,
+    times: Option<crate::rules::TimeTable>,
+}
+
 /// What a bounded advance did.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BoundedAdvance {
@@ -72,6 +79,10 @@ pub struct SimulationRun {
     /// How long measuring periods are, a setting Reset keeps.
     measuring_period: Option<SimTime>,
     periods: Option<Periods>,
+    /// Which MUs the watched objects take and every Station's time rules (ADR 0030), settings
+    /// Reset keeps, which every event's context holds a copy of, behind one pointer: the run is
+    /// read at every event, and a larger one cost the 6,006-object model.
+    expectations: Option<Box<RunExtras>>,
     context: EventContext,
 }
 
@@ -102,6 +113,7 @@ impl SimulationRun {
             stretch_next: SimTime::MAX,
             measuring_period: None,
             periods: None,
+            expectations: None,
             context: EventContext::new(1, Recording::NOTHING).with_routing(routing.clone()),
             routing,
         };
@@ -127,6 +139,38 @@ impl SimulationRun {
                 *distribution = Distributing::Rules(Box::new(ruled));
             }
         }
+    }
+
+    /// Gives Stations their process time by MU (ADR 0030), and the objects their lines read over a
+    /// stretch their buckets. Whoever hands such a Station an MU decides its time first.
+    pub(crate) fn attach_times(&mut self, times: &[(u32, Arc<crate::rules::TimeRules>)]) {
+        let table = crate::rules::TimeTable::new(times);
+        if table.has_stretches() {
+            self.stretch_next = SimTime::ZERO;
+        }
+        self.expectations.get_or_insert_with(Box::default).times = Some(table);
+        self.context = self.default_context();
+    }
+
+    /// Checks every MU entering these objects against these limits on which MUs each takes
+    /// (ADR 0030), replacing any watches the run had, counting from nothing: in a run judging
+    /// expectations, before Init. A setting, so Reset keeps it and starts counting afresh. A run
+    /// that watches nothing pays nothing; one that does pays one check at each move into a
+    /// watched object. What each saw is in `RunState::watches`, in this order.
+    pub fn watch(&mut self, watches: Vec<crate::watch::Watch>) {
+        self.expectations.get_or_insert_with(Box::default).watches = (!watches.is_empty()).then(|| crate::watch::Watching::new(watches));
+        if self.expectations.as_ref().is_some_and(|extras| extras.watches.is_none() && extras.times.is_none()) {
+            self.expectations = None;
+        }
+        let mut context = std::mem::replace(&mut self.context, EventContext::new(1, Recording::NOTHING));
+        context = context.with_watches(self.expectations.as_ref().and_then(|extras| extras.watches.as_ref()));
+        self.context = context;
+    }
+
+    /// Whether Stations' time rules read over a stretch, whose buckets the run keeps in its
+    /// context's copy.
+    fn time_stretches(&self) -> bool {
+        self.expectations.as_ref().and_then(|extras| extras.times.as_ref()).is_some_and(crate::rules::TimeTable::has_stretches)
     }
 
     /// Gives the run user code and which objects have which hooks (ADR 0029). An object with a
@@ -159,7 +203,11 @@ impl SimulationRun {
 
     /// A context for events from now on, handing out MU ids from `first_mu_id`.
     fn new_context(&self, first_mu_id: u32) -> EventContext {
-        EventContext::new(first_mu_id, self.recording).with_routing(self.routing.clone()).with_hooks(self.hook_table.clone())
+        EventContext::new(first_mu_id, self.recording)
+            .with_routing(self.routing.clone())
+            .with_hooks(self.hook_table.clone())
+            .with_watches(self.expectations.as_ref().and_then(|extras| extras.watches.as_ref()))
+            .with_times(self.expectations.as_ref().and_then(|extras| extras.times.as_ref()))
     }
 
     /// Gives every object routing by destination its table of which exits reach each
@@ -208,7 +256,10 @@ impl SimulationRun {
                 ruled.clear_stretches();
             }
         }
-        self.stretch_next = if self.watched.is_empty() { SimTime::MAX } else { SimTime::ZERO };
+        if let Some(times) = self.context.times_mut() {
+            times.clear_stretches();
+        }
+        self.stretch_next = if self.watched.is_empty() && !self.time_stretches() { SimTime::MAX } else { SimTime::ZERO };
     }
 
     /// Keeps the buckets of every stretch a rule reads up to `now`, before the event at `now`
@@ -225,6 +276,11 @@ impl SimulationRun {
             }
             *self.objects[id as usize].distribution_mut().expect("it has one") = taken;
         }
+        if self.time_stretches() {
+            if let Some(times) = self.context.times_mut() {
+                next = next.min(times.roll(&self.objects, now));
+            }
+        }
         self.stretch_next = next;
     }
 
@@ -233,6 +289,7 @@ impl SimulationRun {
             object.clear_statistics(self.time);
         }
         self.clear_stretches();
+        self.context.clear_watches();
         self.statistics_since = self.time;
         self.start_periods();
     }
@@ -577,6 +634,7 @@ impl SimulationRun {
             statistics_since: self.statistics_since,
             objects: self.objects.iter().map(|object| object.report(self.time)).collect(),
             periods: self.periods.as_ref().map(Periods::report),
+            watches: self.context.watch_states(),
         }
     }
 
@@ -803,7 +861,13 @@ impl HookRun<'_> {
         if onto_belt {
             others.get_mut(to).arriving(from, false);
         }
-        let entered = others.get_mut(to).enter(taken, &mut run.context).expect("an object that takes an MU now takes it");
+        let entered = if run.context.decides_times() {
+            let giver = crate::rules::Peer { id: from, keeper: object[0].statistics_keeper(), kind: object[0].kind() };
+            crate::materialflow_objects::model_object::enter_deciding_time(&mut others, to, giver, taken, &mut run.context)
+        } else {
+            others.get_mut(to).enter(taken, &mut run.context)
+        };
+        let entered = entered.expect("an object that takes an MU now takes it");
         if let Some(entered) = entered {
             run.context.schedule(entered);
         }

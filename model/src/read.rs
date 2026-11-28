@@ -510,6 +510,10 @@ impl Reader {
             let at = format!("{pointer}/{key}");
             let read = match key {
                 "interval" => self.time(value, &at, name).map(|time| attributes.interval = Some(time)),
+                "process_time" if value.is_object() => self.process_time_rules(value, &at, name).map(|(lines, default)| {
+                    attributes.process_time = Some(default);
+                    attributes.process_time_rules = Some(lines);
+                }),
                 "process_time" => self.time(value, &at, name).map(|time| attributes.process_time = Some(time)),
                 "failures" => self.failure_list(value, &at, name).map(|failures| attributes.failures = Some(failures)),
                 "starting_mus" => self.count(value, &at, name).map(|count| attributes.starting_mus = Some(count)),
@@ -1001,6 +1005,39 @@ impl Reader {
             },
         };
         Some(DistributionStrategy::Rules(Box::new(crate::rules::RuleDistribution { lines, default: default? })))
+    }
+
+    /// A Station's process time by MU, `{"rules": ["when … then 30s", …], "default": "20"}`
+    /// (ADR 0030): each line read, its names checked against the model by `Model::rule_problems`,
+    /// and the Station's own time, which a line's `default` and no line holding fall back on.
+    fn process_time_rules(&mut self, value: &Value, pointer: &str, name: Option<&str>) -> Option<(Vec<String>, SimTime)> {
+        let fields = self.object(value, pointer, name, "a process time by rules", &["rules", "default"])?;
+        let at = format!("{pointer}/rules");
+        let lines = match fields.get("rules") {
+            Some(Value::Array(lines)) if !lines.is_empty() => {
+                let mut read = Vec::new();
+                for (place, line) in lines.iter().enumerate() {
+                    let Some(text) = self.text(line, &format!("{at}/{place}"), name) else { continue };
+                    match crate::rules::TimeLine::parse(&text) {
+                        Ok(line) => read.push(line.text()),
+                        Err(message) => self.problem(format!("{at}/{place}"), name, message),
+                    }
+                }
+                Some(read)
+            }
+            _ => {
+                self.problem(at, name, "`rules` is a list of lines, at least one, such as [\"when class = Frame then 30s\", \"when step = Deburr then 50s\"]");
+                None
+            }
+        };
+        let default = match fields.get("default") {
+            Some(default) => self.time(default, &format!("{pointer}/default"), name),
+            None => {
+                self.problem(format!("{pointer}/default"), name, "`default` is the Station's own time, for MUs no line gives one, such as \"20\"");
+                None
+            }
+        };
+        Some((lines?, default?))
     }
 
     /// `{"before_init": {"code": {…}}, "after_init": …, "before_reset": …, "after_reset": …}`.

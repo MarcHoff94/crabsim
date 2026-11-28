@@ -114,9 +114,16 @@ pub enum Comparison {
     Equal,
     #[serde(rename = "!=")]
     NotEqual,
+    /// Each MU entering is one of the listed classes or steps (ADR 0030).
+    #[serde(rename = "in")]
+    In,
+    /// No MU entering is one of them.
+    #[serde(rename = "not in")]
+    NotIn,
 }
 
 impl Comparison {
+    /// The comparisons of a number, in the order a line is read for them.
     const ALL: [Comparison; 6] = [Comparison::AtLeast, Comparison::AtMost, Comparison::NotEqual, Comparison::Above, Comparison::Below, Comparison::Equal];
 
     pub fn written(self) -> &'static str {
@@ -127,10 +134,13 @@ impl Comparison {
             Comparison::Below => "<",
             Comparison::Equal => "=",
             Comparison::NotEqual => "!=",
+            Comparison::In => "in",
+            Comparison::NotIn => "not in",
         }
     }
 
-    /// Whether `value` meets it against `limit`.
+    /// Whether `value` meets it against `limit`. For `in` and `not in`, the value is how many MUs
+    /// broke it, and the limit none.
     pub fn holds(self, value: f64, limit: f64) -> bool {
         match self {
             Comparison::AtLeast => value >= limit,
@@ -139,12 +149,19 @@ impl Comparison {
             Comparison::Below => value < limit,
             Comparison::Equal => value == limit,
             Comparison::NotEqual => value != limit,
+            Comparison::In | Comparison::NotIn => value <= limit,
         }
     }
 
-    /// An upper limit, which the most a figure reached is compared with.
+    /// An upper limit, which the most a figure reached is compared with: the MUs that broke an
+    /// `in` or `not in` are too.
     fn upper(self) -> bool {
-        matches!(self, Comparison::AtMost | Comparison::Below)
+        matches!(self, Comparison::AtMost | Comparison::Below | Comparison::In | Comparison::NotIn)
+    }
+
+    /// A limit on which MUs an object takes.
+    pub fn of_names(self) -> bool {
+        matches!(self, Comparison::In | Comparison::NotIn)
     }
 }
 
@@ -156,13 +173,17 @@ pub enum Target {
     Number { value: f64, written: String },
     /// A state's name.
     State(State),
+    /// Classes or instances, for `in` and `not in`: MU classes for `class`, classes of objects
+    /// and instances for `step`.
+    Names(Vec<String>),
 }
 
 impl Target {
-    fn written(&self) -> &str {
+    fn written(&self) -> String {
         match self {
-            Target::Number { written, .. } => written,
-            Target::State(state) => state.name(),
+            Target::Number { written, .. } => written.clone(),
+            Target::State(state) => state.name().to_string(),
+            Target::Names(names) => names.join(", "),
         }
     }
 }
@@ -214,7 +235,10 @@ impl fmt::Display for LineError {
     }
 }
 
-const FORM: &str = "write it as `[every|mean] <instance, class or model>.<figure> <now|since start|last <time>|always> <comparison> <value>`, such as `every Press.working_share since start >= 60%`, or with `=` and a tolerance, such as `Drain.throughput_per_hour since start = 4100/d ± 3%`";
+const FORM: &str = "write it as `[every|mean] <instance, class or model>.<figure> <now|since start|last <time>|always> <comparison> <value>`, such as `every Press.working_share since start >= 60%`, with `=` and a tolerance, such as `Drain.throughput_per_hour since start = 4100/d ± 3%`, or which MUs an object takes, such as `Mill.step always in Welding, Deburr`";
+
+/// How a limit on which MUs an object takes is written.
+const NAMES_FORM: &str = "a limit on which MUs an object takes is `<instance or class>.class always in <MU classes>` or `.step always in <classes or instances>`, or `not in`, such as `Mill.step always in Welding, Deburr`";
 
 /// How a tolerance may be typed after an `=` line's value; the first is how it is written.
 const PLUS_MINUS: [&str; 3] = ["±", "+/-", "+-"];
@@ -256,8 +280,11 @@ impl Check {
             return error(at, "a name can't start or end with spaces".into());
         }
         let subject = if name == "model" { CheckSubject::Model } else { CheckSubject::Named(name) };
-        if figure.subject() == FigureSubject::Mu {
+        if figure.subject() == FigureSubject::Mu && !figure.of_entering() {
             return error(dot + 1, format!("`{}` is an MU's figure, for rules and code: an expectation names an object, a class or the model", figure.name()));
+        }
+        if figure.of_entering() && subject == CheckSubject::Model {
+            return error(0, format!("the model has no `{}`: {NAMES_FORM}", figure.name()));
         }
         match (&subject, aggregate) {
             (CheckSubject::Model, Aggregate::Every | Aggregate::Mean) => return error(0, "`every` and `mean` take a class, not the model".into()),
@@ -301,6 +328,9 @@ impl Check {
             }
             other => return error(at, format!("a time scope comes after the figure: `now`, `since start`, `last <time>` or `always`, not `{other}`")),
         };
+        if figure.of_entering() && scope != Scope::Always {
+            return error(scope_at, format!("an expectation reads an MU's `{}` as each MU enters, with `always`: {NAMES_FORM}", figure.name()));
+        }
         if !figure.has_scope(scope.kind()) {
             let scopes: Vec<&str> = figure.scopes().iter().map(|scope| scope.written()).collect();
             return error(scope_at, format!("`{}` is read {}, not {}", figure.name(), scopes.join(" or "), scope.kind().written()));
@@ -310,6 +340,19 @@ impl Check {
         }
         at = skip_spaces(&chars, at);
         let rest: String = chars[at..].iter().collect();
+        let names = [Comparison::NotIn, Comparison::In].into_iter().find(|comparison| rest.strip_prefix(comparison.written()).is_some_and(|after| after.starts_with(char::is_whitespace)));
+        if figure.of_entering() || names.is_some() {
+            let Some(comparison) = names.filter(|_| figure.of_entering()) else {
+                let message = if figure.of_entering() { format!("`{}` is compared with `in` or `not in` and a list: {NAMES_FORM}", figure.name()) } else { format!("`in` and `not in` are for which MUs an object takes: {NAMES_FORM}") };
+                return error(at, message);
+            };
+            let value_at = skip_spaces(&chars, at + comparison.written().chars().count());
+            let listed: Vec<String> = chars[value_at..].iter().collect::<String>().split(',').map(|name| name.trim().to_string()).collect();
+            if listed.iter().any(String::is_empty) {
+                return error(value_at, format!("`{}` lists names separated by commas, such as `Welding, Deburr`", comparison.written()));
+            }
+            return Ok(Check { aggregate, subject, figure, scope, last_written, comparison, target: Target::Names(listed), tolerance: None });
+        }
         let Some(comparison) = Comparison::ALL.into_iter().find(|comparison| rest.starts_with(comparison.written())) else {
             return error(at, format!("a comparison comes after the scope: >=, <=, >, <, = or !=, not `{}`", rest.trim()));
         };
@@ -398,7 +441,7 @@ impl Check {
             Comparison::AtMost => (None, Some((value, true))),
             Comparison::Below => (None, Some((value, false))),
             Comparison::Equal => (Some((value, true)), Some((value, true))),
-            Comparison::NotEqual => return None,
+            Comparison::NotEqual | Comparison::In | Comparison::NotIn => return None,
         })
     }
 
@@ -413,25 +456,35 @@ impl Check {
     }
 
     /// The value it compares with as the line writes it, such as `60%`.
-    pub fn value_text(&self) -> &str {
+    pub fn value_text(&self) -> String {
         self.target.written()
     }
 
-    /// The limit it compares with, as a number: a state's is 1, for "in that state".
+    /// The limit it compares with, as a number: a state's is 1, for "in that state", and for
+    /// which MUs an object takes, no MU breaking it.
     fn limit(&self) -> f64 {
         match &self.target {
             Target::Number { value, .. } => *value,
             Target::State(_) => 1.0,
+            Target::Names(_) => 0.0,
         }
     }
 
-    /// The comparison a value is judged by: a state's value is 1 in it and 0 otherwise.
+    /// The comparison a value is judged by: a state's value is 1 in it and 0 otherwise, and the
+    /// MUs that broke an `in` or `not in` at most none.
     fn judged_by(&self) -> Comparison {
         match (&self.target, self.comparison) {
             (Target::State(_), Comparison::NotEqual) => Comparison::NotEqual,
             (Target::State(_), _) => Comparison::Equal,
+            (Target::Names(_), _) => Comparison::AtMost,
             (_, comparison) => comparison,
         }
+    }
+
+    /// A limit on which MUs an object takes, checked as each enters, which the run counts
+    /// itself (`Model::entry_watches`) rather than a replay finding where it was broken.
+    pub fn on_entry(&self) -> bool {
+        self.figure.of_entering()
     }
 
     /// A limit during the run, whose first violation a replay can find.
@@ -457,9 +510,25 @@ impl Check {
         Check { subject, ..self.clone() }
     }
 
-    /// The same line naming `to` where it named `from`, for a rename.
-    pub fn renamed(&self, from: &str, to: &str) -> Option<Check> {
-        (self.named() == Some(from)).then(|| Check { subject: CheckSubject::Named(to.to_string()), ..self.clone() })
+    /// The same line naming `to` where it named the instance `from`, or with `class` the class
+    /// or MU class `from`, for a rename: its subject, and the classes or instances it lists.
+    pub fn renamed(&self, from: &str, to: &str, class: bool) -> Option<Check> {
+        let mut check = self.clone();
+        let mut changed = false;
+        if self.named() == Some(from) && (self.aggregate != Aggregate::One) == class {
+            check.subject = CheckSubject::Named(to.to_string());
+            changed = true;
+        }
+        if let Target::Names(names) = &mut check.target {
+            // A step names a class or an instance; a class an MU class.
+            if class || self.figure != Figure::MuClass {
+                for name in names.iter_mut().filter(|name| name.as_str() == from) {
+                    *name = to.to_string();
+                    changed = true;
+                }
+            }
+        }
+        changed.then_some(check)
     }
 }
 
@@ -540,7 +609,7 @@ pub(crate) fn tolerance(unit: Unit, typed: &str) -> Result<Tolerance, String> {
     } else {
         match target(unit, typed) {
             Ok(Target::Number { value, written }) => Tolerance { amount: value, relative: false, written },
-            Ok(Target::State(_)) => return Err("a state takes no tolerance".into()),
+            Ok(Target::State(_) | Target::Names(_)) => return Err("a state takes no tolerance".into()),
             Err(message) => {
                 let also = if unit == Unit::Share { "; for a share, in percentage points" } else { ", or as a percentage of the value, such as `3%`" };
                 return Err(format!("{message}{also}"));
@@ -681,6 +750,9 @@ impl Model {
         let Some(kind) = kind_of(built_in) else {
             return Err(format!("`{name}` is an MU class: an expectation names an object, a class of objects or the model"));
         };
+        if check.on_entry() {
+            return self.fits_entering(check, kind, built_in);
+        }
         if !check.figure.applies_to(kind) {
             let names: Vec<&str> = Figure::ALL.iter().filter(|figure| figure.applies_to(kind)).map(|figure| figure.name()).collect();
             return Err(format!("{} {built_in} has no `{}`: its figures are {}", crate::article(built_in), check.figure.name(), names.join(", ")));
@@ -691,6 +763,26 @@ impl Model {
         if let Target::State(state) = check.target {
             if !State::of(built_in).contains(&state) {
                 return Err(format!("{} {built_in} is never {}", crate::article(built_in), state.never()));
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether a limit on which MUs an object takes fits: MUs enter its object, and it lists MU
+    /// classes for `class`, classes of objects or instances for `step`.
+    fn fits_entering(&self, check: &Check, kind: ObjectKind, built_in: &str) -> Result<(), String> {
+        if kind == ObjectKind::Source {
+            return Err(format!("no MU enters a Source, which makes its MUs: `{}` is a limit on the MUs entering a Station, Buffer, Drain or conveyor", check.figure.name()));
+        }
+        let _ = built_in;
+        let Target::Names(names) = &check.target else { return Ok(()) };
+        for name in names {
+            if check.figure == Figure::MuClass {
+                if !self.is_mu_class(name) {
+                    return Err(format!("`{name}` isn't an MU class"));
+                }
+            } else {
+                self.step_name(name)?;
             }
         }
         Ok(())
@@ -743,7 +835,7 @@ pub struct Observed {
 }
 
 /// When and by which MU a limit was first broken.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, schemars::JsonSchema)]
 pub struct Violation {
     /// The instance's id.
     #[serde(skip)]
@@ -753,17 +845,94 @@ pub struct Violation {
     pub time: SimTime,
     /// The MU that broke it, entering the object or leaving into the Drain.
     pub mu: u32,
-    /// The value it reached, in the figure's own unit.
+    /// The value it reached, in the figure's own unit; for which MUs an object takes, 1, the
+    /// first MU that broke it.
     pub value: f64,
+    /// For which MUs an object takes, the MU's class.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub class: Option<String>,
+    /// For which MUs an object takes, the MU's current step as it entered, `none` without one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub step: Option<String>,
+}
+
+/// What a run judging a model's expectations watches (ADR 0030): a limit on which MUs an object
+/// takes for each subject of each such expectation, which `SimulationRun::watch` takes, and the
+/// names to give the first MU that broke one.
+#[derive(Debug, Clone, Default)]
+pub struct EntryWatches {
+    /// The engine's watches, for `SimulationRun::watch`. Empty without such a limit.
+    pub list: Vec<crabsim::watch::Watch>,
+    /// Each watch's expectation, by its place among those bound, and its subject.
+    of: Vec<(usize, u32)>,
+    /// Each MU kind's class, by kind.
+    classes: Vec<String>,
+    /// A name for each destination, by id.
+    steps: Vec<String>,
+}
+
+impl Model {
+    /// The watches a run needs for these expectations' limits on which MUs an object takes, in the
+    /// order `observe` reads them. Costs building the model once more, and only if there is one.
+    pub fn entry_watches(&self, bound: &[Bound]) -> EntryWatches {
+        if !bound.iter().any(|bound| bound.check.on_entry()) {
+            return EntryWatches::default();
+        }
+        let ids = crate::build::ids(self);
+        let mut watches = EntryWatches { classes: ids.mu_classes.clone(), steps: ids.destination_names(), ..EntryWatches::default() };
+        for (place, bound) in bound.iter().enumerate().filter(|(_, bound)| bound.check.on_entry()) {
+            let Target::Names(names) = &bound.check.target else { continue };
+            let watched = if bound.check.figure == crabsim::figures::Figure::MuClass {
+                let mut kinds: Vec<crabsim::MuKindId> = names.iter().flat_map(|name| ids.kinds.get(name).cloned().unwrap_or_default()).collect();
+                kinds.sort_unstable();
+                kinds.dedup();
+                crabsim::watch::Watched::Class(kinds)
+            } else {
+                let destinations = ids.destinations.iter().map(|(name, id)| (name.as_str(), *id)).collect();
+                crabsim::watch::Watched::Step(self.step_destinations(names, &destinations))
+            };
+            for &subject in &bound.subjects {
+                watches.list.push(crabsim::watch::Watch { object: subject, watched: watched.clone(), inside: bound.check.comparison == Comparison::In });
+                watches.of.push((place, subject));
+            }
+        }
+        watches
+    }
+}
+
+impl EntryWatches {
+    /// The value of the expectation at `place` for `subject` in a run's end state: the MUs that
+    /// broke it, and the first, `None` where the run wasn't given its watch.
+    fn read(&self, place: usize, subject: u32, end: &RunState) -> Option<(f64, Option<Violation>)> {
+        let at = self.of.iter().position(|&of| of == (place, subject))?;
+        let state = end.watches.get(at)?;
+        let violation = state.first.map(|first| Violation {
+            object: first.object,
+            time: first.time,
+            mu: first.mu,
+            value: 1.0,
+            class: Some(self.classes.get(usize::from(first.kind)).cloned().unwrap_or_default()),
+            step: Some(self.steps.get(usize::from(first.step)).cloned().unwrap_or_else(|| "none".into())),
+        });
+        Some((state.breaks as f64, violation))
+    }
 }
 
 /// Each expectation's values at the end of an observation, from its last state and the states at
-/// its `snapshot_times`, by time.
-pub fn observe(bound: &[Bound], end: &RunState, snapshots: &BTreeMap<SimTime, RunState>, warm_up: SimTime, length: SimTime) -> Vec<Observed> {
+/// its `snapshot_times`, by time, and for which MUs an object takes, from what the run's
+/// `watches` saw, with the first MU that broke it.
+pub fn observe(bound: &[Bound], end: &RunState, snapshots: &BTreeMap<SimTime, RunState>, warm_up: SimTime, length: SimTime, watches: &EntryWatches) -> Vec<Observed> {
     bound
         .iter()
-        .map(|bound| {
+        .enumerate()
+        .map(|(place, bound)| {
             let check = &bound.check;
+            if check.on_entry() {
+                let read: Vec<(u32, Option<(f64, Option<Violation>)>)> = bound.subjects.iter().map(|&id| (id, watches.read(place, id, end))).collect();
+                let violation = read.iter().filter_map(|(_, read)| read.as_ref()?.1.clone()).min_by_key(|violation| violation.time);
+                let values = read.into_iter().map(|(id, read)| (Some(id), read.map(|(value, _)| value))).collect();
+                return Observed { values, violation };
+            }
             let start = match check.scope {
                 Scope::Last(stretch) if stretch <= length => snapshots.get(&((warm_up + length).saturating_sub(stretch))),
                 _ => None,
@@ -776,7 +945,7 @@ pub fn observe(bound: &[Bound], end: &RunState, snapshots: &BTreeMap<SimTime, Ru
                     Scope::Always => check.figure.extreme(object, check.comparison.upper()),
                     Scope::Now => match &check.target {
                         Target::State(state) => Some(if state_name(object) == state.name() { 1.0 } else { 0.0 }),
-                        Target::Number { .. } => check.figure.value(object, end.time),
+                        Target::Number { .. } | Target::Names(_) => check.figure.value(object, end.time),
                     },
                 }
             };
@@ -801,10 +970,14 @@ pub fn observe(bound: &[Bound], end: &RunState, snapshots: &BTreeMap<SimTime, Ru
         .collect()
 }
 
-/// The limits an observation broke, by their place in `bound`: those whose value fails.
+/// The limits an observation broke whose first violation a replay must find, by their place in
+/// `bound`: those whose value fails, but for which MUs an object takes, which the run found itself.
 pub fn broken_limits(bound: &[Bound], observed: &[Observed]) -> Vec<usize> {
     (0..bound.len())
-        .filter(|&at| bound[at].check.is_limit() && observed[at].values.iter().any(|(_, value)| value.is_some_and(|value| !bound[at].check.comparison.holds(value, bound[at].check.limit()))))
+        .filter(|&at| {
+            let check = &bound[at].check;
+            check.is_limit() && !check.on_entry() && observed[at].values.iter().any(|(_, value)| value.is_some_and(|value| !check.judged_by().holds(value, check.limit())))
+        })
         .collect()
 }
 
@@ -859,7 +1032,7 @@ pub fn first_violations(description: &ModelDescription, seed: u64, deterministic
                     _ => continue,
                 };
                 if watched && !limit.check.comparison.holds(value, limit.check.limit()) {
-                    found[place] = Some(Violation { object: entered, time: occurrence.time, mu, value });
+                    found[place] = Some(Violation { object: entered, time: occurrence.time, mu, value, class: None, step: None });
                 }
             }
         }
@@ -953,7 +1126,7 @@ pub fn judge(bound: &Bound, observations: &[Observed], deterministic: bool, leng
         .collect();
     // Not met outranks an error, an error being undecided, and that being met.
     let verdict = judged.iter().map(|subject| subject.verdict).max().unwrap_or(Verdict::Error);
-    let violation = observations.iter().enumerate().find_map(|(k, observed)| observed.violation.map(|violation| (k as u32 + 1, violation)));
+    let violation = observations.iter().enumerate().find_map(|(k, observed)| observed.violation.clone().map(|violation| (k as u32 + 1, violation)));
     let advice = match verdict {
         Verdict::Undecided => {
             let needed = judged.iter().filter_map(|subject| subject.observations_needed).max();

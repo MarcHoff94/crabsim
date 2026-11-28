@@ -45,11 +45,27 @@ pub struct EventContext {
     /// The calls at the rear of the MU that moved last, until the conveyor that tracks its rear
     /// takes them (`take_rears`).
     rears: std::collections::VecDeque<crate::hooks::HookCall>,
-    /// Whether anything watches MUs move or come into being: recording, or user code. One check
-    /// at each move and creation, the same a run recording nothing always paid.
+    /// Whether anything watches MUs move or come into being: recording, user code or a watch. One
+    /// check at each move and creation, the same a run recording nothing always paid.
     watching: bool,
+    /// Whether anything but recording watches MUs move: user code or a watch. One check at each
+    /// move a run records, the same recording with user code always paid.
+    beyond_recording: bool,
     /// Where each MU in the run is, written at every move.
     locations: crate::locations::MuLocations,
+    /// The watches and Stations' time rules (ADR 0030), behind one pointer, or `None` in a run with
+    /// neither: the context is read at every event, and on a model of thousands of objects a
+    /// context 16 bytes larger cost several percent.
+    expectations: Option<Box<Extras>>,
+}
+
+/// What only runs judging expectations or with Stations' time rules carry in their context.
+#[derive(Clone, Default)]
+struct Extras {
+    /// Which MUs the watched objects take, and what each watch has seen.
+    watches: Option<crate::watch::Watching>,
+    /// Every Station's time rules.
+    times: Option<crate::rules::TimeTable>,
 }
 
 impl EventContext {
@@ -66,15 +82,97 @@ impl EventContext {
             calls: std::collections::VecDeque::new(),
             rears: std::collections::VecDeque::new(),
             watching: recording != Recording::NOTHING,
+            beyond_recording: false,
             locations: crate::locations::MuLocations::new(first_mu_id),
+            expectations: None,
         }
     }
 
     /// The same, noting calls of user code by this table of hooks.
     pub fn with_hooks(mut self, hooks: Option<std::sync::Arc<crate::hooks::HookTable>>) -> EventContext {
         self.hooks = hooks;
-        self.watching = self.recording != Recording::NOTHING || self.hooks.is_some();
+        self.watching = self.is_watching();
         self
+    }
+
+    /// The same, checking the MUs entering the watched objects (ADR 0030), having seen none yet.
+    pub(crate) fn with_watches(mut self, watches: Option<&crate::watch::Watching>) -> EventContext {
+        self.extras().watches = watches.map(crate::watch::Watching::fresh);
+        self.tidy_extras();
+        self.watching = self.is_watching();
+        self
+    }
+
+    /// What only some runs carry, made when first needed.
+    fn extras(&mut self) -> &mut Extras {
+        self.expectations.get_or_insert_with(Box::default)
+    }
+
+    /// Drops the extras if they hold nothing, so a run without them checks one pointer.
+    fn tidy_extras(&mut self) {
+        if self.expectations.as_ref().is_some_and(|extras| extras.watches.is_none() && extras.times.is_none()) {
+            self.expectations = None;
+        }
+    }
+
+    fn watches(&self) -> Option<&crate::watch::Watching> {
+        self.expectations.as_ref().and_then(|extras| extras.watches.as_ref())
+    }
+
+    fn watches_mut(&mut self) -> Option<&mut crate::watch::Watching> {
+        self.expectations.as_mut().and_then(|extras| extras.watches.as_mut())
+    }
+
+    /// The same, with these Stations' time rules, their stretches having kept nothing.
+    pub(crate) fn with_times(mut self, times: Option<&crate::rules::TimeTable>) -> EventContext {
+        self.extras().times = times.map(crate::rules::TimeTable::fresh);
+        self.tidy_extras();
+        self
+    }
+
+    /// The time rules of the Station `id`, if it has any.
+    pub(crate) fn time_rules(&self, id: u32) -> Option<&crate::rules::Timed> {
+        self.expectations.as_ref().and_then(|extras| extras.times.as_ref()).and_then(|times| times.of(id))
+    }
+
+    /// The Stations' time rules, to keep or forget their stretches.
+    pub(crate) fn times_mut(&mut self) -> Option<&mut crate::rules::TimeTable> {
+        self.expectations.as_mut().and_then(|extras| extras.times.as_mut())
+    }
+
+    /// Whether anything watches MUs move: recording, user code or a watch.
+    fn is_watching(&mut self) -> bool {
+        self.beyond_recording = self.hooks.is_some() || self.watches().is_some();
+        self.recording != Recording::NOTHING || self.beyond_recording
+    }
+
+    /// Whether a Station may have time rules, so whoever hands an MU over decides its time as it
+    /// enters (`enter_deciding_time`): one check at each move. Also in a run that only watches,
+    /// which then enters every MU that way, to the same effect.
+    #[inline(always)]
+    pub(crate) fn decides_times(&self) -> bool {
+        self.expectations.is_some()
+    }
+
+    /// What each watch has seen, in the order the run was given them.
+    pub(crate) fn watch_states(&self) -> Vec<crate::watch::WatchState> {
+        self.watches().map_or_else(Vec::new, |watches| watches.states().to_vec())
+    }
+
+    /// Forgets what the watches saw, as statistics start afresh.
+    pub(crate) fn clear_watches(&mut self) {
+        if let Some(watches) = self.watches_mut() {
+            watches.clear();
+        }
+    }
+
+    /// Checks the MU entering `to` against its watches, with the step it has as it comes in.
+    fn check_watches(&mut self, mu: &crate::flows::MoveableUnit, to: u32) {
+        let step = self.routing.next_destination(mu);
+        let time = self.time;
+        if let Some(watches) = self.watches_mut() {
+            watches.check(mu, to, step, time);
+        }
     }
 
     /// Records the MU moving from `from` into `to`, about to enter it, and notes the hooks on exit
@@ -85,9 +183,21 @@ impl EventContext {
         self.locations.set(mu.id, to);
         if self.watching {
             self.record(OccurrenceKind::MuMoved { mu_id: mu.id, from, to });
-            if self.hooks.is_some() {
-                self.moved_hooked(mu, from, to, false);
+            if self.beyond_recording {
+                self.moved_beyond(mu, from, to, false);
             }
+        }
+    }
+
+    /// Notes what user code and the watches make of a move.
+    #[cold]
+    #[inline(never)]
+    fn moved_beyond(&mut self, mu: &crate::flows::MoveableUnit, from: u32, to: u32, by_code: bool) {
+        if self.hooks.is_some() {
+            self.moved_hooked(mu, from, to, by_code);
+        }
+        if self.watches().is_some() {
+            self.check_watches(mu, to);
         }
     }
 
@@ -96,8 +206,8 @@ impl EventContext {
     pub(crate) fn moved_by_code(&mut self, mu: &crate::flows::MoveableUnit, from: u32, to: u32) {
         self.locations.set(mu.id, to);
         self.record(OccurrenceKind::MuMoved { mu_id: mu.id, from, to });
-        if self.hooks.is_some() {
-            self.moved_hooked(mu, from, to, true);
+        if self.beyond_recording {
+            self.moved_beyond(mu, from, to, true);
         }
     }
 
@@ -280,7 +390,7 @@ impl EventContext {
 
     pub fn set_recording(&mut self, recording: Recording) {
         self.recording = recording;
-        self.watching = recording != Recording::NOTHING || self.hooks.is_some();
+        self.watching = self.is_watching();
     }
 
     /// Keeps this occurrence if the run is recording its kind.

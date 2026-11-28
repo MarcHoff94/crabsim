@@ -392,6 +392,8 @@ pub trait SuccessorContainer {
 		false
 	}
 	fn statistics_mut(&mut self) -> &mut StatisticsKeeper;
+	/// Its statistics and kind, as a rule reads it (ADR 0030).
+	fn statistics_and_kind(&self) -> (&StatisticsKeeper, crate::ObjectKind);
 }
 
 // Note: Do not re-export concrete sibling types here to avoid
@@ -648,7 +650,8 @@ pub fn try_to_move_to_successor_with_strategy<
 				if geometry {
 					arriving_from(others, succ_id, pred_id);
 				}
-				match others.get_mut(succ_id).enter(mu, context) {
+				let entered = if context.decides_times() { enter_deciding_time_from(obj, others, succ_id, mu, context) } else { others.get_mut(succ_id).enter(mu, context) };
+				match entered {
 					Ok(entered) => {
 						chosen = Some((idx, entered));
 						break;
@@ -700,6 +703,22 @@ pub fn try_to_move_to_successor_with_strategy<
 #[inline(never)]
 fn accepts_offered<T: SuccessorContainer + EventInterface + ?Sized>(obj: &T, successor: &crate::materialflow_objects::ModelObject, now: SimTime) -> bool {
 	offer_of(obj, now).is_some_and(|offer| successor.accepts(&offer, now))
+}
+
+/// Hands the MU `obj` passes on to a successor that may be a Station with time rules (ADR 0030),
+/// `obj` read as the giver. Kept out of the move loop, so models without them pay one check.
+#[cold]
+#[inline(never)]
+fn enter_deciding_time_from<T: SuccessorContainer + EventInterface + ?Sized>(
+	obj: &T,
+	others: &mut OtherObjects<'_>,
+	successor: u32,
+	mu: MoveableUnit,
+	context: &mut EventContext,
+) -> Result<Option<EventTemplate>, MaterialflowError> {
+	let (keeper, kind) = obj.statistics_and_kind();
+	let giver = crate::rules::Peer { id: *obj.get_object_id(), keeper, kind };
+	crate::materialflow_objects::model_object::enter_deciding_time(others, successor, giver, mu, context)
 }
 
 /// Tells a successor whose geometry counts who hands it the MU entering now. Only the move loop's

@@ -332,8 +332,9 @@ pub struct AttributesFile {
     /// Source: the time between creating an MU and offering it on. 0 by default, which creates
     /// the next MU as soon as one leaves.
     pub interval: Option<Time>,
-    /// Station: the time it works on each MU. 0 by default, a dummy Station that takes no time.
-    pub process_time: Option<Time>,
+    /// Station: the time it works on each MU, or a time by MU as when/then lines with the
+    /// Station's own time as `default`. 0 by default, a dummy Station that takes no time.
+    pub process_time: Option<ProcessTimeFile>,
     /// Any object: random failures. Left out, it never fails.
     pub failures: Option<FailuresValue>,
     /// Station, Buffer: how many MUs it holds from the start of a run, at most its capacity, in
@@ -636,12 +637,33 @@ pub enum DistributionFile {
     Rules(RulesDistributionFile),
 }
 
+/// A Station's process time: one time for every MU, or a time by MU.
+#[derive(JsonSchema)]
+#[serde(untagged)]
+pub enum ProcessTimeFile {
+    Time(Time),
+    Rules(ProcessTimeRulesFile),
+}
+
+/// A Station's process time by MU (ADR 0030), as when/then lines read in order as an MU enters,
+/// the first that holds giving its time. A work plan step's own time wins for an MU on plan.
+#[derive(JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ProcessTimeRulesFile {
+    /// The lines, such as `when class = Frame then 30s`, `when step = Deburr, Grind then 1:20` or `otherwise default`. Conditions as a distribution's rules have them, without `destination`, and `step = <class or instance>`, the MU's current step: `class = <MU class>`, `step = <class or instance>`, `time of day <comparison> <hh:mm>`, `<instance>.state now = <state>`, or `<instance>.<figure> <now|since start|last <time>> <comparison> <value or figure>`, joined by `and` and `or`. A line's time has its unit, such as `30s`, `2min` or `1:30`, or is `default`, the Station's own.
+    #[schemars(length(min = 1))]
+    pub rules: Vec<String>,
+    /// The Station's own time: what `default` means, what applies when no line holds, and what an
+    /// intervention changes and a weighted strategy weighs.
+    pub default: Time,
+}
+
 /// A distribution by when/then rules (ADR 0030), read in order, the first that holds deciding:
 /// `when <conditions> then <action>`, or `otherwise <action>` for one that always holds.
 #[derive(JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RulesDistributionFile {
-    /// The lines, such as `when class = Frame then smallest working_share last 30min of Line A, Line B among those free`, `when time of day >= 22:00 then to Night shift` or `otherwise default`. Conditions: `class = <MU class>`, `destination = <destination>`, `time of day <comparison> <hh:mm>`, `<instance>.state now = <state>`, or `<instance>.<figure> <now|since start|last <time>> <comparison> <value or figure>`, joined by `and` and `or`. Actions: `to <successor>`, `smallest` or `largest <figure> <scope> [of <successors>] [among those free|and wait]`, `round robin [among <successors>]`, `weighted among <successors>` or `default`.
+    /// The lines, such as `when class = Frame then smallest working_share last 30min of Line A, Line B among those free`, `when time of day >= 22:00 then to Night shift` or `otherwise default`. Conditions: `class = <MU class>`, `destination = <destination>`, `step = <class or instance>` (the MU's current step), `time of day <comparison> <hh:mm>`, `<instance>.state now = <state>`, or `<instance>.<figure> <now|since start|last <time>> <comparison> <value or figure>`, joined by `and` and `or`. Actions: `to <successor>`, `smallest` or `largest <figure> <scope> [of <successors>] [among those free|and wait]`, `round robin [among <successors>]`, `weighted among <successors>` or `default`.
     #[schemars(length(min = 1))]
     pub rules: Vec<String>,
     /// The strategy `default` means, and that decides when no line holds. Round robin when left

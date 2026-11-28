@@ -889,9 +889,14 @@ fn single_run(opts: &SingleRun) -> ExitCode {
         println!("code: {module}, SHA-256 {hash}");
     }
 
-    let start = Instant::now();
-    // It stops where a `last` stretch of an expectation begins, which changes nothing.
+    // It stops where a `last` stretch of an expectation begins, which changes nothing, and watches
+    // the objects whose limits say which MUs they take.
     let expectations = file.bound_expectations();
+    let watches = file.entry_watches(&expectations);
+    if !watches.list.is_empty() {
+        run.watch(watches.list.clone());
+    }
+    let start = Instant::now();
     let mut snapshots = std::collections::BTreeMap::new();
     let outcome = run.init().and_then(|_| {
         for time in crabsim_model::expect::snapshot_times(&expectations, SimTime::ZERO, opts.length) {
@@ -912,7 +917,7 @@ fn single_run(opts: &SingleRun) -> ExitCode {
     }
     print!("{}", report(&model, &state));
     if outcome.is_ok() && !expectations.is_empty() {
-        let mut observed = crabsim_model::expect::observe(&expectations, &state, &snapshots, SimTime::ZERO, opts.length);
+        let mut observed = crabsim_model::expect::observe(&expectations, &state, &snapshots, SimTime::ZERO, opts.length, &watches);
         let broken = crabsim_model::expect::broken_limits(&expectations, &observed);
         let limits: Vec<&crabsim_model::expect::Bound> = broken.iter().map(|&at| &expectations[at]).collect();
         let found = crabsim_model::expect::first_violations(&model, opts.seed, opts.deterministic, SimTime::ZERO, opts.length, &limits);

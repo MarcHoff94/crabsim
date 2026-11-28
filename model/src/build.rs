@@ -13,6 +13,45 @@ pub(crate) fn build(model: &Model) -> ModelDescription {
 
 /// The description, and the MU class each MU kind stands for, by its id, for code to read.
 pub(crate) fn build_naming_mu_kinds(model: &Model) -> (ModelDescription, Vec<String>) {
+    let (description, ids) = build_with_ids(model);
+    (description, ids.mu_classes)
+}
+
+/// What building a model gave its names as ids, for what a run is told about it afterwards, such
+/// as the watches of its expectations (ADR 0030).
+pub(crate) struct Ids {
+    /// The MU class each MU kind stands for, by its id.
+    pub mu_classes: Vec<String>,
+    /// The MU kinds each MU class stands for: its own and those of every MU class derived from it.
+    pub kinds: HashMap<String, Vec<crabsim::MuKindId>>,
+    /// Every name given as a destination, with its id. Names standing for the same objects share
+    /// one.
+    pub destinations: HashMap<String, DestinationId>,
+    /// The names given as destinations, in the order first given.
+    order: Vec<String>,
+}
+
+impl Ids {
+    /// A name for each destination, by id: the first given that has it.
+    pub fn destination_names(&self) -> Vec<String> {
+        let mut names = vec![String::new(); self.destinations.values().map(|&id| usize::from(id) + 1).max().unwrap_or(0)];
+        let mut given: Vec<(&String, DestinationId)> = self.destinations.iter().map(|(name, &id)| (name, id)).collect();
+        given.sort_by_key(|(name, id)| (*id, self.order.iter().position(|known| known == *name)));
+        for (name, id) in given {
+            if names[usize::from(id)].is_empty() {
+                names[usize::from(id)] = name.clone();
+            }
+        }
+        names
+    }
+}
+
+/// The ids building the model gives its names.
+pub(crate) fn ids(model: &Model) -> Ids {
+    build_with_ids(model).1
+}
+
+fn build_with_ids(model: &Model) -> (ModelDescription, Ids) {
     let mut mu_classes = vec![crate::BUILT_IN_MU_CLASS.to_string()];
     let mut description = ModelDescription::new();
     // The model's own values for the built-in MU are those of starting MUs and default Sources.
@@ -109,13 +148,27 @@ pub(crate) fn build_naming_mu_kinds(model: &Model) -> (ModelDescription, Vec<Str
             "Source" => {
                 let kind = model.mu_kind_of(index).expect("checked: a Source's MU class is an MU class");
                 let steps = model.work_plan_of(index).expect("checked: a Source's MU class is an MU class");
-                let kind = description.add_mu_kind_with_plan(kind, plan(&steps));
+                let class = resolved.attributes.mu_class.clone().unwrap_or_else(|| crate::BUILT_IN_MU_CLASS.to_string());
+                let found = description.add_mu_kind_with_plan(kind.clone(), plan(&steps));
+                // An MU class alike another in every value still has MUs of its own, which rules
+                // and expectations tell apart by their class: a kind of its own, or one of its
+                // class's alike.
+                let kind = match mu_classes.get(found as usize) {
+                    Some(named) if !named.is_empty() && *named != class => {
+                        let alike = |known: usize| mu_classes[known] == class && description.mu_kinds()[known] == kind && description.plan(known as crabsim::MuKindId) == plan(&steps).as_slice();
+                        match (0..mu_classes.len()).find(|&known| alike(known)) {
+                            Some(known) => known as crabsim::MuKindId,
+                            None => description.add_separate_mu_kind(kind, plan(&steps)),
+                        }
+                    }
+                    _ => found,
+                };
                 description.set_mu_kind(id, kind);
                 if mu_classes.len() <= kind as usize {
                     mu_classes.resize(kind as usize + 1, String::new());
                 }
                 if mu_classes[kind as usize].is_empty() {
-                    mu_classes[kind as usize] = resolved.attributes.mu_class.clone().unwrap_or_else(|| crate::BUILT_IN_MU_CLASS.to_string());
+                    mu_classes[kind as usize] = class;
                 }
             }
             "Station" => {
@@ -167,8 +220,14 @@ pub(crate) fn build_naming_mu_kinds(model: &Model) -> (ModelDescription, Vec<Str
         if let Some(crate::DistributionStrategy::Rules(rules)) = &resolved.attributes.distribution {
             description.set_rules(index as u32, model.rules_of(index, rules, &rule_ids));
         }
+        // A Station's process time by MU, the same way.
+        if let Some(lines) = resolved.attributes.process_time_rules.as_deref().filter(|_| resolved.built_in == "Station") {
+            description.set_time_rules(index as u32, model.time_rules_of(index, lines, &rule_ids));
+        }
     }
-    (description, mu_classes)
+    let order = model.destination_names().into_iter().map(str::to_string).collect();
+    let destinations = destinations.into_iter().map(|(name, id)| (name.to_string(), id)).collect();
+    (description, Ids { mu_classes, kinds, destinations, order })
 }
 
 /// A distribution strategy as the engine takes it.

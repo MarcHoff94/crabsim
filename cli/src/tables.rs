@@ -171,7 +171,9 @@ pub fn expectations(expectations: &Value) -> String {
         }
         let violation = &expectation["violation"];
         if violation.is_object() {
-            notes.push(format!("first broken at {} by MU {} in {}, observation {}", cell(&violation["time"]), cell(&violation["mu"]), cell(&violation["object"]), cell(&violation["observation"])));
+            // For which MUs an object takes, the MU's class and step say what was wrong with it.
+            let which = if violation["class"].is_string() { format!(" (class {}, step {})", cell(&violation["class"]), cell(&violation["step"])) } else { String::new() };
+            notes.push(format!("first broken at {} by MU {}{which} in {}, observation {}", cell(&violation["time"]), cell(&violation["mu"]), cell(&violation["object"]), cell(&violation["observation"])));
         }
         notes.extend([&expectation["why"], &expectation["advice"]].into_iter().filter(|value| value.is_string()).map(cell));
         rows.push(vec![cell(&expectation["id"]), cell(&expectation["verdict"]).replace('_', " "), cell(&expectation["text"]), reached, interval, notes.join("; ")]);

@@ -144,6 +144,8 @@ pub enum Figure {
     NextDestination,
     /// The step of its work plan the MU is on.
     PlanStep,
+    /// The MU's current step, by the class or instance it names (ADR 0030).
+    Step,
 }
 
 use Figure::*;
@@ -166,7 +168,7 @@ const ALWAYS: &[ScopeKind] = &[ScopeKind::Always];
 
 impl Figure {
     /// Every figure, in the order the results store writes them.
-    pub const ALL: [Figure; 37] = [
+    pub const ALL: [Figure; 38] = [
         MusIn,
         MusOut,
         WorkingShare,
@@ -204,6 +206,7 @@ impl Figure {
         MuClass,
         NextDestination,
         PlanStep,
+        Step,
     ];
 
     /// The figure called `name`.
@@ -251,6 +254,7 @@ impl Figure {
             MuClass => "class",
             NextDestination => "next_destination",
             PlanStep => "plan_step",
+            Step => "step",
         }
     }
 
@@ -291,9 +295,10 @@ impl Figure {
             Mus => "the MUs it holds; always: the most at any moment, for an upper limit",
             LeadTime => "each MU's time from leaving its Source to entering this Drain, as a limit; for the model, at every Drain",
             State => "what it is doing: busy, holding, blocked, idle, receiving, failed, stopped or paused",
-            MuClass => "the MU's class",
+            MuClass => "the MU's class; always: each MU's as it enters an object, as a limit on which it takes",
             NextDestination => "where the MU goes next: its detour, or else its work plan's step",
             PlanStep => "the step of its work plan the MU is on, from 1",
+            Step => "the MU's current step, by the class or instance it names: its detour's while it has one, else its work plan's current step's, none without a plan or past its last step; always: each MU's as it enters an object, as a limit on which it takes",
         }
     }
 
@@ -306,13 +311,13 @@ impl Figure {
             ThroughputPerHour => Unit::PerHour,
             MeanLeadTime | MeanCrossingTime | MaxCrossingTime | LeadTime => Unit::Time,
             State => Unit::State,
-            MuClass | NextDestination => Unit::Name,
+            MuClass | NextDestination | Step => Unit::Name,
         }
     }
 
     pub fn subject(self) -> Subject {
         match self {
-            MuClass | NextDestination | PlanStep => Subject::Mu,
+            MuClass | NextDestination | PlanStep | Step => Subject::Mu,
             _ => Subject::Object,
         }
     }
@@ -329,12 +334,18 @@ impl Figure {
             MeanLengthTakenShare | MaxLengthTakenShare | MeanCrossingTime | MaxCrossingTime => BELTS,
             SwitchingShare | MusOutFront | MusOutBack | MusOutLeft | MusOutRight => CROSS,
             Mus => HOLDING_KINDS,
-            MuClass | NextDestination | PlanStep => NONE,
+            MuClass | NextDestination | PlanStep | Step => NONE,
         }
     }
 
     pub fn applies_to(self, kind: ObjectKind) -> bool {
         self.kinds().contains(&kind)
+    }
+
+    /// Whether an expectation reads it of each MU entering an object, with `always`: a limit on
+    /// which MUs the object takes (ADR 0030).
+    pub fn of_entering(self) -> bool {
+        matches!(self, MuClass | Step)
     }
 
     /// Whether the model as a whole has it: its Drains' together.
@@ -348,7 +359,8 @@ impl Figure {
             MinMus | MaxMus | MedianMus | MaxLengthTakenShare | MaxCrossingTime => SINCE,
             Mus => NOW_AND_ALWAYS,
             LeadTime => ALWAYS,
-            State | MuClass | NextDestination | PlanStep => NOW,
+            MuClass | Step => NOW_AND_ALWAYS,
+            State | NextDestination | PlanStep => NOW,
             _ => SINCE_AND_LAST,
         }
     }
@@ -398,7 +410,7 @@ impl Figure {
             SwitchingShare => object.cross.as_ref().and_then(|cross| share(cross.time_switching)),
             MusOutFront | MusOutBack | MusOutLeft | MusOutRight => object.cross.as_ref().map(|cross| cross.mus_out[self.side().index()] as f64),
             Mus => Some(object.contents.len() as f64),
-            LeadTime | State | MuClass | NextDestination | PlanStep => None,
+            LeadTime | State | MuClass | NextDestination | PlanStep | Step => None,
         }
     }
 
@@ -414,7 +426,7 @@ impl Figure {
             }
             MusOnPlan | MusOffPlan => object.plan.is_some_and(|plan| plan.on_plan + plan.off_plan > 0),
             MusOutFront | MusOutBack | MusOutLeft | MusOutRight => object.cross.as_ref().is_some_and(|cross| cross.mus_out[self.side().index()] > 0),
-            Mus | LeadTime | State | MuClass | NextDestination | PlanStep => false,
+            Mus | LeadTime | State | MuClass | NextDestination | PlanStep | Step => false,
             _ => true,
         };
         if kept { self.value(object, now) } else { None }

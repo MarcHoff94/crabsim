@@ -332,6 +332,9 @@ impl SuccessorContainer for Source {
 	fn statistics_mut(&mut self) -> &mut StatisticsKeeper {
 		&mut self.statistics
 	}
+	fn statistics_and_kind(&self) -> (&StatisticsKeeper, crate::ObjectKind) {
+		(&self.statistics, crate::ObjectKind::Source)
+	}
 }
 
 impl Interruptible for Source {

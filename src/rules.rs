@@ -11,11 +11,16 @@
 //! first among those free, or the best alone to wait for, a named successor, round robin among
 //! some, or the object's own strategy. Only objects with rules pay for them, and they pay their
 //! lines per decision.
+//!
+//! A Station's process time can be lines too (`TimeRules`): the same conditions, without the next
+//! destination, each line giving a time or the Station's own, decided as an MU enters (`Timed`).
+//! Both read an MU's current step (`step = …`): its next destination, matched against every
+//! destination standing for a listed class or instance.
 
 use crate::figures::{Figure, Unit};
 use crate::materialflow_objects::flows::{DestinationId, MoveableUnit, MuKindId};
 use crate::materialflow_objects::{ModelObject, OtherObjects};
-use crate::statistics::{MachineState, ObjectStatistics};
+use crate::statistics::{MachineState, ObjectStatistics, StatisticsKeeper};
 use crate::time::SimTime;
 use crate::ObjectKind;
 use std::sync::Arc;
@@ -102,6 +107,9 @@ pub enum Condition {
     Class { kinds: Vec<MuKindId>, equal: bool },
     /// The MU's next destination is (or isn't) this one.
     Destination { destination: DestinationId, equal: bool },
+    /// The MU's current step, its next destination, is (or isn't) one of these: every destination
+    /// a listed class or instance stands for. An MU without a step is on none of them.
+    Step { destinations: Vec<DestinationId>, equal: bool },
     /// The time of day, from the run's start, against a time between 0 and a day.
     TimeOfDay { compare: Compare, time: SimTime },
     /// A figure against a value or another figure. A figure with no value, such as a share
@@ -148,18 +156,7 @@ impl Rules {
     pub fn stretches(&self, successors: &[u32]) -> Vec<(u32, SimTime)> {
         let mut found = Vec::new();
         for line in &self.lines {
-            for condition in line.when.iter().flatten() {
-                if let Condition::Compare { left, right, .. } = condition {
-                    for reading in std::iter::once(left).chain(match right {
-                        Operand::Figure(right) => Some(right),
-                        Operand::Number(_) => None,
-                    }) {
-                        if let RuleScope::Last(length) = reading.scope {
-                            found.push((reading.object, length));
-                        }
-                    }
-                }
-            }
+            found.extend(condition_stretches(&line.when));
             if let Action::Best { scope: RuleScope::Last(length), among, .. } = &line.then {
                 let exits: Vec<usize> = if among.is_empty() { (0..successors.len()).collect() } else { among.clone() };
                 for exit in exits {
@@ -173,6 +170,24 @@ impl Rules {
         found.dedup();
         found
     }
+}
+
+/// The objects and stretches a line's conditions read over a stretch.
+fn condition_stretches(when: &[Vec<Condition>]) -> Vec<(u32, SimTime)> {
+    let mut found = Vec::new();
+    for condition in when.iter().flatten() {
+        if let Condition::Compare { left, right, .. } = condition {
+            for reading in std::iter::once(left).chain(match right {
+                Operand::Figure(right) => Some(right),
+                Operand::Number(_) => None,
+            }) {
+                if let RuleScope::Last(length) = reading.scope {
+                    found.push((reading.object, length));
+                }
+            }
+        }
+    }
+    found
 }
 
 /// An object's rules as it runs them, with its own strategy for `default` and for when no line
@@ -268,11 +283,7 @@ impl Ruled {
     /// Keeps every stretch's buckets up to `now`, before the event at `now` changes anything,
     /// giving when the next boundary is.
     pub(crate) fn roll(&mut self, objects: &[ModelObject], now: SimTime) -> SimTime {
-        let mut next = SimTime::MAX;
-        for stretch in &mut self.stretches {
-            next = next.min(stretch.roll(objects[stretch.object as usize].statistics_keeper(), now));
-        }
-        next
+        roll_all(&mut self.stretches, objects, now)
     }
 
     /// Forgets what the stretches kept, at Reset or when statistics start afresh.
@@ -281,6 +292,59 @@ impl Ruled {
             stretch.kept.clear();
         }
     }
+}
+
+/// Every Station's time rules in a run, by object, which whoever hands a Station an MU reads to
+/// work out its time before it enters (`enter_deciding_time`), since a Station can't reach the
+/// other objects as it takes an MU. The run's event context holds it, so no object grows: every
+/// object in a run takes the size of the largest.
+#[derive(Debug, Clone)]
+pub(crate) struct TimeTable {
+    /// By object id, sorted.
+    stations: Vec<(u32, Timed)>,
+}
+
+impl TimeTable {
+    pub(crate) fn new(times: &[(u32, Arc<TimeRules>)]) -> TimeTable {
+        let mut stations: Vec<(u32, Timed)> = times.iter().map(|(id, rules)| (*id, Timed::new(Arc::clone(rules)))).collect();
+        stations.sort_by_key(|(id, _)| *id);
+        TimeTable { stations }
+    }
+
+    /// The same rules, their stretches having kept nothing.
+    pub(crate) fn fresh(&self) -> TimeTable {
+        let mut fresh = self.clone();
+        fresh.clear_stretches();
+        fresh
+    }
+
+    /// The time rules of the Station `id`, if it has any.
+    pub(crate) fn of(&self, id: u32) -> Option<&Timed> {
+        self.stations.binary_search_by_key(&id, |(station, _)| *station).ok().map(|at| &self.stations[at].1)
+    }
+
+    /// Whether any line reads over a stretch, whose buckets the run keeps.
+    pub(crate) fn has_stretches(&self) -> bool {
+        self.stations.iter().any(|(_, timed)| !timed.stretches.is_empty())
+    }
+
+    /// Keeps every stretch's buckets up to `now`, giving when the next boundary is.
+    pub(crate) fn roll(&mut self, objects: &[ModelObject], now: SimTime) -> SimTime {
+        self.stations.iter_mut().map(|(_, timed)| timed.roll(objects, now)).min().unwrap_or(SimTime::MAX)
+    }
+
+    pub(crate) fn clear_stretches(&mut self) {
+        self.stations.iter_mut().for_each(|(_, timed)| timed.clear_stretches());
+    }
+}
+
+/// Keeps every stretch's buckets up to `now`, giving when the next boundary is.
+fn roll_all(stretches: &mut [Stretch], objects: &[ModelObject], now: SimTime) -> SimTime {
+    let mut next = SimTime::MAX;
+    for stretch in stretches {
+        next = next.min(stretch.roll(objects[stretch.object as usize].statistics_keeper(), now));
+    }
+    next
 }
 
 impl Ruled {
@@ -312,22 +376,7 @@ impl Ruled {
     /// Decides where the MU goes: reads the lines in order, the first that holds deciding, at
     /// `now`, reading the objects in `others` and the deciding object's successors.
     pub(crate) fn decide(&mut self, mu: &MoveableUnit, destination: DestinationId, successors: &[u32], others: &OtherObjects<'_>, now: SimTime) -> Decided {
-        let stretches = &self.stretches;
-        let reading = |reading: &Reading| read(others.get(reading.object), reading.object, reading.figure, reading.scope, now, stretches);
-        let holds = |condition: &Condition| match condition {
-            Condition::Class { kinds, equal } => kinds.contains(&mu.kind()) == *equal,
-            Condition::Destination { destination: wanted, equal } => (destination == *wanted) == *equal,
-            Condition::TimeOfDay { compare, time } => compare.holds((now.as_millis() % DAY) as f64, time.as_millis() as f64),
-            Condition::Compare { left, compare, right } => {
-                let right = match right {
-                    Operand::Number(value) => Some(*value),
-                    Operand::Figure(right) => reading(right),
-                };
-                matches!((reading(left), right), (Some(left), Some(right)) if compare.holds(left, right))
-            }
-            Condition::State { object, state, equal } => (StateName::of(others.get(*object).statistics_keeper().state()) == *state) == *equal,
-        };
-        let Some(at) = self.rules.lines.iter().position(|line| line.when.is_empty() || line.when.iter().any(|group| group.iter().all(holds))) else {
+        let Some(at) = self.rules.lines.iter().position(|line| line_holds(&line.when, mu, destination, others, now, &self.stretches)) else {
             return Decided::Default;
         };
         match &self.rules.lines[at].then {
@@ -344,7 +393,7 @@ impl Ruled {
                     self.order.extend(among.iter().copied().filter(|&exit| exit < successors.len()));
                 }
                 // Each exit's value, read once; those with none go last, ties keep exit order.
-                let value = |exit: usize| read(others.get(successors[exit]), successors[exit], *figure, *scope, now, &self.stretches);
+                let value = |exit: usize| read(others, successors[exit], *figure, *scope, now, &self.stretches);
                 self.values.clear();
                 self.values.extend(self.order.iter().map(|&exit| (exit, value(exit))));
                 self.values.sort_by(|(a, x), (b, y)| match (x, y) {
@@ -369,10 +418,70 @@ impl Ruled {
 
 const DAY: u64 = 86_400_000;
 
-/// A figure of `object` at `now`, over `scope`, or `None` where it has no value.
-fn read(object: &ModelObject, id: u32, figure: Figure, scope: RuleScope, now: SimTime, stretches: &[Stretch]) -> Option<f64> {
-    let keeper = object.statistics_keeper();
-    let kind = object.kind();
+/// The objects a rule reads, by id: their statistics as they stand and their kind. Never the
+/// object deciding, which a model file's rules can't name.
+pub(crate) trait Reads {
+    fn object(&self, id: u32) -> (&StatisticsKeeper, ObjectKind);
+}
+
+impl Reads for OtherObjects<'_> {
+    fn object(&self, id: u32) -> (&StatisticsKeeper, ObjectKind) {
+        let object = self.get(id);
+        (object.statistics_keeper(), object.kind())
+    }
+}
+
+/// The object an MU is leaving, as a rule reads it: it isn't among the others while it passes
+/// the MU on.
+#[derive(Clone, Copy)]
+pub(crate) struct Peer<'a> {
+    pub id: u32,
+    pub keeper: &'a StatisticsKeeper,
+    pub kind: ObjectKind,
+}
+
+/// Every object but the one an MU enters, as the taker's time rules read them while the giver,
+/// which the others leave out, hands the MU over.
+pub(crate) struct Peers<'a> {
+    pub others: &'a OtherObjects<'a>,
+    pub giver: Peer<'a>,
+}
+
+impl Reads for Peers<'_> {
+    fn object(&self, id: u32) -> (&StatisticsKeeper, ObjectKind) {
+        if id == self.giver.id { (self.giver.keeper, self.giver.kind) } else { self.others.object(id) }
+    }
+}
+
+/// Whether a line's conditions hold for the MU at `now`: one group of them all holding, or none
+/// at all, as for `otherwise`.
+fn line_holds(when: &[Vec<Condition>], mu: &MoveableUnit, destination: DestinationId, reads: &impl Reads, now: SimTime, stretches: &[Stretch]) -> bool {
+    when.is_empty() || when.iter().any(|group| group.iter().all(|condition| holds(condition, mu, destination, reads, now, stretches)))
+}
+
+/// Whether one condition holds for the MU, whose next destination is `destination`, at `now`.
+fn holds(condition: &Condition, mu: &MoveableUnit, destination: DestinationId, reads: &impl Reads, now: SimTime, stretches: &[Stretch]) -> bool {
+    let reading = |reading: &Reading| read(reads, reading.object, reading.figure, reading.scope, now, stretches);
+    match condition {
+        Condition::Class { kinds, equal } => kinds.contains(&mu.kind()) == *equal,
+        Condition::Destination { destination: wanted, equal } => (destination == *wanted) == *equal,
+        // `NO_DESTINATION`, an MU without a step, is in no list.
+        Condition::Step { destinations, equal } => destinations.contains(&destination) == *equal,
+        Condition::TimeOfDay { compare, time } => compare.holds((now.as_millis() % DAY) as f64, time.as_millis() as f64),
+        Condition::Compare { left, compare, right } => {
+            let right = match right {
+                Operand::Number(value) => Some(*value),
+                Operand::Figure(right) => reading(right),
+            };
+            matches!((reading(left), right), (Some(left), Some(right)) if compare.holds(left, right))
+        }
+        Condition::State { object, state, equal } => (StateName::of(reads.object(*object).0.state()) == *state) == *equal,
+    }
+}
+
+/// A figure of the object `id` at `now`, over `scope`, or `None` where it has no value.
+fn read(reads: &impl Reads, id: u32, figure: Figure, scope: RuleScope, now: SimTime, stretches: &[Stretch]) -> Option<f64> {
+    let (keeper, kind) = reads.object(id);
     match (figure, scope) {
         (Figure::Mus, _) => Some(keeper.contents() as f64),
         (_, RuleScope::Now) => None,
@@ -380,6 +489,66 @@ fn read(object: &ModelObject, id: u32, figure: Figure, scope: RuleScope, now: Si
         (_, RuleScope::Last(length)) => {
             let start = stretches.iter().find(|stretch| stretch.object == id && stretch.length == length).map(|stretch| stretch.at_start(keeper, now));
             of_statistics(figure, kind, start.as_ref(), &keeper.read(now), now)
+        }
+    }
+}
+
+// ---------- A Station's process time by MU ----------
+
+/// One line of a Station's process time by MU (ADR 0030): `when` the conditions hold, as a
+/// distribution rule's do, `then` this time, or with `None` (`default`) the Station's own.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TimeLine {
+    /// Conditions joined by `or` between groups and `and` within one. Empty for `otherwise`.
+    pub when: Vec<Vec<Condition>>,
+    pub then: Option<SimTime>,
+}
+
+/// A Station's process time as lines, read in order as an MU enters, the first that holds
+/// deciding; with none holding, the Station's own time.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct TimeRules {
+    pub lines: Vec<TimeLine>,
+}
+
+impl TimeRules {
+    /// Every object and stretch the lines read over a stretch.
+    pub fn stretches(&self) -> Vec<(u32, SimTime)> {
+        let mut found: Vec<(u32, SimTime)> = self.lines.iter().flat_map(|line| condition_stretches(&line.when)).collect();
+        found.sort();
+        found.dedup();
+        found
+    }
+}
+
+/// A Station's time rules as a run runs them, with the stretches its lines read.
+#[derive(Debug, Clone)]
+pub struct Timed {
+    pub rules: Arc<TimeRules>,
+    pub(crate) stretches: Vec<Stretch>,
+}
+
+impl Timed {
+    pub fn new(rules: Arc<TimeRules>) -> Timed {
+        let stretches = rules.stretches().into_iter().map(|(object, length)| Stretch::new(object, length)).collect();
+        Timed { rules, stretches }
+    }
+
+    /// The time the first line that holds gives the MU, whose current step is `step`, at `now`:
+    /// `None` for the Station's own, by `default` or with no line holding.
+    pub(crate) fn decide(&self, mu: &MoveableUnit, step: DestinationId, reads: &impl Reads, now: SimTime) -> Option<SimTime> {
+        self.rules.lines.iter().find(|line| line_holds(&line.when, mu, step, reads, now, &self.stretches)).and_then(|line| line.then)
+    }
+
+    /// Keeps every stretch's buckets up to `now`, giving when the next boundary is.
+    pub(crate) fn roll(&mut self, objects: &[ModelObject], now: SimTime) -> SimTime {
+        roll_all(&mut self.stretches, objects, now)
+    }
+
+    /// Forgets what the stretches kept, at Reset or when statistics start afresh.
+    pub(crate) fn clear_stretches(&mut self) {
+        for stretch in &mut self.stretches {
+            stretch.kept.clear();
         }
     }
 }

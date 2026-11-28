@@ -131,8 +131,16 @@ pub struct ViolationResult {
     pub object: String,
     /// The MU that broke it: entering the object, or for a lead time leaving into the Drain.
     pub mu: u32,
-    /// The value it reached, in the line's unit.
-    pub value: String,
+    /// The value it reached, in the line's unit. None for which MUs an object takes, whose MU's
+    /// class and step say it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    /// For which MUs an object takes, the MU's class.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub class: Option<String>,
+    /// For which MUs an object takes, the MU's current step as it entered, `none` without one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub step: Option<String>,
 }
 
 /// An expectation's verdict on a run.
@@ -207,7 +215,7 @@ pub(crate) fn verdicts(connection: &Connection, run: &str, model_text: &str, det
         .query_map([run], |row| row.get(0))?
         .collect::<Result<_, _>>()?;
     let mut values = connection.prepare("SELECT observation, object, value FROM expectation_values WHERE run = ?1 AND expectation = ?2 ORDER BY observation, rowid")?;
-    let mut violations = connection.prepare("SELECT observation, time_s, object, mu, value FROM violations WHERE run = ?1 AND expectation = ?2")?;
+    let mut violations = connection.prepare("SELECT observation, time_s, object, mu, value, class, step FROM violations WHERE run = ?1 AND expectation = ?2")?;
     let mut results = Vec::new();
     for bound in model.bound_expectations() {
         let expectation = &model.expectations[bound.index];
@@ -220,10 +228,11 @@ pub(crate) fn verdicts(connection: &Connection, run: &str, model_text: &str, det
             let subject = object.and_then(|object| names.get(object.as_str()).copied());
             by_observation.entry(observation).or_default().values.push((subject, value));
         }
-        for row in violations.query_map(params![run, expectation.id], |row| Ok((row.get::<_, u32>(0)?, row.get::<_, f64>(1)?, row.get::<_, String>(2)?, row.get::<_, u32>(3)?, row.get::<_, f64>(4)?)))? {
-            let (observation, time, object, mu, value) = row?;
+        let read = |row: &rusqlite::Row<'_>| Ok((row.get::<_, u32>(0)?, row.get::<_, f64>(1)?, row.get::<_, String>(2)?, row.get::<_, u32>(3)?, row.get::<_, f64>(4)?, row.get(5)?, row.get(6)?));
+        for row in violations.query_map(params![run, expectation.id], read)? {
+            let (observation, time, object, mu, value, class, step) = row?;
             if let Some(observed) = by_observation.get_mut(&observation) {
-                observed.violation = Some(Violation { object: names.get(object.as_str()).copied().unwrap_or_default(), time: SimTime::from_secs_f64(time), mu, value });
+                observed.violation = Some(Violation { object: names.get(object.as_str()).copied().unwrap_or_default(), time: SimTime::from_secs_f64(time), mu, value, class, step });
             }
         }
         let observed: Vec<Observed> = ended.iter().filter_map(|k| by_observation.remove(k)).collect();
@@ -239,7 +248,12 @@ pub fn expectation_results(model: &Model, bound: &expect::Bound, judgement: &exp
     let expectation = &model.expectations[bound.index];
     let check = &bound.check;
     let unit = check.figure.unit();
-    let show = |value: f64| if unit == Unit::State { format!("{value}") } else { check.written_value(value) };
+    let show = |value: f64| match unit {
+        Unit::State => format!("{value}"),
+        // Which MUs an object takes: how many broke it.
+        _ if check.on_entry() => format!("{value} {} broke it", if value == 1.0 { "MU" } else { "MUs" }),
+        _ => check.written_value(value),
+    };
     let name_of = |subject: Option<u32>| subject.map_or_else(String::new, |id| model.instances[id as usize].name.clone());
     let subject_verdict = |judged: &expect::SubjectJudgement| SubjectVerdict {
         name: name_of(judged.subject),
@@ -273,12 +287,15 @@ pub fn expectation_results(model: &Model, bound: &expect::Bound, judgement: &exp
         why: None,
         met: None,
         subjects: Vec::new(),
-        violation: judgement.violation.map(|(observation, violation)| ViolationResult {
-            observation,
+        violation: judgement.violation.as_ref().map(|(observation, violation)| ViolationResult {
+            observation: *observation,
             time: format_time_exact(violation.time),
             object: name_of(Some(violation.object)),
             mu: violation.mu,
-            value: show(violation.value),
+            // For which MUs an object takes, the MU itself says it: its class and step.
+            value: (!check.on_entry()).then(|| show(violation.value)),
+            class: violation.class.clone(),
+            step: violation.step.clone(),
         }),
         advice: judgement.advice.clone(),
     };

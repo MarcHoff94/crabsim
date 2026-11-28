@@ -691,6 +691,26 @@ fn a_deterministic_single_run_prints_each_expectations_verdict() {
 }
 
 #[test]
+fn a_single_run_watches_which_mus_an_object_takes_and_names_the_first_that_broke_it() {
+    let models = Models::new("expectations-entry");
+    let mut model: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(demo_file()).unwrap()).unwrap();
+    model["classes"].as_array_mut().unwrap().push(serde_json::json!({ "name": "Box", "parent": "MU", "attributes": { "length": 1 } }));
+    model["expectations"] = serde_json::json!([
+        { "id": "boxes", "text": "every Station.class always in Box" },
+        { "id": "any", "text": "Drain.class always in MU" }
+    ]);
+    let path = models.0.join("entry.json");
+    std::fs::write(&path, model.to_string()).unwrap();
+    let output = crabsim(&["--model", path.to_str().unwrap(), "--length", "1:00:00", "--deterministic"]);
+    assert!(output.status.success(), "{output:?}");
+    let printed = stdout(&output);
+    let verdict = |id: &str| printed.lines().find(|line| line.starts_with(&format!("{id} "))).unwrap_or_else(|| panic!("no {id}: {printed}")).to_string();
+    // The demo's MUs are the built-in MU, no Box among them.
+    assert!(verdict("boxes").contains("not met") && verdict("boxes").contains("(class MU, step none)"), "{printed}");
+    assert!(verdict("any").contains(" met ") && verdict("any").contains("0 MUs broke it"), "{printed}");
+}
+
+#[test]
 fn run_takes_a_deterministic_experiment_and_figures_lists_the_vocabulary() {
     let models = Models::new("expectations-run");
     demo_with_expectations(&models);

@@ -276,4 +276,7 @@ pub struct RunState {
     /// Each object's figures over the complete measuring periods since statistics began, when
     /// the run measures in periods. See `SimulationRun::set_measuring_period`.
     pub periods: Option<MeasuringPeriods>,
+    /// What each watch the run was given has seen since statistics began (ADR 0030): how many MUs
+    /// broke it and the first. Empty for a run that watches nothing. See `SimulationRun::watch`.
+    pub watches: Vec<crate::watch::WatchState>,
 }

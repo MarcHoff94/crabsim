@@ -46,7 +46,8 @@ struct Place {
 	mu: MoveableUnit,
 	work: Work,
 	/// Its work plan step's process time, if it was worked on for one with a time of its own
-	/// (ADR 0026). Otherwise the Station's process time when its work starts.
+	/// (ADR 0026), or else the time the Station's time rules gave it at entry (ADR 0030).
+	/// Otherwise the Station's process time when its work starts.
 	step_time: Option<SimTime>,
 }
 
@@ -415,7 +416,33 @@ impl MaterialFlow for MultiStation {
 	fn is_exit_allowed(&self) -> bool {
 		self.waiting && !self.is_interrupted()
 	}
-	fn process_mu_entrance(&mut self, mut mu: MoveableUnit, arrival: Arrival, context: &mut EventContext) -> Result<Option<EventTemplate>, MaterialflowError> {
+	#[inline]
+	fn process_mu_entrance(&mut self, mu: MoveableUnit, arrival: Arrival, context: &mut EventContext) -> Result<Option<EventTemplate>, MaterialflowError> {
+		self.take_in(mu, arrival, None, context)
+	}
+	fn reserve(&mut self, mu_id: u32, context: &mut EventContext) {
+		self.incoming += 1;
+		context.record(OccurrenceKind::Reserved { object_id: self.base.object_id, mu_id });
+		self.update_statistics(context.time);
+	}
+	fn add_blocked(&mut self, id_blocked: u32, since: SimTime, answering_retry: bool) {
+		list_blocked(&mut self.blockedlist, id_blocked, since, answering_retry);
+	}
+	fn relist_blocked(&mut self, id_blocked: u32, next: Option<SimTime>) {
+		relist_blocked(&mut self.blockedlist, id_blocked, next);
+	}
+	fn notify_blocked_predecessors(&mut self, context: &mut EventContext) -> Result<(), MaterialflowError> {
+		retries_for_blocked(&mut self.blockedlist, self.base.object_id, context);
+		Ok(())
+	}
+}
+
+impl MultiStation {
+	/// Takes the MU in: for its plan step's own time, or else `decided`, the time its time rules
+	/// gave it as it entered (ADR 0030), or else its own as its work starts. Inlined, so taking an
+	/// MU in without time rules is what it was before them.
+	#[inline(always)]
+	pub(crate) fn take_in(&mut self, mut mu: MoveableUnit, arrival: Arrival, decided: Option<SimTime>, context: &mut EventContext) -> Result<Option<EventTemplate>, MaterialflowError> {
 		log::info!("MU {} entered Station {}", mu.id, self.base.object_id);
 		let was_blocked = self.process_state() == ProcessState::Blocked;
 		// An MU it was receiving takes its reserved place.
@@ -424,9 +451,11 @@ impl MaterialFlow for MultiStation {
 		if self.detour != NO_DESTINATION {
 			mu.detour = self.detour;
 		}
+		// Its time rules decided as it came in, even for a batch still to fill; a plan step's own
+		// time wins over them. Without either, its own time as work starts.
 		let step_time = match arrival {
-			Arrival::OnPlan(time) => time,
-			_ => None,
+			Arrival::OnPlan(Some(time)) => Some(time),
+			_ => decided,
 		};
 		self.places.push(Place { mu, work: Work::Waiting, step_time });
 		self.statistics.count_mu_in();
@@ -443,21 +472,6 @@ impl MaterialFlow for MultiStation {
 		self.report_blocking(was_blocked, context);
 		self.update_statistics(context.time);
 		Ok(exit)
-	}
-	fn reserve(&mut self, mu_id: u32, context: &mut EventContext) {
-		self.incoming += 1;
-		context.record(OccurrenceKind::Reserved { object_id: self.base.object_id, mu_id });
-		self.update_statistics(context.time);
-	}
-	fn add_blocked(&mut self, id_blocked: u32, since: SimTime, answering_retry: bool) {
-		list_blocked(&mut self.blockedlist, id_blocked, since, answering_retry);
-	}
-	fn relist_blocked(&mut self, id_blocked: u32, next: Option<SimTime>) {
-		relist_blocked(&mut self.blockedlist, id_blocked, next);
-	}
-	fn notify_blocked_predecessors(&mut self, context: &mut EventContext) -> Result<(), MaterialflowError> {
-		retries_for_blocked(&mut self.blockedlist, self.base.object_id, context);
-		Ok(())
 	}
 }
 
@@ -581,6 +595,9 @@ impl SuccessorContainer for MultiStation {
 	}
 	fn statistics_mut(&mut self) -> &mut StatisticsKeeper {
 		&mut self.statistics
+	}
+	fn statistics_and_kind(&self) -> (&StatisticsKeeper, crate::ObjectKind) {
+		(&self.statistics, crate::ObjectKind::Station)
 	}
 	fn take_content(&mut self, _now: SimTime) -> Option<MoveableUnit> {
 		let at = self.offered()?;

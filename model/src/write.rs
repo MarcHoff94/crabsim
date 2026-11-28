@@ -179,7 +179,11 @@ pub(crate) fn attributes(attributes: &Attributes) -> Value {
         fields.insert("interval".into(), time(interval));
     }
     if let Some(process_time) = attributes.process_time {
-        fields.insert("process_time".into(), time(process_time));
+        let value = match &attributes.process_time_rules {
+            Some(lines) => json!({ "rules": lines, "default": time(process_time) }),
+            None => time(process_time),
+        };
+        fields.insert("process_time".into(), value);
     }
     if let Some(failures) = &attributes.failures {
         fields.insert("failures".into(), Value::Array(failures.iter().map(self::failures).collect()));

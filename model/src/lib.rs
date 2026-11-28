@@ -200,8 +200,14 @@ pub struct Attributes {
     /// A Source's time between creating an MU and offering it on. 0 by default: the next MU as
     /// soon as one leaves.
     pub interval: Option<SimTime>,
-    /// A Station's time working on each MU. 0 by default: a dummy Station.
+    /// A Station's time working on each MU. 0 by default: a dummy Station. With
+    /// `process_time_rules`, its own time, which they fall back on.
     pub process_time: Option<SimTime>,
+    /// A Station's process time by MU (ADR 0030), as when/then lines in their canonical form, each
+    /// giving a time or `default`, `process_time` being the Station's own time. A file writes both
+    /// as one `process_time`, `{"rules": [...], "default": "20"}`, set and inherited as a whole, so
+    /// it is set only where `process_time` is. None by default: the same time for every MU.
+    pub process_time_rules: Option<Vec<String>>,
     /// Named random failure profiles, for any object, independent of each other. None by default:
     /// it never fails. The list is inherited as a whole.
     pub failures: Option<Vec<Failures>>,
@@ -511,7 +517,10 @@ impl Attributes {
     fn take(&mut self, attribute: Attribute, from: &Attributes) {
         match attribute {
             Attribute::Interval => self.interval = from.interval,
-            Attribute::ProcessTime => self.process_time = from.process_time,
+            Attribute::ProcessTime => {
+                self.process_time = from.process_time;
+                self.process_time_rules = from.process_time_rules.clone();
+            }
             Attribute::Failures => self.failures = from.failures.clone(),
             Attribute::StartingMus => self.starting_mus = from.starting_mus,
             Attribute::Capacity => self.capacity = from.capacity,

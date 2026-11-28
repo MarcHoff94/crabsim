@@ -293,7 +293,9 @@ impl SingleStation {
 		self.interruptions.is_active(Interruption::Paused)
 	}
 	/// Takes the MU in and starts work on it: for its plan step's own time, or else `decided`, the
-	/// time its time rules gave it (ADR 0030), or else its own.
+	/// time its time rules gave it (ADR 0030), or else its own. Inlined, so taking an MU in
+	/// without time rules is what it was before them.
+	#[inline(always)]
 	pub(crate) fn take_in(&mut self, mut mu: MoveableUnit, arrival: Arrival, decided: Option<SimTime>, context: &mut EventContext) -> Result<Option<EventTemplate>, MaterialflowError> {
 		log::info!("MU {} entered SingleStation {}", mu.id, self.base.object_id);
 		let mu_id = mu.id;

@@ -321,6 +321,8 @@ impl MaterialFlow for ModelObject {
     fn wake_on_listing(&mut self) -> Option<EventTemplate> {
         on_the_object!(self, object => object.wake_on_listing())
     }
+    /// Inlined into every move, as it was while `enter` was its only caller.
+    #[inline(always)]
     fn process_mu_entrance(&mut self, mu: MoveableUnit, arrival: Arrival, context: &mut EventContext) -> Result<Option<EventTemplate>, MaterialflowError> {
         on_the_object!(self, object => object.process_mu_entrance(mu, arrival, context))
     }

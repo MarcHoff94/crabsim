@@ -439,7 +439,9 @@ impl MaterialFlow for MultiStation {
 
 impl MultiStation {
 	/// Takes the MU in: for its plan step's own time, or else `decided`, the time its time rules
-	/// gave it as it entered (ADR 0030), or else its own as its work starts.
+	/// gave it as it entered (ADR 0030), or else its own as its work starts. Inlined, so taking an
+	/// MU in without time rules is what it was before them.
+	#[inline(always)]
 	pub(crate) fn take_in(&mut self, mut mu: MoveableUnit, arrival: Arrival, decided: Option<SimTime>, context: &mut EventContext) -> Result<Option<EventTemplate>, MaterialflowError> {
 		log::info!("MU {} entered Station {}", mu.id, self.base.object_id);
 		let was_blocked = self.process_state() == ProcessState::Blocked;

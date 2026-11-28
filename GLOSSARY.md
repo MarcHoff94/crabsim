@@ -450,11 +450,21 @@ How much work a call of user code may do, counted in WebAssembly instructions, t
 ### Agreeing and checking
 
 **Request**:
-What a user wants from the model, in their own words, with an agent's restatement in precise terms, the expectations that check it and its state: open, built, met or broken. The user accepts the restatement and its expectations together (ADR 0030). Whoever builds it marks it built; whether it is met or broken is what crabsim's latest checks say, never written into the model.
+The only way an agent proposes what a model must achieve (ADR 0030, amended 2026-11-28): the user's words exactly, or the agent's own suggestion with its reason, an agent's restatement in precise terms, its draft lines and the agent that wrote it. It waits for the user's answer, and is then accepted, declined or, once later requests replaced all its lines, superseded. Whether an accepted one is met or broken is what crabsim's latest checks say, never written into the model. It stays in the model as the record of why its lines exist.
 _Avoid_: Requirement (SysML's word for an expectation), task, ticket
 
+**Draft line**:
+A line a request proposes, written as an expectation is, possibly replacing or removing an agreed one. crabsim checks it and judges it, but it counts for no stage until the user accepts its request, when it becomes an expectation with the same id.
+_Avoid_: Draft alone (the first stage), proposed expectation
+
+**Answer**:
+What the user says to a request: **accept** it whole, **ask for changes** with a comment, which the agent then works into the same request, or **decline** it with a reason, after which it stays, folded away. Only the user answers, and an answer is no change to the model: checks stay current and the agent isn't refused for it.
+
+**Superseded**:
+An accepted request all of whose lines later requests replaced or removed. It names the request that did it.
+
 **Expectation**:
-A check of a model that crabsim judges on its own, agreed with the user: a figure at the end of a run, such as "Station A busy at least 70%", or a limit during it, such as "Buffer X never holds more than 20". It names an object, a class with `every` or `mean`, or the model, and belongs to a stage. An agent proposes it, the user accepts it, and only the user changes an accepted one; an agent may question it, with its reason.
+A check of a model that crabsim judges on its own, agreed with the user: a figure at the end of a run, such as "Station A busy at least 70%", or a limit during it, such as "Buffer X never holds more than 20". It names an object, a class with `every` or `mean`, or the model, and belongs to a stage. The user's own are agreed as written; an agent's come as draft lines of a request. Only the user changes an agreed one, and an agent proposes a change through another request.
 _Avoid_: Requirement, test, assertion, constraint
 
 **Figure**:
@@ -462,7 +472,7 @@ Something crabsim measures, with its unit, such as a Station's working share, a 
 _Avoid_: Metric, KPI
 
 **Limit**:
-An expectation that holds at every moment of a run, such as "Buffer X never holds more than 20", or for every MU entering an object, such as "Mill only works MUs whose current step is Welding or Deburr", written with `always`. crabsim says when and by which MU it was first broken.
+An expectation that holds at every moment of a run, such as "Buffer X never holds more than 20", written with `always` (`Buffer X.mus always <= 20`), or for every MU entering an object, such as "Mill only works MUs whose current step is Welding or Deburr", written with `entering_mu` (`Mill.entering_mu.step in Welding, Deburr`). crabsim says when and by which MU it was first broken.
 _Avoid_: Constraint, threshold
 
 **Reference figure**:
@@ -485,9 +495,6 @@ _Avoid_: Phase, status
 **Check**:
 One run of a stage, verification or validation, for each set of settings its expectations are checked with, kept in the results store: what crabsim works out the stage from. A check never changes the model.
 _Avoid_: Test
-
-**Questioned**:
-An accepted expectation an agent doubts, with its reason, such as a throughput above what a Station can do. It stays in force until the user answers, by accepting it again, changing it or removing it.
 
 **Verification**:
 Checking that the model does what was specified, in a deterministic run: no failures, every random time at its mean.

@@ -809,6 +809,9 @@ impl Reader {
         if value.get("code").is_some() {
             return self.code_distribution(value, pointer, name);
         }
+        if value.get("rules").is_some() {
+            return self.rules_distribution(value, pointer, name);
+        }
         let fields = self.object(value, pointer, name, "a distribution", &["weighted", "by_destination"])?;
         if let Some(by_destination) = fields.get("by_destination") {
             let at = format!("{pointer}/by_destination");
@@ -963,6 +966,41 @@ impl Reader {
             },
         };
         Some(DistributionStrategy::Code(Box::new(crate::CodeDistribution { code: code?, default: default?, asked_on_entry: asked_on_entry? })))
+    }
+
+    /// `{"rules": ["when … then …", …], "default": …}` (ADR 0030): each line read, its names
+    /// checked against the model by `Model::rule_problems`.
+    fn rules_distribution(&mut self, value: &Value, pointer: &str, name: Option<&str>) -> Option<DistributionStrategy> {
+        let fields = self.object(value, pointer, name, "a distribution by rules", &["rules", "default"])?;
+        let at = format!("{pointer}/rules");
+        let lines = match fields.get("rules") {
+            Some(Value::Array(lines)) if !lines.is_empty() => {
+                let mut read = Vec::new();
+                for (place, line) in lines.iter().enumerate() {
+                    let Some(text) = self.text(line, &format!("{at}/{place}"), name) else { continue };
+                    match crate::rules::Line::parse(&text) {
+                        Ok(line) => read.push(line.text()),
+                        Err(message) => self.problem(format!("{at}/{place}"), name, message),
+                    }
+                }
+                read
+            }
+            _ => {
+                self.problem(at, name, "`rules` is a list of lines, at least one, such as [\"when class = Frame then to Line A\", \"otherwise default\"]");
+                return None;
+            }
+        };
+        let default = match fields.get("default") {
+            None => Some(DistributionStrategy::RoundRobin),
+            Some(default) => match self.distribution(default, &format!("{pointer}/default"), name)? {
+                DistributionStrategy::Code(_) | DistributionStrategy::Rules(_) => {
+                    self.problem(format!("{pointer}/default"), name, "rules' default is a built-in strategy: \"round_robin\", {\"weighted\": …} or {\"by_destination\": …}");
+                    None
+                }
+                strategy => Some(strategy),
+            },
+        };
+        Some(DistributionStrategy::Rules(Box::new(crate::rules::RuleDistribution { lines, default: default? })))
     }
 
     /// `{"before_init": {"code": {…}}, "after_init": …, "before_reset": …, "after_reset": …}`.

@@ -148,9 +148,9 @@ fn weights_and_strategies_are_what_the_canvas_writes_beside_each_object() {
 
     let marked = strategies(workspace.model(), workspace.description());
     assert_eq!(marked[OUT as usize], None, "a Drain has no successors to choose from");
-    assert_eq!(marked[IN as usize], Some(Strategy { weighted: false, places: Vec::new() }));
+    assert_eq!(marked[IN as usize], Some(Strategy { weighted: false, rules: Vec::new(), places: Vec::new() }));
     // Split prefers A: 10 + 5 s onward against B's 3 + 30 s.
-    assert_eq!(marked[SPLIT as usize], Some(Strategy { weighted: true, places: vec![(A, 1), (B, 2)] }));
+    assert_eq!(marked[SPLIT as usize], Some(Strategy { weighted: true, rules: Vec::new(), places: vec![(A, 1), (B, 2)] }));
 }
 
 #[test]

@@ -395,14 +395,14 @@ fn number(typed: &str) -> Option<f64> {
 }
 
 /// `value` as `{}` writes a number, without a trailing `.0`.
-fn plain(value: f64) -> String {
+pub(crate) fn plain(value: f64) -> String {
     let rounded = (value * 1e9).round() / 1e9;
     format!("{rounded}")
 }
 
 /// A length of time with its unit: `90s`, `30min`, `2h`, `1d`, or as the UI writes time, such as
 /// `1:30` or `2d 06:00:00`. A bare number isn't one: its unit wouldn't be explicit.
-fn time_value(typed: &str) -> Option<(SimTime, String)> {
+pub(crate) fn time_value(typed: &str) -> Option<(SimTime, String)> {
     for (suffix, seconds) in [("min", 60.0), ("s", 1.0), ("h", 3_600.0)] {
         if let Some(amount) = typed.strip_suffix(suffix).and_then(number) {
             return Some((SimTime::from_secs_f64(amount * seconds), format!("{}{suffix}", plain(amount))));
@@ -416,7 +416,7 @@ fn time_value(typed: &str) -> Option<(SimTime, String)> {
 }
 
 /// The value a line compares with, read in the figure's unit.
-fn target(unit: Unit, typed: &str) -> Result<Target, String> {
+pub(crate) fn target(unit: Unit, typed: &str) -> Result<Target, String> {
     let number_target = |value: f64, written: String| Ok(Target::Number { value, written });
     match unit {
         Unit::Share => match typed.strip_suffix('%').and_then(number) {

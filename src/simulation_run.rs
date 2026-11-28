@@ -64,6 +64,11 @@ pub struct SimulationRun {
     /// The end of the measuring period in progress, or the end of time without periods, so
     /// checking for one costs the per-event path a single comparison.
     period_end: SimTime,
+    /// The objects a rule reads over a stretch (ADR 0030), whose buckets the run keeps.
+    watched: Vec<u32>,
+    /// When the next of their buckets begins: `SimTime::MAX` without any, so other models pay
+    /// one comparison an event.
+    stretch_next: SimTime,
     /// How long measuring periods are, a setting Reset keeps.
     measuring_period: Option<SimTime>,
     periods: Option<Periods>,
@@ -93,6 +98,8 @@ impl SimulationRun {
             hook_table: None,
             hook_error: None,
             period_end: SimTime::MAX,
+            watched: Vec::new(),
+            stretch_next: SimTime::MAX,
             measuring_period: None,
             periods: None,
             context: EventContext::new(1, Recording::NOTHING).with_routing(routing.clone()),
@@ -102,6 +109,28 @@ impl SimulationRun {
         run.rank_successors();
         run.context = run.default_context();
         run
+    }
+
+    /// Gives objects their rules (ADR 0030), each keeping its own strategy for `default`, and the
+    /// objects the rules read over a stretch their buckets.
+    pub(crate) fn attach_rules(&mut self, rules: &[(u32, Arc<crate::rules::Rules>)]) {
+        for (id, rules) in rules {
+            let Some(object) = self.objects.get_mut(*id as usize) else { continue };
+            let successors: Vec<u32> = object.successor_ids().to_vec();
+            if let Some(distribution) = object.distribution_mut() {
+                let builtin = std::mem::take(distribution);
+                *distribution = Distributing::Rules(Box::new(crate::rules::Ruled::new(Arc::clone(rules), builtin, successors.len())));
+            }
+            for (watched, length) in rules.stretches(&successors) {
+                if let Some(object) = self.objects.get_mut(watched as usize) {
+                    object.statistics_keeper_mut().watch(length);
+                    if !self.watched.contains(&watched) {
+                        self.watched.push(watched);
+                    }
+                    self.stretch_next = SimTime::ZERO;
+                }
+            }
+        }
     }
 
     /// Gives the run user code and which objects have which hooks (ADR 0029). An object with a
@@ -176,9 +205,24 @@ impl SimulationRun {
 
     /// Starts every object's statistics afresh from the current time, such as at the end of a
     /// warm-up. It changes nothing else, so random numbers and event order stay the same.
+    /// Keeps the buckets of every stretch a rule reads up to `now`, before the event at `now`
+    /// changes anything (ADR 0030).
+    #[cold]
+    #[inline(never)]
+    fn roll_stretches(&mut self, now: SimTime) {
+        let mut next = SimTime::MAX;
+        for &id in &self.watched {
+            next = next.min(self.objects[id as usize].statistics_keeper_mut().roll_stretches(now));
+        }
+        self.stretch_next = next;
+    }
+
     pub fn clear_statistics(&mut self) {
         for object in &mut self.objects {
             object.clear_statistics(self.time);
+        }
+        if !self.watched.is_empty() {
+            self.stretch_next = SimTime::ZERO;
         }
         self.statistics_since = self.time;
         self.start_periods();
@@ -478,6 +522,7 @@ impl SimulationRun {
         self.statistics_since = SimTime::ZERO;
         self.periods = None;
         self.period_end = SimTime::MAX;
+        self.stretch_next = if self.watched.is_empty() { SimTime::MAX } else { SimTime::ZERO };
         self.context = self.default_context();
         self.rank_successors();
         if let Some(hooks) = &mut self.hooks {
@@ -602,6 +647,9 @@ impl SimulationRun {
     }
 
     fn process(&mut self, event: ScheduledEvent) -> Result<(), RunError> {
+        if event.time >= self.stretch_next {
+            self.roll_stretches(event.time);
+        }
         self.time = event.time;
         self.context.time = self.time;
         self.context.seq = event.seq;

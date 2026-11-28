@@ -203,6 +203,49 @@ impl ModelObject {
         self.offered_kind(now).map(|kind| Offer { kind, from: *self.get_object_id(), from_belt: self.reads_mu_kind(), crosswise })
     }
 
+    /// Its kind, as views, figures and rules name it.
+    pub fn kind(&self) -> crate::ObjectKind {
+        use crate::ObjectKind;
+        match self {
+            ModelObject::Source(_) => ObjectKind::Source,
+            ModelObject::Station(_) | ModelObject::MultiStation(_) => ObjectKind::Station,
+            ModelObject::Buffer(_) => ObjectKind::Buffer,
+            ModelObject::Drain(_) => ObjectKind::Drain,
+            ModelObject::Conveyor(conveyor) if conveyor.cross().is_some() => ObjectKind::CrossConveyor,
+            ModelObject::Conveyor(_) => ObjectKind::Conveyor,
+            #[cfg(test)]
+            ModelObject::RecordsThenFails(_) => ObjectKind::Station,
+        }
+    }
+
+    /// Its statistics, which a rule reads (ADR 0030).
+    pub fn statistics_keeper(&self) -> &crate::statistics::StatisticsKeeper {
+        match self {
+            ModelObject::Source(object) => &object.statistics,
+            ModelObject::Station(object) => &object.statistics,
+            ModelObject::MultiStation(object) => &object.statistics,
+            ModelObject::Buffer(object) => &object.statistics,
+            ModelObject::Drain(object) => &object.statistics,
+            ModelObject::Conveyor(object) => &object.statistics,
+            #[cfg(test)]
+            ModelObject::RecordsThenFails(_) => unreachable!("a test object has no rules"),
+        }
+    }
+
+    /// Its statistics, to keep a stretch a rule reads.
+    pub fn statistics_keeper_mut(&mut self) -> &mut crate::statistics::StatisticsKeeper {
+        match self {
+            ModelObject::Source(object) => &mut object.statistics,
+            ModelObject::Station(object) => &mut object.statistics,
+            ModelObject::MultiStation(object) => &mut object.statistics,
+            ModelObject::Buffer(object) => &mut object.statistics,
+            ModelObject::Drain(object) => &mut object.statistics,
+            ModelObject::Conveyor(object) => &mut object.statistics,
+            #[cfg(test)]
+            ModelObject::RecordsThenFails(_) => unreachable!("a test object has no rules"),
+        }
+    }
+
     /// How it picks a successor, if it has successors to pick from.
     pub fn distribution_mut(&mut self) -> Option<&mut crate::materialflow_objects::Distributing> {
         match self {

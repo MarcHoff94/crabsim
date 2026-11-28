@@ -680,3 +680,21 @@ fn a_sources_mu_class_is_chosen_from_the_models_mu_classes() {
     assert_eq!(form.value(), Ok(json!("Tote")));
     assert!(!form.matches(Some(&json!("MU"))));
 }
+
+#[test]
+fn rules_read_back_as_one_line_each_with_their_default_and_none_written_is_refused() {
+    let given = json!({ "rules": ["when class = Frame then to A", "otherwise default"], "default": { "weighted": { "by": "process_time", "order": "smallest", "rank": "route" } } });
+    let form = Form::for_attribute("distribution", Some(&given), &[], &with_drains(&["Out"]));
+    let choice = form.distribution.clone().unwrap();
+    assert_eq!(choice.rules.as_deref(), Some("when class = Frame then to A\notherwise default"));
+    assert!(choice.weighted, "the default is what follows");
+    assert_eq!(form.value(), Ok(given.clone()));
+    assert!(form.matches(Some(&given)));
+    // Round robin as their default is left out.
+    let mut form = Form::for_attribute("distribution", None, &[], &with_drains(&["Out"]));
+    form.distribution.as_mut().unwrap().rules = Some("otherwise to A\n\n".into());
+    assert_eq!(form.value(), Ok(json!({ "rules": ["otherwise to A"] })));
+    form.distribution.as_mut().unwrap().rules = Some("  ".into());
+    assert!(form.value().is_err());
+    assert_eq!(summary(&given), "rules: when class = Frame then to A and 1 more; else weighted: route by process time, smallest first");
+}

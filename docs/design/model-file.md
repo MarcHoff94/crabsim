@@ -230,6 +230,28 @@ What the user agreed with an agent, and how crabsim checks it (ADR 0030, spec is
 - **`stages`** give `verification` and `validation` each a `length`, `warm_up` and `observations`, every part left out taking its default: a day, no warm-up, one observation for verification, which runs deterministically, and ten for validation, which runs with randomness. An expectation may give its own `length`, `warm_up` and `observations`, which its check runs with instead: a stage is checked with one run for each set of settings its expectations have.
 - **Only the user agrees:** the catalogue refuses an agent anything that accepts an expectation or a request, or changes or removes an accepted one, or changes how an accepted expectation is checked, whichever operation it tries (`edit_model`, `write_model`, `adopt_model`, `delete_model`, `undo_model`, `redo_model`). Renaming what an accepted expectation names keeps it accepted: an instance is the same when it keeps its stream (ADR 0012). An agent may change its own proposals, question an accepted expectation and mark a request built.
 
+## Rules
+
+A distribution by when/then rules (ADR 0030, spec issue 162, PR 3), on a Source, Station, Buffer, Conveyor or cross conveyor, inherited as a whole like any distribution:
+
+```json
+"distribution": {
+  "rules": [
+    "when class = Frame then smallest working_share last 30min of Line A, Line B among those free",
+    "when time of day >= 22:00 or time of day < 06:00 then to Night shift",
+    "otherwise default"
+  ],
+  "default": "round_robin"
+}
+```
+
+- **The lines** are read in order as the object passes an MU on; the first that holds decides. A line is `when <conditions> then <action>` or `otherwise <action>`, saved in canonical form (`crabsim_model::rules::Line`): `among those free` written out, a time of day as `06:00`, values as an expectation writes them.
+- **Conditions,** joined by `and`, which binds first, and `or`: `class = <MU class>` or `!=`, with a comma-separated list for any of them, each standing for the MU classes derived from it too; `destination = <destination>` or `!=`, an instance or a class of objects, the MU's next one; `time of day <comparison> <hh:mm>`, from the run's start, a day long; `<instance>.state now = <state>` or `!=`, a state its class can be in, a stop by hand reading as failed; and `<instance>.<figure> <scope> <comparison> <value>`, or another `<instance>.<figure> <scope>` in the same unit. The scope is `now` (for `mus`), `since start` or `last <time>`; the figures are those the statistics keep as the run goes (`crabsim::rules::readable`). A rule never names the object deciding.
+- **Actions:** `to <successor>`, the MU waiting for it alone; `smallest` or `largest <figure> <scope> [of <successors>] [among those free|and wait]`, each successor's figure, the best free one taking the MU, or only the best, waited for; `round robin [among <successors>]`; `weighted among <successors>`, by the object's own ranking, so its `default` must be weighted; and `default`.
+- **`default`** is round robin when left out, or weighted, or by destination, never code or rules: it decides when no line holds and when a line says `default`.
+- **Problems** point at the line where it is written: the instance's `/attributes/distribution/rules/<n>`, or the class's, naming the instance it doesn't fit. A line that doesn't read says why; one that doesn't fit names the successor, class, destination, figure or state that's wrong. Renaming an instance or class through `edit_model` renames it in the lines, as a destination either way.
+- **Built** into the engine's `crabsim::rules::Rules` by id (`ModelDescription::set_rules`), a class's MU kinds those of its own Sources and every MU class derived from it.
+
 ## Names
 
 - Instance names and class names are each unique, compared exactly (case-sensitive).

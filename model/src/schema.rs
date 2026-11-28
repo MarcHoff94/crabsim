@@ -629,6 +629,20 @@ pub enum DistributionFile {
     Weighted(WeightedFile),
     ByDestination(ByDestinationFile),
     Code(CodeDistributionFile),
+    Rules(RulesDistributionFile),
+}
+
+/// A distribution by when/then rules (ADR 0030), read in order, the first that holds deciding:
+/// `when <conditions> then <action>`, or `otherwise <action>` for one that always holds.
+#[derive(JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RulesDistributionFile {
+    /// The lines, such as `when class = Frame then smallest working_share last 30min of Line A, Line B among those free`, `when time of day >= 22:00 then to Night shift` or `otherwise default`. Conditions: `class = <MU class>`, `destination = <destination>`, `time of day <comparison> <hh:mm>`, `<instance>.state now = <state>`, or `<instance>.<figure> <now|since start|last <time>> <comparison> <value or figure>`, joined by `and` and `or`. Actions: `to <successor>`, `smallest` or `largest <figure> <scope> [of <successors>] [among those free|and wait]`, `round robin [among <successors>]`, `weighted among <successors>` or `default`.
+    #[schemars(length(min = 1))]
+    pub rules: Vec<String>,
+    /// The strategy `default` means, and that decides when no line holds. Round robin when left
+    /// out.
+    pub default: Option<CodeDefaultFile>,
 }
 
 /// The strategy that chooses among the successors that reach the MU's destination.

@@ -147,6 +147,27 @@ pub(crate) fn build_naming_mu_kinds(model: &Model) -> (ModelDescription, Vec<Str
             description.connect_at(from as u32, connection.from_side, ids[connection.to.as_str()], connection.to_side);
         }
     }
+    // Rules (ADR 0030), once every Source's MU kinds are known: a class stands for its own kinds
+    // and those of every MU class derived from it.
+    let mut kinds: HashMap<String, Vec<crabsim::MuKindId>> = HashMap::new();
+    for (kind, class) in mu_classes.iter().enumerate().filter(|(_, class)| !class.is_empty()) {
+        let mut names = vec![class.clone()];
+        if let Some((chain, built_in)) = model.chain(class) {
+            names.extend(chain.iter().map(|link| link.name.clone()));
+            names.push(built_in.to_string());
+        }
+        names.dedup();
+        for name in names {
+            kinds.entry(name).or_default().push(kind as crabsim::MuKindId);
+        }
+    }
+    let rule_ids = crate::rules::Ids { kinds: &kinds, destinations: &destinations };
+    for index in 0..model.instances.len() {
+        let resolved = model.resolve(index).expect("checked: every instance's chain of classes is sound");
+        if let Some(crate::DistributionStrategy::Rules(rules)) = &resolved.attributes.distribution {
+            description.set_rules(index as u32, model.rules_of(index, rules, &rule_ids));
+        }
+    }
     (description, mu_classes)
 }
 
@@ -167,6 +188,7 @@ fn distribution_rule(strategy: &crate::DistributionStrategy, ids: &HashMap<&str,
         crate::DistributionStrategy::ByDestination(then) => DistributionRule::ByDestination(Box::new(distribution_rule(then, ids))),
         // Code chooses on top of its default, which the hooks give it when built with code.
         crate::DistributionStrategy::Code(code) => distribution_rule(&code.default, ids),
+        crate::DistributionStrategy::Rules(rules) => distribution_rule(&rules.default, ids),
     }
 }
 

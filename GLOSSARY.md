@@ -151,6 +151,9 @@ _Avoid_: Routing (a conveyor's path), recipe
 **Detour**:
 A destination a Station sends its MUs to before they carry on with their work plan, such as Rework. It is cleared when the MU reaches it.
 
+**Current step**:
+The step an MU is on: what its detour names while it has one, otherwise what its work plan's current step names, and none without a plan or past its last step. Expectations and rule lines read it as `step`, by the class or instance it names, such as `Mill.step always in Welding, Deburr` (ADR 0026, ADR 0030).
+
 **Geometry-aware object**:
 A material-flow object whose results depend on real sizes and paths, such as a conveyor, which cannot take an MU wider than itself. It reads the MU's size. A Source, Station, Buffer or Drain is not one: they take any MU.
 
@@ -299,7 +302,7 @@ Something in a model that can run but is probably a mistake, such as an object n
 ### Timing
 
 **Process time**:
-How long a station needs to work on one MU if nothing interrupts it.
+How long a station needs to work on one MU if nothing interrupts it. A work plan's step may give its own, and a Station's may depend on the MU through when/then lines, such as Frames 30 s and everything else 20 s, its own time being their default (ADR 0030).
 
 **Completion time**:
 The moment a station finishes working on an MU: its entry time plus the process time, moved later by the time the station spends interrupted during that work.
@@ -459,7 +462,7 @@ Something crabsim measures, with its unit, such as a Station's working share, a 
 _Avoid_: Metric, KPI
 
 **Limit**:
-An expectation that holds at every moment of a run, such as "Buffer X never holds more than 20", written with `always`. crabsim says when and by which MU it was first broken.
+An expectation that holds at every moment of a run, such as "Buffer X never holds more than 20", or for every MU entering an object, such as "Mill only works MUs whose current step is Welding or Deburr", written with `always`. crabsim says when and by which MU it was first broken.
 _Avoid_: Constraint, threshold
 
 **Reference figure**:
@@ -493,7 +496,7 @@ Checking that the model does what was specified, in a deterministic run: no fail
 Checking that the model behaves like the real line, in runs with randomness, against reference figures.
 
 **Rule**:
-A decision written as when/then lines that crabsim reads in order, such as "when the MU's class is Frame, to the one of Line A and Line B holding fewest MUs". Between the built-in strategies and user code: readable and checkable as the built-in ones are, without a program.
+A decision written as when/then lines that crabsim reads in order, such as "when the MU's class is Frame, to the one of Line A and Line B holding fewest MUs", for where an MU goes or how long a Station works on it. Between the built-in strategies and user code: readable and checkable as the built-in ones are, without a program.
 _Avoid_: Script, code, policy
 
 ### Working with agents

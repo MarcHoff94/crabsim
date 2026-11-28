@@ -53,13 +53,19 @@ pub struct EventContext {
     beyond_recording: bool,
     /// Where each MU in the run is, written at every move.
     locations: crate::locations::MuLocations,
-    /// Which MUs the watched objects take (ADR 0030), and what each watch has seen, or `None` in a
-    /// run told to watch nothing, which then pays nothing for them.
-    watches: Option<Box<crate::watch::Watching>>,
-    /// Every Station's time rules (ADR 0030), whose time whoever hands it an MU decides as it
-    /// enters (`enter_deciding_time`), or `None` in a model without them, which then pays one
-    /// check at each move.
-    times: Option<Box<crate::rules::TimeTable>>,
+    /// The watches and Stations' time rules (ADR 0030), behind one pointer, or `None` in a run with
+    /// neither: the context is read at every event, and on a model of thousands of objects a
+    /// context 16 bytes larger cost several percent.
+    expectations: Option<Box<Extras>>,
+}
+
+/// What only runs judging expectations or with Stations' time rules carry in their context.
+#[derive(Clone, Default)]
+struct Extras {
+    /// Which MUs the watched objects take, and what each watch has seen.
+    watches: Option<crate::watch::Watching>,
+    /// Every Station's time rules.
+    times: Option<crate::rules::TimeTable>,
 }
 
 impl EventContext {
@@ -78,8 +84,7 @@ impl EventContext {
             watching: recording != Recording::NOTHING,
             beyond_recording: false,
             locations: crate::locations::MuLocations::new(first_mu_id),
-            watches: None,
-            times: None,
+            expectations: None,
         }
     }
 
@@ -92,47 +97,71 @@ impl EventContext {
 
     /// The same, checking the MUs entering the watched objects (ADR 0030), having seen none yet.
     pub(crate) fn with_watches(mut self, watches: Option<&crate::watch::Watching>) -> EventContext {
-        self.watches = watches.map(|watches| Box::new(watches.fresh()));
+        self.extras().watches = watches.map(crate::watch::Watching::fresh);
+        self.tidy_extras();
         self.watching = self.is_watching();
         self
     }
 
+    /// What only some runs carry, made when first needed.
+    fn extras(&mut self) -> &mut Extras {
+        self.expectations.get_or_insert_with(Box::default)
+    }
+
+    /// Drops the extras if they hold nothing, so a run without them checks one pointer.
+    fn tidy_extras(&mut self) {
+        if self.expectations.as_ref().is_some_and(|extras| extras.watches.is_none() && extras.times.is_none()) {
+            self.expectations = None;
+        }
+    }
+
+    fn watches(&self) -> Option<&crate::watch::Watching> {
+        self.expectations.as_ref().and_then(|extras| extras.watches.as_ref())
+    }
+
+    fn watches_mut(&mut self) -> Option<&mut crate::watch::Watching> {
+        self.expectations.as_mut().and_then(|extras| extras.watches.as_mut())
+    }
+
     /// The same, with these Stations' time rules, their stretches having kept nothing.
     pub(crate) fn with_times(mut self, times: Option<&crate::rules::TimeTable>) -> EventContext {
-        self.times = times.map(|times| Box::new(times.fresh()));
+        self.extras().times = times.map(crate::rules::TimeTable::fresh);
+        self.tidy_extras();
         self
     }
 
     /// The time rules of the Station `id`, if it has any.
     pub(crate) fn time_rules(&self, id: u32) -> Option<&crate::rules::Timed> {
-        self.times.as_deref().and_then(|times| times.of(id))
+        self.expectations.as_ref().and_then(|extras| extras.times.as_ref()).and_then(|times| times.of(id))
     }
 
     /// The Stations' time rules, to keep or forget their stretches.
     pub(crate) fn times_mut(&mut self) -> Option<&mut crate::rules::TimeTable> {
-        self.times.as_deref_mut()
+        self.expectations.as_mut().and_then(|extras| extras.times.as_mut())
     }
 
     /// Whether anything watches MUs move: recording, user code or a watch.
     fn is_watching(&mut self) -> bool {
-        self.beyond_recording = self.hooks.is_some() || self.watches.is_some();
+        self.beyond_recording = self.hooks.is_some() || self.watches().is_some();
         self.recording != Recording::NOTHING || self.beyond_recording
     }
 
-    /// Whether any Station has time rules, so whoever hands an MU over decides its time first.
+    /// Whether a Station may have time rules, so whoever hands an MU over decides its time as it
+    /// enters (`enter_deciding_time`): one check at each move. Also in a run that only watches,
+    /// which then enters every MU that way, to the same effect.
     #[inline(always)]
     pub(crate) fn decides_times(&self) -> bool {
-        self.times.is_some()
+        self.expectations.is_some()
     }
 
     /// What each watch has seen, in the order the run was given them.
     pub(crate) fn watch_states(&self) -> Vec<crate::watch::WatchState> {
-        self.watches.as_ref().map_or_else(Vec::new, |watches| watches.states().to_vec())
+        self.watches().map_or_else(Vec::new, |watches| watches.states().to_vec())
     }
 
     /// Forgets what the watches saw, as statistics start afresh.
     pub(crate) fn clear_watches(&mut self) {
-        if let Some(watches) = &mut self.watches {
+        if let Some(watches) = self.watches_mut() {
             watches.clear();
         }
     }
@@ -141,7 +170,7 @@ impl EventContext {
     fn check_watches(&mut self, mu: &crate::flows::MoveableUnit, to: u32) {
         let step = self.routing.next_destination(mu);
         let time = self.time;
-        if let Some(watches) = &mut self.watches {
+        if let Some(watches) = self.watches_mut() {
             watches.check(mu, to, step, time);
         }
     }
@@ -167,7 +196,7 @@ impl EventContext {
         if self.hooks.is_some() {
             self.moved_hooked(mu, from, to, by_code);
         }
-        if self.watches.is_some() {
+        if self.watches().is_some() {
             self.check_watches(mu, to);
         }
     }

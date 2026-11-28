@@ -20,6 +20,7 @@ pub use expect::{CheckStage, Expectation};
 pub use crabsim_code;
 pub mod path;
 mod read;
+pub mod rules;
 pub mod schema;
 mod suggest;
 mod warn;
@@ -328,6 +329,8 @@ pub enum DistributionStrategy {
     ByDestination(Box<DistributionStrategy>),
     /// User code chooses (ADR 0029): one successor, hold, or its `default` strategy.
     Code(Box<CodeDistribution>),
+    /// When/then lines choose (ADR 0030), read in order, or its `default` strategy.
+    Rules(Box<rules::RuleDistribution>),
 }
 
 impl DistributionStrategy {
@@ -339,6 +342,7 @@ impl DistributionStrategy {
             DistributionStrategy::Weighted(weighted) => Some(weighted),
             DistributionStrategy::ByDestination(then) => then.weighted(),
             DistributionStrategy::Code(code) => code.default.weighted(),
+            DistributionStrategy::Rules(rules) => rules.default.weighted(),
         }
     }
 
@@ -346,6 +350,7 @@ impl DistributionStrategy {
     pub fn built_in(&self) -> &DistributionStrategy {
         match self {
             DistributionStrategy::Code(code) => &code.default,
+            DistributionStrategy::Rules(rules) => &rules.default,
             other => other,
         }
     }

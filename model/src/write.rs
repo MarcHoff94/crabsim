@@ -338,6 +338,14 @@ pub(crate) fn distribution(strategy: &crate::DistributionStrategy) -> Value {
             json!({ "weighted": fields })
         }
         crate::DistributionStrategy::ByDestination(then) => json!({ "by_destination": { "then": distribution(then) } }),
+        crate::DistributionStrategy::Rules(rules) => {
+            let mut fields = Map::new();
+            fields.insert("rules".into(), json!(rules.lines));
+            if rules.default != crate::DistributionStrategy::RoundRobin {
+                fields.insert("default".into(), distribution(&rules.default));
+            }
+            Value::Object(fields)
+        }
         crate::DistributionStrategy::Code(code) => {
             let mut fields = Map::new();
             fields.insert("code".into(), code_call(&code.code));

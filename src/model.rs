@@ -104,6 +104,8 @@ pub struct ModelDescription {
     /// User code (ADR 0029), which every run gets a copy of, and which objects have which hooks.
     hooks: Option<Box<dyn crate::hooks::Hooks>>,
     hook_table: crate::hooks::HookTable,
+    /// Each object's rules, by id (ADR 0030): only objects with rules have any.
+    rules: Vec<(u32, std::sync::Arc<crate::rules::Rules>)>,
 }
 
 impl Default for ModelDescription {
@@ -118,6 +120,7 @@ impl Default for ModelDescription {
             destinations: Vec::new(),
             hooks: None,
             hook_table: crate::hooks::HookTable::default(),
+            rules: Vec::new(),
         }
     }
 }
@@ -515,7 +518,26 @@ impl ModelDescription {
             let hooks = self.hooks.clone().expect("a model with hooks has user code: set it with set_hooks");
             run.attach_hooks(self.hook_table.clone(), hooks);
         }
+        if !self.rules.is_empty() {
+            run.attach_rules(&self.rules);
+        }
         run
+    }
+
+    /// Gives an object rules (ADR 0030), replacing any it had: when/then lines it reads in
+    /// order when it passes an MU on, its own strategy, set with `set_distribution`, deciding
+    /// when none holds or a line says `default`. Not with a distribution hook.
+    pub fn set_rules(&mut self, id: u32, rules: crate::rules::Rules) {
+        assert!(self.objects.get(id as usize).is_some_and(|object| !matches!(object, ModelObject::Drain(_))), "object {id} passes no MU on, so it has no rules");
+        self.rules.retain(|(object, _)| *object != id);
+        if !rules.lines.is_empty() {
+            self.rules.push((id, std::sync::Arc::new(rules)));
+        }
+    }
+
+    /// The object's rules, if it has any.
+    pub fn rules(&self, id: u32) -> Option<&crate::rules::Rules> {
+        self.rules.iter().find(|(object, _)| *object == id).map(|(_, rules)| &**rules)
     }
 
     /// Gives the model user code (ADR 0029), which the hooks set on objects and on the model call.
@@ -580,16 +602,7 @@ impl ModelDescription {
     }
 
     pub fn kind(&self, id: u32) -> ObjectKind {
-        match self.object(id) {
-            ModelObject::Source(_) => ObjectKind::Source,
-            ModelObject::Station(_) | ModelObject::MultiStation(_) => ObjectKind::Station,
-            ModelObject::Buffer(_) => ObjectKind::Buffer,
-            ModelObject::Drain(_) => ObjectKind::Drain,
-            ModelObject::Conveyor(conveyor) if conveyor.cross().is_some() => ObjectKind::CrossConveyor,
-            ModelObject::Conveyor(_) => ObjectKind::Conveyor,
-            #[cfg(test)]
-            ModelObject::RecordsThenFails(_) => ObjectKind::Station,
-        }
+        self.object(id).kind()
     }
 
     /// The longest mean time between failures or mean repair time among the model's Stations

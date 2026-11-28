@@ -6195,7 +6195,14 @@ fn paths_labels(ctx: &egui::Context, ui: &Ui, camera: &ViewCamera, canvas: egui:
             && let Some(strategy) = strategies.get(object.id as usize).cloned().flatten()
         {
             let corner = screen(Point { x: object.centre.x - half_width, y: object.centre.y + half_height });
-            let (mark, colour) = if strategy.weighted { ("W", green) } else { ("RR", egui::Color32::LIGHT_GRAY) };
+            // Rules choose first (ADR 0030), their default after them.
+            let (mark, colour) = if !strategy.rules.is_empty() {
+                ("R", egui::Color32::from_rgb(240, 200, 80))
+            } else if strategy.weighted {
+                ("W", green)
+            } else {
+                ("RR", egui::Color32::LIGHT_GRAY)
+            };
             painter.text(corner - egui::vec2(2.0, 2.0), egui::Align2::RIGHT_BOTTOM, mark, font.clone(), colour);
             for (to, place) in strategy.places {
                 if let Some(connection) = ui.view.connections().iter().find(|connection| connection.from == object.id && connection.to == to) {
@@ -6305,6 +6312,18 @@ fn validation_window(ctx: &egui::Context, ui: &mut Ui) -> Option<crabsim_ui::wor
 /// A distribution strategy's choices: Round robin or Weighted, and for Weighted what it weighs,
 /// which totals come first, what it ranks, and the Drains it counts.
 fn distribution_fields(ui: &mut egui::Ui, choice: &mut crabsim_ui::attributes::DistributionChoice, salt: &str) {
+    let mut ruled = choice.rules.is_some();
+    if ui
+        .checkbox(&mut ruled, "Rules")
+        .on_hover_text("When/then lines read in order, the first that holds deciding, such as `when class = Frame then smallest working_share last 30min of Line A, Line B among those free`, and `otherwise default`. What's below decides when none holds")
+        .changed()
+    {
+        choice.rules = ruled.then(|| "otherwise default".to_string());
+    }
+    if let Some(rules) = choice.rules.as_mut() {
+        ui.add(egui::TextEdit::multiline(rules).desired_rows(3).desired_width(f32::INFINITY).font(egui::TextStyle::Monospace));
+        ui.label(egui::RichText::new("else").weak().small());
+    }
     ui.checkbox(&mut choice.by_destination, "By destination").on_hover_text(
         "Only the successors from which the MU's next destination can be reached, chosen among as below. An MU with no destination, or one none of them reaches, is offered to all",
     );

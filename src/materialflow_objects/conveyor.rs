@@ -1006,6 +1006,21 @@ impl Conveyor {
 			}
 		};
 		let (destination, kind) = (context.routing.next_destination(mu), mu.kind());
+		let mu = mu.clone();
+		let mu = &mu;
+		if matches!(self.distribution, Distributing::Rules(_)) {
+			// Leaving sideways it lies the other way round from how it came in.
+			let mut turns = [false; 8];
+			for (exit, &at) in cross.exit_sides.iter().enumerate().take(8) {
+				turns[exit] = at != side.opposite();
+			}
+			let (mu, from) = (mu.clone(), self.base.object_id);
+			let offer = |exit: usize| Offer { kind, from, from_belt: true, crosswise: crosswise != turns[exit] };
+			if let super::flows::RuleExit::Decided(exit) = super::flows::choose_exit_by_rules(self, others, &mu, destination, &offer, context.time) {
+				self.cross.as_deref_mut().expect("a cross conveyor").decide(side, exit);
+				return;
+			}
+		}
 		if self.distribution.is_code() {
 			let mu = mu.clone();
 			match self.exit_by_code(&mu, context) {

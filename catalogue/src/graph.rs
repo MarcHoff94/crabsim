@@ -846,8 +846,12 @@ pub enum QueryModelOutput {
     },
     Distribution {
         name: String,
-        /// `round_robin`, `weighted` or `by_destination`.
+        /// `round_robin`, `weighted`, `by_destination`, or `rules` for when/then lines read in
+        /// order, `weighted` and `successors` then saying what their default does.
         strategy: String,
+        /// For rules, their lines in order (ADR 0030).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        rules: Vec<String>,
         /// For a weighted one, or by destination: the strategy as a model file writes it.
         #[serde(skip_serializing_if = "Option::is_none")]
         weighted: Option<Value>,
@@ -1574,7 +1578,13 @@ fn find_instances(
 fn distribution(model: &Model, at: usize, name: String) -> Result<QueryModelOutput, OperationError> {
     let resolved = model.resolve(at).expect("a valid model's instances resolve");
     let successors = model.successors(&name);
-    let strategy = resolved.attributes.distribution.clone().unwrap_or(crabsim_model::DistributionStrategy::RoundRobin);
+    let chosen = resolved.attributes.distribution.clone().unwrap_or(crabsim_model::DistributionStrategy::RoundRobin);
+    // Rules choose first (ADR 0030): their lines, then what their default does.
+    let rules = match &chosen {
+        crabsim_model::DistributionStrategy::Rules(rules) => rules.lines.clone(),
+        _ => Vec::new(),
+    };
+    let strategy = chosen.built_in().clone();
     let description = model.to_description();
     let by_destination = matches!(strategy, crabsim_model::DistributionStrategy::ByDestination(_));
     // Through each successor, the destinations that can be reached, for one routing by destination.
@@ -1620,7 +1630,8 @@ fn distribution(model: &Model, at: usize, name: String) -> Result<QueryModelOutp
             if by_destination { ("by_destination", Some(crabsim_model::write_distribution(&strategy)), listed) } else { ("round_robin", None, listed) }
         }
     };
-    Ok(QueryModelOutput::Distribution { name, strategy: kind.to_string(), weighted, successors: listed })
+    let kind = if rules.is_empty() { kind } else { "rules" };
+    Ok(QueryModelOutput::Distribution { name, strategy: kind.to_string(), weighted, rules, successors: listed })
 }
 
 /// Every instance reachable from the one at `index` along the connections, itself included.

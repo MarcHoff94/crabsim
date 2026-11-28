@@ -12,6 +12,7 @@ pub mod materialflow_objects;
 pub mod model;
 pub mod report;
 pub mod routing;
+pub mod rules;
 pub mod picture;
 pub mod random_numbers;
 pub mod simulation_run;

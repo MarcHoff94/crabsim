@@ -20,6 +20,12 @@ pub fn summary(value: &Value) -> String {
         let then = by_destination.get("then").map_or_else(|| "round robin".to_string(), summary);
         return format!("by destination, then {then}");
     }
+    if let Some(lines) = value.get("rules").and_then(Value::as_array) {
+        let then = value.get("default").map_or_else(|| "round robin".to_string(), summary);
+        let first = lines.first().map(&text).unwrap_or_default();
+        let more = if lines.len() > 1 { format!(" and {} more", lines.len() - 1) } else { String::new() };
+        return format!("rules: {first}{more}; else {then}");
+    }
     if let Some(weighted) = value.get("weighted") {
         let by = WEIGHABLE.iter().find(|(name, _)| weighted["by"] == *name).map_or("?", |(_, label)| label).to_lowercase();
         let order = if weighted["order"] == "largest" { "largest" } else { "smallest" };
@@ -744,6 +750,9 @@ pub const WEIGHABLE: [(&str, &str); 4] = [("process_time", "Process time"), ("in
 /// A distribution strategy's choices (ADR 0016).
 #[derive(Debug, Clone, PartialEq)]
 pub struct DistributionChoice {
+    /// When/then rules (ADR 0030), one a line, read first, the rest being their default. `None`
+    /// for no rules.
+    pub rules: Option<String>,
     /// Only the successors that reach the MU's destination (ADR 0025), chosen among by the rest.
     pub by_destination: bool,
     /// Weighted rather than round robin.
@@ -864,6 +873,9 @@ impl Form {
     /// robin without one. The Drains to tick are the model's `drains`, then any other name the
     /// value counts, so saving again never drops one silently.
     pub fn distribution(value: Option<&Value>, drains: &[String]) -> Form {
+        // Rules come first, and what follows is their default.
+        let rules = value.and_then(|value| value.get("rules")).and_then(Value::as_array).map(|lines| lines.iter().filter_map(Value::as_str).collect::<Vec<_>>().join("\n"));
+        let value = if rules.is_some() { value.and_then(|value| value.get("default")) } else { value };
         let by_destination = value.and_then(|value| value.get("by_destination"));
         // By destination, what then chooses is read as a strategy of its own.
         let value = by_destination.map_or(value, |by| by.get("then"));
@@ -877,6 +889,7 @@ impl Form {
         ticks.extend(named.iter().filter(|name| !drains.contains(name)).map(|name| (name.clone(), true)));
         let field = |key: &str| weighted.and_then(|weighted| weighted.get(key)).and_then(Value::as_str);
         let choice = DistributionChoice {
+            rules,
             by_destination: by_destination.is_some(),
             weighted: weighted.is_some(),
             by: field("by").unwrap_or("process_time").to_string(),
@@ -960,7 +973,18 @@ impl Form {
             }
             "distribution" => {
                 let by_destination = self.distribution.as_ref().is_some_and(|choice| choice.by_destination);
-                let wrap = |then: Value| if by_destination { json!({ "by_destination": { "then": then } }) } else { then };
+                let lines: Option<Vec<String>> = self.distribution.as_ref().and_then(|choice| choice.rules.as_ref()).map(|text| text.lines().map(str::trim).filter(|line| !line.is_empty()).map(str::to_owned).collect());
+                if lines.as_ref().is_some_and(Vec::is_empty) {
+                    return Err("write a rule a line, such as `when class = Frame then to Line A`, or untick Rules".to_string());
+                }
+                let wrap = |then: Value| {
+                    let then = if by_destination { json!({ "by_destination": { "then": then } }) } else { then };
+                    match &lines {
+                        Some(lines) if then == json!("round_robin") => json!({ "rules": lines }),
+                        Some(lines) => json!({ "rules": lines, "default": then }),
+                        None => then,
+                    }
+                };
                 let Some(choice) = self.distribution.as_ref().filter(|choice| choice.weighted) else {
                     return Ok(wrap(json!("round_robin")));
                 };

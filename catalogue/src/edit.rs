@@ -434,6 +434,23 @@ impl Draft {
         }
     }
 
+    /// Renames an instance, or with `class` a class, in every rule line naming it (ADR 0030): a
+    /// destination is either, so it is renamed both ways. A line that doesn't read is left for
+    /// the model's own check.
+    fn rename_in_rules(&mut self, name: &str, to: &str, class: bool) {
+        let rename = |owner: &mut Value| {
+            let Some(lines) = owner.pointer_mut("/attributes/distribution/rules").and_then(Value::as_array_mut) else { return };
+            for line in lines.iter_mut() {
+                let Some(read) = line.as_str().and_then(|text| crabsim_model::rules::Line::parse(text).ok()) else { continue };
+                if let Some(renamed) = read.renamed(name, to, class) {
+                    *line = json!(renamed.text());
+                }
+            }
+        };
+        self.instances().iter_mut().for_each(rename);
+        self.classes().iter_mut().for_each(rename);
+    }
+
     fn classes(&mut self) -> &mut Vec<Value> {
         let fields = self.model.as_object_mut().expect("a model is an object");
         fields.entry("classes").or_insert_with(|| json!([])).as_array_mut().expect("classes are a list")
@@ -693,6 +710,7 @@ impl Draft {
                 }
                 self.rename_destination(&name, &to);
                 self.rename_in_expectations(&name, &to, false);
+                self.rename_in_rules(&name, &to, false);
             }
             Change::MoveInstance { name, position } => {
                 let index = self.instance(&name)?;
@@ -842,6 +860,7 @@ impl Draft {
                 self.classes().iter_mut().for_each(rename);
                 self.rename_destination(&name, &to);
                 self.rename_in_expectations(&name, &to, true);
+                self.rename_in_rules(&name, &to, true);
             }
             Change::SetParent { name, parent } => {
                 let index = self.class(&name)?;

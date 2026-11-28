@@ -428,6 +428,9 @@ pub enum Distributing {
 	/// By user code's distribution hook (ADR 0029), which may hand the choice back to the object's
 	/// own strategy. Boxed, since only objects with the hook pay for it.
 	Code(Box<crate::hooks::Coded>),
+	/// By when/then rules (ADR 0030), which may hand the choice back to the object's own
+	/// strategy. Boxed, since only objects with rules pay for them.
+	Rules(Box<crate::rules::Ruled>),
 }
 
 impl Distributing {
@@ -452,6 +455,7 @@ impl Distributing {
 	pub fn builtin_mut(&mut self) -> &mut Distributing {
 		match self {
 			Distributing::Code(coded) => &mut coded.builtin,
+			Distributing::Rules(ruled) => &mut ruled.builtin,
 			other => other,
 		}
 	}
@@ -551,7 +555,7 @@ fn with_toward<T: SuccessorContainer, R>(obj: &mut T, destination: DestinationId
 	let then = match then {
 		Distributing::RoundRobin => Then::RoundRobin,
 		Distributing::Weighted(ranked) => Then::Ranked(ranked),
-		Distributing::ByDestination(_) | Distributing::Code(_) => unreachable!("by destination chooses by round robin or weighted"),
+		Distributing::ByDestination(_) | Distributing::Code(_) | Distributing::Rules(_) => unreachable!("by destination chooses by round robin or weighted"),
 	};
 	let result = move_it(obj, allowed, then);
 	*obj.distribution_mut() = distribution;
@@ -734,6 +738,7 @@ pub fn retry_move_to_successor<T: SuccessorContainer + EventInterface>(
 	};
 	match obj.distribution_mut() {
 		Distributing::Code(_) => move_by_code(obj, context, others, Some(from)),
+		Distributing::Rules(_) => move_by_rules(obj, context, others, Some(from)),
 		Distributing::RoundRobin => try_to_move_to_successor_with_strategy(obj, context, others, &mut OnlySuccessor(index, &mut RoundRobinStrategy)),
 		Distributing::Weighted(_) => with_ranked(obj, |obj, ranked| try_to_move_to_successor_with_strategy(obj, context, others, &mut OnlySuccessor(index, ranked))),
 		Distributing::ByDestination(_) => with_toward(obj, offered_destination(obj, context), |obj, allowed, mut then| {
@@ -784,6 +789,7 @@ pub fn try_to_reserve_successor<T: SuccessorContainer + EventInterface>(
 			None => reserve_with_strategy(obj, context, others, mu_id, &mut Toward { allowed, inner: then }),
 		}),
 		Distributing::Code(_) => reserve_by_code(obj, context, others, mu_id, index),
+		Distributing::Rules(_) => reserve_by_rules(obj, context, others, mu_id, index),
 	}
 }
 
@@ -821,7 +827,7 @@ fn reserve_by_builtin<T: SuccessorContainer + EventInterface>(
 				None => reserve_with_strategy(obj, context, others, mu_id, &mut ByCode(Toward { allowed, inner: then })),
 			}
 		}
-		Distributing::Code(_) => unreachable!("a distribution hook hands back to the object's own strategy, never to code"),
+		Distributing::Code(_) | Distributing::Rules(_) => unreachable!("a distribution hook or rules hand back to the object's own strategy, never to code or rules"),
 	}
 }
 
@@ -951,10 +957,7 @@ pub fn choose_exit<T: SuccessorContainer>(obj: &mut T, others: &OtherObjects<'_>
 	let mut pointer = obj.succ_pointer();
 	let successors = obj.successors();
 	// User code's answer of default leaves the choice to the cross conveyor's own strategy.
-	let own = match &mut distribution {
-		Distributing::Code(coded) => &mut coded.builtin,
-		other => other,
-	};
+	let own = distribution.builtin_mut();
 	let chosen = match own {
 		Distributing::RoundRobin => pick_exit(&mut RoundRobinStrategy, successors, &mut pointer, others, allowed, offer, now),
 		Distributing::Weighted(ranked) => pick_exit(ranked, successors, &mut pointer, others, allowed, offer, now),
@@ -962,7 +965,7 @@ pub fn choose_exit<T: SuccessorContainer>(obj: &mut T, others: &OtherObjects<'_>
 			Distributing::Weighted(ranked) => pick_exit(ranked, successors, &mut pointer, others, allowed, offer, now),
 			_ => pick_exit(&mut RoundRobinStrategy, successors, &mut pointer, others, allowed, offer, now),
 		},
-		Distributing::Code(_) => unreachable!("a distribution hook hands back to the object's own strategy, never to code"),
+		Distributing::Code(_) | Distributing::Rules(_) => unreachable!("a distribution hook or rules hand back to the object's own strategy, never to code or rules"),
 	};
 	*obj.succ_pointer_mut() = pointer;
 	*obj.distribution_mut() = distribution;
@@ -990,6 +993,7 @@ pub fn try_to_move_to_successor<T: SuccessorContainer + EventInterface>(
 			try_to_move_to_successor_with_strategy(obj, context, others, &mut Toward { allowed, inner: then })
 		}),
 		Distributing::Code(_) => move_by_code(obj, context, others, None),
+		Distributing::Rules(_) => move_by_rules(obj, context, others, None),
 	}
 }
 
@@ -1026,7 +1030,7 @@ fn move_by_builtin(obj: &mut dyn PassesOn, context: &mut EventContext, others: &
 				None => try_to_move_to_successor_with_strategy(obj, context, others, &mut ByCode(Toward { allowed, inner: then })),
 			}
 		}
-		Distributing::Code(_) => unreachable!("a distribution hook hands back to the object's own strategy, never to code"),
+		Distributing::Code(_) | Distributing::Rules(_) => unreachable!("a distribution hook or rules hand back to the object's own strategy, never to code or rules"),
 	}
 }
 
@@ -1130,5 +1134,158 @@ mod size_tests {
 	fn the_limit_is_about_8900_years() {
 		let years = TIME_LIMIT.as_secs_f64() / (365.25 * 86_400.0);
 		assert!((8_900.0..8_930.0).contains(&years), "{years}");
+	}
+}
+
+// ---------- Rules (ADR 0030) ----------
+
+/// Offers the MU to the exits a rule listed, in its order, without moving the object's turn on.
+struct Listed<'a>(&'a [usize]);
+
+impl DistributionStrategy for Listed<'_> {
+	fn order(&self, _n: usize, _start: usize) -> impl Iterator<Item = usize> {
+		self.0.iter().copied()
+	}
+	fn moved(&mut self, _idx: usize, _n: usize, _pointer: &mut usize) {}
+}
+
+/// Passes on the MU `obj` offers as its rules decide (ADR 0030): to the exits a rule lists, in
+/// order, the first free taking it; round robin or the object's ranking among some; or its own
+/// strategy. With `retry_from`, it answers that successor's retry, if the rules would offer the
+/// MU there now.
+#[cold]
+#[inline(never)]
+fn move_by_rules(obj: &mut dyn PassesOn, context: &mut EventContext, others: &mut OtherObjects<'_>, retry_from: Option<u32>) -> Result<Option<EventTemplate>, MaterialflowError> {
+	let Some(mu) = obj.offered_mu(context.time).cloned() else {
+		return Ok(None);
+	};
+	let index = match retry_from {
+		Some(from) => match obj.successors().iter().position(|&succ| succ == from) {
+			Some(index) => Some(index),
+			None => return Ok(None),
+		},
+		None => None,
+	};
+	let destination = context.routing.next_destination(&mu);
+	let mut distribution = std::mem::take(obj.distribution_mut());
+	let Distributing::Rules(ruled) = &mut distribution else {
+		unreachable!("only an object with rules is moved by them")
+	};
+	let decided = ruled.decide(&mu, destination, obj.successors(), others, context.time);
+	let result = match decided {
+		crate::rules::Decided::Listed => match index {
+			Some(index) if ruled.order.contains(&index) => try_to_move_to_successor_with_strategy(obj, context, others, &mut ByRules(OnlySuccessor(index, &mut Listed(&ruled.order)))),
+			Some(_) => Ok(None),
+			None => try_to_move_to_successor_with_strategy(obj, context, others, &mut ByRules(Listed(&ruled.order))),
+		},
+		crate::rules::Decided::RoundRobin(line) | crate::rules::Decided::Weighted(line) => {
+			let ruled = &mut **ruled;
+			let allowed = Some(ruled.masks[line].as_slice());
+			let mut inner = match (&mut ruled.builtin, decided) {
+				(Distributing::Weighted(ranked), crate::rules::Decided::Weighted(_)) => Then::Ranked(ranked),
+				_ => Then::RoundRobin,
+			};
+			match index {
+				Some(index) => try_to_move_to_successor_with_strategy(obj, context, others, &mut ByRules(Toward { allowed, inner: OnlySuccessor(index, &mut inner) })),
+				None => try_to_move_to_successor_with_strategy(obj, context, others, &mut ByRules(Toward { allowed, inner })),
+			}
+		}
+		crate::rules::Decided::Default => move_by_builtin(obj, context, others, retry_from, &mut ruled.builtin),
+	};
+	*obj.distribution_mut() = distribution;
+	result
+}
+
+/// As `move_by_rules`, for a conveyor whose front MU reaches its end: the successor that takes it
+/// reserves a place (ADR 0023).
+#[cold]
+#[inline(never)]
+fn reserve_by_rules<T: SuccessorContainer + EventInterface>(obj: &mut T, context: &mut EventContext, others: &mut OtherObjects<'_>, mu_id: u32, index: Option<usize>) -> Option<u32> {
+	let mu = obj.offered_mu(context.time).cloned()?;
+	let destination = context.routing.next_destination(&mu);
+	let mut distribution = std::mem::take(obj.distribution_mut());
+	let Distributing::Rules(ruled) = &mut distribution else {
+		unreachable!("only an object with rules is moved by them")
+	};
+	let decided = ruled.decide(&mu, destination, obj.successors(), others, context.time);
+	let reserved = match decided {
+		crate::rules::Decided::Listed => match index {
+			Some(index) if ruled.order.contains(&index) => reserve_with_strategy(obj, context, others, mu_id, &mut ByRules(OnlySuccessor(index, &mut Listed(&ruled.order)))),
+			Some(_) => None,
+			None => reserve_with_strategy(obj, context, others, mu_id, &mut ByRules(Listed(&ruled.order))),
+		},
+		crate::rules::Decided::RoundRobin(line) | crate::rules::Decided::Weighted(line) => {
+			let ruled = &mut **ruled;
+			let allowed = Some(ruled.masks[line].as_slice());
+			let mut inner = match (&mut ruled.builtin, decided) {
+				(Distributing::Weighted(ranked), crate::rules::Decided::Weighted(_)) => Then::Ranked(ranked),
+				_ => Then::RoundRobin,
+			};
+			match index {
+				Some(index) => reserve_with_strategy(obj, context, others, mu_id, &mut ByRules(Toward { allowed, inner: OnlySuccessor(index, &mut inner) })),
+				None => reserve_with_strategy(obj, context, others, mu_id, &mut ByRules(Toward { allowed, inner })),
+			}
+		}
+		crate::rules::Decided::Default => reserve_by_builtin(obj, context, others, mu_id, index, &mut ruled.builtin),
+	};
+	*obj.distribution_mut() = distribution;
+	reserved
+}
+
+/// What a cross conveyor's rules decide for the MU it lets in: an exit, or its own strategy.
+pub enum RuleExit {
+	Decided(Option<usize>),
+	Builtin,
+}
+
+/// Which exit a cross conveyor's rules pick for the MU it lets in, offered at each exit as
+/// `offer` gives it: of the exits a rule lists, the first whose successor would take it now,
+/// otherwise the first; or among those a rule allows by round robin or the object's ranking; or
+/// its own strategy, by its exits' destinations.
+#[cold]
+#[inline(never)]
+pub fn choose_exit_by_rules<T: SuccessorContainer>(obj: &mut T, others: &OtherObjects<'_>, mu: &MoveableUnit, destination: DestinationId, offer: &dyn Fn(usize) -> Offer, now: SimTime) -> RuleExit {
+	let mut distribution = std::mem::take(obj.distribution_mut());
+	let Distributing::Rules(ruled) = &mut distribution else {
+		*obj.distribution_mut() = distribution;
+		return RuleExit::Builtin;
+	};
+	let decided = ruled.decide(mu, destination, obj.successors(), others, now);
+	let mut pointer = obj.succ_pointer();
+	let successors = obj.successors();
+	let exit = match decided {
+		crate::rules::Decided::Listed => {
+			let listed = &ruled.order;
+			let exit = listed.iter().copied().find(|&exit| others.get(successors[exit]).accepts(&offer(exit), now)).or_else(|| listed.first().copied());
+			RuleExit::Decided(exit)
+		}
+		crate::rules::Decided::RoundRobin(line) | crate::rules::Decided::Weighted(line) => {
+			let ruled = &mut **ruled;
+			let allowed = ruled.bits(line);
+			RuleExit::Decided(match (&mut ruled.builtin, decided) {
+				(Distributing::Weighted(ranked), crate::rules::Decided::Weighted(_)) => pick_exit(ranked, successors, &mut pointer, others, allowed, offer, now),
+				_ => pick_exit(&mut RoundRobinStrategy, successors, &mut pointer, others, allowed, offer, now),
+			})
+		}
+		crate::rules::Decided::Default => RuleExit::Builtin,
+	};
+	*obj.succ_pointer_mut() = pointer;
+	*obj.distribution_mut() = distribution;
+	exit
+}
+
+/// A strategy used for rules, doing exactly what the strategy inside does: a type of its own, so
+/// the move code for rules is compiled apart and every model's own path keeps its callers.
+struct ByRules<S>(S);
+
+impl<S: DistributionStrategy> DistributionStrategy for ByRules<S> {
+	fn order(&self, n: usize, start: usize) -> impl Iterator<Item = usize> {
+		self.0.order(n, start)
+	}
+	fn moved(&mut self, idx: usize, n: usize, pointer: &mut usize) {
+		self.0.moved(idx, n, pointer);
+	}
+	fn answers_retry(&self) -> bool {
+		self.0.answers_retry()
 	}
 }

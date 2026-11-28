@@ -163,6 +163,21 @@ impl StatisticsKeeper {
         self.capacity
     }
 
+    /// The state it is in now, as last told: what a rule reads (ADR 0030).
+    pub fn state(&self) -> MachineState {
+        self.state
+    }
+
+    /// The MUs it holds now, as last told.
+    pub fn contents(&self) -> u64 {
+        self.contents
+    }
+
+    /// When it was last told of a change, from which the state has stayed as it is.
+    pub fn since(&self) -> SimTime {
+        self.since
+    }
+
     /// Takes note of what the object is doing as of `now`. Costs one comparison if nothing changed.
     #[inline]
     pub fn observe(&mut self, now: SimTime, state: MachineState, contents: u64) {

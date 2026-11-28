@@ -233,6 +233,8 @@ pub fn weights(model: &Model, weigh: &Weigh, values: Option<&[Option<f64>]>) -> 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Strategy {
     pub weighted: bool,
+    /// Its rules' lines (ADR 0030), empty for none: it chooses by them first.
+    pub rules: Vec<String>,
     /// For a weighted one: each successor's place in its ranking, from 1, by id. Those sharing
     /// place 1 are preferred.
     pub places: Vec<(u32, usize)>,
@@ -247,9 +249,13 @@ pub fn strategies(model: &Model, description: &ModelDescription) -> Vec<Option<S
             if successors.is_empty() {
                 return None;
             }
-            let weighted = model
-                .resolve(id as usize)
-                .is_some_and(|resolved| matches!(resolved.attributes.distribution, Some(DistributionStrategy::Weighted(_))));
+            let resolved = model.resolve(id as usize);
+            let distribution = resolved.as_ref().and_then(|resolved| resolved.attributes.distribution.as_ref());
+            let rules = match distribution {
+                Some(DistributionStrategy::Rules(rules)) => rules.lines.clone(),
+                _ => Vec::new(),
+            };
+            let weighted = matches!(distribution.map(DistributionStrategy::built_in), Some(DistributionStrategy::Weighted(_)));
             let places = match description.ranking(id).filter(|_| weighted) {
                 Some(ranking) => ranking
                     .groups
@@ -259,7 +265,7 @@ pub fn strategies(model: &Model, description: &ModelDescription) -> Vec<Option<S
                     .collect(),
                 None => Vec::new(),
             };
-            Some(Strategy { weighted, places })
+            Some(Strategy { weighted, rules, places })
         })
         .collect()
 }

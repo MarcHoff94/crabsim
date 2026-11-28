@@ -91,3 +91,18 @@ fn the_user_accepts_what_an_agent_proposed_while_it_holds_the_file() {
     assert!(!status.has_stage("validation"));
     assert!(workspace.check_stage("validation").unwrap_err().contains("no validation expectations"));
 }
+
+#[test]
+fn an_expectation_the_model_cant_meet_says_why_before_anything_runs() {
+    let folder = Folder::new("bounds");
+    let user = Catalogue::open(Settings::new(&folder.0, Source::Cli)).unwrap();
+    let fast = LINE.replace(r#""id":"busy","text":"Press.working_share since start >= 70%""#, r#""id":"fast","text":"Out.throughput_per_hour since start >= 400/h""#);
+    user.call("write_model", json!({ "path": "fast.json", "text": fast })).unwrap();
+    drop(user);
+    let mut workspace = Workspace::open(&folder.0);
+    assert!(workspace.open_model("fast.json"));
+    let status = workspace.status().unwrap();
+    let why = status.expectations[0].cannot_be_met.as_deref().expect("a bound");
+    assert!(why.contains("360/h"), "{why}");
+    assert!(status.next.starts_with("crabsim works out that fast can't be met as the model is"), "{}", status.next);
+}

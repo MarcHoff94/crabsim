@@ -55,7 +55,7 @@ impl Expectation {
 }
 
 /// The stage an expectation belongs to (ADR 0030).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, serde::Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum CheckStage {
     /// What was specified, checked in a deterministic run.
@@ -167,6 +167,25 @@ impl Target {
     }
 }
 
+/// How far from an `=` line's value a figure may lie, such as a reference figure's `± 3%`: in
+/// the figure's own unit, or for a figure not counted in shares, a percentage of the value.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Tolerance {
+    /// In the figure's own unit, or as a share of the value when `relative`.
+    pub amount: f64,
+    /// A share of the value, such as `± 3%` on a rate, rather than an amount in its unit.
+    pub relative: bool,
+    /// How the line writes it, such as `3%` or `30s`.
+    written: String,
+}
+
+impl Tolerance {
+    /// How the line writes it, such as `3%`, without the `±`.
+    pub fn written(&self) -> &str {
+        &self.written
+    }
+}
+
 /// A line, parsed.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Check {
@@ -178,6 +197,8 @@ pub struct Check {
     last_written: Option<String>,
     pub comparison: Comparison,
     pub target: Target,
+    /// With `=`, how far from the value it may lie: a reference figure's tolerance (ADR 0030).
+    pub tolerance: Option<Tolerance>,
 }
 
 /// Why a line doesn't parse, and where, counting characters from 1.
@@ -193,7 +214,10 @@ impl fmt::Display for LineError {
     }
 }
 
-const FORM: &str = "write it as `[every|mean] <instance, class or model>.<figure> <now|since start|last <time>|always> <comparison> <value>`, such as `every Press.working_share since start >= 60%`";
+const FORM: &str = "write it as `[every|mean] <instance, class or model>.<figure> <now|since start|last <time>|always> <comparison> <value>`, such as `every Press.working_share since start >= 60%`, or with `=` and a tolerance, such as `Drain.throughput_per_hour since start = 4100/d ± 3%`";
+
+/// How a tolerance may be typed after an `=` line's value; the first is how it is written.
+const PLUS_MINUS: [&str; 3] = ["±", "+/-", "+-"];
 
 impl Check {
     /// Reads a line. Names aren't looked up: that's `Model::expectation_problems`.
@@ -290,7 +314,17 @@ impl Check {
             return error(at, format!("a comparison comes after the scope: >=, <=, >, <, = or !=, not `{}`", rest.trim()));
         };
         let value_at = skip_spaces(&chars, at + comparison.written().len());
-        let value: String = chars[value_at..].iter().collect::<String>().trim_end().to_string();
+        let rest: String = chars[value_at..].iter().collect();
+        // A tolerance follows the value, after `±`.
+        let marked = PLUS_MINUS.iter().filter_map(|mark| rest.find(mark).map(|byte| (byte, mark.len()))).min();
+        let (value, tolerance_at) = match marked {
+            Some((byte, length)) => {
+                let before = rest[..byte].chars().count();
+                let after = rest[byte + length..].chars().count();
+                (rest[..byte].trim_end().to_string(), Some((value_at + before, chars.len() - after)))
+            }
+            None => (rest.trim_end().to_string(), None),
+        };
         if value.is_empty() {
             return error(value_at, "the line ends before its value".into());
         }
@@ -305,7 +339,26 @@ impl Check {
             Ok(target) => target,
             Err(message) => return error(value_at, message),
         };
-        Ok(Check { aggregate, subject, figure, scope, last_written, comparison, target })
+        let tolerance = match tolerance_at {
+            None => None,
+            Some((mark_at, _)) if comparison != Comparison::Equal => {
+                return error(mark_at, "a tolerance goes with `=`, such as `= 4100/d ± 3%`: other comparisons say on which side the value must lie".into());
+            }
+            Some((mark_at, _)) if scope == Scope::Always => return error(mark_at, "a limit with `always` takes no tolerance: it is an upper one, <= or <".into()),
+            Some((mark_at, _)) if unit == Unit::State => return error(mark_at, "a state takes no tolerance".into()),
+            Some((_, from)) => {
+                let from = skip_spaces(&chars, from);
+                let typed: String = chars[from..].iter().collect::<String>().trim_end().to_string();
+                if typed.is_empty() {
+                    return error(from, "the line ends before its tolerance, such as `3%`".into());
+                }
+                match tolerance(unit, &typed) {
+                    Ok(tolerance) => Some(tolerance),
+                    Err(message) => return error(from, message),
+                }
+            }
+        };
+        Ok(Check { aggregate, subject, figure, scope, last_written, comparison, target, tolerance })
     }
 
     /// The line in its canonical form.
@@ -319,7 +372,34 @@ impl Check {
             CheckSubject::Named(name) => name.as_str(),
             CheckSubject::Model => "model",
         };
-        format!("{aggregate}{subject}.{} {} {} {}", self.figure.name(), self.scope_text(), self.comparison.written(), self.value_text())
+        let tolerance = self.tolerance.as_ref().map_or_else(String::new, |tolerance| format!(" {} {}", PLUS_MINUS[0], tolerance.written));
+        format!("{aggregate}{subject}.{} {} {} {}{tolerance}", self.figure.name(), self.scope_text(), self.comparison.written(), self.value_text())
+    }
+
+    /// For `=` with a tolerance, the lowest and highest values that meet it, in the figure's unit.
+    pub fn band(&self) -> Option<(f64, f64)> {
+        let tolerance = self.tolerance.as_ref()?;
+        let Target::Number { value, .. } = self.target else { return None };
+        let amount = if tolerance.relative { value.abs() * tolerance.amount } else { tolerance.amount };
+        Some((value - amount, value + amount))
+    }
+
+    /// The values that meet it, as the lowest and highest with whether each is included, `None`
+    /// for no limit on that side; for `!=` and a state, every value but one, which this can't
+    /// say, so `None`.
+    pub fn accepted(&self) -> Option<(Option<(f64, bool)>, Option<(f64, bool)>)> {
+        if let Some((low, high)) = self.band() {
+            return Some((Some((low, true)), Some((high, true))));
+        }
+        let Target::Number { value, .. } = self.target else { return None };
+        Some(match self.comparison {
+            Comparison::AtLeast => (Some((value, true)), None),
+            Comparison::Above => (Some((value, false)), None),
+            Comparison::AtMost => (None, Some((value, true))),
+            Comparison::Below => (None, Some((value, false))),
+            Comparison::Equal => (Some((value, true)), Some((value, true))),
+            Comparison::NotEqual => return None,
+        })
     }
 
     /// Its scope as the line writes it, such as `last 1h`.
@@ -445,6 +525,32 @@ pub(crate) fn target(unit: Unit, typed: &str) -> Result<Target, String> {
         },
         Unit::Name => Err("an expectation can't compare a name".into()),
     }
+}
+
+/// A tolerance as a line writes it after `±`: in the figure's own unit, such as `100/d`, `30s` or,
+/// for a share, `5%` (percentage points), or for any other figure a percentage of the value, such
+/// as `3%`.
+pub(crate) fn tolerance(unit: Unit, typed: &str) -> Result<Tolerance, String> {
+    let relative = unit != Unit::Share && typed.ends_with('%');
+    let amount = if relative {
+        match typed.strip_suffix('%').and_then(number) {
+            Some(percent) => Tolerance { amount: percent / 100.0, relative: true, written: format!("{}%", plain(percent)) },
+            None => return Err(format!("a tolerance is written in the figure's unit or as a percentage of the value, such as `3%`, not `{typed}`")),
+        }
+    } else {
+        match target(unit, typed) {
+            Ok(Target::Number { value, written }) => Tolerance { amount: value, relative: false, written },
+            Ok(Target::State(_)) => return Err("a state takes no tolerance".into()),
+            Err(message) => {
+                let also = if unit == Unit::Share { "; for a share, in percentage points" } else { ", or as a percentage of the value, such as `3%`" };
+                return Err(format!("{message}{also}"));
+            }
+        }
+    };
+    if amount.amount <= 0.0 {
+        return Err("a tolerance is more than 0: leave it out for an exact value".into());
+    }
+    Ok(amount)
 }
 
 /// `value`, in a figure's own unit, as a line would write it.
@@ -890,6 +996,27 @@ fn judge_subject(check: &Check, subject: Option<u32>, values: &[Option<f64>], de
         let verdict = if comparison.holds(extreme, limit) { Verdict::Met } else { Verdict::NotMet };
         return judged(verdict, None, Some(extreme), None);
     }
+    // A tolerance's band is met by a value inside it, and over an experiment by an interval inside
+    // it: the model's mean is within it, whatever the spread.
+    if let Some((low_edge, high_edge)) = check.band() {
+        let inside = |value: f64| (low_edge..=high_edge).contains(&value);
+        if n == 1 || deterministic {
+            let verdict = if values.iter().all(|&value| inside(value)) { Verdict::Met } else { Verdict::NotMet };
+            return judged(verdict, None, None, None);
+        }
+        let half = half_width(&values, mean);
+        let (low, high) = (mean - half, mean + half);
+        let verdict = if inside(low) && inside(high) {
+            Verdict::Met
+        } else if high < low_edge || low > high_edge {
+            Verdict::NotMet
+        } else {
+            Verdict::Undecided
+        };
+        // The nearer edge decides it once the interval no longer reaches across it.
+        let distance = if inside(mean) { (mean - low_edge).min(high_edge - mean) } else { (low_edge - mean).max(mean - high_edge) };
+        return judged(verdict, Some([low, high]), None, observations_needed(verdict, n, half, distance));
+    }
     // Equality is exact, so it is judged observation by observation, as a state is.
     if matches!(check.target, Target::State(_)) || matches!(comparison, Comparison::Equal | Comparison::NotEqual) {
         let holding = values.iter().filter(|&&value| comparison.holds(value, limit)).count();
@@ -900,8 +1027,7 @@ fn judge_subject(check: &Check, subject: Option<u32>, values: &[Option<f64>], de
         let verdict = if values.iter().all(|&value| comparison.holds(value, limit)) { Verdict::Met } else { Verdict::NotMet };
         return judged(verdict, None, None, None);
     }
-    let variance = values.iter().map(|value| (value - mean).powi(2)).sum::<f64>() / (n as f64 - 1.0);
-    let half = crabsim::statistics::t_quantile(n - 1) * (variance / n as f64).sqrt();
+    let half = half_width(&values, mean);
     let (low, high) = (mean - half, mean + half);
     let verdict = match comparison {
         Comparison::AtLeast | Comparison::Above if comparison.holds(low, limit) => Verdict::Met,
@@ -910,13 +1036,24 @@ fn judge_subject(check: &Check, subject: Option<u32>, values: &[Option<f64>], de
         Comparison::AtMost | Comparison::Below if !comparison.holds(low, limit) => Verdict::NotMet,
         _ => Verdict::Undecided,
     };
-    // The interval narrows as one over the root of the observations: enough of them to bring its
-    // half-width under the mean's distance from the limit.
-    let needed = (verdict == Verdict::Undecided && (mean - limit).abs() > 0.0).then(|| {
-        let ratio = half / (mean - limit).abs();
-        (n as f64 * ratio * ratio).ceil().min(f64::from(u32::MAX)) as u32
-    });
-    judged(verdict, Some([low, high]), None, needed.map(|needed| needed.max(n as u32 + 1)))
+    judged(verdict, Some([low, high]), None, observations_needed(verdict, n, half, (mean - limit).abs()))
+}
+
+/// Half the width of the 95% interval of the mean of two or more values.
+fn half_width(values: &[f64], mean: f64) -> f64 {
+    let n = values.len();
+    let variance = values.iter().map(|value| (value - mean).powi(2)).sum::<f64>() / (n as f64 - 1.0);
+    crabsim::statistics::t_quantile(n - 1) * (variance / n as f64).sqrt()
+}
+
+/// About how many observations in all would decide an undecided verdict: the interval narrows as
+/// one over the root of the observations, so enough of them to bring its half-width under the
+/// mean's distance from what decides it.
+fn observations_needed(verdict: Verdict, n: usize, half: f64, distance: f64) -> Option<u32> {
+    (verdict == Verdict::Undecided && distance > 0.0).then(|| {
+        let ratio = half / distance;
+        ((n as f64 * ratio * ratio).ceil().min(f64::from(u32::MAX)) as u32).max(n as u32 + 1)
+    })
 }
 
 #[cfg(test)]
@@ -961,6 +1098,60 @@ mod tests {
             assert_eq!(error.at, at, "{typed}: {error}");
             assert!(error.message.contains(part), "{typed}: {error}");
         }
+    }
+
+    #[test]
+    fn a_tolerance_follows_an_equals_value_in_the_figures_unit_or_as_a_share_of_it() {
+        for (typed, canonical, band) in [
+            ("Drain.throughput_per_hour since start = 4100/d ± 3%", "Drain.throughput_per_hour since start = 4100/d ± 3%", (4100.0 / 24.0 * 0.97, 4100.0 / 24.0 * 1.03)),
+            ("Drain.throughput_per_hour since start = 170/h +- 10/h", "Drain.throughput_per_hour since start = 170/h ± 10/h", (160.0, 180.0)),
+            ("Press.working_share since start = 70% +/- 5%", "Press.working_share since start = 70% ± 5%", (0.65, 0.75)),
+            ("model.mean_lead_time_s last 8h = 5min±30s", "model.mean_lead_time_s last 8h = 5min ± 30s", (270.0, 330.0)),
+            ("Drain.mus_in since start = 2000 ± 2.5%", "Drain.mus_in since start = 2000 ± 2.5%", (1950.0, 2050.0)),
+            ("Buffer.mean_mus since start = 4 ± 0.5", "Buffer.mean_mus since start = 4 ± 0.5", (3.5, 4.5)),
+        ] {
+            let check = Check::parse(typed).unwrap_or_else(|error| panic!("{typed}: {error}"));
+            assert_eq!(check.text(), canonical);
+            assert_eq!(Check::parse(canonical).unwrap(), check);
+            let (low, high) = check.band().unwrap();
+            assert!((low - band.0).abs() < 1e-9 && (high - band.1).abs() < 1e-9, "{typed}: {low} to {high}");
+        }
+        assert_eq!(Check::parse("Drain.mus_in since start = 2000").unwrap().band(), None);
+        for (typed, at, part) in [
+            ("Drain.mus_in since start >= 2000 ± 3%", 34, "goes with `=`"),
+            ("Drain.mus_in since start != 2000 ± 3%", 34, "goes with `=`"),
+            ("Mill.state now = busy ± 1", 23, "no tolerance"),
+            ("Drain.mus_in since start = 2000 ± ", 35, "before its tolerance"),
+            ("Drain.mus_in since start = 2000 ± 0", 35, "more than 0"),
+            ("Drain.throughput_per_hour since start = 170/h ± 10", 49, "percentage of the value"),
+            ("Press.working_share since start = 70% ± 5", 41, "percentage points"),
+        ] {
+            let error = Check::parse(typed).expect_err(typed);
+            assert_eq!(error.at, at, "{typed}: {error}");
+            assert!(error.message.contains(part), "{typed}: {error}");
+        }
+    }
+
+    #[test]
+    fn a_reference_figure_is_met_once_its_interval_lies_within_its_tolerance() {
+        let day = SimTime::from_secs(86_400);
+        let reference = bound("Drain.throughput_per_hour since start = 100/h ± 5%");
+        // One observation, or a deterministic run, decides by its value.
+        assert_eq!(judge(&reference, &observed(&[104.0]), true, day).verdict, Verdict::Met);
+        assert_eq!(judge(&reference, &observed(&[106.0]), true, day).verdict, Verdict::NotMet);
+        // The mean inside, its interval too.
+        assert_eq!(judge(&reference, &observed(&[99.0, 101.0, 100.5, 99.5, 100.0]), false, day).verdict, Verdict::Met);
+        // Wholly outside.
+        assert_eq!(judge(&reference, &observed(&[110.0, 112.0, 111.0, 109.0, 110.5]), false, day).verdict, Verdict::NotMet);
+        assert_eq!(judge(&reference, &observed(&[88.0, 90.0, 89.0, 91.0, 90.5]), false, day).verdict, Verdict::NotMet);
+        // The mean inside but the interval reaching past an edge: more observations would tell.
+        let straddling = judge(&reference, &observed(&[96.0, 106.0, 101.0, 98.0, 104.0]), false, day);
+        assert_eq!(straddling.verdict, Verdict::Undecided);
+        assert!(straddling.subjects[0].observations_needed.unwrap() > 5);
+        assert!(straddling.advice.unwrap().contains("more observations"));
+        // Equal without a tolerance is still judged observation by observation.
+        let exact = bound("Drain.mus_in since start = 3");
+        assert_eq!(judge(&exact, &observed(&[3.0, 3.0, 4.0]), false, day).verdict, Verdict::Undecided);
     }
 
     fn bound(text: &str) -> Bound {

@@ -26,7 +26,7 @@ pub(crate) fn entries() -> Vec<Entry> {
 
 /// How agents and the user work towards a model that does what was asked, as the MCP server's
 /// instructions and the CLI's help describe it.
-pub const PROCESS: &str = "Work in five steps (ADR 0030). 1. Agree: turn what the user asks for into a request with the user's own words, your restatement in precise terms and expectations crabsim can judge (edit_model add_request and add_expectation, list_figures for the figures), and ask the user to accept them, which only the user does; skip this when the model already has accepted expectations for the work. 2. Build the model without randomness first, no failures, and mark the request built (set_request built). 3. Verify: check_stage verification runs it deterministically and judges the verification expectations; crabsim also verifies when you release your claim and before an experiment. 4. Add randomness, such as failures. 5. Validate: check_stage validation runs an experiment and judges the validation expectations by their 95% intervals. get_status says at any time where the model stands and what to do next. You can't change what the user accepted: question an expectation with its reason when the model or the data says it can't be met, and tell your user.";
+pub const PROCESS: &str = "Work in five steps (ADR 0030). 1. Agree: turn what the user asks for into a request with the user's own words, your restatement in precise terms and expectations crabsim can judge (edit_model add_request and add_expectation, list_figures for the figures), and ask the user to accept them, which only the user does; skip this when the model already has accepted expectations for the work. get_status's `cannot_be_met` says which crabsim works out can't be met, without running anything: change those before the user accepts them. 2. Build the model without randomness first, no failures, and mark the request built (set_request built). 3. Verify: check_stage verification runs it deterministically and judges the verification expectations; crabsim also verifies when you release your claim and before an experiment. 4. Add randomness, such as failures. 5. Validate against reference figures from the real line, validation expectations with a tolerance and their `source`, such as `Drain.throughput_per_hour since start = 4100/d ± 3%`: check_stage validation runs an experiment and judges each by its 95% interval, met once it lies within the tolerance. get_status says at any time where the model stands and what to do next. You can't change what the user accepted: question an expectation with its reason when the model or the data says it can't be met, and tell your user.";
 
 /// How far a model is checked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
@@ -221,6 +221,13 @@ pub struct ExpectationStatus {
     /// Why it couldn't be judged, or what to do next, such as run more observations.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// Why crabsim works out from the model, without running it, that it can't be met, or that
+    /// it contradicts another expectation, such as a throughput above what a Station can pass.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cannot_be_met: Option<String>,
+    /// Where it comes from; for a reference figure, where it was measured.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
     /// The requests it checks.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub requests: Vec<String>,
@@ -313,6 +320,11 @@ pub(crate) fn status(catalogue: &Catalogue, path: &str) -> Result<GetStatusOutpu
         (true, false) => Stage::Verified,
         _ => Stage::Draft,
     };
+    // What crabsim works out without a run, for a model that can run.
+    let bounds: HashMap<String, String> = match &hash {
+        Some(hash) if problems.is_empty() => bounds_of(hash, &model),
+        _ => HashMap::new(),
+    };
     let finished_of = |stage: CheckStage| if stage == CheckStage::Verification { (verified.as_ref(), verification.current) } else { (validated.as_ref(), validation.current) };
     let expectations: Vec<ExpectationStatus> = model
         .expectations
@@ -331,6 +343,8 @@ pub(crate) fn status(catalogue: &Catalogue, path: &str) -> Result<GetStatusOutpu
                 current: check_current && same_line,
                 found: result.and_then(|result| result.extreme.clone().or_else(|| result.mean.clone()).or_else(|| result.met.as_ref().map(|met| format!("{met} met")))),
                 note: result.and_then(|result| result.why.clone().or_else(|| result.advice.clone())),
+                cannot_be_met: bounds.get(&expectation.id).cloned(),
+                source: expectation.source.clone(),
                 requests: model.requests.iter().filter(|request| request.expectations.contains(&expectation.id)).map(|request| request.id.clone()).collect(),
             }
         })
@@ -352,6 +366,29 @@ pub(crate) fn status(catalogue: &Catalogue, path: &str) -> Result<GetStatusOutpu
     Ok(GetStatusOutput { path: path.to_string(), stage, valid: problems.is_empty(), problems: problems.len(), verification, validation, requests, expectations, next })
 }
 
+/// Each expectation's bound by id, as `Model::expectation_bounds` warns of it, kept for the last
+/// few models by their hash: the window reads the status every few seconds, and a bound changes
+/// only with the model, while working it out on a large one takes a good part of a second.
+fn bounds_of(hash: &str, model: &Model) -> HashMap<String, String> {
+    const KEPT: usize = 8;
+    static KNOWN: std::sync::Mutex<Vec<(String, HashMap<String, String>)>> = std::sync::Mutex::new(Vec::new());
+    if let Some((_, bounds)) = KNOWN.lock().expect("never poisoned").iter().find(|(known, _)| known == hash) {
+        return bounds.clone();
+    }
+    let mut bounds: HashMap<String, String> = HashMap::new();
+    for warning in model.expectation_bounds() {
+        if let Some(id) = warning.name {
+            bounds.entry(id).or_insert(warning.message);
+        }
+    }
+    let mut known = KNOWN.lock().expect("never poisoned");
+    if known.len() >= KEPT {
+        known.remove(0);
+    }
+    known.push((hash.to_string(), bounds.clone()));
+    bounds
+}
+
 /// What to do next, the first thing that holds the model back.
 #[allow(clippy::too_many_arguments)]
 fn next_step(
@@ -371,6 +408,32 @@ fn next_step(
     }
     if expectations.is_empty() {
         return "agree what the model must achieve: a request with the user's own words, a restatement and expectations crabsim can judge (edit_model add_request, add_expectation; list_figures gives the figures)".to_string();
+    }
+    // What can't be met is better changed before anyone accepts it, and questioned once accepted.
+    let cannot = |proposed: bool| -> Vec<&str> {
+        expectations
+            .iter()
+            .filter(|expectation| expectation.cannot_be_met.is_some() && (expectation.state == Agreement::Proposed) == proposed && expectation.state != Agreement::Questioned)
+            .map(|expectation| expectation.id.as_str())
+            .collect()
+    };
+    let (proposed_cannot, accepted_cannot) = (cannot(true), cannot(false));
+    let them = |found: &[&str]| if found.len() == 1 { "it" } else { "them" };
+    if !proposed_cannot.is_empty() {
+        let (these, it) = (ids(proposed_cannot.clone()), them(&proposed_cannot));
+        return if agent {
+            format!("crabsim works out that {these} can't be met as the model is, as `cannot_be_met` says: change the model or {it} before asking the user to accept {it}")
+        } else {
+            format!("crabsim works out that {these}, which an agent proposed, can't be met as the model is, as `cannot_be_met` says: change the model, or change or remove {it}")
+        };
+    }
+    if !accepted_cannot.is_empty() {
+        let (these, it) = (ids(accepted_cannot.clone()), them(&accepted_cannot));
+        return if agent {
+            format!("crabsim works out that {these} can't be met as the model is, as `cannot_be_met` says: change the model, or question {it} with edit_model question_expectation, giving why, and tell your user")
+        } else {
+            format!("crabsim works out that {these} can't be met as the model is, as `cannot_be_met` says: change the model, or change or remove {it}")
+        };
     }
     let unaccepted_requests: Vec<&str> = requests.iter().filter(|request| !request.accepted).map(|request| request.id.as_str()).collect();
     let proposed: Vec<&str> = expectations.iter().filter(|expectation| expectation.state == Agreement::Proposed).map(|expectation| expectation.id.as_str()).collect();
@@ -419,7 +482,7 @@ fn next_step(
         return next;
     }
     if !has(CheckStage::Validation) {
-        return format!("verified. Next: add randomness, such as failures, and expectations at the validation stage, such as figures from the real line, to validate `{path}` against");
+        return format!("verified. Next: add randomness, such as failures, and reference figures from the real line to validate `{path}` against: expectations at the validation stage with a tolerance and their `source`, such as `Drain.throughput_per_hour since start = 4100/d ± 3%`");
     }
     if let Some(next) = check(CheckStage::Validation, validation) {
         return next;
@@ -503,7 +566,7 @@ pub struct GetStatusInput {
 
 impl Operation for GetStatus {
     const NAME: &'static str = "get_status";
-    const DESCRIPTION: &'static str = "Says where a model file stands (ADR 0030), in one call to start a session with: its stage (draft, verified or validated), each stage's latest check with whether it was of the model as it is now or `not_checked_since` which change, every request with the user's words, whether the user accepted it and its state (open, built, met or broken), every expectation with its state (proposed, accepted or questioned with its question) and its verdict, and `next`, what to do next. Stages and verdicts come from the checks crabsim keeps, never from the model file, which a check never changes.";
+    const DESCRIPTION: &'static str = "Says where a model file stands (ADR 0030), in one call to start a session with: its stage (draft, verified or validated), each stage's latest check with whether it was of the model as it is now or `not_checked_since` which change, every request with the user's words, whether the user accepted it and its state (open, built, met or broken), every expectation with its state (proposed, accepted or questioned with its question), its verdict and, where crabsim works out without running it that it can't be met or contradicts another, `cannot_be_met` with why, and `next`, what to do next. Stages and verdicts come from the checks crabsim keeps, never from the model file, which a check never changes.";
     const EFFECT: Effect = Effect::ReadOnly;
     type Input = GetStatusInput;
     type Output = GetStatusOutput;

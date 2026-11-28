@@ -752,7 +752,7 @@ pub fn status(status: &Value) -> String {
                 (Some(verdict), true) => verdict.replace('_', " "),
                 (Some(verdict), false) => format!("{} before a change", verdict.replace('_', " ")),
             };
-            let notes: Vec<String> = [&expectation["question"], &expectation["note"]].into_iter().filter(|value| value.is_string()).map(cell).collect();
+            let notes: Vec<String> = [&expectation["cannot_be_met"], &expectation["question"], &expectation["note"]].into_iter().filter(|value| value.is_string()).map(cell).collect();
             vec![cell(&expectation["id"]), cell(&expectation["stage"]), cell(&expectation["state"]), verdict, cell(&expectation["found"]), cell(&expectation["text"]), notes.join("; ")]
         })
         .collect();

@@ -780,3 +780,16 @@ fn the_user_sees_the_status_accepts_and_checks() {
     assert!(printed.starts_with("demo.json: verified"), "{printed}");
     assert!(printed.contains("out  verification  accepted  met"), "{printed}");
 }
+
+#[test]
+fn the_status_says_which_expectation_cant_be_met_before_anything_runs() {
+    let models = Models::new("bounds");
+    assert!(crabsim(&["adopt", "--models", models.arg(), "demo.json"]).status.success());
+    let agent = |operation: &str, input: &str| crabsim(&["call", "--models", models.arg(), "--agent", "tester", operation, input]);
+    agent("claim_model", r#"{"path": "demo.json", "goal": "agree", "doing": "proposing"}"#);
+    let proposed = agent("edit_model", r#"{"path": "demo.json", "changes": [{"change": "add_expectation", "id": "fast", "text": "model.throughput_per_hour since start >= 100000/h"}]}"#);
+    assert!(proposed.status.success(), "{proposed:?}");
+    let status = stdout(&crabsim(&["status", "--models", models.arg(), "demo.json"]));
+    assert!(status.contains("it can't be met: at most"), "{status}");
+    assert!(status.contains("Next: crabsim works out that fast, which an agent proposed, can't be met as the model is"), "{status}");
+}

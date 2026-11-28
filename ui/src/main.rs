@@ -4558,9 +4558,14 @@ fn status_tab(ui: &mut egui::Ui, opened: bool, status: Option<&Result<Status, St
             row.label(format!("{}: {}", expectation.id, expectation.text));
         });
         let mut said = vec![format!("{}, {}", expectation.state, expectation.stage)];
+        said.extend(expectation.source.iter().map(|source| format!("from {source}")));
         said.extend(expectation.found.iter().map(|found| format!("found {found}")));
         said.extend(expectation.note.iter().cloned());
         ui.label(egui::RichText::new(said.join("; ")).small().weak());
+        if let Some(why) = &expectation.cannot_be_met {
+            ui.colored_label(egui::Color32::from_rgb(230, 90, 80), format!("Can't be met: {}", why.strip_prefix("it can't be met: ").unwrap_or(why)))
+                .on_hover_text("crabsim works this out from the model, without running it");
+        }
         if let Some(question) = &expectation.question {
             ui.colored_label(egui::Color32::from_rgb(240, 200, 80), format!("Questioned: {question}"));
         }

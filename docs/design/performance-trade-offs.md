@@ -16,6 +16,12 @@ An idea for something faster goes under "Ideas", with what it would gain and wha
 
 ## Trade-offs made
 
+### Bounds and reference figures, spec issue 162's PR 4 (2026-11-28)
+- **Chosen:** bounds worked out on request outside any run (`Model::expectation_bounds`, among `Model::warnings` and in `get_status`), from the model alone: a maximum flow (Dinic's, in whole MUs, without recursion) through what lies upstream of each figure's object, a shortest way (Dijkstra's) for lead times, loops by Tarjan's algorithm, and contradictions by a hash of what each expectation reads. A tolerance is one more field of a parsed line, judged after the run as any verdict is.
+- **Cost on runs: none.** Nothing on the per-event path changed, and a run reads no bound.
+- **Cost of working them out,** release build in the container, measured once each: 429 copies of the demo (6,006 objects) with five expectations, three of them `every` over a class of 429 to 3,003 instances, 69 ms for the bounds and 177 ms for all of `validate_model`'s warnings; a single line of 3,000 Stations with `every Station.working_share`, about 1.1 s, since each Station's flow is over everything before it. `get_status` keeps the bounds of its last 8 models by their hash, so the window, reading the status every few seconds, works them out once per change.
+- **Decided by** Claude while building.
+
 ### Rules, spec issue 162's PR 3 (2026-11-28)
 - **Chosen:** rules as one more `Distributing` kind on code's cold path, deciding without allocating (`Ruled::order` and `values` reused), and a stretch's 60 buckets kept by the rules that read it, rolled by the run before an event that reaches the next boundary. The statistics keeper is as it was.
 - **Cost on models without rules: one comparison an event** (`stretch_next`, `SimTime::MAX`), and the new match arms. Every occurrence and the final state of the demo, the buffered, conveyor and cross lines over 2 days hash the same as `master`. Instructions (cachegrind, 10 simulated days): about +0.7% on the demo and +0.4% on the buffered line with the buckets in the keeper and the check in the run loop. Wall time with the buckets in the rules, the benchmark's own binaries alternating with `master`'s in the container, medians of 9 repetitions (3 for the cross line), means of the pairs: demo headless -0.6% (5 pairs), buffered line +1.6% (5), demo kept +1.0% (3), 6,006 objects -1.0% (3), cross line -1.8% (3). The container's noise is a few percent between runs of one build, so these are within it, the cross line nearest the ±2% the spec allows.
@@ -76,6 +82,8 @@ An idea for something faster goes under "Ideas", with what it would gain and wha
 - **Scheduling without a `Vec` per event** (PR 126) took allocations per event to 0 and made demo headless 45% faster and 6,006 objects 23% (handoff, build step 7).
 
 ## Ideas
+
+- **Bounds of a line in one pass:** where nothing upstream of an object splits its MUs between successors, the maximum flow into it is the least of the paces on the way, plus what is held, which one pass in flow order gives for every object at once. It would take `every` over a long line from about 1.1 s for 3,000 Stations to a few milliseconds (spec issue 162, PR 4). Worth it if a real model is that large and the status or validation feels slow.
 
 - **Pooling or copy-on-write memory for code's instances,** asked to be explored by the owner on 2026-11-27.
   - A checkpoint of a run with code makes a fresh instance and copies the module's memory into it. Measured with wasmtime 51 in the container, most of that is first-touch page faults on the fresh memory, about 1.4 µs per 4 KB page: 26 µs for 64 KB and about 350 µs for 1 MB, where the copy alone is 1.3 µs and 40 to 50 µs. A Rust module's default 1 MB stack puts real modules near the 1 MB figure.
